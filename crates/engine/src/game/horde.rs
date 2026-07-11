@@ -104,13 +104,27 @@ pub(crate) fn horde_is_defeated(state: &GameState) -> bool {
     library_empty && !controls_creature
 }
 
-/// How many cards the Horde reveals-and-resolves this wave. PR2 implements only
-/// the base `FixedCount(n)` policy; live-state bonuses (one extra per Horde
-/// artifact, one extra per additional survivor) and the token-heavy
-/// `UntilNonToken` policy are later PRs.
-fn wave_count(state: &GameState) -> u32 {
-    match state.format_config.horde_ruleset.as_ref().map(|r| &r.wave) {
-        Some(WaveTermination::FixedCount(n)) => *n,
+/// The wave policy for this Horde game, if any.
+fn wave_policy(state: &GameState) -> Option<WaveTermination> {
+    state.format_config.horde_ruleset.as_ref().map(|r| r.wave)
+}
+
+/// Seed value for the Horde's precombat-main wave counter.
+///
+/// - `FixedCount(n)`: the wave reveals exactly `n` cards, so seed `n`.
+/// - `UntilNonToken`: the wave reveals until it casts a non-token card, which
+///   ends the wave (see [`maybe_reveal_next`]). The counter is only a *safety
+///   bound* here — seed it with the Horde's current library size so the loop
+///   still terminates if the library empties before a non-token card appears.
+///
+/// Live-state bonuses (one extra per Horde artifact, one extra per additional
+/// survivor) are a later PR.
+fn wave_seed(state: &GameState) -> u32 {
+    match wave_policy(state) {
+        Some(WaveTermination::FixedCount(n)) => n,
+        Some(WaveTermination::UntilNonToken) => horde_seat(state)
+            .and_then(|horde| state.players.iter().find(|p| p.id == horde))
+            .map_or(0, |p| p.library.len() as u32),
         None => 0,
     }
 }
@@ -125,7 +139,7 @@ pub(crate) fn begin_wave(state: &mut GameState, _events: &mut [GameEvent]) {
     if !is_horde_turn(state) {
         return;
     }
-    state.horde_wave_remaining = wave_count(state);
+    state.horde_wave_remaining = wave_seed(state);
 }
 
 /// If a Horde wave is in progress and the Horde is at an empty-stack priority
@@ -211,7 +225,18 @@ pub(crate) fn maybe_reveal_next(
 
         let ability = free_cast_ability(card_id, horde);
         return match crate::game::effects::cast_from_zone::resolve(state, &ability, events) {
-            Ok(()) => Some(state.waiting_for.clone()),
+            Ok(()) => {
+                // `UntilNonToken`: this non-token card ENDS the wave — clear the
+                // counter so the priority re-entry seam (which re-invokes this
+                // function once the spell resolves) reveals nothing more, leaving
+                // the next card in the library for the following Horde turn.
+                // `FixedCount`: the wave continues; the per-card decrement above
+                // already accounts for this card, so leave the counter as-is.
+                if wave_policy(state) == Some(WaveTermination::UntilNonToken) {
+                    state.horde_wave_remaining = 0;
+                }
+                Some(state.waiting_for.clone())
+            }
             Err(_) => None,
         };
     }

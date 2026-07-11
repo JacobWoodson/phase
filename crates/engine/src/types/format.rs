@@ -167,8 +167,16 @@ pub enum WaveTermination {
     /// engine, not stored here — this is only the base count (e.g. 2 for Battle
     /// the Horde, 1 for Face the Hydra).
     FixedCount(u32),
-    // Future (pure additions, each its own add-engine-variant gate run):
-    //   UntilNonToken               — Knudson / token-heavy decks (e.g. Cyberman)
+    /// Reveal-and-resolve cards until (and including) the first NON-token card,
+    /// which ends the wave. Every token revealed before it enters the
+    /// battlefield; the nontoken is cast (for free) and the wave stops — the
+    /// next revealed card stays in the library for the following Horde turn.
+    /// The authentic behavior for token-heavy decks (the original Knudson rules,
+    /// and the Doctor Who Cyberman Horde, which is ~2/3 tokens): a small
+    /// `FixedCount` would usually reveal only tokens and barely advance the real
+    /// threats, so "reveal until a nontoken" keeps the wave pressuring.
+    UntilNonToken,
+    // Future (pure addition, its own add-engine-variant gate run):
     //   UntilRarityAtLeast(Rarity)  — community "waves"
 }
 
@@ -204,11 +212,11 @@ impl ChallengeDeck {
         match self {
             ChallengeDeck::CybermanHorde => HordeRuleset {
                 challenge_deck: ChallengeDeck::CybermanHorde,
-                // Placeholder until `WaveTermination::UntilNonToken` lands (the
-                // Cyberman deck is ~2/3 tokens, so it will ultimately reveal
-                // until a non-token card). `FixedCount(2)` keeps the format
-                // selectable and inert in the meantime.
-                wave: WaveTermination::FixedCount(2),
+                // The Cyberman deck is ~2/3 tokens, so a small `FixedCount`
+                // would usually reveal only tokens and barely advance the real
+                // threats. "Reveal until a non-token card" is the authentic
+                // token-heavy behavior for this deck.
+                wave: WaveTermination::UntilNonToken,
                 survivor_setup_turns: 3,
                 per_extra_survivor_life_delta: 0,
                 horde_creatures_forced_attackers: true,

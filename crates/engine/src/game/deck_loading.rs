@@ -544,6 +544,124 @@ pub fn grant_horde_emblem(state: &mut GameState, horde_seat: PlayerId, forced_at
     }
 }
 
+/// Create a non-token Horde library card face up in the Horde seat's library.
+///
+/// Mirrors `create_scheme_deck_card`, but the Horde's engine-supplied deck IS
+/// its library (not the command-zone scheme deck): the card sits face up in the
+/// owner's `Player::library` with no scheme flag, exactly like any ordinary
+/// library card, so `horde::maybe_reveal_next` can reveal and free-cast it. This
+/// is the single Horde authority for library-card creation; it reuses
+/// `create_object_from_card_face` (the shared library-object building block)
+/// rather than duplicating the create + `apply_card_face_to_object` steps.
+pub fn create_horde_library_card(
+    state: &mut GameState,
+    card_face: &CardFace,
+    owner: PlayerId,
+) -> crate::types::identifiers::ObjectId {
+    create_object_from_card_face(state, card_face, owner)
+}
+
+/// Create a predefined token in the Horde seat's library from a token body.
+///
+/// CR 111: a token can never be cast, so Cyberman/Dalek tokens wait in the
+/// Horde's library and enter the battlefield when revealed
+/// (`horde::reveal_library_token`). The object is stamped `is_token` and
+/// `in_horde_library` (the CR 704.5d cease-to-exist exemption, scoped to
+/// `sba::check_token_cease_to_exist`) and carries the body's full
+/// characteristics — P/T, card types, colors, keywords — on both the live and
+/// `base_*` fields so `reveal_library_token`'s `GameObject → TokenCharacteristics`
+/// projection round-trips the body faithfully. `TokenCharacteristics` has no
+/// channel for non-keyword abilities, so keyword-only / vanilla bodies (Cyberman
+/// 2/2 vanilla; Dalek 3/3 with Menace) round-trip fully.
+pub fn create_horde_library_token(
+    state: &mut GameState,
+    body: &crate::types::proposed_event::TokenCharacteristics,
+    owner: PlayerId,
+) -> crate::types::identifiers::ObjectId {
+    let obj_id = create_object(
+        state,
+        CardId(0),
+        owner,
+        body.display_name.clone(),
+        Zone::Library,
+    );
+    let obj = state.objects.get_mut(&obj_id).expect("just created");
+    // CR 111.1: mark as a token; CR 704.5d exemption while library-resident.
+    obj.is_token = true;
+    obj.in_horde_library = true;
+    obj.power = body.power;
+    obj.toughness = body.toughness;
+    obj.base_power = body.power;
+    obj.base_toughness = body.toughness;
+    obj.card_types = crate::types::card_type::CardType {
+        supertypes: body.supertypes.clone(),
+        core_types: body.core_types.clone(),
+        subtypes: body.subtypes.clone(),
+    };
+    obj.base_card_types = obj.card_types.clone();
+    obj.base_name = body.display_name.clone();
+    obj.color = body.colors.clone();
+    obj.base_color = body.colors.clone();
+    obj.keywords = body.keywords.clone();
+    obj.base_keywords = body.keywords.clone();
+    obj_id
+}
+
+/// Build the Horde seat's engine-supplied library for a challenge deck and
+/// shuffle it deterministically from the game seed.
+///
+/// Seat-scoped like the Archenemy scheme deck (`load_shared_scheme_deck`), NOT
+/// all-seat like Momir: only the Horde's library is replaced; survivors keep the
+/// decks they submitted. Non-token names are resolved from the card DB (any name
+/// that fails to resolve panics — the decklist is a fixed engine resource and a
+/// silent miss would ship a short library); token names are resolved from the
+/// predefined-token catalog. CR 103.3: the assembled library is then shuffled
+/// with `state.rng` so reveals are random but reproducible from the game seed.
+pub fn load_horde_library(
+    state: &mut GameState,
+    db: &CardDatabase,
+    horde_seat: PlayerId,
+    deck: crate::types::format::ChallengeDeck,
+) {
+    use crate::types::format::ChallengeDeck;
+
+    let (nontokens, tokens) = match deck {
+        ChallengeDeck::CybermanHorde => (
+            crate::game::decks::cyberman_horde::CYBERMAN_HORDE_NONTOKEN_CARDS,
+            crate::game::decks::cyberman_horde::CYBERMAN_HORDE_TOKENS,
+        ),
+    };
+
+    for (count, name) in nontokens {
+        let face = db
+            .get_face_by_name(name)
+            .unwrap_or_else(|| {
+                panic!("Horde deck {deck:?} non-token card '{name}' must resolve in the card DB")
+            })
+            .clone();
+        for _ in 0..*count {
+            create_horde_library_card(state, &face, horde_seat);
+        }
+    }
+
+    for (count, name) in tokens {
+        let body =
+            crate::game::token_presets::known_token_body_by_name(name).unwrap_or_else(|| {
+                panic!("Horde deck {deck:?} token preset '{name}' must resolve to a unique body")
+            });
+        for _ in 0..*count {
+            create_horde_library_token(state, body, horde_seat);
+        }
+    }
+
+    // CR 103.3: shuffle the assembled Horde library. Uses `state.rng` (seeded
+    // from the game seed) so the reveal order is random yet reproducible.
+    let GameState { players, rng, .. } = state;
+    if let Some(player) = players.iter_mut().find(|p| p.id == horde_seat) {
+        crate::util::im_ext::shuffle_vector(&mut player.library, rng);
+    }
+}
+
 /// Create a commander GameObject from a CardFace, placing it in the command zone.
 pub fn create_commander_from_card_face(
     state: &mut GameState,
@@ -1111,6 +1229,27 @@ pub fn load_and_hydrate_decks(
     load_deck_into_state(state, payload);
     match db {
         Some(db) => {
+            // Horde Magic: inject the Horde seat's engine-supplied library
+            // (~300 cards) BEFORE rehydration so the freshly-created non-token
+            // cards get their DFC `back_face`/layout hydrated alongside every
+            // other object. Seat-scoped (like the Archenemy scheme deck),
+            // unlike Momir's all-seat overwrite: survivors keep their submitted
+            // decks. Library-resident tokens carry no `printed_ref`, so
+            // rehydration skips them and their materialized bodies are
+            // preserved. `load_horde_library` shuffles the Horde library itself
+            // (CR 103.3) — `load_deck_into_state`'s per-player shuffle already
+            // ran, before these cards existed.
+            if state.format_config.format == crate::types::format::GameFormat::Horde {
+                if let Some(deck) = state
+                    .format_config
+                    .horde_ruleset
+                    .as_ref()
+                    .map(|r| r.challenge_deck)
+                {
+                    let horde_seat = crate::game::topology::archenemy(state).unwrap_or(PlayerId(0));
+                    load_horde_library(state, db, horde_seat, deck);
+                }
+            }
             super::printed_cards::rehydrate_game_from_card_db(state, db);
             // CR 205.3m: Seed the creature subtype vocabulary from the full
             // card corpus (not just loaded decks) so token-only types like
