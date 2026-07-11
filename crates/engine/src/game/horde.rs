@@ -13,7 +13,8 @@
 //! At the start of the Horde's precombat main phase the Horde reveals cards from
 //! the top of its library and either casts them (nontoken cards, for free — the
 //! Cascade/Discover free-cast authority, CR 608.2g) or puts them onto the
-//! battlefield (tokens — CR 111; deferred to a later PR). A "wave" reveals a
+//! battlefield (tokens — CR 111: a token is never cast, so a revealed library
+//! token enters directly via [`reveal_library_token`]). A "wave" reveals a
 //! ruleset-defined number of cards ([`WaveTermination`]).
 //!
 //! Because each free cast sets [`GameState::waiting_for`] and puts one spell on
@@ -34,6 +35,8 @@
 //!    and priority returns to the Horde with an empty stack, until the counter
 //!    reaches zero.
 
+use crate::game::effects::token::apply_create_token_after_replacement;
+use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     CardPlayMode, CastFromZoneDriver, Effect, ResolvedAbility, TargetFilter, TargetRef,
 };
@@ -43,7 +46,9 @@ use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
+use crate::types::proposed_event::{EtbTapState, ProposedEvent, TokenCharacteristics, TokenSpec};
 use crate::types::zones::Zone;
+use std::collections::HashSet;
 
 /// The Horde seat, if this is a Horde game. Live read via the topology accessor
 /// (single authority, CR 904.2a-style), never a latched copy.
@@ -145,53 +150,151 @@ pub(crate) fn maybe_reveal_next(
     }
     let horde = horde_seat(state)?;
 
-    // Reveal the top card of the Horde's library.
-    let Some(card_id) = state
-        .players
-        .iter()
-        .find(|p| p.id == horde)
-        .and_then(|p| p.library.front().copied())
-    else {
-        // Empty library: nothing more to reveal this wave. The Horde loses by
-        // decking out (a later PR); here we simply end the wave cleanly.
-        state.horde_wave_remaining = 0;
-        return None;
+    // Reveal-and-resolve cards until either the wave pauses on a nontoken spell
+    // (which is put on the stack and resolved through the normal priority loop
+    // before the `engine::pass_priority_once` re-entry seam re-invokes this
+    // function) or the wave budget / library is exhausted.
+    //
+    // Tokens must be handled in a LOOP here rather than one-per-beat: a token is
+    // never cast (CR 111) and enters the battlefield synchronously, so it never
+    // goes on the stack and cannot pause the wave. The re-entry seam only fires
+    // after a Horde SPELL resolves and priority returns to the Horde with the
+    // stack becoming empty; a token that returned `None` (stack already empty,
+    // `waiting_for` unchanged) would strand every later card in the wave. So on
+    // a token we resolve its ETB and immediately `continue` to the next card.
+    loop {
+        // Wave budget exhausted (e.g. after the last card was a token that
+        // decremented the counter to zero) — stop cleanly.
+        if state.horde_wave_remaining == 0 {
+            return None;
+        }
+
+        // Reveal the top card of the Horde's library.
+        let Some(card_id) = state
+            .players
+            .iter()
+            .find(|p| p.id == horde)
+            .and_then(|p| p.library.front().copied())
+        else {
+            // Empty library: nothing more to reveal this wave. The Horde loses by
+            // decking out (a later PR); here we simply end the wave cleanly.
+            state.horde_wave_remaining = 0;
+            return None;
+        };
+
+        // Consume one from the wave budget regardless of the branch taken so the
+        // wave always terminates.
+        state.horde_wave_remaining = state.horde_wave_remaining.saturating_sub(1);
+
+        let is_token = state.objects.get(&card_id).is_some_and(|obj| obj.is_token);
+
+        if is_token {
+            // CR 111 + CR 111.1: a token can never be cast, so a revealed library
+            // token is put directly onto the battlefield under the Horde's
+            // control. Enters synchronously (no stack), so continue the wave with
+            // the next card in this same call.
+            reveal_library_token(state, card_id, horde, events);
+            continue;
+        }
+
+        // Nontoken: cast it for free during resolution. Mirror Cascade — move the
+        // card to exile first (CR 601.2a: the reveal), then drive the free cast
+        // through the single free-cast authority (`cast_from_zone::resolve`'s
+        // `driver_free_cast` gate, CR 608.2g), which casts from the card's current
+        // (exile) zone at zero cost. X-cost nontokens resolve at X = 0 (CR 601.2b),
+        // exactly like Cascade/Discover.
+        crate::game::zones::move_to_zone(state, card_id, Zone::Exile, events);
+        if state.objects.get(&card_id).map(|o| o.zone) != Some(Zone::Exile) {
+            // A replacement effect redirected the reveal; do not attempt to cast.
+            return None;
+        }
+
+        let ability = free_cast_ability(card_id, horde);
+        return match crate::game::effects::cast_from_zone::resolve(state, &ability, events) {
+            Ok(()) => Some(state.waiting_for.clone()),
+            Err(_) => None,
+        };
+    }
+}
+
+/// Reveal a token from the top of the Horde's library onto the battlefield.
+///
+/// CR 111: a token can never be cast, so a token in the Horde's library is put
+/// directly onto the battlefield when revealed. A FRESH battlefield token is
+/// created (CR 111.1 + CR 111.2 — the Horde is the token's owner and its
+/// controller) from the library object's stored body characteristics, routed
+/// through the ordinary token-creation replacement pipeline exactly like any
+/// other created token — so ETB triggers fire and the Horde emblem's haste +
+/// must-attack apply. The original library placeholder object is then removed so
+/// no duplicate remains (the M2 "create + remove" lifecycle, chosen over a
+/// literal library→battlefield move so the shared CR 111.8 movement guards stay
+/// untouched). The fresh battlefield token does NOT carry `in_horde_library`
+/// (it is a normal token via `create_object`), so it will cease to exist
+/// normally (CR 704.5d) if it later leaves the battlefield.
+fn reveal_library_token(
+    state: &mut GameState,
+    card_id: ObjectId,
+    horde: PlayerId,
+    events: &mut Vec<GameEvent>,
+) {
+    let Some(obj) = state.objects.get(&card_id) else {
+        return;
     };
-
-    // Consume one from the wave budget regardless of the branch taken so the
-    // wave always terminates.
-    state.horde_wave_remaining = state.horde_wave_remaining.saturating_sub(1);
-
-    let is_token = state.objects.get(&card_id).is_some_and(|obj| obj.is_token);
-
-    if is_token {
-        // TODO(PR4 — token-in-library primitive): put a fresh battlefield token
-        // (from the revealed object's stored `TokenCharacteristics`) under the
-        // Horde's control and remove the library object. Until that lands, move
-        // the token out of the library so the wave advances instead of spinning
-        // on the same card; the cease-to-exist SBA (CR 111.8) then sweeps it.
-        // The PR2 fixture contains no library tokens, so this branch is inert.
-        crate::game::zones::move_to_zone(state, card_id, Zone::Graveyard, events);
-        return None;
+    // Reconstruct the token body from the revealed library object (mirrors the
+    // GameObject → TokenCharacteristics projection used by `token_copy`). A Horde
+    // library token is materialized from a `TokenCharacteristics` body, so this
+    // projection round-trips its full identity. `TokenCharacteristics` carries no
+    // channel for non-keyword activated/triggered/static abilities — the token
+    // body model only encodes P/T, types, colors, and keywords — so the created
+    // token carries exactly those (`static_abilities` empty). If a future Horde
+    // token needs granted statics, thread them through `TokenSpec::static_abilities`.
+    let characteristics = TokenCharacteristics {
+        display_name: obj.name.clone(),
+        power: obj.power,
+        toughness: obj.toughness,
+        core_types: obj.card_types.core_types.clone(),
+        subtypes: obj.card_types.subtypes.clone(),
+        supertypes: obj.card_types.supertypes.clone(),
+        colors: obj.color.clone(),
+        keywords: obj.keywords.clone(),
+    };
+    let spec = TokenSpec {
+        characteristics,
+        script_name: obj.name.clone(),
+        static_abilities: Vec::new(),
+        enter_with_counters: Vec::new(),
+        tapped: false,
+        enters_attacking: false,
+        sacrifice_at: None,
+        // Token-creation source (plumbing, not a rule): there is no card/ability
+        // source for a Horde reveal (it is a turn-based action), so the library
+        // placeholder — still present at apply time; removed just below — stands
+        // in as the source for the token-art lookup. No delayed trigger or
+        // `enters_attacking` references it, so its removal leaves nothing dangling.
+        source_id: card_id,
+        controller: horde,
+        attach_to: None,
+    };
+    let proposed = ProposedEvent::CreateToken {
+        owner: horde,
+        spec: Box::new(spec),
+        copy: None,
+        enter_tapped: EtbTapState::Unspecified,
+        count: 1,
+        applied: HashSet::new(),
+    };
+    // CR 614.16: token-creation replacement effects apply to the revealed token.
+    match replacement::replace_event(state, proposed, events) {
+        ReplacementResult::Execute(event) => {
+            apply_create_token_after_replacement(state, event, events);
+        }
+        // The Horde's own token creation is not subject to a player's opt-in
+        // replacement choice; treat prevention / (unreachable) choice as no ETB.
+        ReplacementResult::Prevented | ReplacementResult::NeedsChoice(_) => {}
     }
-
-    // Nontoken: cast it for free during resolution. Mirror Cascade — move the
-    // card to exile first (CR 601.2a: the reveal), then drive the free cast
-    // through the single free-cast authority (`cast_from_zone::resolve`'s
-    // `driver_free_cast` gate, CR 608.2g), which casts from the card's current
-    // (exile) zone at zero cost. X-cost nontokens resolve at X = 0 (CR 601.2b),
-    // exactly like Cascade/Discover.
-    crate::game::zones::move_to_zone(state, card_id, Zone::Exile, events);
-    if state.objects.get(&card_id).map(|o| o.zone) != Some(Zone::Exile) {
-        // A replacement effect redirected the reveal; do not attempt to cast.
-        return None;
-    }
-
-    let ability = free_cast_ability(card_id, horde);
-    match crate::game::effects::cast_from_zone::resolve(state, &ability, events) {
-        Ok(()) => Some(state.waiting_for.clone()),
-        Err(_) => None,
-    }
+    // Remove the library placeholder so no duplicate token remains.
+    crate::game::zones::remove_from_zone(state, card_id, Zone::Library, horde);
+    state.objects.remove(&card_id);
 }
 
 /// Build the synthetic `Effect::CastFromZone` that free-casts a single revealed

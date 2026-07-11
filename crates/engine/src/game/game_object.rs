@@ -430,6 +430,17 @@ pub struct GameObject {
     /// (command zone), tracked via `Player::contraption_deck`.
     #[serde(default)]
     pub in_contraption_deck: bool,
+    /// CR 704.5d exemption (casual Horde Magic variant): a token that lives in
+    /// the Horde's library does NOT cease to exist while flagged. Ordinarily a
+    /// token in any zone other than the battlefield is swept by the CR 704.5d
+    /// state-based action; the Horde deck seeds predefined tokens into its
+    /// library and reveals them onto the battlefield, so a library-resident
+    /// Horde token must survive until it is revealed. This flag gates ONLY the
+    /// `check_token_cease_to_exist` SBA (`sba.rs`) — it does not touch the
+    /// shared CR 111.8 movement guards. Not a CR-sanctioned rule; Horde Magic is
+    /// a casual format, so the flag names the mechanism rather than a rule.
+    #[serde(default)]
+    pub in_horde_library: bool,
     /// Unstable Contraptions: the sprocket this Contraption occupies on the
     /// battlefield. `None` when it is not assembled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1482,6 +1493,7 @@ impl GameObject {
             attraction_lights: Vec::new(),
             in_attraction_deck: false,
             in_contraption_deck: false,
+            in_horde_library: false,
             contraption_sprocket: None,
             stickers: Vec::new(),
             mana_cost: ManaCost::default(),

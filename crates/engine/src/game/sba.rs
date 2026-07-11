@@ -1811,8 +1811,16 @@ fn check_token_cease_to_exist(state: &mut GameState, any_performed: &mut bool) {
         .objects
         .iter()
         .filter(|(_, obj)| {
-            zones::token_is_outside_battlefield_and_stack(obj)
-                || zones::copy_of_card_outside_battlefield_and_stack(obj)
+            // CR 704.5d exemption (casual Horde Magic variant): a token flagged
+            // `in_horde_library` lives in the Horde's library until it is
+            // revealed onto the battlefield, so it is NOT swept here. The
+            // exemption is scoped to this SBA only — the shared CR 111.8
+            // movement guards (`zones::token_is_outside_battlefield_and_stack`)
+            // are deliberately untouched so library tokens remain otherwise
+            // immovable. Not a CR-sanctioned rule; Horde Magic is casual.
+            !obj.in_horde_library
+                && (zones::token_is_outside_battlefield_and_stack(obj)
+                    || zones::copy_of_card_outside_battlefield_and_stack(obj))
         })
         .map(|(id, obj)| (*id, obj.zone, obj.owner))
         .collect();
