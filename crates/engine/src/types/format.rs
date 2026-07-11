@@ -64,6 +64,16 @@ pub enum GameFormat {
     /// Create a token that's a copy of a creature card with mana value X chosen
     /// at random."
     Momir,
+    /// Horde Magic: a cooperative variant where a team of survivors faces a
+    /// single self-piloting "Horde" deck. Casual community format (not
+    /// DCI/CR-sanctioned); it reuses CR mechanisms the engine already models —
+    /// shared team turns (CR 805) for the survivor team and the one-vs-many
+    /// topology used by Archenemy (CR 904). The Horde has no life total, takes
+    /// scripted "reveal and resolve" turns, and loses by decking out. Which
+    /// concrete deck is played and how each Horde turn reveals cards are carried
+    /// by `FormatConfig::horde_ruleset` (`HordeRuleset`), never by sibling
+    /// `GameFormat` variants.
+    Horde,
 }
 
 /// CR 100.4 / CR 100.4a: Per-format sideboard rules.
@@ -124,6 +134,89 @@ pub enum FormatTopology {
     },
 }
 
+/// Which concrete self-piloting Horde deck a `GameFormat::Horde` game uses.
+///
+/// This is the deck-identity axis of the Horde ruleset. Per-deck rule
+/// differences (wave size, whether the Horde's creatures attack, life totals)
+/// live on `HordeRuleset`, not here — this enum only names the deck so
+/// `deck_loading` can inject the right fixed library. New decks are pure
+/// additions: the community/Knudson variants and the three Theros challenge
+/// decks (Battle the Horde, Face the Hydra, Defeat a God) each add one variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChallengeDeck {
+    /// Doctor Who "Cyberman Horde" — ~100 real Universes Beyond cards plus ~200
+    /// predefined Cyberman/Dalek tokens. The first deck the spine is validated
+    /// against.
+    CybermanHorde,
+}
+
+/// How a single Horde turn decides how many cards to reveal-and-resolve.
+///
+/// This is a *policy*, not a scalar count, because the rule genuinely varies by
+/// ruleset: the Theros challenge decks reveal a fixed number, the original
+/// Knudson rules reveal until a non-token card, and the community format ends a
+/// "wave" when a card of at least a given rarity resolves. Modelling it as a
+/// typed enum lets every current and future ruleset slot in as a pure addition
+/// rather than overloading a number with special-case meanings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum WaveTermination {
+    /// Reveal-and-resolve a fixed base number of cards each Horde turn. Runtime
+    /// bonuses that depend on live game state (one extra per Horde artifact in
+    /// play, one extra per additional survivor) are layered on in the turn
+    /// engine, not stored here — this is only the base count (e.g. 2 for Battle
+    /// the Horde, 1 for Face the Hydra).
+    FixedCount(u32),
+    // Future (pure additions, each its own add-engine-variant gate run):
+    //   UntilNonToken               — Knudson / token-heavy decks (e.g. Cyberman)
+    //   UntilRarityAtLeast(Rarity)  — community "waves"
+}
+
+/// The parameters that distinguish one Horde deck's rules from another, carried
+/// on `FormatConfig` so a single `GameFormat::Horde` variant covers the whole
+/// family without sibling format variants. All fields are typed axes, not
+/// booleans-as-config where a richer type exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HordeRuleset {
+    /// Which fixed library the Horde seat plays.
+    pub challenge_deck: ChallengeDeck,
+    /// How each Horde turn sizes its reveal-and-resolve wave.
+    pub wave: WaveTermination,
+    /// How many turns the survivors take before the Horde's first turn, letting
+    /// them establish a board (3 in the published rules).
+    pub survivor_setup_turns: u8,
+    /// Life added to the survivors' shared total for each survivor beyond the
+    /// first. `0` for a flat combined total (Theros: shared 20); the community
+    /// format uses a negative delta (100 base, −15 per extra survivor). The base
+    /// combined total is `FormatConfig::starting_life`.
+    pub per_extra_survivor_life_delta: i32,
+    /// Whether the Horde's creatures are forced to attack each combat if able
+    /// (true for every published Horde ruleset; a typed axis so a future ruleset
+    /// can opt out — e.g. Defeat a God's revelers that only attack when told).
+    pub horde_creatures_forced_attackers: bool,
+}
+
+impl ChallengeDeck {
+    /// The canonical ruleset for each Horde deck. Centralizes deck-identity →
+    /// rules so the registry, `FormatConfig::for_format`, and callers that only
+    /// have the deck enum agree on one source of truth.
+    pub fn default_ruleset(self) -> HordeRuleset {
+        match self {
+            ChallengeDeck::CybermanHorde => HordeRuleset {
+                challenge_deck: ChallengeDeck::CybermanHorde,
+                // Placeholder until `WaveTermination::UntilNonToken` lands (the
+                // Cyberman deck is ~2/3 tokens, so it will ultimately reveal
+                // until a non-token card). `FixedCount(2)` keeps the format
+                // selectable and inert in the meantime.
+                wave: WaveTermination::FixedCount(2),
+                survivor_setup_turns: 3,
+                per_extra_survivor_life_delta: 0,
+                horde_creatures_forced_attackers: true,
+            },
+        }
+    }
+}
+
 /// Configuration for a game format, describing player counts, starting life, deck rules, etc.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FormatConfig {
@@ -161,6 +254,12 @@ pub struct FormatConfig {
     /// Immutable for the life of the session.
     #[serde(default)]
     pub allow_debug_actions: bool,
+    /// Present only for `GameFormat::Horde`: the per-deck Horde rules (which
+    /// challenge deck, wave sizing, setup turns, life scaling, forced attackers).
+    /// `None` for every other format. Mirrors the optional `archenemy_player`
+    /// pattern so existing serialized configs deserialize unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub horde_ruleset: Option<HordeRuleset>,
 }
 
 impl FormatTopology {
@@ -205,6 +304,9 @@ impl GameFormat {
             | GameFormat::Planechase
             // Momir's pool is the entire creature corpus — no legality restriction.
             | GameFormat::Momir
+            // Horde uses engine-supplied fixed decks (Horde library + survivor
+            // precons) — no constructed legality restriction.
+            | GameFormat::Horde
             | GameFormat::Limited => None,
         }
     }
@@ -232,6 +334,8 @@ impl GameFormat {
             | GameFormat::Brawl
             // Momir has no sideboard — the deck is exactly 60 snow basic lands.
             | GameFormat::Momir
+            // Horde decks are engine-supplied and fixed — no sideboard.
+            | GameFormat::Horde
             | GameFormat::HistoricBrawl => SideboardPolicy::Forbidden,
             GameFormat::TinyLeaders => SideboardPolicy::Limited(10),
             GameFormat::FreeForAll
@@ -287,6 +391,11 @@ impl GameFormat {
     /// `FormatConfig::supplies_fixed_deck` field to bypass deck-selection gates,
     /// and must never re-list fixed-deck formats client-side.
     pub fn supplies_fixed_deck(self) -> bool {
+        // Horde is intentionally excluded: only the Horde *seat* plays an
+        // engine-supplied library (injected like Archenemy's shared scheme
+        // deck), while the survivors — the human players — still build and
+        // select their own decks. This predicate means "no player selects a
+        // deck", which is true only for Momir.
         matches!(self, GameFormat::Momir)
     }
 
@@ -315,6 +424,7 @@ impl GameFormat {
             GameFormat::Archenemy => "Archenemy",
             GameFormat::Planechase => "Planechase",
             GameFormat::Momir => "Momir's Madness",
+            GameFormat::Horde => "Horde",
         }
     }
 
@@ -501,6 +611,14 @@ impl GameFormat {
                 group: FormatGroup::Multiplayer,
                 default_config: FormatConfig::momir(),
             },
+            FormatMetadata {
+                format: GameFormat::Horde,
+                label: "Horde",
+                short_label: "HRD",
+                description: "Co-op team vs a self-piloting Horde deck",
+                group: FormatGroup::Multiplayer,
+                default_config: FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset()),
+            },
         ]
     }
 }
@@ -514,6 +632,14 @@ impl FormatConfig {
                 turn_structure: TurnStructure::SharedTeamTurns,
             },
             GameFormat::Archenemy => FormatTopology::OneVsMany {
+                archenemy: self.archenemy_player.unwrap_or(PlayerId(0)),
+                turn_structure: TurnStructure::SharedTeamTurns,
+            },
+            // Horde reuses the one-vs-many topology with the Horde as the
+            // "archenemy" seat and the survivors as a shared-turn team. The
+            // survivors-first turn order and no-life-total handling are applied
+            // in `starting_player`/`starting_life_for_player`, not here.
+            GameFormat::Horde => FormatTopology::OneVsMany {
                 archenemy: self.archenemy_player.unwrap_or(PlayerId(0)),
                 turn_structure: TurnStructure::SharedTeamTurns,
             },
@@ -542,10 +668,23 @@ impl FormatConfig {
             FormatTopology::FixedTeams { team_size, .. } => {
                 self.starting_life / i32::from(team_size)
             }
-            // CR 904.5: The archenemy starts at 40 life; each other player
-            // starts at 20. This is not a shared life total.
+            // Horde and Archenemy both map to OneVsMany, so the format must be
+            // distinguished here.
             FormatTopology::OneVsMany { archenemy, .. } => {
-                if player == archenemy {
+                if self.format == GameFormat::Horde {
+                    // The Horde has no life total (it loses by decking out, not
+                    // by life). Its seat's life value is never consulted once
+                    // the no-life-total exemption + damage->mill redirect land
+                    // in a later PR; every seat is seeded with the survivors'
+                    // combined starting life here, and that combined total is
+                    // distributed across the survivor seats in `GameState::new`
+                    // once the seat count is known (CR 810.9a reads each seat
+                    // through the shared team total). Crucially, the Horde is
+                    // NOT given the archenemy's 40 life.
+                    self.starting_life
+                } else if player == archenemy {
+                    // CR 904.5: The archenemy starts at 40 life; each other
+                    // player starts at 20. This is not a shared life total.
                     40
                 } else {
                     20
@@ -562,11 +701,18 @@ impl FormatConfig {
     }
 
     pub fn validate_for_player_count(&self, player_count: u8) -> Result<(), String> {
-        if self.format == GameFormat::Archenemy {
+        // Both Archenemy and Horde designate a single special seat via
+        // `archenemy_player`, which must be a valid seat index.
+        if matches!(self.format, GameFormat::Archenemy | GameFormat::Horde) {
             let archenemy = self.archenemy_player().unwrap_or(PlayerId(0));
             if archenemy.0 >= player_count {
+                let seat = if self.format == GameFormat::Horde {
+                    "horde"
+                } else {
+                    "archenemy"
+                };
                 return Err(format!(
-                    "archenemy_player must be less than player_count ({player_count})"
+                    "{seat}_player must be less than player_count ({player_count})"
                 ));
             }
         }
@@ -574,6 +720,15 @@ impl FormatConfig {
     }
 
     pub fn starting_player(&self) -> PlayerId {
+        // Horde: the survivors set up their board first (the published rules
+        // give them several turns before the Horde's first turn), so the first
+        // turn goes to a survivor, NOT the Horde. The Horde occupies the
+        // `archenemy_player` seat; the first survivor is the lowest seat index
+        // that isn't the Horde. `min_players` (2) guarantees such a seat exists.
+        if self.format == GameFormat::Horde {
+            let horde = self.archenemy_player().unwrap_or(PlayerId(0));
+            return PlayerId(if horde.0 == 0 { 1 } else { 0 });
+        }
         // CR 904.6: The archenemy takes the first turn instead of a randomly
         // determined player. Non-Archenemy formats keep the legacy default.
         self.archenemy_player().unwrap_or(PlayerId(0))
@@ -595,6 +750,7 @@ impl FormatConfig {
             uses_commander: false,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            horde_ruleset: None,
         }
     }
 
@@ -614,6 +770,7 @@ impl FormatConfig {
             uses_commander: true,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            horde_ruleset: None,
         }
     }
 
@@ -705,6 +862,7 @@ impl FormatConfig {
             uses_commander: false,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            horde_ruleset: None,
         }
     }
 
@@ -728,6 +886,7 @@ impl FormatConfig {
             uses_commander: false,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            horde_ruleset: None,
         }
     }
 
@@ -764,6 +923,7 @@ impl FormatConfig {
             uses_commander: true,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            horde_ruleset: None,
         }
     }
 
@@ -791,6 +951,7 @@ impl FormatConfig {
             uses_commander: false,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            horde_ruleset: None,
         }
     }
 
@@ -812,6 +973,7 @@ impl FormatConfig {
             uses_commander: false,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            horde_ruleset: None,
         }
     }
 
@@ -836,6 +998,7 @@ impl FormatConfig {
             uses_commander: false,
             supplies_fixed_deck: true,
             allow_debug_actions: false,
+            horde_ruleset: None,
         }
     }
 
@@ -855,6 +1018,7 @@ impl FormatConfig {
             uses_commander: false,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            horde_ruleset: None,
         }
     }
 
@@ -877,6 +1041,7 @@ impl FormatConfig {
             uses_commander: false,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            horde_ruleset: None,
         }
     }
 
@@ -898,6 +1063,44 @@ impl FormatConfig {
             uses_commander: false,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            horde_ruleset: None,
+        }
+    }
+
+    /// Horde Magic (casual community variant, not CR-sanctioned). A team of
+    /// survivors shares a life total and faces the self-piloting Horde seat,
+    /// which occupies the `archenemy_player` seat and reuses the one-vs-many
+    /// shared-turn topology. `command_zone: true` so the game-start Horde emblem
+    /// (forced attackers + haste on Horde creatures) has a home, mirroring how
+    /// Archenemy/Momir install their game-start command-zone objects.
+    ///
+    /// `starting_life` is the survivors' *combined* starting total (distributed
+    /// across survivor seats at game start); the Horde itself has no life total.
+    /// `supplies_fixed_deck` is `false` — only the Horde seat's library is
+    /// engine-supplied (injected like the Archenemy scheme deck); survivors
+    /// build and select their own decks.
+    pub fn horde(ruleset: HordeRuleset) -> Self {
+        FormatConfig {
+            format: GameFormat::Horde,
+            // Survivors' shared/combined starting life (Theros challenge decks
+            // and the Cyberman Horde use a shared 20).
+            starting_life: 20,
+            // 1 survivor + the Horde seat, up to 4 survivors + the Horde.
+            min_players: 2,
+            max_players: 5,
+            deck_size: 60,
+            singleton: false,
+            command_zone: true,
+            commander_damage_threshold: None,
+            range_of_influence: None,
+            team_based: false,
+            // The Horde occupies seat 0; survivors take the remaining seats and
+            // act first (see `starting_player`).
+            archenemy_player: Some(PlayerId(0)),
+            uses_commander: false,
+            supplies_fixed_deck: false,
+            allow_debug_actions: false,
+            horde_ruleset: Some(ruleset),
         }
     }
 
@@ -940,6 +1143,7 @@ impl FormatConfig {
             GameFormat::Archenemy => Self::archenemy(),
             GameFormat::Planechase => Self::planechase(),
             GameFormat::Momir => Self::momir(),
+            GameFormat::Horde => Self::horde(ChallengeDeck::CybermanHorde.default_ruleset()),
         }
     }
 }
@@ -1311,6 +1515,99 @@ mod tests {
         assert!(!entry.default_config.team_based);
         assert_eq!(entry.default_config.commander_damage_threshold, None);
         assert_eq!(entry.default_config.archenemy_player(), Some(PlayerId(0)));
+    }
+
+    #[test]
+    fn format_config_horde() {
+        let config = FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset());
+        assert_eq!(config.format, GameFormat::Horde);
+        assert_eq!(config.starting_life, 20);
+        assert_eq!(config.min_players, 2);
+        assert_eq!(config.max_players, 5);
+        assert!(config.command_zone);
+        assert!(!config.team_based);
+        assert!(!config.uses_commander);
+        // Survivors build their own decks; only the Horde seat is engine-supplied.
+        assert!(!config.supplies_fixed_deck);
+        assert_eq!(config.archenemy_player(), Some(PlayerId(0)));
+        let ruleset = config
+            .horde_ruleset
+            .as_ref()
+            .expect("horde config has ruleset");
+        assert_eq!(ruleset.challenge_deck, ChallengeDeck::CybermanHorde);
+        assert_eq!(ruleset.survivor_setup_turns, 3);
+        assert!(ruleset.horde_creatures_forced_attackers);
+    }
+
+    #[test]
+    fn horde_uses_one_vs_many_shared_turn_topology() {
+        let config = FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset());
+        assert_eq!(
+            config.topology(),
+            FormatTopology::OneVsMany {
+                archenemy: PlayerId(0),
+                turn_structure: TurnStructure::SharedTeamTurns,
+            }
+        );
+    }
+
+    #[test]
+    fn horde_survivors_take_the_first_turn_not_the_horde() {
+        // Regression guard for the review's B1 blocker: because Horde reuses the
+        // Archenemy OneVsMany topology, the naive path would hand the Horde
+        // (the archenemy seat) the first turn. Survivors must go first.
+        let config = FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset());
+        let horde_seat = config.archenemy_player().expect("horde seat");
+        let first = config.starting_player();
+        assert_ne!(first, horde_seat, "the Horde must not take the first turn");
+        assert_eq!(first, PlayerId(1));
+    }
+
+    #[test]
+    fn horde_seat_is_not_given_archenemy_forty_life() {
+        // B1 blocker guard: the Archenemy OneVsMany arm grants 40 life to the
+        // special seat. The Horde has no life total and must not inherit 40.
+        let config = FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset());
+        let horde_seat = config.archenemy_player().expect("horde seat");
+        assert_ne!(config.starting_life_for_player(horde_seat), 40);
+        assert_eq!(config.starting_life_for_player(horde_seat), 20);
+        assert_eq!(config.starting_life_for_player(PlayerId(1)), 20);
+    }
+
+    #[test]
+    fn horde_registry_entry_uses_default_config() {
+        let registry = GameFormat::registry();
+        let entry = registry
+            .iter()
+            .find(|m| m.format == GameFormat::Horde)
+            .expect("Horde must be in registry");
+        assert_eq!(entry.group, FormatGroup::Multiplayer);
+        assert_eq!(entry.short_label, "HRD");
+        assert_eq!(
+            entry.default_config,
+            FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset())
+        );
+    }
+
+    #[test]
+    fn horde_ruleset_survives_config_serde_round_trip() {
+        let config = FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset());
+        let json = serde_json::to_string(&config).expect("serialize");
+        let restored: FormatConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(config, restored);
+    }
+
+    #[test]
+    fn non_horde_configs_have_no_horde_ruleset() {
+        for meta in GameFormat::registry() {
+            let has_ruleset = meta.default_config.horde_ruleset.is_some();
+            assert_eq!(
+                has_ruleset,
+                meta.format == GameFormat::Horde,
+                "{:?}: horde_ruleset presence must match the Horde format",
+                meta.format
+            );
+        }
     }
 
     #[test]

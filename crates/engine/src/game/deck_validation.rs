@@ -1781,9 +1781,14 @@ fn evaluate_selected_format_summary(
             format.legality_format().unwrap(),
             format.label(),
         ),
-        GameFormat::FreeForAll | GameFormat::TwoHeadedGiant | GameFormat::Limited => {
-            QuickCheckResult::compatible()
-        }
+        // Horde survivors bring their own decks and the format imposes no
+        // constructed legality restriction (`legality_format()` is `None`), so
+        // any submitted deck is compatible — same as the other unrestricted
+        // multiplayer variants.
+        GameFormat::FreeForAll
+        | GameFormat::TwoHeadedGiant
+        | GameFormat::Horde
+        | GameFormat::Limited => QuickCheckResult::compatible(),
     };
 
     (
@@ -2163,7 +2168,13 @@ fn evaluate_selected_format(
             }
             check.compatible
         }
-        GameFormat::FreeForAll | GameFormat::TwoHeadedGiant | GameFormat::Limited => true,
+        // Horde: survivors bring unrestricted decks (no constructed legality),
+        // so any submitted deck is compatible — same as the other unrestricted
+        // multiplayer variants.
+        GameFormat::FreeForAll
+        | GameFormat::TwoHeadedGiant
+        | GameFormat::Horde
+        | GameFormat::Limited => true,
     };
 
     // CR 100.4 × MatchType::Bo3: BO3 requires a sideboard regardless of format.
