@@ -60,6 +60,45 @@ pub(crate) fn is_horde_turn(state: &GameState) -> bool {
     horde_seat(state) == Some(state.active_player)
 }
 
+/// True when `id` is the Horde seat, which in this casual variant has no life
+/// total. Damage/life loss it would suffer is redirected to milling (see
+/// `effects::life`), and it is exempt from the CR 704.5a "0 or less life loses"
+/// state-based action (`sba::collect_life_losers`). This is not a
+/// CR-sanctioned rule — Horde Magic is a casual format — so the helper names
+/// the *mechanism* (a seat with no life total) rather than citing a fictional
+/// rule number.
+pub(crate) fn player_has_no_life_total(state: &GameState, id: PlayerId) -> bool {
+    horde_seat(state) == Some(id)
+}
+
+/// The Horde is defeated (and the survivors win) when its library is empty AND
+/// it controls no creature on the battlefield. This is the Horde-variant loss
+/// condition consumed by `elimination::check_game_over` in place of the generic
+/// archenemy "still living" check — the Horde has no life total, so it can never
+/// be eliminated by the ordinary life/poison state-based actions. Casual-format
+/// rule (no CR number); it stands in for the archenemy-alive predicate of
+/// CR 104.2a's win check.
+pub(crate) fn horde_is_defeated(state: &GameState) -> bool {
+    let Some(horde) = horde_seat(state) else {
+        return false;
+    };
+    let library_empty = state
+        .players
+        .iter()
+        .find(|p| p.id == horde)
+        .is_none_or(|p| p.library.is_empty());
+    let controls_creature = state.battlefield.iter().any(|id| {
+        state.objects.get(id).is_some_and(|obj| {
+            obj.controller == horde
+                && obj
+                    .card_types
+                    .core_types
+                    .contains(&crate::types::card_type::CoreType::Creature)
+        })
+    });
+    library_empty && !controls_creature
+}
+
 /// How many cards the Horde reveals-and-resolves this wave. PR2 implements only
 /// the base `FixedCount(n)` policy; live-state bonuses (one extra per Horde
 /// artifact, one extra per additional survivor) and the token-heavy

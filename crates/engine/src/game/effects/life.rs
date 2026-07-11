@@ -204,6 +204,15 @@ pub fn apply_life_gain_after_replacement(
         );
         return 0;
     };
+
+    // Horde Magic (casual variant): the Horde seat has no life total, so life
+    // gain does nothing to it (mirrors the CR 119.7 "can't gain life" no-op
+    // shape, though here the cause is the absence of a life total, not a
+    // static ability). No mutation, no LifeChanged event.
+    if crate::game::horde::player_has_no_life_total(state, pid) {
+        return 0;
+    }
+
     if let Some(player) = state.players.iter_mut().find(|p| p.id == pid) {
         player.life += gain_amount as i32;
         player.life_gained_this_turn += gain_amount;
@@ -280,6 +289,34 @@ pub fn apply_life_loss_after_replacement(
         );
         return 0;
     };
+
+    // Horde Magic (casual variant): the Horde seat has no life total. Damage it
+    // suffers (CR 120.3a: damage to a player causes that much life loss) and any
+    // direct life loss (CR 119.3) is redirected to milling that many cards from
+    // the top of its own library — the milled count stands in for the "loss".
+    // The Horde's `life` is NOT decremented and `life_lost_this_turn` is NOT
+    // incremented, so it can never lose to the CR 704.5a life state-based
+    // action. Lifelink is unaffected: the dealer's life GAIN is a separate
+    // upstream `LifeGain` event, not routed through this loss-mutation point.
+    if crate::game::horde::player_has_no_life_total(state, pid) {
+        // Route through the shared mill building block so per-card graveyard
+        // replacements (Rest in Peace class) still consult, exactly as an
+        // ordinary mill would (CR 701.17a-b). A per-card CR 616.1 pause is
+        // discarded here — this redirect substitutes for a bare life mutation
+        // with no resolution frame of its own to park a prompt against.
+        let _ = crate::game::effects::mill::apply_mill_after_replacement(
+            state,
+            ProposedEvent::Mill {
+                player_id: pid,
+                count: loss_amount,
+                destination: crate::types::zones::Zone::Graveyard,
+                applied: HashSet::new(),
+            },
+            events,
+        );
+        return loss_amount;
+    }
+
     if let Some(player) = state.players.iter_mut().find(|p| p.id == pid) {
         player.life -= loss_amount as i32;
         player.life_lost_this_turn += loss_amount;
@@ -466,26 +503,12 @@ pub fn resolve_lose(
 
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
-            if let ProposedEvent::LifeLoss {
-                player_id,
-                amount: loss_amount,
-                ..
-            } = event
-            {
-                let player = state
-                    .players
-                    .iter_mut()
-                    .find(|p| p.id == player_id)
-                    .ok_or(EffectError::PlayerNotFound)?;
-                player.life -= loss_amount as i32;
-                player.life_lost_this_turn += loss_amount;
-                crate::game::layers::mark_layers_full(state);
-
-                events.push(GameEvent::LifeChanged {
-                    player_id,
-                    amount: -(loss_amount as i32),
-                });
-            }
+            // CR 119.3: route the accepted loss through the single life-loss
+            // mutation point so `Effect::LoseLife` shares every downstream
+            // behavior (LifeChanged emission, life_lost_this_turn tracking) —
+            // and, crucially, the Horde no-life-total mill redirect. Inlining
+            // the mutation here would let `LoseLife` bypass that redirect.
+            apply_life_loss_after_replacement(state, event, events);
         }
         ReplacementResult::Prevented => {
             // CR 614.1a + CR 614.12a — Issue #317: Drain substitute effect

@@ -650,7 +650,18 @@ fn check_game_over(state: &mut GameState, events: &mut Vec<GameEvent>) {
         .collect();
 
     if let Some(archenemy) = super::topology::archenemy(state) {
-        let archenemy_alive = living.contains(&archenemy);
+        // CR 104.2a win check. Horde Magic (casual variant): the Horde seat has
+        // no life total and can never be eliminated by the ordinary
+        // life/poison SBAs, so "archenemy alive" is replaced by the Horde-loss
+        // condition — the Horde is defeated when its library is empty AND it
+        // controls no creature. All other formats keep the generic living-set
+        // check.
+        let archenemy_alive =
+            if state.format_config.format == crate::types::format::GameFormat::Horde {
+                !super::horde::horde_is_defeated(state)
+            } else {
+                living.contains(&archenemy)
+            };
         let living_heroes: Vec<PlayerId> = living
             .iter()
             .copied()

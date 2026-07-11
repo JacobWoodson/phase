@@ -532,6 +532,11 @@ fn collect_life_losers(state: &GameState) -> Vec<PlayerId> {
         .players
         .iter()
         .filter(|p| !p.is_eliminated && !p.is_phased_out())
+        // Horde Magic (casual variant): the Horde seat has no life total, so it
+        // is never a CR 704.5a "0 or less life" loser. Belt-and-suspenders with
+        // the life-loss→mill redirect (its life never drops), but this makes
+        // "no life total" a hard guarantee independent of the redirect.
+        .filter(|p| !super::horde::player_has_no_life_total(state, p.id))
         .filter(|p| super::players::team_life_total(state, p.id) <= 0)
         .filter(|p| !player_has_cant_lose(state, p.id))
         .map(|p| p.id)
