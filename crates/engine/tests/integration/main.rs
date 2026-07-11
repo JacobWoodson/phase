@@ -144,6 +144,7 @@ mod heist_production_path_handoff;
 mod hellkite_tyrant_steal_artifacts_2906;
 mod heroic_defiance_recipient_color_4590;
 mod hollow_one_cost_reduction;
+mod horde_spine_runtime;
 mod hunters_insight_combat_draw;
 mod inevitable_betrayal_no_mana_cost;
 mod infantry_shield_mobilize_grant;

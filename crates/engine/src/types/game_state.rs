@@ -8289,6 +8289,15 @@ pub struct GameState {
     /// (CR 314.5 / CR 904.7). `None` outside an Archenemy game.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archenemy: Option<PlayerId>,
+    /// Horde Magic: how many cards remain to reveal-and-resolve in the Horde's
+    /// current precombat-main wave. Seeded at the start of the Horde's precombat
+    /// main by `horde::begin_wave` and decremented as each card is revealed and
+    /// cast/put onto the battlefield. `0` at every non-wave moment (and for every
+    /// non-Horde format). A plain counter — the reveal loop re-enters after each
+    /// Horde spell resolves (`horde::maybe_reveal_next`), because each free cast
+    /// sets `waiting_for` and only one card can be cast per resolution beat.
+    #[serde(default)]
+    pub horde_wave_remaining: u32,
     /// CR 725: The initiative designation (like monarch — one player at a time).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initiative: Option<PlayerId>,
@@ -9070,6 +9079,7 @@ impl GameState {
             planar_die_actions_this_turn: HashMap::new(),
             scheme_deck: im::Vector::new(),
             archenemy,
+            horde_wave_remaining: 0,
             initiative: None,
             combat_prevention_tally: None,
             cancelled_casts: Vec::new(),

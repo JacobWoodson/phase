@@ -697,6 +697,21 @@ fn pass_priority_once_with_pipeline(
     // No else-branch: a bare handoff or an empty-stack pass-to-advance-phase does NOT
     // touch the ring (leave-intact), so accumulation survives the inter-resolution beats.
 
+    // Horde Magic: reveal-and-resolve the NEXT card of the Horde's wave. After a
+    // Horde spell resolves and priority returns to the Horde (the active player)
+    // with an empty stack during its precombat main, cast the next revealed card
+    // before the phase can advance. `maybe_reveal_next` self-gates on all of
+    // those conditions (Horde turn, precombat main, empty stack, counter > 0), so
+    // this fires only for a genuine wave continuation and is inert otherwise. The
+    // `player == active` guard skips beats where a non-active survivor holds
+    // priority (they may respond to each Horde spell first).
+    if matches!(wf, WaitingFor::Priority { player } if player == state.active_player) {
+        if let Some(next) = crate::game::horde::maybe_reveal_next(state, events) {
+            sync_waiting_for(state, &next);
+            return Ok(next);
+        }
+    }
+
     Ok(wf)
 }
 

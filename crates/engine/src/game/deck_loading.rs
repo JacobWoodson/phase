@@ -475,6 +475,75 @@ pub fn momir_emblem_ability() -> crate::types::ability::AbilityDefinition {
     ability
 }
 
+/// Horde Magic display name for the game-start Horde emblem chip.
+const HORDE_EMBLEM_SOURCE_NAME: &str = "The Horde";
+
+/// The Horde's game-start command-zone emblem static: a single continuous
+/// ability that grants every creature the Horde controls haste and (when the
+/// ruleset forces it) "attacks each combat if able".
+///
+/// Both grants are Layer 6 ability-adding continuous effects (CR 613.1f /
+/// CR 613.3): `AddKeyword(Haste)` (CR 702.10b) and, gated on
+/// `horde_creatures_forced_attackers`, a grafted `StaticMode::MustAttack`
+/// (CR 508.1d) via `GrantStaticAbility`. The outer static is controlled by the
+/// Horde, so its `ControllerRef::You` affected-filter resolves to "creatures the
+/// Horde controls" — a live read, so a creature that changes controller stops
+/// receiving both grants. Mirrors `create_emblem::ninja_pump_static`'s
+/// command-zone anthem pattern.
+fn horde_emblem_static(forced_attackers: bool) -> crate::types::ability::StaticDefinition {
+    use crate::types::ability::{
+        ContinuousModification, ControllerRef, StaticDefinition, TargetFilter, TypedFilter,
+    };
+    use crate::types::keywords::Keyword;
+    use crate::types::statics::StaticMode;
+
+    let mut modifications = vec![
+        // CR 702.10b: haste — the Horde's creatures can attack the turn they
+        // enter and ignore summoning sickness for tap abilities.
+        ContinuousModification::AddKeyword {
+            keyword: Keyword::Haste,
+        },
+    ];
+    if forced_attackers {
+        // CR 508.1d: graft "attacks each combat if able" onto each affected
+        // creature as a static ability of its own (self-scoped), so the
+        // declare-attackers validation forces it to attack.
+        modifications.push(ContinuousModification::GrantStaticAbility {
+            definition: Box::new(StaticDefinition::new(StaticMode::MustAttack)),
+        });
+    }
+
+    StaticDefinition::continuous()
+        .affected(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ))
+        .modifications(modifications)
+        .description(
+            "Creatures the Horde controls have haste and attack each combat if able.".to_string(),
+        )
+}
+
+/// Grant the Horde seat its game-start command-zone emblem (haste + forced
+/// attackers on its creatures). Single authority for the Horde emblem, mirroring
+/// the Momir emblem grant; `forced_attackers` comes from the ruleset.
+pub fn grant_horde_emblem(state: &mut GameState, horde_seat: PlayerId, forced_attackers: bool) {
+    let emblem_id = crate::game::effects::create_emblem::grant_emblem(
+        state,
+        horde_seat,
+        vec![horde_emblem_static(forced_attackers)],
+        Vec::new(),
+        Vec::new(),
+    );
+    // CR 114.5: give the emblem chip a display-only name (it has no art of its
+    // own); `grant_emblem` leaves `emblem_source` unset.
+    if let Some(obj) = state.objects.get_mut(&emblem_id) {
+        obj.emblem_source = Some(crate::game::game_object::EmblemSource {
+            name: HORDE_EMBLEM_SOURCE_NAME.to_string(),
+            printed_ref: None,
+        });
+    }
+}
+
 /// Create a commander GameObject from a CardFace, placing it in the command zone.
 pub fn create_commander_from_card_face(
     state: &mut GameState,
@@ -885,6 +954,20 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
                 });
             }
         }
+    }
+
+    // Horde Magic: grant the Horde seat its game-start command-zone emblem
+    // (haste + forced attackers on the Horde's creatures). Mirrors the Momir
+    // emblem grant above; scoped to the single Horde seat, unlike Momir's
+    // all-seat loop, because only the Horde controls Horde creatures.
+    if state.format_config.format == crate::types::format::GameFormat::Horde {
+        let horde_seat = crate::game::topology::archenemy(state).unwrap_or(PlayerId(0));
+        let forced_attackers = state
+            .format_config
+            .horde_ruleset
+            .as_ref()
+            .is_some_and(|r| r.horde_creatures_forced_attackers);
+        grant_horde_emblem(state, horde_seat, forced_attackers);
     }
 
     // Collect all creature subtypes for Changeling CDA expansion.

@@ -581,10 +581,22 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
     // they set the top scheme of their scheme deck in motion (a turn-based action
     // that doesn't use the stack). No-op outside an Archenemy game, when the active
     // player isn't the archenemy, or when the scheme deck is empty.
+    //
+    // Horde Magic reuses the OneVsMany topology with the Horde in the archenemy
+    // seat, so `topology::archenemy` also returns the Horde here — the two share
+    // this precombat-main entry point. Keep them mutually exclusive: a Horde game
+    // seeds its reveal-and-resolve wave counter (`horde::begin_wave`) instead of
+    // setting a scheme in motion. (`set_in_motion` would in any case no-op on the
+    // Horde's empty `scheme_deck`, but dispatching explicitly documents the
+    // overlap and keeps the two runtimes distinct.)
     if next == Phase::PreCombatMain
         && super::topology::archenemy(state) == Some(state.active_player)
     {
-        crate::game::archenemy::set_in_motion(state, events);
+        if state.format_config.format == GameFormat::Horde {
+            crate::game::horde::begin_wave(state, events);
+        } else {
+            crate::game::archenemy::set_in_motion(state, events);
+        }
     }
 }
 
@@ -2114,6 +2126,11 @@ fn first_player_skips_first_draw(state: &GameState) -> bool {
 pub fn should_skip_draw(state: &GameState) -> bool {
     (state.turn_number == 1 && first_player_skips_first_draw(state))
         || should_skip_step_static(state, Phase::Draw)
+        // Horde Magic: the Horde has no hand and never draws — every Horde turn
+        // it reveals-and-casts from its library instead (skipping the draw also
+        // keeps it clear of the deck-out draw-loss SBA). Kept in lockstep with
+        // the executor's Draw gate below.
+        || super::horde::is_horde_turn(state)
 }
 
 /// CR 614.1b + CR 614.10: Check whether the active player should skip the given
@@ -2369,6 +2386,9 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     && first_player_skips_first_draw(state)
                     && state.extra_phase_resume.is_empty())
                     || should_skip_step_now(state, Phase::Draw)
+                    // Horde Magic: the Horde skips its draw step every turn (it
+                    // has no hand). Kept in lockstep with `should_skip_draw`.
+                    || super::horde::is_horde_turn(state)
                 {
                     advance_phase(state, events);
                     continue;
@@ -2407,6 +2427,17 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     let active = state.active_player;
                     if super::effects::paradigm::enqueue_offer_if_any(state, active) {
                         return state.waiting_for.clone();
+                    }
+                    // Horde Magic: reveal-and-resolve the FIRST card of the
+                    // Horde's wave here (a turn-based action at the start of the
+                    // Horde's precombat main, mirroring the Paradigm hook above).
+                    // `begin_wave` seeded the counter in `finish_enter_phase`;
+                    // this casts one card (setting `waiting_for` with the spell on
+                    // the stack). Subsequent cards are revealed by
+                    // `horde::maybe_reveal_next` from the priority-grant seam once
+                    // each Horde spell resolves.
+                    if let Some(wf) = super::horde::maybe_reveal_next(state, events) {
+                        return wf;
                     }
                 }
                 // CR 603.2b + CR 603.3: beginning-of-main-phase triggers are

@@ -95,6 +95,7 @@ mod omnath_tests;
 // so `merge.rs` stays implementation-only).
 pub mod archenemy;
 pub mod conspiracy;
+pub mod horde;
 // Tests for `conspiracy` live in a sibling file (declared here, not in
 // `conspiracy.rs`, so `conspiracy.rs` stays implementation-only).
 #[cfg(test)]
