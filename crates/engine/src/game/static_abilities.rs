@@ -1147,7 +1147,7 @@ fn life_lock_active_for(state: &GameState, player_id: PlayerId, mode: StaticMode
 /// propagates from either teammate.
 pub fn player_has_cant_gain_life(state: &GameState, player_id: PlayerId) -> bool {
     life_lock_active_for(state, player_id, StaticMode::CantGainLife)
-        || (super::topology::has_two_headed_giant_shared_resources(state)
+        || (super::topology::has_shared_life_resources(state)
             && super::players::teammates(state, player_id)
                 .into_iter()
                 .any(|teammate| life_lock_active_for(state, teammate, StaticMode::CantGainLife)))
@@ -1165,7 +1165,7 @@ pub fn player_has_cant_gain_life(state: &GameState, player_id: PlayerId) -> bool
 /// — in team-based formats the lock also propagates from either teammate.
 pub fn player_has_cant_lose_life(state: &GameState, player_id: PlayerId) -> bool {
     life_lock_active_for(state, player_id, StaticMode::CantLoseLife)
-        || (super::topology::has_two_headed_giant_shared_resources(state)
+        || (super::topology::has_shared_life_resources(state)
             && super::players::teammates(state, player_id)
                 .into_iter()
                 .any(|teammate| life_lock_active_for(state, teammate, StaticMode::CantLoseLife)))

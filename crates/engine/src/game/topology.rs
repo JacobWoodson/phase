@@ -88,15 +88,28 @@ pub(crate) fn archenemy(state: &GameState) -> Option<PlayerId> {
     }
 }
 
-/// CR 810.4 / CR 810.8 / CR 810.9 / CR 810.10: Two-Headed Giant shares life,
-/// poison, and team loss. Default Archenemy uses shared turns (CR 805) but not
-/// these shared-resource rules.
-pub(crate) fn has_two_headed_giant_shared_resources(state: &GameState) -> bool {
-    matches!(state.format_config.format, GameFormat::TwoHeadedGiant)
+/// CR 810.4 / CR 810.8 / CR 810.9 / CR 810.10: Formats whose team shares life,
+/// poison, and team loss. Two-Headed Giant is the canonical case; Horde Magic
+/// reuses the same shared-resource rules for its survivor team (2–4 survivors
+/// share one combined life total, Theros/Cyberman style). The survivors also
+/// share POISON and the dedup grouping via this predicate — intended and
+/// harmless: the Horde deals damage, never poison, so no Horde source ever adds
+/// a poison counter to a survivor.
+///
+/// Default Archenemy stays FALSE: it uses shared turns (CR 805) but its heroes
+/// do NOT share life (CR 904.5, each hero at their own 20). The explicit
+/// `TwoHeadedGiant | Horde` match (not a topology check) preserves that — both
+/// Horde and Archenemy map to `OneVsMany`, so only the format enum distinguishes
+/// them.
+pub(crate) fn has_shared_life_resources(state: &GameState) -> bool {
+    matches!(
+        state.format_config.format,
+        GameFormat::TwoHeadedGiant | GameFormat::Horde
+    )
 }
 
 pub(crate) fn shared_resource_members(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
-    if has_two_headed_giant_shared_resources(state) {
+    if has_shared_life_resources(state) {
         team_members(state, player)
     } else if super::players::is_alive(state, player) {
         vec![player]
@@ -106,7 +119,7 @@ pub(crate) fn shared_resource_members(state: &GameState, player: PlayerId) -> Ve
 }
 
 pub(crate) fn shared_resource_dedup_key(state: &GameState, player: PlayerId) -> TeamId {
-    if has_two_headed_giant_shared_resources(state) {
+    if has_shared_life_resources(state) {
         team_id(state, player)
     } else {
         TeamId(player.0)

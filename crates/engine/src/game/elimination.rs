@@ -42,7 +42,7 @@ pub fn eliminate_players_simultaneously(
             continue;
         }
         leaving_set.insert(player);
-        if super::topology::has_two_headed_giant_shared_resources(state) {
+        if super::topology::has_shared_life_resources(state) {
             for teammate in players::teammates(state, player) {
                 if players::is_alive(state, teammate) {
                     leaving_set.insert(teammate);
@@ -61,7 +61,7 @@ pub fn eliminate_players_simultaneously(
         do_eliminate(state, player, &leaving_set, events);
         eliminated_any = true;
 
-        if super::topology::has_two_headed_giant_shared_resources(state) {
+        if super::topology::has_shared_life_resources(state) {
             for teammate in players::teammates(state, player) {
                 if players::is_alive(state, teammate) {
                     do_eliminate(state, teammate, &leaving_set, events);
@@ -678,7 +678,13 @@ fn check_game_over(state: &mut GameState, events: &mut Vec<GameEvent>) {
         };
         events.push(GameEvent::GameOver { winner });
         state.waiting_for = WaitingFor::GameOver { winner };
-    } else if super::topology::has_two_headed_giant_shared_resources(state) {
+    } else if super::topology::has_shared_life_resources(state) {
+        // Horde note: `has_shared_life_resources` is now true for Horde too, but a
+        // Horde game never reaches this `else if` — the `if let Some(archenemy)`
+        // branch above evaluates FIRST and always matches (Horde maps to
+        // `OneVsMany`, so `topology::archenemy` returns the Horde seat). This
+        // branch therefore stays the pure Two-Headed Giant team-win path; Horde
+        // win/loss is fully handled on the archenemy path above.
         let mut living_teams = std::collections::BTreeSet::new();
         for &pid in &living {
             living_teams.insert(super::topology::team_dedup_key(state, pid));

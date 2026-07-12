@@ -145,6 +145,7 @@ mod hellkite_tyrant_steal_artifacts_2906;
 mod heroic_defiance_recipient_color_4590;
 mod hollow_one_cost_reduction;
 mod horde_cyberman_deck;
+mod horde_multiplayer;
 mod horde_spine_runtime;
 mod horde_tokens;
 mod horde_win_loss;

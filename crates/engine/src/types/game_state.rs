@@ -22,6 +22,7 @@ use super::card_type::{CoreType, Supertype};
 use super::counter::{counter_map_serde, CounterMatch, CounterType};
 use super::events::{GameEvent, PlayerActionKind};
 use super::format::FormatConfig;
+use super::format::GameFormat;
 use super::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedSetId};
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{ManaColor, ManaCost, ManaPipId, ManaType, ManaUnit, StepEndManaAction};
@@ -8808,7 +8809,7 @@ impl GameState {
 
     /// Create a new game with the given format configuration and player count.
     pub fn new(config: FormatConfig, player_count: u8, seed: u64) -> Self {
-        let players: Vec<Player> = (0..player_count)
+        let mut players: Vec<Player> = (0..player_count)
             .map(|i| Player {
                 id: PlayerId(i),
                 life: config.starting_life_for_player(PlayerId(i)),
@@ -8818,6 +8819,63 @@ impl GameState {
         let seat_order: Vec<PlayerId> = (0..player_count).map(PlayerId).collect();
         let starting_player = config.starting_player();
         let archenemy = config.archenemy_player();
+
+        // Horde Magic (casual variant): the survivors share ONE combined life
+        // total (CR 810.8/810.9a, reused via `has_shared_life_resources`).
+        // `starting_life_for_player` seeded every seat — Horde included — with the
+        // full combined total (it can't split until the seat count is known here),
+        // so N survivors would sum to N × combined. Distribute the combined total
+        // across the SURVIVOR seats (every seat except the Horde) so
+        // `team_life_total` sums to it. The Horde seat's life is left untouched:
+        // it has no life total (damage mills it; exempt from the CR 704.5a life
+        // SBA) and is never consulted.
+        if config.format == GameFormat::Horde {
+            let horde_seat = archenemy;
+            let survivor_seats: Vec<PlayerId> = seat_order
+                .iter()
+                .copied()
+                .filter(|&id| Some(id) != horde_seat)
+                .collect();
+            let survivor_count = survivor_seats.len() as i32;
+            if survivor_count > 0 {
+                // Combined total = base + delta per extra survivor beyond the
+                // first (delta 0 for Cyberman → flat shared 20; the community
+                // format uses a negative delta). CR 810.9a routes every individual
+                // read through the team total, so an uneven split is fine.
+                let delta = config
+                    .horde_ruleset
+                    .as_ref()
+                    .map_or(0, |ruleset| ruleset.per_extra_survivor_life_delta);
+                let combined_total = config.starting_life + delta * (survivor_count - 1);
+                let base = combined_total / survivor_count;
+                let remainder = combined_total - base * survivor_count;
+                for (idx, &seat) in survivor_seats.iter().enumerate() {
+                    // Any remainder from an uneven split lands on the first survivor.
+                    let extra = if idx == 0 { remainder } else { 0 };
+                    players[seat.0 as usize].life = base + extra;
+                }
+            }
+        }
+
+        // Horde Magic setup turns: the survivors take `survivor_setup_turns`
+        // consecutive turns to establish a board before the Horde's first turn
+        // (the published rules give them 3). `starting_player` already hands the
+        // first turn to a survivor (PR1). With shared team turns (CR 805.4), the
+        // turn rotation alternates survivor-team / Horde-team; seeding the Horde
+        // seat's `turns_to_skip` makes the Horde skip its early turns so the
+        // survivor team acts again. `start_next_turn` consumes ONE skip after
+        // each survivor turn (the Horde's would-be turn is fast-path skipped and
+        // recurses back to the survivor rep), so K skips yield K+1 survivor turns
+        // before the Horde's first: seed K = survivor_setup_turns - 1.
+        let mut turns_to_skip = vec![0u32; player_count as usize];
+        if config.format == GameFormat::Horde {
+            if let Some(horde_seat) = archenemy {
+                if let Some(ruleset) = config.horde_ruleset.as_ref() {
+                    turns_to_skip[horde_seat.0 as usize] =
+                        u32::from(ruleset.survivor_setup_turns.saturating_sub(1));
+                }
+            }
+        }
 
         GameState {
             turn_number: 0,
@@ -8899,7 +8957,7 @@ impl GameState {
             commander_cast_count: HashMap::new(),
             commander_cast_owners: HashMap::new(),
             extra_turns: Vec::new(),
-            turns_to_skip: vec![0; player_count as usize],
+            turns_to_skip,
             steps_to_skip: vec![HashMap::new(); player_count as usize],
             combat_phase_skip_next_turn: vec![
                 CombatPhaseSkipState::default();
