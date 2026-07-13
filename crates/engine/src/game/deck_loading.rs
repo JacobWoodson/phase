@@ -632,6 +632,24 @@ pub fn load_horde_library(
         ),
     };
 
+    // REPLACE, don't append: the Horde seat is an engine-supplied seat, but in a
+    // real game it is an AI seat that was auto-assigned a deck, which
+    // `load_deck_into_state` already loaded into this library. Clear it (and drop
+    // the now-orphaned objects) so the Horde's library ends up EXACTLY the
+    // challenge deck — matching this function's contract.
+    let stale_library: Vec<crate::types::identifiers::ObjectId> = state
+        .players
+        .iter()
+        .find(|p| p.id == horde_seat)
+        .map(|p| p.library.iter().copied().collect())
+        .unwrap_or_default();
+    for id in &stale_library {
+        state.objects.remove(id);
+    }
+    if let Some(player) = state.players.iter_mut().find(|p| p.id == horde_seat) {
+        player.library.clear();
+    }
+
     for (count, name) in nontokens {
         let face = db
             .get_face_by_name(name)

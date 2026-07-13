@@ -11,7 +11,7 @@ use engine::game::finalize_public_state;
 use engine::game::{load_and_hydrate_decks, rehydrate_game_from_card_db};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::format::FormatConfig;
+use engine::types::format::{FormatConfig, GameFormat};
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
 use engine::types::log::GameLogEntry;
@@ -286,7 +286,18 @@ impl GameSession {
     }
 
     fn rebuild_pregame_state(&mut self, player_count: u8) {
-        let format_config = self.state.format_config.clone();
+        let mut format_config = self.state.format_config.clone();
+        // Horde Magic: the Horde is the self-piloting deck, which is played by an
+        // AI seat — not the host (seat 0), who is a survivor. The default
+        // `FormatConfig::horde()` points `archenemy_player` at seat 0; remap it to
+        // the (lowest-indexed) AI seat so the engine designates that seat as the
+        // Horde — loading the challenge-deck library there, seating the humans as
+        // the survivor team, and giving the survivors the first turn.
+        if format_config.format == GameFormat::Horde {
+            if let Some(&horde_seat) = self.ai_seats.iter().min() {
+                format_config.archenemy_player = Some(horde_seat);
+            }
+        }
         let match_config = self.state.match_config;
         self.state = GameState::new(format_config, player_count, rand::rng().random());
         // CR 732.2a: re-read the immutable match config (incl. the combo-detector

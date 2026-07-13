@@ -491,6 +491,36 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       allow_debug_actions: false,
     },
   },
+  {
+    format: "Horde",
+    label: "Horde",
+    short_label: "HRD",
+    description: "Co-op team vs a self-piloting Horde deck",
+    group: "Multiplayer",
+    default_config: {
+      format: "Horde",
+      starting_life: 20,
+      min_players: 2,
+      max_players: 5,
+      deck_size: 60,
+      singleton: false,
+      command_zone: true,
+      commander_damage_threshold: null,
+      range_of_influence: null,
+      team_based: false,
+      uses_commander: false,
+      supplies_fixed_deck: false,
+      archenemy_player: 0,
+      allow_debug_actions: false,
+      horde_ruleset: {
+        challenge_deck: "CybermanHorde",
+        wave: { type: "UntilNonToken" },
+        survivor_setup_turns: 3,
+        per_extra_survivor_life_delta: 0,
+        horde_creatures_forced_attackers: true,
+      },
+    },
+  },
 ];
 
 export function formatMetadata(format: GameFormat): FormatMetadata | undefined {

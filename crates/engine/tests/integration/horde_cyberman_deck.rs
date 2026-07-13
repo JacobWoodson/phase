@@ -225,8 +225,7 @@ fn until_nontoken_all_token_library_reveals_all_then_ends() {
 /// Returns `None` when the fixture is absent so CI without the card-data pipeline
 /// skips these tests gracefully.
 fn full_card_db() -> Option<CardDatabase> {
-    let path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/who_horde_cards.json");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/who_horde_cards.json");
     if !path.exists() {
         eprintln!("skipping: tests/fixtures/who_horde_cards.json not generated");
         return None;
