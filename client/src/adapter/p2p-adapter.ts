@@ -1020,9 +1020,24 @@ export class P2PHostAdapter implements EngineAdapter {
       const playerCount = allowPartialStart
         ? orderedOpponents.length + 1
         : this.pregameSeatState.seats.length;
+
+      // Horde Magic: the Horde is the self-piloting deck, played by an AI seat —
+      // not the host (seat 0), who is a survivor. Point `archenemy_player` (the
+      // Horde seat) at the lowest-indexed AI seat so the engine designates that
+      // seat as the Horde: it loads the challenge-deck library there, seats the
+      // human(s) as the survivor team, and gives the survivors the first turn.
+      // Mirrors the server-core `rebuild_pregame_state` remap for the WS path.
+      let formatConfigForInit = this.formatConfig;
+      if (formatConfigForInit?.format === "Horde") {
+        const hordeSeat = this.pregameSeatState.seats.findIndex((s) => s.type === "Ai");
+        if (hordeSeat > 0) {
+          formatConfigForInit = { ...formatConfigForInit, archenemy_player: hordeSeat };
+        }
+      }
+
       const result = await this.wasm.initializeGame(
         deckPayload,
-        this.formatConfig,
+        formatConfigForInit,
         playerCount,
         this.matchConfig,
         undefined,
