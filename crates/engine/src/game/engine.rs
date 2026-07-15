@@ -7100,9 +7100,22 @@ pub fn start_game(state: &mut GameState) -> ActionResult {
     }
 
     if let Some(archenemy) = super::topology::archenemy(state) {
-        // CR 904.6: The archenemy takes the first turn. Default Archenemy does
-        // not run the CR 103.1 starting-player contest.
-        return start_game_with_starting_player(state, archenemy);
+        // CR 904.6: In default Archenemy the archenemy takes the first turn, and
+        // no CR 103.1 starting-player contest is run.
+        //
+        // Horde Magic reuses the OneVsMany topology (the Horde is the archenemy
+        // seat) but INVERTS the turn order: the survivors take the first turn (and
+        // several setup turns) before the Horde acts. `FormatConfig::starting_player`
+        // already returns a survivor for Horde, and `GameState::new` seeds the
+        // Horde's `turns_to_skip` so the survivor team takes `survivor_setup_turns`
+        // turns first — but only if the game actually STARTS on the survivor. Use
+        // the configured starting player for Horde instead of forcing the archenemy.
+        let first = if state.format_config.format == crate::types::format::GameFormat::Horde {
+            state.format_config.starting_player()
+        } else {
+            archenemy
+        };
+        return start_game_with_starting_player(state, first);
     }
 
     // CR 103.1 / CR 706: roll one d20 per seat; the high roller becomes the
@@ -7135,7 +7148,15 @@ pub fn start_game_with_starting_player(
 ) -> ActionResult {
     let mut events = Vec::new();
     state.outside_game_cards_brought_in.clear();
-    let starting_player = super::topology::archenemy(state).unwrap_or(starting_player);
+    // CR 904.6: default Archenemy forces the archenemy to take the first turn,
+    // overriding any passed starter. Horde reuses the OneVsMany topology but the
+    // survivors go first, so it must honor the passed starting player (a survivor)
+    // rather than snapping back to the Horde seat.
+    let starting_player = if state.format_config.format == crate::types::format::GameFormat::Horde {
+        starting_player
+    } else {
+        super::topology::archenemy(state).unwrap_or(starting_player)
+    };
 
     if state.match_config.match_type == MatchType::Bo3
         && state.players.len() != 2

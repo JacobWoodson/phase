@@ -12,6 +12,7 @@
 //! the input reached the seam under test.
 
 use engine::game::effects::life::apply_damage_life_loss;
+use engine::game::engine::start_game;
 use engine::game::players::{team_life_total, teammates};
 use engine::game::sba::check_state_based_actions;
 use engine::game::turns::start_next_turn;
@@ -354,5 +355,63 @@ fn single_survivor_team_total_equals_own_life() {
     assert_eq!(
         state.players[HORDE.0 as usize].life, state.format_config.starting_life,
         "the Horde seat's life field is left at its seeded value (never consulted)"
+    );
+}
+
+/// Regression (found by the headless AI sim): the REAL game-start seam must give
+/// the survivors the first turn and their setup turns. `start_game` previously
+/// took an unconditional archenemy branch (CR 904.6) that forced the Horde (= the
+/// archenemy seat) to take turn 1, overriding the survivor-first
+/// `FormatConfig::starting_player()` and never engaging the `turns_to_skip`
+/// setup-turn seeding — so survivors were steamrolled from turn 1. The prior
+/// setup-turn test drove `start_next_turn` directly and missed this, because the
+/// bug lived in `start_game` / `start_game_with_starting_player`.
+///
+/// Revert guard: restoring either unconditional archenemy override makes turn 1
+/// the Horde — the `active_player != HORDE` assertion flips.
+#[test]
+fn horde_game_start_gives_survivors_the_first_turn_and_setup_turns() {
+    let mut state = horde_game(2);
+    let survivor_rep = PlayerId(1);
+    let setup_turns = state
+        .format_config
+        .horde_ruleset
+        .as_ref()
+        .unwrap()
+        .survivor_setup_turns;
+    assert_eq!(
+        setup_turns, 3,
+        "reach-guard: Cyberman survivor_setup_turns is 3"
+    );
+
+    // Drive the ACTUAL production start seam (not `start_next_turn` directly).
+    start_game(&mut state);
+
+    assert_ne!(
+        state.active_player, HORDE,
+        "the Horde must NOT take the first turn — the survivors set up first"
+    );
+    assert_eq!(
+        state.active_player, survivor_rep,
+        "turn 1 belongs to the survivor team"
+    );
+
+    // Exactly `setup_turns` survivor turns precede the Horde's first turn.
+    let mut actives = vec![state.active_player];
+    let mut events = Vec::new();
+    for _ in 0..3 {
+        start_next_turn(&mut state, &mut events);
+        actives.push(state.active_player);
+    }
+    let survivor_turns_before_horde = actives.iter().take_while(|&&p| p != HORDE).count();
+    assert_eq!(
+        survivor_turns_before_horde as u8, setup_turns,
+        "survivors take exactly survivor_setup_turns turns before the Horde via the real start_game path; got {actives:?}"
+    );
+    assert_eq!(
+        actives[3],
+        HORDE,
+        "the Horde's first turn is turn {}",
+        setup_turns + 1
     );
 }
