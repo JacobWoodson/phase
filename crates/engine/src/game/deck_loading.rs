@@ -558,7 +558,16 @@ pub fn create_horde_library_card(
     card_face: &CardFace,
     owner: PlayerId,
 ) -> crate::types::identifiers::ObjectId {
-    create_object_from_card_face(state, card_face, owner)
+    let obj_id = create_object_from_card_face(state, card_face, owner);
+    // Record the card's lowest printing rarity so a rarity-based wave
+    // (`WaveTermination::UntilRarityAtLeast`, the D&D Horde) can tell when a
+    // reveal-and-resolve wave ends. Lowest = "most-common printing": a card with
+    // any common printing counts as common and keeps the wave going, so the wave
+    // ends only on cards that are uncommon-or-better across every printing.
+    if let Some(obj) = state.objects.get_mut(&obj_id) {
+        obj.horde_library_rarity = card_face.rarities.iter().min().copied();
+    }
+    obj_id
 }
 
 /// Create a predefined token in the Horde seat's library from a token body.
@@ -630,6 +639,10 @@ pub fn load_horde_library(
             crate::game::decks::cyberman_horde::CYBERMAN_HORDE_NONTOKEN_CARDS,
             crate::game::decks::cyberman_horde::CYBERMAN_HORDE_TOKENS,
         ),
+        ChallengeDeck::DndHorde => (
+            crate::game::decks::dnd_horde::DND_OOZE_NONTOKEN_CARDS,
+            crate::game::decks::dnd_horde::DND_OOZE_TOKENS,
+        ),
     };
 
     // REPLACE, don't append: the Horde seat is an engine-supplied seat, but in a
@@ -662,10 +675,21 @@ pub fn load_horde_library(
         }
     }
 
-    for (count, name) in tokens {
-        let body =
-            crate::game::token_presets::known_token_body_by_name(name).unwrap_or_else(|| {
-                panic!("Horde deck {deck:?} token preset '{name}' must resolve to a unique body")
+    for (count, selector) in tokens {
+        // Resolve a token selector by display name first (the Cyberman deck's
+        // uniquely-named "Cyberman"/"Dalek"), then fall back to a preset id. The
+        // id path is required for generic subtype tokens whose display name maps
+        // to multiple distinct bodies (the D&D Horde's "Ooze" — six same-name
+        // bodies in the catalog make name lookup ambiguous, so it pins the id).
+        let body = crate::game::token_presets::known_token_body_by_name(selector)
+            .or_else(|| {
+                crate::game::token_presets::known_token_preset_by_id(selector).map(|p| &p.body)
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "Horde deck {deck:?} token selector '{selector}' must resolve to a unique body \
+                     (by display name or preset id)"
+                )
             });
         for _ in 0..*count {
             create_horde_library_token(state, body, horde_seat);

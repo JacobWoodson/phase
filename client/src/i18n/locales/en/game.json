@@ -1103,6 +1103,11 @@
     "noLegalAiDecks": {
       "withFormat": "Add or import a deck legal in {{format}} for the AI to use.",
       "generic": "Add or import a deck legal in this format for the AI to use."
+    },
+    "hordeDeck": {
+      "title": "Horde Deck",
+      "subtitle": "The self-piloting deck your team faces. The engine supplies it — you don't need an AI deck.",
+      "selected": "Selected"
     }
   },
   "cardChoice": {

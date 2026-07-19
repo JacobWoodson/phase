@@ -5,3 +5,4 @@
 //! (`game::horde`) and the seat-scoped injection (`game::deck_loading`) consume
 //! these; a new deck is a peer module here plus one `ChallengeDeck` variant.
 pub mod cyberman_horde;
+pub mod dnd_horde;

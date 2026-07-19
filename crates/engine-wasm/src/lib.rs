@@ -547,6 +547,16 @@ pub fn get_format_registry() -> JsValue {
     to_js(&GameFormat::registry())
 }
 
+/// Return the authoritative list of selectable Horde challenge decks as a typed
+/// array. The Horde deck picker renders this directly, so adding a new challenge
+/// deck is a single engine-side change — the client never maintains a mirrored
+/// deck list. Each entry bundles the deck's `HordeRuleset`, so the client can
+/// build the complete `FormatConfig` for the picked deck without a second call.
+#[wasm_bindgen(js_name = getChallengeDeckRegistry)]
+pub fn get_challenge_deck_registry() -> JsValue {
+    to_js(&engine::types::format::ChallengeDeck::registry())
+}
+
 /// Evaluate deck compatibility and format legality using the loaded card database.
 /// Returns strict Standard/Commander checks, BO3 readiness, and selected-format compatibility.
 #[wasm_bindgen]

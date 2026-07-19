@@ -1,7 +1,8 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
-import type { GameFormat, MatchType, PhaseStop } from "../adapter/types";
+import type { ChallengeDeck, GameFormat, MatchType, PhaseStop } from "../adapter/types";
+import { DEFAULT_CHALLENGE_DECK } from "../data/challengeDeckRegistry";
 import type { CommanderBracket } from "../types/bracket";
 import type { SortKey } from "../components/modal/cardChoice/gridSelection";
 import {
@@ -298,6 +299,7 @@ function buildDefaultPreferences(): PreferencesState {
     multiplayerBoardLayout: "focused",
     aiSeats: [defaultAiSeat()],
     cedhMode: false,
+    hordeChallengeDeck: DEFAULT_CHALLENGE_DECK,
     aiArchetypeFilter: "Any",
     aiCoverageFloor: DEFAULT_AI_COVERAGE_FLOOR,
     aiBracketFilter: [] as CommanderBracket[],
@@ -389,6 +391,10 @@ interface PreferencesState {
    *  pools are restricted to bracket-5 decks. cEDH is a table property, not a
    *  per-seat difficulty — see `effectiveAiDifficulty` in `services/cedhLock`. */
   cedhMode: boolean;
+  /** Which self-piloting Horde deck the survivors face in a `Horde` game. The
+   *  engine's `ChallengeDeck::registry()` (mirrored in `challengeDeckRegistry`)
+   *  is the source of truth for which decks exist; this only remembers the pick. */
+  hordeChallengeDeck: ChallengeDeck;
   aiArchetypeFilter: AiArchetypeFilter;
   aiCoverageFloor: number;
   aiBracketFilter: CommanderBracket[];
@@ -462,6 +468,8 @@ interface PreferencesActions {
   ensureAiSeatCount: (count: number) => void;
   /** Toggle the table-wide cEDH mode (all AI play cEDH, deck pools → bracket 5). */
   setCedhMode: (enabled: boolean) => void;
+  /** Remember which Horde challenge deck the survivors face. */
+  setHordeChallengeDeck: (deck: ChallengeDeck) => void;
   setAiArchetypeFilter: (filter: AiArchetypeFilter) => void;
   setAiCoverageFloor: (floor: number) => void;
   setAiBracketFilter: (brackets: CommanderBracket[]) => void;
@@ -645,6 +653,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
           return { aiSeats: grown };
         }),
       setCedhMode: (enabled) => set({ cedhMode: enabled }),
+      setHordeChallengeDeck: (deck) => set({ hordeChallengeDeck: deck }),
       setAiArchetypeFilter: (filter) => set({ aiArchetypeFilter: filter }),
       setAiCoverageFloor: (floor) => set({ aiCoverageFloor: floor }),
       setAiBracketFilter: (brackets) => set({ aiBracketFilter: brackets }),

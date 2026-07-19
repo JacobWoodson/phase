@@ -12,6 +12,7 @@ import {
 import { useAudioContext } from "../audio/useAudioContext";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { AiOpponentConfig } from "../components/menu/AiOpponentConfig";
+import { HordeDeckSelector } from "../components/setup/HordeDeckSelector";
 import { FormatPicker } from "../components/menu/FormatPicker";
 import { MenuParticles } from "../components/menu/MenuParticles";
 import { MenuPanel, MenuShell } from "../components/menu/MenuShell";
@@ -109,6 +110,8 @@ export function GameSetupPage() {
   const setLastFormat = usePreferencesStore((s) => s.setLastFormat);
   const setLastMatchType = usePreferencesStore((s) => s.setLastMatchType);
   const setLastPlayerCount = usePreferencesStore((s) => s.setLastPlayerCount);
+  const hordeChallengeDeck = usePreferencesStore((s) => s.hordeChallengeDeck);
+  const setHordeChallengeDeck = usePreferencesStore((s) => s.setHordeChallengeDeck);
 
   // Restore last session on mount
   useEffect(() => {
@@ -202,8 +205,13 @@ export function GameSetupPage() {
     // CR 732.2a: carry the creation-time combo-detector opt-in into the game URL;
     // GamePage projects it onto the local MatchConfig. Omitted = Off (engine default).
     const loopParam = loopDetection.type === "On" ? "&loop=on" : "";
+    // Horde: carry the picked challenge deck in the URL so it survives reload and
+    // lands in the saved game record. GamePage applies it to the FormatConfig via
+    // `withChallengeDeck` (which swaps in that deck's whole HordeRuleset).
+    const hordeDeckParam =
+      formatConfig.format === "Horde" ? `&hordeDeck=${hordeChallengeDeck}` : "";
     navigate(
-      `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${formatConfig.format}&players=${playerCount}&match=${matchType.toLowerCase()}${loopParam}${firstParam}`,
+      `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${formatConfig.format}&players=${playerCount}&match=${matchType.toLowerCase()}${loopParam}${firstParam}${hordeDeckParam}`,
     );
   };
 
@@ -601,6 +609,19 @@ export function GameSetupPage() {
 
               {/* Separator */}
               <div className="border-t border-white/8" />
+
+              {/* Horde: pick the self-piloting deck the survivors face. The AI
+                  seat's library is engine-supplied, so this replaces the usual
+                  AI deck selection for this format. */}
+              {selectedFormat === "Horde" && (
+                <>
+                  <HordeDeckSelector
+                    value={hordeChallengeDeck}
+                    onChange={setHordeChallengeDeck}
+                  />
+                  <div className="border-t border-white/8" />
+                </>
+              )}
 
               {/* AI opponent configuration */}
               <AiOpponentConfig

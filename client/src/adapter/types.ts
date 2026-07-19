@@ -59,7 +59,13 @@ export type FormatGroup = "Constructed" | "Commander" | "Multiplayer" | "Limited
  * Which self-piloting Horde deck a `GameFormat.Horde` game uses. Mirrors the
  * engine `ChallengeDeck` enum (`crates/engine/src/types/format.rs`).
  */
-export type ChallengeDeck = "CybermanHorde";
+export type ChallengeDeck = "CybermanHorde" | "DndHorde";
+
+/**
+ * Card rarity. Mirrors the engine `Rarity` enum (serde `rename_all =
+ * "lowercase"`).
+ */
+export type Rarity = "common" | "uncommon" | "rare" | "mythic" | "special" | "bonus";
 
 /**
  * How a Horde turn sizes its reveal-and-resolve wave. Mirrors the engine
@@ -67,7 +73,8 @@ export type ChallengeDeck = "CybermanHorde";
  */
 export type WaveTermination =
   | { type: "FixedCount"; data: number }
-  | { type: "UntilNonToken" };
+  | { type: "UntilNonToken" }
+  | { type: "UntilRarityAtLeast"; data: Rarity };
 
 /**
  * Per-deck Horde rules carried on a `GameFormat.Horde` `FormatConfig`. Mirrors
@@ -80,6 +87,23 @@ export interface HordeRuleset {
   survivor_setup_turns: number;
   per_extra_survivor_life_delta: number;
   horde_creatures_forced_attackers: boolean;
+}
+
+/**
+ * Display metadata for one selectable Horde challenge deck. Mirrors the engine
+ * `ChallengeDeckMetadata` struct, emitted by the `getChallengeDeckRegistry` WASM
+ * export. Adding a Horde deck is a single engine-side change — the deck picker
+ * renders this list, so the client never hardcodes which decks exist.
+ *
+ * `default_ruleset` is bundled so a picked entry can be turned into a complete
+ * `FormatConfig` without a second engine call.
+ */
+export interface ChallengeDeckMetadata {
+  deck: ChallengeDeck;
+  label: string;
+  short_label: string;
+  description: string;
+  default_ruleset: HordeRuleset;
 }
 
 export interface FormatConfig {

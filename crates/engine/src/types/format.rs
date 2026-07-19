@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::database::legality::LegalityFormat;
+use crate::types::card::Rarity;
 use crate::types::player::PlayerId;
 
 /// Broad grouping used by the UI to visually cluster related formats
@@ -148,6 +149,32 @@ pub enum ChallengeDeck {
     /// predefined Cyberman/Dalek tokens. The first deck the spine is validated
     /// against.
     CybermanHorde,
+    /// D&D Horde (community format, hordemagic.com). An escalating challenge of
+    /// three tiered libraries (Ooze → Goblin/Skeleton → Giant/Dragon), all built
+    /// from real, already-implemented cards, using the rarity-based wave rule
+    /// (`WaveTermination::UntilRarityAtLeast`). This spine slice loads the Level 1
+    /// **Ooze** library; multi-tier progression is a follow-up.
+    DndHorde,
+}
+
+/// Authoritative display metadata for one selectable Horde challenge deck.
+///
+/// Produced by [`ChallengeDeck::registry`] and consumed by the frontend's Horde
+/// deck picker, so adding a new challenge deck requires touching the engine only
+/// — the client never maintains a mirrored deck list. Mirrors [`FormatMetadata`]
+/// for `GameFormat`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChallengeDeckMetadata {
+    pub deck: ChallengeDeck,
+    /// Full display label, e.g. "Cyberman Horde".
+    pub label: &'static str,
+    /// Short code for compact badges, e.g. "CYB".
+    pub short_label: &'static str,
+    /// One-line human description suitable for a card or tooltip.
+    pub description: &'static str,
+    /// The deck's canonical ruleset, so a client can build the complete
+    /// `FormatConfig` for a selected deck without a second call.
+    pub default_ruleset: HordeRuleset,
 }
 
 /// How a single Horde turn decides how many cards to reveal-and-resolve.
@@ -176,8 +203,19 @@ pub enum WaveTermination {
     /// `FixedCount` would usually reveal only tokens and barely advance the real
     /// threats, so "reveal until a nontoken" keeps the wave pressuring.
     UntilNonToken,
-    // Future (pure addition, its own add-engine-variant gate run):
-    //   UntilRarityAtLeast(Rarity)  — community "waves"
+    /// Reveal-and-resolve cards until (and including) the first card whose rarity
+    /// is at least the given threshold, which ends the wave. Tokens (no rarity)
+    /// and nontoken cards *below* the threshold are deployed/cast and the wave
+    /// CONTINUES; the first card at or above the threshold is cast and then stops
+    /// the wave, leaving the rest of the library for the next Horde turn.
+    ///
+    /// This is the community "waves" rule used by the D&D Horde: "a wave ends when
+    /// an Uncommon, Rare, or Mythic card enters" — i.e. `UntilRarityAtLeast(
+    /// Rarity::Uncommon)`. Commons and tokens are the filler that builds the board
+    /// up; the first uncommon-or-better is the payoff that caps the wave. Rarity
+    /// is a card-data property (`Rarity` derives `Ord`: Common < Uncommon < Rare
+    /// < Mythic), not a CR concept — Horde Magic is a casual community format.
+    UntilRarityAtLeast(Rarity),
 }
 
 /// The parameters that distinguish one Horde deck's rules from another, carried
@@ -205,6 +243,44 @@ pub struct HordeRuleset {
 }
 
 impl ChallengeDeck {
+    /// Every selectable challenge deck, in display order.
+    ///
+    /// New decks must be appended here as well as given a [`Self::metadata`] arm
+    /// (that match is exhaustive, so the compiler catches a missing arm; the
+    /// `registry_covers_every_challenge_deck` test catches a missing entry here).
+    pub const ALL: &'static [ChallengeDeck] =
+        &[ChallengeDeck::CybermanHorde, ChallengeDeck::DndHorde];
+
+    /// Display metadata for a single deck. Exhaustive match: adding a
+    /// `ChallengeDeck` variant fails to compile until it is described here.
+    pub fn metadata(self) -> ChallengeDeckMetadata {
+        match self {
+            ChallengeDeck::CybermanHorde => ChallengeDeckMetadata {
+                deck: self,
+                label: "Cyberman Horde",
+                short_label: "CYB",
+                description: "Doctor Who — Cybermen and Daleks swarm in waves that \
+                              run until a nontoken card is cast",
+                default_ruleset: self.default_ruleset(),
+            },
+            ChallengeDeck::DndHorde => ChallengeDeckMetadata {
+                deck: self,
+                label: "D&D Horde — Oozes",
+                short_label: "DND",
+                description: "Dungeons & Dragons — a self-replicating Ooze swarm; \
+                              each wave ends when an uncommon or better is revealed",
+                default_ruleset: self.default_ruleset(),
+            },
+        }
+    }
+
+    /// The full catalog of selectable Horde decks with display metadata. The
+    /// frontend's Horde deck picker renders this directly — it is the single
+    /// source of truth for which decks exist and how they are labeled.
+    pub fn registry() -> Vec<ChallengeDeckMetadata> {
+        Self::ALL.iter().copied().map(Self::metadata).collect()
+    }
+
     /// The canonical ruleset for each Horde deck. Centralizes deck-identity →
     /// rules so the registry, `FormatConfig::for_format`, and callers that only
     /// have the deck enum agree on one source of truth.
@@ -217,6 +293,17 @@ impl ChallengeDeck {
                 // threats. "Reveal until a non-token card" is the authentic
                 // token-heavy behavior for this deck.
                 wave: WaveTermination::UntilNonToken,
+                survivor_setup_turns: 3,
+                per_extra_survivor_life_delta: 0,
+                horde_creatures_forced_attackers: true,
+            },
+            ChallengeDeck::DndHorde => HordeRuleset {
+                challenge_deck: ChallengeDeck::DndHorde,
+                // The D&D Horde's defining rule: a wave ends when an Uncommon,
+                // Rare, or Mythic card enters (commons and tokens keep it going).
+                wave: WaveTermination::UntilRarityAtLeast(Rarity::Uncommon),
+                // No published D&D-specific setup/life values; follow the generic
+                // hordemagic rules, mirroring the Cyberman defaults (tunable axes).
                 survivor_setup_turns: 3,
                 per_extra_survivor_life_delta: 0,
                 horde_creatures_forced_attackers: true,
@@ -1652,5 +1739,66 @@ mod tests {
                 meta.format
             );
         }
+    }
+
+    /// The Horde deck picker renders `ChallengeDeck::registry()` directly, so a
+    /// deck missing from `ALL` would be silently unselectable. `metadata` is an
+    /// exhaustive match (the compiler catches a missing arm); this catches a
+    /// variant that was described but never added to `ALL`.
+    #[test]
+    fn registry_covers_every_challenge_deck() {
+        let registry = ChallengeDeck::registry();
+        assert_eq!(registry.len(), ChallengeDeck::ALL.len());
+
+        for deck in ChallengeDeck::ALL {
+            // Exhaustive match: adding a variant fails to compile here until it
+            // is also appended to `ALL`.
+            match deck {
+                ChallengeDeck::CybermanHorde | ChallengeDeck::DndHorde => {}
+            }
+            assert!(
+                registry.iter().any(|meta| meta.deck == *deck),
+                "{deck:?} is missing from the challenge-deck registry"
+            );
+        }
+    }
+
+    /// Every entry must be renderable (non-empty labels) and internally
+    /// consistent — the bundled ruleset must describe the deck it is attached to,
+    /// so a client can build a `FormatConfig` straight from a picked entry.
+    #[test]
+    fn registry_entries_are_renderable_and_self_consistent() {
+        for meta in ChallengeDeck::registry() {
+            assert!(!meta.label.is_empty(), "{:?} has no label", meta.deck);
+            assert!(
+                !meta.short_label.is_empty(),
+                "{:?} has no short label",
+                meta.deck
+            );
+            assert!(
+                !meta.description.is_empty(),
+                "{:?} has no description",
+                meta.deck
+            );
+            assert_eq!(
+                meta.default_ruleset.challenge_deck, meta.deck,
+                "{:?} bundles a ruleset for a different deck",
+                meta.deck
+            );
+        }
+    }
+
+    /// Pin the two decks' defining wave rules — these are what make them play
+    /// differently, and a silent swap would change the whole feel of a deck.
+    #[test]
+    fn challenge_decks_keep_their_defining_wave_rules() {
+        assert_eq!(
+            ChallengeDeck::CybermanHorde.default_ruleset().wave,
+            WaveTermination::UntilNonToken
+        );
+        assert_eq!(
+            ChallengeDeck::DndHorde.default_ruleset().wave,
+            WaveTermination::UntilRarityAtLeast(Rarity::Uncommon)
+        );
     }
 }

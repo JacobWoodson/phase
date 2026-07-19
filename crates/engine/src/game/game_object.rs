@@ -10,7 +10,7 @@ use crate::types::ability::{
     ChosenAttribute, ChosenSubtypeKind, CostPaidObjectSnapshot, ModalChoice, ReplacementDefinition,
     SeatDirection, SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
 };
-use crate::types::card::{LayoutKind, PrintedCardRef, TokenImageRef};
+use crate::types::card::{LayoutKind, PrintedCardRef, Rarity, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::{counter_map_serde, CounterType};
 use crate::types::definitions::Definitions;
@@ -441,6 +441,15 @@ pub struct GameObject {
     /// a casual format, so the flag names the mechanism rather than a rule.
     #[serde(default)]
     pub in_horde_library: bool,
+    /// The card's rarity while it sits in the Horde library, consulted by
+    /// `WaveTermination::UntilRarityAtLeast` to decide when a reveal-and-resolve
+    /// wave ends (the D&D Horde: a wave ends when an uncommon-or-better card is
+    /// revealed). Set from the resolved card face's lowest printing rarity when
+    /// the library is seeded; `None` for every non-Horde object and for library
+    /// tokens (which have no rarity and never end a rarity wave). Not a CR
+    /// concept — Horde Magic is a casual community format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub horde_library_rarity: Option<Rarity>,
     /// Unstable Contraptions: the sprocket this Contraption occupies on the
     /// battlefield. `None` when it is not assembled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1494,6 +1503,7 @@ impl GameObject {
             in_attraction_deck: false,
             in_contraption_deck: false,
             in_horde_library: false,
+            horde_library_rarity: None,
             contraption_sprocket: None,
             stickers: Vec::new(),
             mana_cost: ManaCost::default(),
