@@ -693,6 +693,44 @@ pub fn check_static_ability(
     mode: StaticMode,
     context: &StaticCheckContext,
 ) -> bool {
+    check_static_ability_scoped(state, mode, context, false)
+}
+
+/// Like [`check_static_ability`], but considers ONLY definitions that explicitly
+/// declare an `affected` filter — i.e. genuinely cross-permanent statics such as
+/// "All creatures attack each combat if able".
+///
+/// A definition with `affected: None` is SELF-scoped: it describes the object
+/// carrying it (a printed "~ attacks each combat if able", or one grafted onto a
+/// permanent by `ContinuousModification::GrantStaticAbility`). Asking "does this
+/// static apply to some OTHER object?" must answer no — but the unscoped scan
+/// skips the filter entirely when `affected` is `None`, so such a definition
+/// would otherwise match every candidate.
+///
+/// That is not hypothetical: the Horde emblem grafts a self-scoped
+/// `StaticMode::MustAttack` onto each Horde creature, and combat's
+/// cross-permanent fallback then forced EVERY creature in the game to attack,
+/// including the survivors' own board. Callers that already read self-scoped
+/// statics per object (via `functioning_abilities::active_static_definitions`)
+/// should use this function for their cross-permanent fallback so the two paths
+/// do not overlap.
+pub fn check_cross_permanent_static_ability(
+    state: &GameState,
+    mode: StaticMode,
+    context: &StaticCheckContext,
+) -> bool {
+    check_static_ability_scoped(state, mode, context, true)
+}
+
+/// Shared implementation. `cross_permanent_only` skips self-scoped definitions
+/// (those without an `affected` filter); see
+/// [`check_cross_permanent_static_ability`].
+fn check_static_ability_scoped(
+    state: &GameState,
+    mode: StaticMode,
+    context: &StaticCheckContext,
+    cross_permanent_only: bool,
+) -> bool {
     // Perf: this is the O(N) whole-battlefield sweep that combat/untap legality
     // loops hoist an existence gate in front of (see
     // `functioning_abilities::any_functioning_static_mode`).
@@ -715,6 +753,13 @@ pub fn check_static_ability(
             if !static_filter_matches(state, context, affected, obj.id) {
                 continue;
             }
+        } else if cross_permanent_only {
+            // Self-scoped definition (no `affected` filter): it describes only
+            // the object carrying it, so it can never satisfy a cross-permanent
+            // query about a different object. Skipping it here is what keeps a
+            // grafted self-static (e.g. the Horde emblem's MustAttack) from
+            // matching every candidate.
+            continue;
         }
 
         if !static_condition_matches_context(state, obj.id, obj.controller, def, context) {

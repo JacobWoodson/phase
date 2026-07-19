@@ -2378,10 +2378,17 @@ fn creature_must_attack_with_attackable_players_gated(
     }
     // CR 508.1d: MustAttack — either directly on this creature or from a
     // cross-permanent static (e.g., "All creatures attack each combat if able").
+    //
+    // The second path must use the CROSS-PERMANENT check: a self-scoped
+    // definition (`affected: None`) describes only its own carrier and is
+    // already covered by the `active_static_definitions` path above. Using the
+    // unscoped check here matched every creature as soon as any self-scoped
+    // MustAttack existed anywhere — the Horde emblem grafts exactly such a
+    // static onto its creatures, which forced the survivors' board to attack.
     let has_must_attack = super::functioning_abilities::active_static_definitions(state, obj)
         .any(|sd| sd.mode == StaticMode::MustAttack)
         || (gates.has_must_attack
-            && crate::game::static_abilities::check_static_ability(
+            && crate::game::static_abilities::check_cross_permanent_static_ability(
                 state,
                 StaticMode::MustAttack,
                 &crate::game::static_abilities::StaticCheckContext {

@@ -235,6 +235,90 @@ fn horde_emblem_grants_haste_and_must_attack_to_horde_creatures_only() {
     );
 }
 
+/// The emblem's granted must-attack must not leak through COMBAT's
+/// cross-permanent fallback onto survivor creatures.
+///
+/// The sibling test above proves the *layers* scoping is right (a survivor
+/// creature is never granted the static). This one drives the actual combat
+/// authority, `creature_must_attack`, which has a second path: a global
+/// "does any MustAttack static exist?" gate followed by
+/// `check_static_ability(MustAttack, target)`. Because the emblem grafts a
+/// SELF-scoped `StaticDefinition::new(MustAttack)` (`affected: None`) onto each
+/// Horde creature, and `check_static_ability` skips the filter entirely when
+/// `affected` is `None`, that fallback matched EVERY creature — so one Horde
+/// zombie forced the survivors' whole board to attack. Observed live: a
+/// survivor-controlled Doctor Doom was reported as "must attack".
+#[test]
+fn horde_emblem_must_attack_does_not_force_survivor_creatures_to_attack() {
+    // Survivor is the active player — must-attack is only evaluated for the
+    // active player's creatures.
+    let mut state = horde_game(1, SURVIVOR);
+    grant_horde_emblem(&mut state, HORDE, true);
+
+    let horde_creature = create_object(
+        &mut state,
+        CardId(9101),
+        HORDE,
+        "Dalek".to_string(),
+        Zone::Battlefield,
+    );
+    let survivor_creature = create_object(
+        &mut state,
+        CardId(9102),
+        SURVIVOR,
+        "Human".to_string(),
+        Zone::Battlefield,
+    );
+    for id in [horde_creature, survivor_creature] {
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        obj.base_power = Some(2);
+        obj.base_toughness = Some(2);
+        // Clear summoning sickness so `creature_must_attack` reaches the
+        // requirement logic — otherwise this test would pass vacuously via the
+        // CR 302.6 early-out rather than by correct scoping.
+        obj.summoning_sick = false;
+    }
+
+    flush_layers(&mut state);
+
+    assert!(
+        !engine::game::combat::creature_must_attack(&state, survivor_creature),
+        "the Horde emblem must not force a SURVIVOR-controlled creature to attack"
+    );
+
+    // Positive control: the same authority, on the Horde's own creature during
+    // the Horde's turn, DOES report the requirement. Without this, the assertion
+    // above could pass simply because the requirement never fires at all.
+    let mut horde_turn = horde_game(1, HORDE);
+    grant_horde_emblem(&mut horde_turn, HORDE, true);
+    let forced = create_object(
+        &mut horde_turn,
+        CardId(9103),
+        HORDE,
+        "Dalek".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = horde_turn.objects.get_mut(&forced).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        obj.base_power = Some(2);
+        obj.base_toughness = Some(2);
+        obj.summoning_sick = false;
+    }
+    flush_layers(&mut horde_turn);
+    assert!(
+        engine::game::combat::creature_must_attack(&horde_turn, forced),
+        "positive control: the emblem MUST still force the Horde's own creature to attack"
+    );
+}
+
 /// `horde_creatures_forced_attackers = false` grants haste but NOT must-attack,
 /// proving the ruleset flag gates only the MustAttack modification.
 #[test]
