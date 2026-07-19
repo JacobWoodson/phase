@@ -125,19 +125,33 @@ fn wave_policy(state: &GameState) -> Option<WaveTermination> {
 fn wave_seed(state: &GameState) -> u32 {
     match wave_policy(state) {
         Some(WaveTermination::FixedCount(n)) => n,
-        Some(WaveTermination::UntilNonToken) | Some(WaveTermination::UntilRarityAtLeast(_)) => {
-            horde_seat(state)
-                .and_then(|horde| state.players.iter().find(|p| p.id == horde))
-                .map_or(0, |p| p.library.len() as u32)
-        }
+        Some(WaveTermination::UntilNonToken { .. })
+        | Some(WaveTermination::UntilRarityAtLeast(_)) => horde_seat(state)
+            .and_then(|horde| state.players.iter().find(|p| p.id == horde))
+            .map_or(0, |p| p.library.len() as u32),
         None => 0,
+    }
+}
+
+/// How many NON-token cards must resolve to end this Horde turn's wave.
+///
+/// Only meaningful for `UntilNonToken`; every other policy terminates on a
+/// different axis (a fixed card count, or a rarity threshold) and reports `0`.
+/// The count is resolved against `turn_index` because a schedule may vary per
+/// turn — `WaveCount::Snaking` ramps up and back down.
+fn wave_nontoken_seed(state: &GameState, turn_index: u32) -> u32 {
+    match wave_policy(state) {
+        Some(WaveTermination::UntilNonToken { count }) => count.nontokens_for_turn(turn_index),
+        _ => 0,
     }
 }
 
 /// Whether revealing-and-casting a NON-TOKEN card of the given rarity ends the
 /// wave under `policy`.
 ///
-/// - `UntilNonToken`: every non-token card ends the wave.
+/// - `UntilNonToken { .. }`: ends once the wave's required number of nontokens
+///   have resolved — i.e. when the remaining count reaches zero AFTER this card
+///   is accounted for. `nontokens_remaining_after` is that post-decrement value.
 /// - `UntilRarityAtLeast(t)`: only a card whose rarity is at least `t` ends it; a
 ///   below-threshold (common) card is cast and the wave CONTINUES, exactly like
 ///   `FixedCount` — the per-card decrement in [`maybe_reveal_next`] already
@@ -150,9 +164,13 @@ fn wave_seed(state: &GameState) -> u32 {
 ///
 /// Split out as a pure function so the whole policy matrix is testable without
 /// driving a free cast through the stack.
-fn wave_ends_after_nontoken(policy: Option<WaveTermination>, rarity: Option<Rarity>) -> bool {
+fn wave_ends_after_nontoken(
+    policy: Option<WaveTermination>,
+    rarity: Option<Rarity>,
+    nontokens_remaining_after: u32,
+) -> bool {
     match policy {
-        Some(WaveTermination::UntilNonToken) => true,
+        Some(WaveTermination::UntilNonToken { .. }) => nontokens_remaining_after == 0,
         Some(WaveTermination::UntilRarityAtLeast(threshold)) => {
             rarity.is_some_and(|r| r >= threshold)
         }
@@ -160,17 +178,24 @@ fn wave_ends_after_nontoken(policy: Option<WaveTermination>, rarity: Option<Rari
     }
 }
 
-/// Seed the Horde's precombat-main wave counter. Called from
+/// Seed the Horde's precombat-main wave counters. Called from
 /// `turns::finish_enter_phase` as the Horde's precombat main begins, taking the
 /// place of the (no-op) archenemy `set_in_motion` turn-based action for a Horde
-/// game. This only sets the counter; the actual reveal-and-resolve is driven one
+/// game. This only sets the counters; the actual reveal-and-resolve is driven one
 /// card at a time by [`maybe_reveal_next`] (see the module docs for why the cast
 /// cannot happen here).
+///
+/// The Horde turn index advances here (and only here), so a per-turn wave
+/// schedule (`WaveCount::Snaking`) reads a stable index for the whole wave.
 pub(crate) fn begin_wave(state: &mut GameState, _events: &mut [GameEvent]) {
     if !is_horde_turn(state) {
         return;
     }
+    let turn_index = state.horde_turn_index;
     state.horde_wave_remaining = wave_seed(state);
+    state.horde_wave_nontokens_remaining = wave_nontoken_seed(state, turn_index);
+    // Advance for the NEXT Horde turn; this turn's wave keeps `turn_index`.
+    state.horde_turn_index = turn_index.saturating_add(1);
 }
 
 /// If a Horde wave is in progress and the Horde is at an empty-stack priority
@@ -266,11 +291,21 @@ pub(crate) fn maybe_reveal_next(
         let ability = free_cast_ability(card_id, horde);
         return match crate::game::effects::cast_from_zone::resolve(state, &ability, events) {
             Ok(()) => {
+                // This card is a resolved NON-token, so it counts against an
+                // `UntilNonToken` wave's quota (saturating: other policies leave
+                // the quota at 0 and are unaffected).
+                state.horde_wave_nontokens_remaining =
+                    state.horde_wave_nontokens_remaining.saturating_sub(1);
+
                 // Ending the wave clears the counter so the priority re-entry seam
                 // (which re-invokes this function once the spell resolves) reveals
                 // nothing more, leaving the rest of the library for the next Horde
                 // turn. See [`wave_ends_after_nontoken`] for the policy matrix.
-                if wave_ends_after_nontoken(wave_policy(state), revealed_rarity) {
+                if wave_ends_after_nontoken(
+                    wave_policy(state),
+                    revealed_rarity,
+                    state.horde_wave_nontokens_remaining,
+                ) {
                     state.horde_wave_remaining = 0;
                 }
                 Some(state.waiting_for.clone())
@@ -387,6 +422,7 @@ fn free_cast_ability(card_id: ObjectId, horde: PlayerId) -> ResolvedAbility {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::format::WaveCount;
 
     /// The rarity-wave gate is a `>=` comparison, so the `Ord` derive on
     /// [`Rarity`] must order least-rare first. Pin it: if the enum is ever
@@ -404,10 +440,10 @@ mod tests {
     fn rarity_wave_ends_only_at_or_above_the_threshold() {
         let policy = Some(WaveTermination::UntilRarityAtLeast(Rarity::Uncommon));
 
-        assert!(!wave_ends_after_nontoken(policy, Some(Rarity::Common)));
-        assert!(wave_ends_after_nontoken(policy, Some(Rarity::Uncommon)));
-        assert!(wave_ends_after_nontoken(policy, Some(Rarity::Rare)));
-        assert!(wave_ends_after_nontoken(policy, Some(Rarity::Mythic)));
+        assert!(!wave_ends_after_nontoken(policy, Some(Rarity::Common), 0));
+        assert!(wave_ends_after_nontoken(policy, Some(Rarity::Uncommon), 0));
+        assert!(wave_ends_after_nontoken(policy, Some(Rarity::Rare), 0));
+        assert!(wave_ends_after_nontoken(policy, Some(Rarity::Mythic), 0));
     }
 
     /// The threshold is a parameter, not a constant — a deck may cap its waves
@@ -416,10 +452,18 @@ mod tests {
     fn rarity_wave_threshold_is_parameterized() {
         let rare_only = Some(WaveTermination::UntilRarityAtLeast(Rarity::Rare));
 
-        assert!(!wave_ends_after_nontoken(rare_only, Some(Rarity::Common)));
-        assert!(!wave_ends_after_nontoken(rare_only, Some(Rarity::Uncommon)));
-        assert!(wave_ends_after_nontoken(rare_only, Some(Rarity::Rare)));
-        assert!(wave_ends_after_nontoken(rare_only, Some(Rarity::Mythic)));
+        assert!(!wave_ends_after_nontoken(
+            rare_only,
+            Some(Rarity::Common),
+            0
+        ));
+        assert!(!wave_ends_after_nontoken(
+            rare_only,
+            Some(Rarity::Uncommon),
+            0
+        ));
+        assert!(wave_ends_after_nontoken(rare_only, Some(Rarity::Rare), 0));
+        assert!(wave_ends_after_nontoken(rare_only, Some(Rarity::Mythic), 0));
     }
 
     /// A card-data gap must fail safe toward "keep revealing" rather than
@@ -427,18 +471,34 @@ mod tests {
     #[test]
     fn unknown_rarity_never_ends_a_rarity_wave() {
         let policy = Some(WaveTermination::UntilRarityAtLeast(Rarity::Uncommon));
-        assert!(!wave_ends_after_nontoken(policy, None));
+        assert!(!wave_ends_after_nontoken(policy, None, 0));
     }
 
-    /// `UntilNonToken` is rarity-blind: the first non-token ends the wave
-    /// whatever its rarity (the Cyberman Horde's behavior, unchanged).
+    /// `UntilNonToken` is rarity-blind — it ends on the nontoken QUOTA, not on
+    /// what the card is. With the quota exhausted (0 remaining) any rarity ends
+    /// the wave; this is the Cyberman `Fixed(1)` behavior, unchanged.
     #[test]
-    fn until_nontoken_ends_on_any_rarity() {
-        let policy = Some(WaveTermination::UntilNonToken);
+    fn until_nontoken_is_rarity_blind_once_the_quota_is_met() {
+        let policy = Some(WaveTermination::UntilNonToken {
+            count: WaveCount::Fixed(1),
+        });
 
-        assert!(wave_ends_after_nontoken(policy, Some(Rarity::Common)));
-        assert!(wave_ends_after_nontoken(policy, Some(Rarity::Mythic)));
-        assert!(wave_ends_after_nontoken(policy, None));
+        assert!(wave_ends_after_nontoken(policy, Some(Rarity::Common), 0));
+        assert!(wave_ends_after_nontoken(policy, Some(Rarity::Mythic), 0));
+        assert!(wave_ends_after_nontoken(policy, None, 0));
+    }
+
+    /// A multi-nontoken wave keeps going while the quota is unmet, regardless of
+    /// rarity — the Zombies Horde's Wave 2 and Wave 3 turns.
+    #[test]
+    fn until_nontoken_continues_while_quota_remains() {
+        let policy = Some(WaveTermination::UntilNonToken {
+            count: WaveCount::Snaking { min: 1, max: 3 },
+        });
+
+        assert!(!wave_ends_after_nontoken(policy, Some(Rarity::Mythic), 2));
+        assert!(!wave_ends_after_nontoken(policy, Some(Rarity::Common), 1));
+        assert!(wave_ends_after_nontoken(policy, Some(Rarity::Common), 0));
     }
 
     /// `FixedCount` waves are governed solely by the counter — casting a
@@ -447,9 +507,9 @@ mod tests {
     fn fixed_count_and_absent_policy_never_end_the_wave_here() {
         let fixed = Some(WaveTermination::FixedCount(2));
 
-        assert!(!wave_ends_after_nontoken(fixed, Some(Rarity::Common)));
-        assert!(!wave_ends_after_nontoken(fixed, Some(Rarity::Mythic)));
-        assert!(!wave_ends_after_nontoken(fixed, None));
-        assert!(!wave_ends_after_nontoken(None, Some(Rarity::Mythic)));
+        assert!(!wave_ends_after_nontoken(fixed, Some(Rarity::Common), 0));
+        assert!(!wave_ends_after_nontoken(fixed, Some(Rarity::Mythic), 0));
+        assert!(!wave_ends_after_nontoken(fixed, None, 0));
+        assert!(!wave_ends_after_nontoken(None, Some(Rarity::Mythic), 0));
     }
 }

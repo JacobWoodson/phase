@@ -6,3 +6,4 @@
 //! these; a new deck is a peer module here plus one `ChallengeDeck` variant.
 pub mod cyberman_horde;
 pub mod dnd_horde;
+pub mod zombies_horde;

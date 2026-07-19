@@ -8299,6 +8299,22 @@ pub struct GameState {
     /// sets `waiting_for` and only one card can be cast per resolution beat.
     #[serde(default)]
     pub horde_wave_remaining: u32,
+    /// Horde Magic: how many NON-token cards must still resolve before the
+    /// current wave ends, for a `WaveTermination::UntilNonToken` ruleset. Seeded
+    /// per Horde turn by `horde::begin_wave` from the ruleset's `WaveCount`
+    /// (which may vary per turn — the Zombies Horde snakes 1 → 2 → 3 → 2 → 1),
+    /// and decremented as each nontoken is cast. `0` at every non-wave moment and
+    /// for every non-Horde format. Distinct from `horde_wave_remaining`, which
+    /// bounds total cards revealed (tokens included) as a termination safeguard.
+    #[serde(default)]
+    pub horde_wave_nontokens_remaining: u32,
+    /// Horde Magic: how many turns the Horde has taken so far (0-based index of
+    /// the CURRENT Horde turn while a wave is in progress). Incremented by
+    /// `horde::begin_wave`. Drives per-turn wave schedules — `WaveCount::Snaking`
+    /// derives its triangle wave from this index, so the ramp needs no direction
+    /// flag or other mutable bookkeeping.
+    #[serde(default)]
+    pub horde_turn_index: u32,
     /// CR 725: The initiative designation (like monarch — one player at a time).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initiative: Option<PlayerId>,
@@ -9138,6 +9154,8 @@ impl GameState {
             scheme_deck: im::Vector::new(),
             archenemy,
             horde_wave_remaining: 0,
+            horde_wave_nontokens_remaining: 0,
+            horde_turn_index: 0,
             initiative: None,
             combat_prevention_tally: None,
             cancelled_casts: Vec::new(),

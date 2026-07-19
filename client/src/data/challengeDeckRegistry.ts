@@ -18,7 +18,7 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       "Doctor Who — Cybermen and Daleks swarm in waves that run until a nontoken card is cast",
     default_ruleset: {
       challenge_deck: "CybermanHorde",
-      wave: { type: "UntilNonToken" },
+      wave: { type: "UntilNonToken", data: { count: { type: "Fixed", data: 1 } } },
       survivor_setup_turns: 3,
       per_extra_survivor_life_delta: 0,
       horde_creatures_forced_attackers: true,
@@ -33,6 +33,23 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
     default_ruleset: {
       challenge_deck: "DndHorde",
       wave: { type: "UntilRarityAtLeast", data: "uncommon" },
+      survivor_setup_turns: 3,
+      per_extra_survivor_life_delta: 0,
+      horde_creatures_forced_attackers: true,
+    },
+  },
+  {
+    deck: "ZombiesHorde",
+    label: "Zombies Horde",
+    short_label: "ZOM",
+    description:
+      "An undead swarm whose waves ramp 1 → 2 → 3 nontokens and back down, snaking between pressure and respite",
+    default_ruleset: {
+      challenge_deck: "ZombiesHorde",
+      wave: {
+        type: "UntilNonToken",
+        data: { count: { type: "Snaking", data: { min: 1, max: 3 } } },
+      },
       survivor_setup_turns: 3,
       per_extra_survivor_life_delta: 0,
       horde_creatures_forced_attackers: true,

@@ -65,7 +65,19 @@ describe("CHALLENGE_DECK_REGISTRY (engine drift check)", () => {
 
     const cyber = withChallengeDeck(dnd, "CybermanHorde");
     expect(cyber.horde_ruleset?.challenge_deck).toBe("CybermanHorde");
-    expect(cyber.horde_ruleset?.wave).toEqual({ type: "UntilNonToken" });
+    expect(cyber.horde_ruleset?.wave).toEqual({
+      type: "UntilNonToken",
+      data: { count: { type: "Fixed", data: 1 } },
+    });
+
+    // The Zombies deck carries the snaking count that defines its difficulty
+    // ramp — the whole point of parameterizing the nontoken count.
+    const zombies = withChallengeDeck(cyber, "ZombiesHorde");
+    expect(zombies.horde_ruleset?.challenge_deck).toBe("ZombiesHorde");
+    expect(zombies.horde_ruleset?.wave).toEqual({
+      type: "UntilNonToken",
+      data: { count: { type: "Snaking", data: { min: 1, max: 3 } } },
+    });
   });
 
   it("leaves non-Horde formats untouched", () => {

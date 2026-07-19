@@ -155,6 +155,11 @@ pub enum ChallengeDeck {
     /// (`WaveTermination::UntilRarityAtLeast`). This spine slice loads the Level 1
     /// **Ooze** library; multi-tier progression is a follow-up.
     DndHorde,
+    /// Zombies Horde (community format, hordemagic.com). 100 nontoken cards plus
+    /// 200 Zombie / Zombie Giant tokens. Its signature rule is a *snaking* wave
+    /// count — the Horde reveals until one nontoken resolves, then two, then
+    /// three, then back down — so pressure ramps up and eases off in a cycle.
+    ZombiesHorde,
 }
 
 /// Authoritative display metadata for one selectable Horde challenge deck.
@@ -177,6 +182,53 @@ pub struct ChallengeDeckMetadata {
     pub default_ruleset: HordeRuleset,
 }
 
+/// How many NON-token cards a [`WaveTermination::UntilNonToken`] wave must
+/// resolve before it ends.
+///
+/// A plain number would cover the classic rule ("until the first nontoken"), but
+/// the count genuinely varies *per Horde turn* in published decks — the Zombies
+/// Horde ramps difficulty by snaking the count up and back down. Modelling it as
+/// a typed schedule keeps that inside the ruleset instead of leaking a
+/// special-case counter into the turn engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum WaveCount {
+    /// The same number of nontokens every Horde turn. `Fixed(1)` is the classic
+    /// "reveal until the first nontoken card" rule.
+    Fixed(u32),
+    /// Ramp the count up from `min` to `max`, then back down, repeating — a
+    /// triangle wave over the Horde's turns. The Zombies Horde is
+    /// `Snaking { min: 1, max: 3 }`: "Wave 1, then Wave 2, and so on for Wave 3.
+    /// On its next turn, it will descend back down to Wave 2, snaking back and
+    /// forth" — i.e. 1, 2, 3, 2, 1, 2, 3, …
+    Snaking { min: u32, max: u32 },
+}
+
+impl WaveCount {
+    /// How many nontokens end the wave on the Horde's `turn_index`-th turn
+    /// (0-based).
+    ///
+    /// `Snaking` is a triangle wave of period `2 * (max - min)`: the phase walks
+    /// up to `max` and back down toward `min` without repeating the endpoints,
+    /// which is what "snaking back and forth" means. A degenerate range
+    /// (`max <= min`) collapses to `min`, so a malformed ruleset still yields a
+    /// terminating wave rather than a divide-by-zero.
+    pub fn nontokens_for_turn(self, turn_index: u32) -> u32 {
+        match self {
+            WaveCount::Fixed(n) => n,
+            WaveCount::Snaking { min, max } => {
+                if max <= min {
+                    return min;
+                }
+                let span = max - min;
+                let period = span * 2;
+                let phase = turn_index % period;
+                min + if phase <= span { phase } else { period - phase }
+            }
+        }
+    }
+}
+
 /// How a single Horde turn decides how many cards to reveal-and-resolve.
 ///
 /// This is a *policy*, not a scalar count, because the rule genuinely varies by
@@ -194,15 +246,22 @@ pub enum WaveTermination {
     /// engine, not stored here — this is only the base count (e.g. 2 for Battle
     /// the Horde, 1 for Face the Hydra).
     FixedCount(u32),
-    /// Reveal-and-resolve cards until (and including) the first NON-token card,
-    /// which ends the wave. Every token revealed before it enters the
-    /// battlefield; the nontoken is cast (for free) and the wave stops — the
-    /// next revealed card stays in the library for the following Horde turn.
+    /// Reveal-and-resolve cards until `count` NON-token cards have been cast,
+    /// which ends the wave. Every token revealed along the way enters the
+    /// battlefield; each nontoken is cast (for free), and once the required
+    /// number have resolved the wave stops — the next revealed card stays in the
+    /// library for the following Horde turn.
+    ///
     /// The authentic behavior for token-heavy decks (the original Knudson rules,
     /// and the Doctor Who Cyberman Horde, which is ~2/3 tokens): a small
     /// `FixedCount` would usually reveal only tokens and barely advance the real
-    /// threats, so "reveal until a nontoken" keeps the wave pressuring.
-    UntilNonToken,
+    /// threats, so "reveal until N nontokens" keeps the wave pressuring.
+    ///
+    /// `count` is a [`WaveCount`] rather than a bare number because the count is
+    /// not always constant: the Zombies Horde escalates it 1 → 2 → 3 → 2 → 1 …
+    /// as a difficulty ramp. `WaveCount::Fixed(1)` is the classic
+    /// "until the first nontoken" rule.
+    UntilNonToken { count: WaveCount },
     /// Reveal-and-resolve cards until (and including) the first card whose rarity
     /// is at least the given threshold, which ends the wave. Tokens (no rarity)
     /// and nontoken cards *below* the threshold are deployed/cast and the wave
@@ -248,8 +307,11 @@ impl ChallengeDeck {
     /// New decks must be appended here as well as given a [`Self::metadata`] arm
     /// (that match is exhaustive, so the compiler catches a missing arm; the
     /// `registry_covers_every_challenge_deck` test catches a missing entry here).
-    pub const ALL: &'static [ChallengeDeck] =
-        &[ChallengeDeck::CybermanHorde, ChallengeDeck::DndHorde];
+    pub const ALL: &'static [ChallengeDeck] = &[
+        ChallengeDeck::CybermanHorde,
+        ChallengeDeck::DndHorde,
+        ChallengeDeck::ZombiesHorde,
+    ];
 
     /// Display metadata for a single deck. Exhaustive match: adding a
     /// `ChallengeDeck` variant fails to compile until it is described here.
@@ -269,6 +331,14 @@ impl ChallengeDeck {
                 short_label: "DND",
                 description: "Dungeons & Dragons — a self-replicating Ooze swarm; \
                               each wave ends when an uncommon or better is revealed",
+                default_ruleset: self.default_ruleset(),
+            },
+            ChallengeDeck::ZombiesHorde => ChallengeDeckMetadata {
+                deck: self,
+                label: "Zombies Horde",
+                short_label: "ZOM",
+                description: "An undead swarm whose waves ramp 1 → 2 → 3 nontokens \
+                              and back down, snaking between pressure and respite",
                 default_ruleset: self.default_ruleset(),
             },
         }
@@ -291,8 +361,11 @@ impl ChallengeDeck {
                 // The Cyberman deck is ~2/3 tokens, so a small `FixedCount`
                 // would usually reveal only tokens and barely advance the real
                 // threats. "Reveal until a non-token card" is the authentic
-                // token-heavy behavior for this deck.
-                wave: WaveTermination::UntilNonToken,
+                // token-heavy behavior for this deck — the classic single-
+                // nontoken rule, i.e. `Fixed(1)`.
+                wave: WaveTermination::UntilNonToken {
+                    count: WaveCount::Fixed(1),
+                },
                 survivor_setup_turns: 3,
                 per_extra_survivor_life_delta: 0,
                 horde_creatures_forced_attackers: true,
@@ -304,6 +377,21 @@ impl ChallengeDeck {
                 wave: WaveTermination::UntilRarityAtLeast(Rarity::Uncommon),
                 // No published D&D-specific setup/life values; follow the generic
                 // hordemagic rules, mirroring the Cyberman defaults (tunable axes).
+                survivor_setup_turns: 3,
+                per_extra_survivor_life_delta: 0,
+                horde_creatures_forced_attackers: true,
+            },
+            ChallengeDeck::ZombiesHorde => HordeRuleset {
+                challenge_deck: ChallengeDeck::ZombiesHorde,
+                // The deck's defining rule: "it will Wave 1, putting out Tokens
+                // until it flips its first nontoken card. Then ... Wave 2 ... and
+                // so on for Wave 3. On its next turn, it will descend back down
+                // to Wave 2, snaking back and forth."
+                wave: WaveTermination::UntilNonToken {
+                    count: WaveCount::Snaking { min: 1, max: 3 },
+                },
+                // No published Zombies-specific setup/life values; follow the
+                // generic hordemagic rules, as the other community decks do.
                 survivor_setup_turns: 3,
                 per_extra_survivor_life_delta: 0,
                 horde_creatures_forced_attackers: true,
@@ -1754,7 +1842,9 @@ mod tests {
             // Exhaustive match: adding a variant fails to compile here until it
             // is also appended to `ALL`.
             match deck {
-                ChallengeDeck::CybermanHorde | ChallengeDeck::DndHorde => {}
+                ChallengeDeck::CybermanHorde
+                | ChallengeDeck::DndHorde
+                | ChallengeDeck::ZombiesHorde => {}
             }
             assert!(
                 registry.iter().any(|meta| meta.deck == *deck),
@@ -1788,17 +1878,67 @@ mod tests {
         }
     }
 
-    /// Pin the two decks' defining wave rules — these are what make them play
+    /// Pin each deck's defining wave rule — these are what make them play
     /// differently, and a silent swap would change the whole feel of a deck.
     #[test]
     fn challenge_decks_keep_their_defining_wave_rules() {
         assert_eq!(
             ChallengeDeck::CybermanHorde.default_ruleset().wave,
-            WaveTermination::UntilNonToken
+            WaveTermination::UntilNonToken {
+                count: WaveCount::Fixed(1)
+            }
         );
         assert_eq!(
             ChallengeDeck::DndHorde.default_ruleset().wave,
             WaveTermination::UntilRarityAtLeast(Rarity::Uncommon)
+        );
+        assert_eq!(
+            ChallengeDeck::ZombiesHorde.default_ruleset().wave,
+            WaveTermination::UntilNonToken {
+                count: WaveCount::Snaking { min: 1, max: 3 }
+            }
+        );
+    }
+
+    /// A constant schedule is the classic rule and must not vary by turn.
+    #[test]
+    fn fixed_wave_count_is_constant_across_turns() {
+        let fixed = WaveCount::Fixed(1);
+        for turn in 0..10 {
+            assert_eq!(fixed.nontokens_for_turn(turn), 1);
+        }
+    }
+
+    /// The Zombies Horde's published ramp: "Wave 1 ... then Wave 2 ... and so on
+    /// for Wave 3. On its next turn, it will descend back down to Wave 2, snaking
+    /// back and forth." Pin the exact sequence over two full periods.
+    #[test]
+    fn snaking_wave_count_ramps_up_and_back_down() {
+        let snake = WaveCount::Snaking { min: 1, max: 3 };
+        let seq: Vec<u32> = (0..9).map(|t| snake.nontokens_for_turn(t)).collect();
+        assert_eq!(seq, vec![1, 2, 3, 2, 1, 2, 3, 2, 1]);
+    }
+
+    /// The endpoints must not repeat — a naive "up then reversed" schedule would
+    /// emit 1,2,3,3,2,1 and linger a turn too long at each extreme.
+    #[test]
+    fn snaking_wave_count_does_not_repeat_its_endpoints() {
+        let snake = WaveCount::Snaking { min: 2, max: 4 };
+        let seq: Vec<u32> = (0..8).map(|t| snake.nontokens_for_turn(t)).collect();
+        assert_eq!(seq, vec![2, 3, 4, 3, 2, 3, 4, 3]);
+    }
+
+    /// A degenerate range must still yield a terminating wave rather than
+    /// dividing by zero on the period.
+    #[test]
+    fn snaking_wave_count_handles_degenerate_ranges() {
+        assert_eq!(
+            WaveCount::Snaking { min: 2, max: 2 }.nontokens_for_turn(7),
+            2
+        );
+        assert_eq!(
+            WaveCount::Snaking { min: 3, max: 1 }.nontokens_for_turn(7),
+            3
         );
     }
 }

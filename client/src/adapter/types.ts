@@ -59,7 +59,7 @@ export type FormatGroup = "Constructed" | "Commander" | "Multiplayer" | "Limited
  * Which self-piloting Horde deck a `GameFormat.Horde` game uses. Mirrors the
  * engine `ChallengeDeck` enum (`crates/engine/src/types/format.rs`).
  */
-export type ChallengeDeck = "CybermanHorde" | "DndHorde";
+export type ChallengeDeck = "CybermanHorde" | "DndHorde" | "ZombiesHorde";
 
 /**
  * Card rarity. Mirrors the engine `Rarity` enum (serde `rename_all =
@@ -68,12 +68,23 @@ export type ChallengeDeck = "CybermanHorde" | "DndHorde";
 export type Rarity = "common" | "uncommon" | "rare" | "mythic" | "special" | "bonus";
 
 /**
+ * How many NON-token cards an `UntilNonToken` wave must resolve before it ends.
+ * Mirrors the engine `WaveCount` enum (serde `tag = "type", content = "data"`).
+ *
+ * `Snaking` ramps the count from `min` up to `max` and back down each Horde
+ * turn — the Zombies Horde's difficulty cycle.
+ */
+export type WaveCount =
+  | { type: "Fixed"; data: number }
+  | { type: "Snaking"; data: { min: number; max: number } };
+
+/**
  * How a Horde turn sizes its reveal-and-resolve wave. Mirrors the engine
  * `WaveTermination` enum (serde `tag = "type", content = "data"`).
  */
 export type WaveTermination =
   | { type: "FixedCount"; data: number }
-  | { type: "UntilNonToken" }
+  | { type: "UntilNonToken"; data: { count: WaveCount } }
   | { type: "UntilRarityAtLeast"; data: Rarity };
 
 /**

@@ -514,7 +514,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       allow_debug_actions: false,
       horde_ruleset: {
         challenge_deck: "CybermanHorde",
-        wave: { type: "UntilNonToken" },
+        wave: { type: "UntilNonToken", data: { count: { type: "Fixed", data: 1 } } },
         survivor_setup_turns: 3,
         per_extra_survivor_life_delta: 0,
         horde_creatures_forced_attackers: true,
