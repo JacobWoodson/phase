@@ -326,6 +326,54 @@ async function buildLocalAiDeckList(
     };
   }
 
+  // Horde: the human is a survivor bringing their own constructed deck; the AI
+  // seat(s) are the self-piloting Horde, whose library is the engine-supplied
+  // challenge deck injected by `load_horde_library` at the archenemy seat. No
+  // saved deck is tagged "Horde", so the AI seats submit empty and must NOT be
+  // drawn from the (empty) Horde-filtered catalog — only the human keeps a real
+  // deck. Mirrors the fixed-deck branch above but asymmetric: player real, AI
+  // empty.
+  if (formatConfig && formatConfig.format === "Horde") {
+    const { aiSeats, cedhMode } = usePreferencesStore.getState();
+    const opponentCount = Math.max(1, playerCount - 1);
+    const emptySeat = (): ExpandedDeckWithTier => ({
+      main_deck: [],
+      sideboard: [],
+      commander: [],
+      planar_deck: [],
+      scheme_deck: [],
+      signature_spell: [],
+      sticker_sheets: [],
+      bracket_tier: "core",
+    });
+    let hordePlayerDeck = deck;
+    let hordePlayerBracket = playerBracket ?? null;
+    if (!hordePlayerDeck) {
+      // Human chose "Random Deck": Horde imposes no constructed-legality
+      // restriction on survivors, so pick from the unfiltered catalog rather
+      // than the Horde-tagged one (which is empty).
+      const anyCatalog = await buildLegalAiDeckCatalog({ selectedMatchType });
+      const pick = pickRandomDeckCandidate(anyCatalog.candidates, {});
+      if (!pick) {
+        throw new Error(t("gameProvider.noLegalAiDecks.generic"));
+      }
+      hordePlayerDeck = pick.deck;
+      hordePlayerBracket = pick.bracket;
+    }
+    const aiDifficulties = Array.from({ length: opponentCount }, (_, i) =>
+      effectiveAiDifficulty(aiSeats[i]?.difficulty ?? "Medium", cedhMode),
+    );
+    return {
+      player: {
+        ...expandParsedDeck(hordePlayerDeck),
+        bracket_tier: bracketToEngineTier(hordePlayerBracket),
+      },
+      opponent: emptySeat(),
+      ai_decks: Array.from({ length: opponentCount - 1 }, emptySeat),
+      ai_difficulties: aiDifficulties,
+    };
+  }
+
   const { aiSeats, cedhMode, aiArchetypeFilter, aiCoverageFloor } = usePreferencesStore.getState();
   const catalog = await buildLegalAiDeckCatalog({
     selectedFormat: formatConfig?.format,
@@ -1143,6 +1191,17 @@ export function GameProvider({
       const savedState = await loadGame(gameId);
       const adapter = getSharedAdapter();
 
+      // Horde: the archenemy (Horde) seat is an AI, never the local human (who
+      // is always seat 0 in solo Play-vs-AI). Remap the registry default
+      // (archenemy_player: 0) onto the first AI seat (seat 1) so
+      // `load_horde_library` injects the challenge deck under the AI, not the
+      // player — otherwise the human is dealt the Cyberman library (the
+      // seat-inversion bug). Mirrors the P2PHostAdapter remap on the host path.
+      const initFormatConfig =
+        formatConfig?.format === "Horde"
+          ? { ...formatConfig, archenemy_player: 1 }
+          : formatConfig;
+
       if (savedState) {
         try {
           // Load card DB before restore so the engine can rehydrate objects
@@ -1198,7 +1257,7 @@ export function GameProvider({
             return;
           }
           try {
-            await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
+            await initGame(gameId, adapter, deckList, initFormatConfig, playerCount, matchConfig, firstPlayer);
             if (cancelled) return;
             if (!adapter.cardDbLoaded) {
               onCardDataMissingRef.current?.();
@@ -1328,7 +1387,7 @@ export function GameProvider({
           gameId,
           adapter,
           deckList,
-          formatConfig,
+          initFormatConfig,
           playerCount,
           matchConfig,
           firstPlayer,

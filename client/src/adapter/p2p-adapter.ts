@@ -999,9 +999,17 @@ export class P2PHostAdapter implements EngineAdapter {
           continue;
         }
         if (kind.type === "Ai") {
-          const deck = this.aiDecks.get(seat);
+          let deck = this.aiDecks.get(seat);
           if (!deck) {
-            throw new AdapterError("P2P_ERROR", `AI seat ${seat} is missing a resolved deck`, false);
+            // Horde: the AI seat is the self-piloting Horde, whose library is the
+            // engine-supplied challenge deck (injected — and any submitted deck
+            // cleared — at game load). It needs no user-provided deck, so use the
+            // host deck as a well-formed placeholder that the engine discards.
+            if (this.formatConfig?.format === "Horde") {
+              deck = hostDeck.player;
+            } else {
+              throw new AdapterError("P2P_ERROR", `AI seat ${seat} is missing a resolved deck`, false);
+            }
           }
           orderedOpponents.push(deck);
           orderedDifficulties.push(kind.data.difficulty);

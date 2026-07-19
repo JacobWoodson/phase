@@ -217,7 +217,14 @@ export function GameSetupPage() {
   const noDeckSelected = !suppliesDeck && !activeDeckName;
   const deckBlockedForSelectedFormat =
     !suppliesDeck && !isRandomDeckSelection(activeDeckName) && selectedCompat?.selected_format_compatible === false;
-  const noLegalAiDecks = !suppliesDeck && legalAiDeckCount === 0;
+  // Horde: the AI seat plays the engine-supplied challenge deck (the Horde deck
+  // is injected at game load), so — like a fixed-deck format — the user is not
+  // required to provide a legal AI deck. Without this, the AI-deck catalog's
+  // known-format filter drops every deck (none is tagged "Horde") and Start is
+  // wrongly disabled.
+  const aiDeckSuppliedByEngine = selectedFormat === "Horde";
+  const noLegalAiDecks =
+    !suppliesDeck && !aiDeckSuppliedByEngine && legalAiDeckCount === 0;
   // Block start only while the card DB is actively loading — not on `error`/`idle`,
   // since initializeGame awaits ensureCardDb itself and an errored warm must not
   // trap the user on this screen.
