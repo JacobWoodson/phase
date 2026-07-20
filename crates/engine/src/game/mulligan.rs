@@ -89,9 +89,15 @@ pub fn start_mulligan(state: &mut GameState, events: &mut Vec<GameEvent>) -> Wai
         crate::util::im_ext::shuffle_vector(&mut player.library, rng);
     }
 
-    // Draw the opening hand for each player in seat order.
+    // Draw the opening hand for each player in seat order. The Horde seat is
+    // skipped: it has no hand and plays off the top of its library, so an
+    // opening hand would strand threats it can never cast and shorten the
+    // library it must deck out to lose.
     let seat_order = state.seat_order.clone();
     for &player_id in &seat_order {
+        if crate::game::horde::player_skips_opening_hand(state, player_id) {
+            continue;
+        }
         draw_n(state, player_id, STARTING_HAND_SIZE, events);
     }
 
@@ -110,6 +116,11 @@ fn normal_mulligan_decision(state: &GameState) -> WaitingFor {
     let pending = state
         .seat_order
         .iter()
+        // A seat with no opening hand has nothing to keep or mulligan; leaving
+        // the Horde in `pending` would stall the game waiting on a decision it
+        // can never meaningfully make (and its "Keep" would bottom cards from a
+        // hand it never drew).
+        .filter(|&&player| !crate::game::horde::player_skips_opening_hand(state, player))
         .map(|&player| MulliganDecisionEntry {
             player,
             mulligan_count: state

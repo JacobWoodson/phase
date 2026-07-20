@@ -77,6 +77,20 @@ pub(crate) fn player_has_no_life_total(state: &GameState, id: PlayerId) -> bool 
     horde_seat(state) == Some(id)
 }
 
+/// True when `id` is the Horde seat, which draws NO opening hand and takes no
+/// mulligan (`mulligan::start_mulligan`).
+///
+/// The Horde has no hand in this variant: it plays entirely off the top of its
+/// library through the reveal-and-resolve wave ([`maybe_reveal_next`]) and has no
+/// way to cast from hand. Dealing it an opening hand therefore strands real
+/// threats where they can never be played, AND permanently removes them from the
+/// library — which is the Horde's actual clock, since it loses by decking out
+/// ([`horde_is_defeated`]). Casual-format rule (no CR number), so this names the
+/// mechanism rather than citing a rule.
+pub(crate) fn player_skips_opening_hand(state: &GameState, id: PlayerId) -> bool {
+    horde_seat(state) == Some(id)
+}
+
 /// The Horde is defeated (and the survivors win) when its library is empty AND
 /// it controls no creature on the battlefield. This is the Horde-variant loss
 /// condition consumed by `elimination::check_game_over` in place of the generic

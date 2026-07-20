@@ -235,6 +235,71 @@ fn horde_emblem_grants_haste_and_must_attack_to_horde_creatures_only() {
     );
 }
 
+/// The Horde draws NO opening hand and takes no mulligan.
+///
+/// The Horde has no hand in this variant — it plays off the top of its library
+/// via the reveal wave. Dealing it an opening hand stranded real threats where it
+/// could never cast them AND pulled them out of the library it must deck out to
+/// lose (observed live: the Horde sat on a 2-card hand and a 298-card library
+/// instead of the full 300). Drives the REAL `start_mulligan` path.
+#[test]
+fn horde_draws_no_opening_hand_and_is_not_asked_to_mulligan() {
+    let mut state = horde_game(1, SURVIVOR);
+
+    // Give both seats a library to draw from.
+    for (seat, base) in [(HORDE, 7000u64), (SURVIVOR, 8000u64)] {
+        for i in 0..20 {
+            create_object(
+                &mut state,
+                CardId(base + i),
+                seat,
+                format!("Filler {i}"),
+                Zone::Library,
+            );
+        }
+    }
+    let horde_library_before = state.players[HORDE.0 as usize].library.len();
+
+    let mut events = Vec::new();
+    let waiting = engine::game::mulligan::start_mulligan(&mut state, &mut events);
+
+    // The Horde keeps every card in its library and holds no hand.
+    assert!(
+        state.players[HORDE.0 as usize].hand.is_empty(),
+        "the Horde must not be dealt an opening hand"
+    );
+    assert_eq!(
+        state.players[HORDE.0 as usize].library.len(),
+        horde_library_before,
+        "the Horde's library must be untouched — those cards are its clock"
+    );
+
+    // Positive control: a survivor still draws a normal opening hand, so this
+    // cannot pass by the opening draw being broken for everyone.
+    assert_eq!(
+        state.players[SURVIVOR.0 as usize].hand.len(),
+        7,
+        "survivors must still draw a normal 7-card opening hand"
+    );
+
+    // The Horde must not be asked for a decision it cannot meaningfully make;
+    // leaving it pending would stall the game.
+    match waiting {
+        WaitingFor::MulliganDecision { pending, .. } => {
+            let seats: Vec<PlayerId> = pending.iter().map(|entry| entry.player).collect();
+            assert!(
+                !seats.contains(&HORDE),
+                "the Horde must not appear in the mulligan decision list, got {seats:?}"
+            );
+            assert!(
+                seats.contains(&SURVIVOR),
+                "survivors must still be asked to keep or mulligan, got {seats:?}"
+            );
+        }
+        other => panic!("expected a mulligan decision, got {other:?}"),
+    }
+}
+
 /// The emblem's granted must-attack must not leak through COMBAT's
 /// cross-permanent fallback onto survivor creatures.
 ///
