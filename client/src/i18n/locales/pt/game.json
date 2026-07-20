@@ -292,7 +292,9 @@
     "done": "Concluído"
   },
   "lifeTotal": {
-    "playerLabel": "J{{seat}}"
+    "playerLabel": "J{{seat}}",
+    "libraryLabel": "CARTAS",
+    "libraryTooltip": "A Horda não tem total de vidas. Dano e perda de vida fazem com que ela moa o próprio grimório — ela é derrotada quando seu grimório acaba, então este número é seu verdadeiro relógio."
   },
   "phaseStop": {
     "untapLabel": "Etapa de desvirar",
@@ -1066,6 +1068,11 @@
     "noLegalAiDecks": {
       "withFormat": "Adicione ou importe um deck válido em {{format}} para a IA usar.",
       "generic": "Adicione ou importe um deck válido neste formato para a IA usar."
+    },
+    "hordeDeck": {
+      "title": "Deck da Horda",
+      "subtitle": "O deck autônomo que sua equipe enfrenta. O motor o fornece — você não precisa de um deck de IA.",
+      "selected": "Selecionado"
     }
   },
   "cardChoice": {

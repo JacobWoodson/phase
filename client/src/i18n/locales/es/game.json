@@ -292,7 +292,9 @@
     "done": "Listo"
   },
   "lifeTotal": {
-    "playerLabel": "J{{seat}}"
+    "playerLabel": "J{{seat}}",
+    "libraryLabel": "CARTAS",
+    "libraryTooltip": "La Horda no tiene total de vidas. El daño y la pérdida de vidas la hacen descartar cartas de su biblioteca en su lugar: es derrotada cuando su biblioteca se agota, así que este número es su verdadero reloj."
   },
   "phaseStop": {
     "untapLabel": "Paso de enderezar",
@@ -1066,6 +1068,11 @@
     "noLegalAiDecks": {
       "withFormat": "Añade o importa un mazo legal en {{format}} para que lo use la IA.",
       "generic": "Añade o importa un mazo legal en este formato para que lo use la IA."
+    },
+    "hordeDeck": {
+      "title": "Mazo de la Horda",
+      "subtitle": "El mazo autónomo al que se enfrenta tu equipo. Lo proporciona el motor: no necesitas un mazo de IA.",
+      "selected": "Seleccionado"
     }
   },
   "cardChoice": {

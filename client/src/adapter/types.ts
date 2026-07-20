@@ -1048,6 +1048,16 @@ export type PlayerStatus =
 export interface Player {
   id: PlayerId;
   life: number;
+  /**
+   * Engine-derived: this seat has NO life total, so `life` is meaningless for it
+   * and must not be presented as a resource. True only for the Horde seat in a
+   * `Horde` game — damage and life loss are redirected into milling its library,
+   * and it is defeated when that library runs out.
+   *
+   * Render the seat's library count instead (see `LifeTotal`). Never infer this
+   * from format/archenemy on the client; the engine publishes it.
+   */
+  has_no_life_total?: boolean;
   poison_counters: number;
   speed?: number | null;
   mana_pool: ManaPool;

@@ -292,7 +292,9 @@
     "done": "Fertig"
   },
   "lifeTotal": {
-    "playerLabel": "S{{seat}}"
+    "playerLabel": "S{{seat}}",
+    "libraryLabel": "KARTEN",
+    "libraryTooltip": "Die Horde hat keine Lebenspunkte. Schaden und Lebensverlust lassen sie stattdessen Karten von ihrer Bibliothek auf den Friedhof legen – sie ist besiegt, wenn ihre Bibliothek leer ist. Diese Zahl ist ihre echte Uhr."
   },
   "phaseStop": {
     "untapLabel": "Enttappschritt",
@@ -1066,6 +1068,11 @@
     "noLegalAiDecks": {
       "withFormat": "Füge ein in {{format}} legales Deck hinzu oder importiere es, damit die KI es nutzen kann.",
       "generic": "Füge ein in diesem Format legales Deck hinzu oder importiere es, damit die KI es nutzen kann."
+    },
+    "hordeDeck": {
+      "title": "Horde-Deck",
+      "subtitle": "Das selbstspielende Deck, dem euer Team gegenübersteht. Die Engine stellt es bereit – du brauchst kein KI-Deck.",
+      "selected": "Ausgewählt"
     }
   },
   "cardChoice": {

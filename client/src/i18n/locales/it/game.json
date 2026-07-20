@@ -292,7 +292,9 @@
     "done": "Fatto"
   },
   "lifeTotal": {
-    "playerLabel": "G{{seat}}"
+    "playerLabel": "G{{seat}}",
+    "libraryLabel": "CARTE",
+    "libraryTooltip": "L'Orda non ha punti vita. I danni e la perdita di punti vita le fanno invece macinare carte dal grimorio: è sconfitta quando il suo grimorio finisce, quindi questo numero è il suo vero orologio."
   },
   "phaseStop": {
     "untapLabel": "Passo di STAP",
@@ -1066,6 +1068,11 @@
     "noLegalAiDecks": {
       "withFormat": "Aggiungi o importa un mazzo legale in {{format}} che l'IA possa usare.",
       "generic": "Aggiungi o importa un mazzo legale in questo formato che l'IA possa usare."
+    },
+    "hordeDeck": {
+      "title": "Mazzo dell'Orda",
+      "subtitle": "Il mazzo automatico che la tua squadra affronta. Lo fornisce il motore: non ti serve un mazzo IA.",
+      "selected": "Selezionato"
     }
   },
   "cardChoice": {

@@ -235,6 +235,30 @@ fn horde_emblem_grants_haste_and_must_attack_to_horde_creatures_only() {
     );
 }
 
+/// The Horde seat publishes `has_no_life_total` so clients can render it
+/// truthfully.
+///
+/// The Horde's `life` never moves — damage and life loss are redirected into
+/// milling — so a UI that shows it renders a frozen number that reads as "your
+/// attacks are doing nothing". The engine must publish the fact on the seat
+/// rather than leaving the client to re-derive "which seat is the Horde" from
+/// format + archenemy, which the frontend is not allowed to do.
+#[test]
+fn horde_seat_is_flagged_as_having_no_life_total() {
+    let state = horde_game(1, SURVIVOR);
+
+    assert!(
+        state.players[HORDE.0 as usize].has_no_life_total,
+        "the Horde seat must be flagged as having no life total"
+    );
+    // Positive control: survivors keep a real life total, so a client can't
+    // simply render every seat as clock-less.
+    assert!(
+        !state.players[SURVIVOR.0 as usize].has_no_life_total,
+        "a survivor seat must NOT be flagged as having no life total"
+    );
+}
+
 /// The Horde draws NO opening hand and takes no mulligan.
 ///
 /// The Horde has no hand in this variant — it plays off the top of its library

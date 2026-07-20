@@ -292,7 +292,9 @@
     "done": "Terminé"
   },
   "lifeTotal": {
-    "playerLabel": "J{{seat}}"
+    "playerLabel": "J{{seat}}",
+    "libraryLabel": "CARTES",
+    "libraryTooltip": "La Horde n'a pas de total de points de vie. Les blessures et les pertes de points de vie la font meuler à la place — elle est vaincue lorsque sa bibliothèque est épuisée, donc ce nombre est son véritable compte à rebours."
   },
   "phaseStop": {
     "untapLabel": "Étape de dégagement",
@@ -1066,6 +1068,11 @@
     "noLegalAiDecks": {
       "withFormat": "Ajoutez ou importez un deck légal en {{format}} pour que l'IA l'utilise.",
       "generic": "Ajoutez ou importez un deck légal dans ce format pour que l'IA l'utilise."
+    },
+    "hordeDeck": {
+      "title": "Deck de la Horde",
+      "subtitle": "Le deck autonome affronté par votre équipe. Le moteur le fournit — vous n'avez pas besoin de deck IA.",
+      "selected": "Sélectionné"
     }
   },
   "cardChoice": {

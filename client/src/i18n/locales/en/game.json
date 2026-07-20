@@ -324,7 +324,9 @@
     "done": "Done"
   },
   "lifeTotal": {
-    "playerLabel": "P{{seat}}"
+    "playerLabel": "P{{seat}}",
+    "libraryLabel": "CARDS",
+    "libraryTooltip": "The Horde has no life total. Damage and life loss mill it instead — it's defeated when its library runs out, so this count is its real clock."
   },
   "phaseStop": {
     "untapLabel": "Untap step",

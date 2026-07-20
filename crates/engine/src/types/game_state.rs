@@ -8871,6 +8871,15 @@ impl GameState {
                     players[seat.0 as usize].life = base + extra;
                 }
             }
+            // Publish the no-life-total fact ON the Horde seat so clients can
+            // render it truthfully (its library is the real clock — it loses by
+            // decking out) instead of a life total frozen at its starting value.
+            // Set here, at the single point where the format config first meets
+            // the seats, so every construction path agrees — not only the live
+            // deck-loading one.
+            if let Some(horde_seat) = horde_seat {
+                players[horde_seat.0 as usize].has_no_life_total = true;
+            }
         }
 
         // Horde Magic setup turns: the survivors take `survivor_setup_turns`

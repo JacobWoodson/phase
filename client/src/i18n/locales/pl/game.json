@@ -292,7 +292,9 @@
     "done": "Gotowe"
   },
   "lifeTotal": {
-    "playerLabel": "G{{seat}}"
+    "playerLabel": "G{{seat}}",
+    "libraryLabel": "KARTY",
+    "libraryTooltip": "Horda nie ma punktów życia. Obrażenia i utrata życia zamiast tego mielą jej bibliotekę — zostaje pokonana, gdy skończą się jej karty, więc ta liczba to jej prawdziwy zegar."
   },
   "phaseStop": {
     "untapLabel": "Krok odwracania",
@@ -1066,6 +1068,11 @@
     "noLegalAiDecks": {
       "withFormat": "Dodaj lub zaimportuj talię dozwoloną w formacie {{format}}, aby AI mogło jej użyć.",
       "generic": "Dodaj lub zaimportuj talię dozwoloną w tym formacie, aby AI mogło jej użyć."
+    },
+    "hordeDeck": {
+      "title": "Talia Hordy",
+      "subtitle": "Samogrająca talia, z którą mierzy się twoja drużyna. Dostarcza ją silnik — nie potrzebujesz talii SI.",
+      "selected": "Wybrano"
     }
   },
   "cardChoice": {
