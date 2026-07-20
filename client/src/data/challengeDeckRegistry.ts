@@ -55,6 +55,34 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       horde_creatures_forced_attackers: true,
     },
   },
+  {
+    deck: "SliversHorde",
+    label: "Slivers Horde",
+    short_label: "SLV",
+    description:
+      "Every Sliver buffs every other Sliver — the swarm compounds, growing stronger as it grows wider",
+    default_ruleset: {
+      challenge_deck: "SliversHorde",
+      wave: { type: "UntilRarityAtLeast", data: "uncommon" },
+      survivor_setup_turns: 3,
+      per_extra_survivor_life_delta: 0,
+      horde_creatures_forced_attackers: true,
+    },
+  },
+  {
+    deck: "HumansGodzillaHorde",
+    label: "Humans & Godzilla Horde",
+    short_label: "HGZ",
+    description:
+      "A wide, cheap human army punctuated by a handful of enormous Godzilla-series titans",
+    default_ruleset: {
+      challenge_deck: "HumansGodzillaHorde",
+      wave: { type: "UntilRarityAtLeast", data: "uncommon" },
+      survivor_setup_turns: 3,
+      per_extra_survivor_life_delta: 0,
+      horde_creatures_forced_attackers: true,
+    },
+  },
 ];
 
 /** The deck a Horde game uses when the player hasn't picked one. */

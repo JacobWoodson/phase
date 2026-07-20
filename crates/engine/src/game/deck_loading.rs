@@ -647,6 +647,14 @@ pub fn load_horde_library(
             crate::game::decks::zombies_horde::ZOMBIES_HORDE_NONTOKEN_CARDS,
             crate::game::decks::zombies_horde::ZOMBIES_HORDE_TOKENS,
         ),
+        ChallengeDeck::SliversHorde => (
+            crate::game::decks::slivers_horde::SLIVERS_HORDE_NONTOKEN_CARDS,
+            crate::game::decks::slivers_horde::SLIVERS_HORDE_TOKENS,
+        ),
+        ChallengeDeck::HumansGodzillaHorde => (
+            crate::game::decks::humans_godzilla_horde::HUMANS_GODZILLA_HORDE_NONTOKEN_CARDS,
+            crate::game::decks::humans_godzilla_horde::HUMANS_GODZILLA_HORDE_TOKENS,
+        ),
     };
 
     // REPLACE, don't append: the Horde seat is an engine-supplied seat, but in a

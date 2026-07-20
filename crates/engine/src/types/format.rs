@@ -160,6 +160,14 @@ pub enum ChallengeDeck {
     /// count — the Horde reveals until one nontoken resolves, then two, then
     /// three, then back down — so pressure ramps up and eases off in a cycle.
     ZombiesHorde,
+    /// Slivers Horde (community format, hordemagic.com). 135 nontoken cards plus
+    /// 170 Metallic Sliver tokens. Every Sliver lord buffs every other Sliver, so
+    /// the board compounds fast — the swarm gets stronger rather than just wider.
+    SliversHorde,
+    /// Humans and Godzilla Horde (community format, hordemagic.com). 100 nontoken
+    /// cards plus 200 Human Soldier tokens: a wide, cheap human army punctuated
+    /// by a handful of enormous Godzilla-series titans.
+    HumansGodzillaHorde,
 }
 
 /// Authoritative display metadata for one selectable Horde challenge deck.
@@ -311,6 +319,8 @@ impl ChallengeDeck {
         ChallengeDeck::CybermanHorde,
         ChallengeDeck::DndHorde,
         ChallengeDeck::ZombiesHorde,
+        ChallengeDeck::SliversHorde,
+        ChallengeDeck::HumansGodzillaHorde,
     ];
 
     /// Display metadata for a single deck. Exhaustive match: adding a
@@ -339,6 +349,22 @@ impl ChallengeDeck {
                 short_label: "ZOM",
                 description: "An undead swarm whose waves ramp 1 → 2 → 3 nontokens \
                               and back down, snaking between pressure and respite",
+                default_ruleset: self.default_ruleset(),
+            },
+            ChallengeDeck::SliversHorde => ChallengeDeckMetadata {
+                deck: self,
+                label: "Slivers Horde",
+                short_label: "SLV",
+                description: "Every Sliver buffs every other Sliver — the swarm \
+                              compounds, growing stronger as it grows wider",
+                default_ruleset: self.default_ruleset(),
+            },
+            ChallengeDeck::HumansGodzillaHorde => ChallengeDeckMetadata {
+                deck: self,
+                label: "Humans & Godzilla Horde",
+                short_label: "HGZ",
+                description: "A wide, cheap human army punctuated by a handful of \
+                              enormous Godzilla-series titans",
                 default_ruleset: self.default_ruleset(),
             },
         }
@@ -392,6 +418,27 @@ impl ChallengeDeck {
                 },
                 // No published Zombies-specific setup/life values; follow the
                 // generic hordemagic rules, as the other community decks do.
+                survivor_setup_turns: 3,
+                per_extra_survivor_life_delta: 0,
+                horde_creatures_forced_attackers: true,
+            },
+            ChallengeDeck::SliversHorde => HordeRuleset {
+                challenge_deck: ChallengeDeck::SliversHorde,
+                // States no deck-specific rules; takes the hordemagic BASIC rule
+                // verbatim: "Waves end when an UNCOMMON, RARE or MYTHIC card is
+                // cast."
+                wave: WaveTermination::UntilRarityAtLeast(Rarity::Uncommon),
+                // Basic rules: "Each player takes {3} consecutive turns to set up
+                // their board."
+                survivor_setup_turns: 3,
+                per_extra_survivor_life_delta: 0,
+                horde_creatures_forced_attackers: true,
+            },
+            ChallengeDeck::HumansGodzillaHorde => HordeRuleset {
+                challenge_deck: ChallengeDeck::HumansGodzillaHorde,
+                // As above — no deck-specific rules stated, so the basic
+                // community wave rule applies.
+                wave: WaveTermination::UntilRarityAtLeast(Rarity::Uncommon),
                 survivor_setup_turns: 3,
                 per_extra_survivor_life_delta: 0,
                 horde_creatures_forced_attackers: true,
@@ -1844,7 +1891,9 @@ mod tests {
             match deck {
                 ChallengeDeck::CybermanHorde
                 | ChallengeDeck::DndHorde
-                | ChallengeDeck::ZombiesHorde => {}
+                | ChallengeDeck::ZombiesHorde
+                | ChallengeDeck::SliversHorde
+                | ChallengeDeck::HumansGodzillaHorde => {}
             }
             assert!(
                 registry.iter().any(|meta| meta.deck == *deck),

@@ -59,7 +59,12 @@ export type FormatGroup = "Constructed" | "Commander" | "Multiplayer" | "Limited
  * Which self-piloting Horde deck a `GameFormat.Horde` game uses. Mirrors the
  * engine `ChallengeDeck` enum (`crates/engine/src/types/format.rs`).
  */
-export type ChallengeDeck = "CybermanHorde" | "DndHorde" | "ZombiesHorde";
+export type ChallengeDeck =
+  | "CybermanHorde"
+  | "DndHorde"
+  | "ZombiesHorde"
+  | "SliversHorde"
+  | "HumansGodzillaHorde";
 
 /**
  * Card rarity. Mirrors the engine `Rarity` enum (serde `rename_all =
