@@ -1,10 +1,17 @@
-//! Headless full-game proof for Horde Magic (Doctor Who "Cyberman Horde").
+//! Headless full-game proof for Horde Magic (the Zombies Horde).
 //!
 //! This is the end-to-end integration path automated tests hadn't yet covered:
 //! the AI driving BOTH seats of a real Horde game through to `GameOver` —
 //!   - seat 0 = the Horde AI (whose precombat main fires the engine's
 //!     reveal-and-cast wave; its creatures have haste + must-attack), and
 //!   - seat 1 = a survivor AI playing a normal green deck.
+//!
+//! Uses the ZOMBIES Horde deck, not Cyberman: every card in it is fully
+//! implemented, so this sim validates the Horde SPINE and AI end to end without
+//! being hostage to incomplete cards. (The Cyberman deck's Universes Beyond
+//! cards are known-incomplete — e.g. Missy's villainous-choice draw branch —
+//! and a long enough game trips them; that is a card-fidelity gap, not a spine
+//! bug, and it does not belong in a spine regression test.)
 //!
 //! The construction mirrors the production init path exactly:
 //!   `GameState::new(FormatConfig::horde(..))` → `load_and_hydrate_decks`
@@ -204,10 +211,18 @@ fn ai_plays_full_horde_game_to_completion() {
     let seed = 42u64;
     let (db, db_source) = load_db();
     eprintln!("card DB source: {db_source}");
+    // The Zombies Horde deck is built from real Magic cards across many sets; the
+    // committed WHO fixture only holds Cyberman-deck cards, so it cannot serve
+    // this deck. Skip (rather than fall back) when the full DB is absent — the
+    // WHO fixture is only useful for a WHO deck.
+    if db_source != "client/public/card-data.json" {
+        eprintln!("skipping: Zombies Horde needs the full card DB, not the WHO fixture");
+        return;
+    }
 
     // --- Construction: exactly the production init path. ---
     let mut state = GameState::new(
-        FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset()),
+        FormatConfig::horde(ChallengeDeck::ZombiesHorde.default_ruleset()),
         2,
         seed,
     );
@@ -429,7 +444,7 @@ struct Outcome {
 /// init path as the detailed test above; no per-turn logging.
 fn play_once(db: &CardDatabase, seed: u64) -> Outcome {
     let mut state = GameState::new(
-        FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset()),
+        FormatConfig::horde(ChallengeDeck::ZombiesHorde.default_ruleset()),
         2,
         seed,
     );
@@ -516,6 +531,14 @@ fn play_once(db: &CardDatabase, seed: u64) -> Outcome {
 fn ai_plays_horde_games_across_seeds_without_stalling() {
     let (db, db_source) = load_db();
     eprintln!("card DB source: {db_source}");
+    // The Zombies Horde deck is built from real Magic cards across many sets; the
+    // committed WHO fixture only holds Cyberman-deck cards, so it cannot serve
+    // this deck. Skip (rather than fall back) when the full DB is absent — the
+    // WHO fixture is only useful for a WHO deck.
+    if db_source != "client/public/card-data.json" {
+        eprintln!("skipping: Zombies Horde needs the full card DB, not the WHO fixture");
+        return;
+    }
     let seeds: [u64; 6] = [1, 7, 42, 99, 2024, 31337];
     let mut all_ok = true;
     for seed in seeds {

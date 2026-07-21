@@ -499,7 +499,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     group: "Multiplayer",
     default_config: {
       format: "Horde",
-      starting_life: 20,
+      starting_life: 100,
       min_players: 2,
       max_players: 5,
       deck_size: 60,
@@ -516,7 +516,8 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
         challenge_deck: "CybermanHorde",
         wave: { type: "UntilNonToken", data: { count: { type: "Fixed", data: 1 } } },
         survivor_setup_turns: 3,
-        per_extra_survivor_life_delta: 0,
+        combined_base_life: 100,
+        per_extra_survivor_life_delta: -15,
         horde_creatures_forced_attackers: true,
       },
     },

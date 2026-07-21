@@ -101,6 +101,12 @@ export interface HordeRuleset {
   challenge_deck: ChallengeDeck;
   wave: WaveTermination;
   survivor_setup_turns: number;
+  /**
+   * The survivors' shared combined life total with a single survivor — the base
+   * the per-survivor delta adjusts from (community rules: 100). Mirrors the
+   * engine `HordeRuleset::combined_base_life`.
+   */
+  combined_base_life: number;
   per_extra_survivor_life_delta: number;
   horde_creatures_forced_attackers: boolean;
 }

@@ -298,10 +298,22 @@ pub struct HordeRuleset {
     /// How many turns the survivors take before the Horde's first turn, letting
     /// them establish a board (3 in the published rules).
     pub survivor_setup_turns: u8,
-    /// Life added to the survivors' shared total for each survivor beyond the
-    /// first. `0` for a flat combined total (Theros: shared 20); the community
-    /// format uses a negative delta (100 base, −15 per extra survivor). The base
-    /// combined total is `FormatConfig::starting_life`.
+    /// The survivors' shared combined life total with a SINGLE survivor — the
+    /// base the per-survivor delta below adjusts from. The hordemagic community
+    /// rules set this at 100 ("Player life totals are combined, shared and start
+    /// at 100 life"); the Theros challenge decks use a flat shared 20.
+    ///
+    /// Carried here rather than read from `FormatConfig::starting_life` because
+    /// base life is a per-deck-family property (community 100 vs Theros 20), and
+    /// it belongs next to `per_extra_survivor_life_delta` — the two halves of the
+    /// same combined-total formula. `GameState::new` computes the combined total
+    /// as `combined_base_life + per_extra_survivor_life_delta * (survivors - 1)`
+    /// and distributes it across the survivor seats (CR 810.9a shared team life).
+    pub combined_base_life: i32,
+    /// Life added to the survivors' shared combined total for each survivor
+    /// beyond the first. `0` for a flat combined total (Theros: shared 20); the
+    /// hordemagic community rules use −15 ("Each player reduces {15} life to the
+    /// total life beyond the 1st player") — so 1/2/3 survivors → 100/85/70.
     pub per_extra_survivor_life_delta: i32,
     /// Whether the Horde's creatures are forced to attack each combat if able
     /// (true for every published Horde ruleset; a typed axis so a future ruleset
@@ -393,7 +405,8 @@ impl ChallengeDeck {
                     count: WaveCount::Fixed(1),
                 },
                 survivor_setup_turns: 3,
-                per_extra_survivor_life_delta: 0,
+                combined_base_life: 100,
+                per_extra_survivor_life_delta: -15,
                 horde_creatures_forced_attackers: true,
             },
             ChallengeDeck::DndHorde => HordeRuleset {
@@ -404,7 +417,8 @@ impl ChallengeDeck {
                 // No published D&D-specific setup/life values; follow the generic
                 // hordemagic rules, mirroring the Cyberman defaults (tunable axes).
                 survivor_setup_turns: 3,
-                per_extra_survivor_life_delta: 0,
+                combined_base_life: 100,
+                per_extra_survivor_life_delta: -15,
                 horde_creatures_forced_attackers: true,
             },
             ChallengeDeck::ZombiesHorde => HordeRuleset {
@@ -419,7 +433,8 @@ impl ChallengeDeck {
                 // No published Zombies-specific setup/life values; follow the
                 // generic hordemagic rules, as the other community decks do.
                 survivor_setup_turns: 3,
-                per_extra_survivor_life_delta: 0,
+                combined_base_life: 100,
+                per_extra_survivor_life_delta: -15,
                 horde_creatures_forced_attackers: true,
             },
             ChallengeDeck::SliversHorde => HordeRuleset {
@@ -431,7 +446,8 @@ impl ChallengeDeck {
                 // Basic rules: "Each player takes {3} consecutive turns to set up
                 // their board."
                 survivor_setup_turns: 3,
-                per_extra_survivor_life_delta: 0,
+                combined_base_life: 100,
+                per_extra_survivor_life_delta: -15,
                 horde_creatures_forced_attackers: true,
             },
             ChallengeDeck::HumansGodzillaHorde => HordeRuleset {
@@ -440,7 +456,8 @@ impl ChallengeDeck {
                 // community wave rule applies.
                 wave: WaveTermination::UntilRarityAtLeast(Rarity::Uncommon),
                 survivor_setup_turns: 3,
-                per_extra_survivor_life_delta: 0,
+                combined_base_life: 100,
+                per_extra_survivor_life_delta: -15,
                 horde_creatures_forced_attackers: true,
             },
         }
@@ -903,15 +920,19 @@ impl FormatConfig {
             FormatTopology::OneVsMany { archenemy, .. } => {
                 if self.format == GameFormat::Horde {
                     // The Horde has no life total (it loses by decking out, not
-                    // by life). Its seat's life value is never consulted once
-                    // the no-life-total exemption + damage->mill redirect land
-                    // in a later PR; every seat is seeded with the survivors'
-                    // combined starting life here, and that combined total is
+                    // by life), so its own seat's life value is never consulted.
+                    // Every seat is seeded here with the survivors' single-
+                    // survivor combined base life, and that combined total is
                     // distributed across the survivor seats in `GameState::new`
                     // once the seat count is known (CR 810.9a reads each seat
-                    // through the shared team total). Crucially, the Horde is
-                    // NOT given the archenemy's 40 life.
-                    self.starting_life
+                    // through the shared team total). The base lives on the
+                    // ruleset (per-deck: community 100, Theros 20); fall back to
+                    // the format-wide `starting_life` only if a Horde config was
+                    // somehow built without a ruleset. The Horde is NOT given the
+                    // archenemy's 40 life.
+                    self.horde_ruleset
+                        .as_ref()
+                        .map_or(self.starting_life, |r| r.combined_base_life)
                 } else if player == archenemy {
                     // CR 904.5: The archenemy starts at 40 life; each other
                     // player starts at 20. This is not a shared life total.
@@ -1312,9 +1333,12 @@ impl FormatConfig {
     pub fn horde(ruleset: HordeRuleset) -> Self {
         FormatConfig {
             format: GameFormat::Horde,
-            // Survivors' shared/combined starting life (Theros challenge decks
-            // and the Cyberman Horde use a shared 20).
-            starting_life: 20,
+            // Fallback only. The authoritative survivors' combined base life is
+            // `HordeRuleset::combined_base_life` (per-deck: community 100, Theros
+            // 20); `starting_life_for_player` and `GameState::new` read the
+            // ruleset and only fall back to this if a Horde config were built
+            // without one. Kept at the community base so that fallback is sane.
+            starting_life: 100,
             // 1 survivor + the Horde seat, up to 4 survivors + the Horde.
             min_players: 2,
             max_players: 5,
@@ -1751,7 +1775,13 @@ mod tests {
     fn format_config_horde() {
         let config = FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset());
         assert_eq!(config.format, GameFormat::Horde);
-        assert_eq!(config.starting_life, 20);
+        // `starting_life` is now only the fallback base; the authoritative
+        // survivor combined base lives on the ruleset (community rules: 100).
+        assert_eq!(config.starting_life, 100);
+        assert_eq!(
+            config.horde_ruleset.as_ref().unwrap().combined_base_life,
+            100
+        );
         assert_eq!(config.min_players, 2);
         assert_eq!(config.max_players, 5);
         assert!(config.command_zone);
@@ -1797,11 +1827,17 @@ mod tests {
     fn horde_seat_is_not_given_archenemy_forty_life() {
         // B1 blocker guard: the Archenemy OneVsMany arm grants 40 life to the
         // special seat. The Horde has no life total and must not inherit 40.
-        let config = FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset());
+        let ruleset = ChallengeDeck::CybermanHorde.default_ruleset();
+        let base = ruleset.combined_base_life;
+        let config = FormatConfig::horde(ruleset);
         let horde_seat = config.archenemy_player().expect("horde seat");
+        // Load-bearing: NOT the archenemy's 40. Every seat is pre-seeded with the
+        // combined base (redistributed across survivors in `GameState::new`);
+        // derive it from the ruleset rather than hardcoding, so this stays valid
+        // as deck balance changes.
         assert_ne!(config.starting_life_for_player(horde_seat), 40);
-        assert_eq!(config.starting_life_for_player(horde_seat), 20);
-        assert_eq!(config.starting_life_for_player(PlayerId(1)), 20);
+        assert_eq!(config.starting_life_for_player(horde_seat), base);
+        assert_eq!(config.starting_life_for_player(PlayerId(1)), base);
     }
 
     #[test]
@@ -1947,6 +1983,31 @@ mod tests {
                 count: WaveCount::Snaking { min: 1, max: 3 }
             }
         );
+    }
+
+    /// Pin the published community survivor-life rule (hordemagic basic rules:
+    /// "combined, shared and start at 100 life. Each player reduces {15} life ...
+    /// beyond the 1st"). The `horde_multiplayer` mechanism tests are deliberately
+    /// balance-agnostic (they derive from the ruleset), so this is where the
+    /// concrete 100 / −15 → 100·85·70 numbers are actually asserted; a wrong base
+    /// or delta slips past those tests but not this one.
+    #[test]
+    fn community_decks_use_the_published_shared_life_rule() {
+        for deck in ChallengeDeck::ALL {
+            let r = deck.default_ruleset();
+            assert_eq!(
+                r.combined_base_life, 100,
+                "{deck:?} must use the 100-life community base"
+            );
+            assert_eq!(
+                r.per_extra_survivor_life_delta, -15,
+                "{deck:?} must reduce 15 per extra survivor"
+            );
+            // 1 / 2 / 3 survivors → 100 / 85 / 70.
+            let combined =
+                |n: i32| r.combined_base_life + r.per_extra_survivor_life_delta * (n - 1);
+            assert_eq!((combined(1), combined(2), combined(3)), (100, 85, 70));
+        }
     }
 
     /// A constant schedule is the classic rule and must not vary by turn.

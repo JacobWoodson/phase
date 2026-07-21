@@ -8855,14 +8855,23 @@ impl GameState {
             let survivor_count = survivor_seats.len() as i32;
             if survivor_count > 0 {
                 // Combined total = base + delta per extra survivor beyond the
-                // first (delta 0 for Cyberman → flat shared 20; the community
-                // format uses a negative delta). CR 810.9a routes every individual
-                // read through the team total, so an uneven split is fine.
-                let delta = config
-                    .horde_ruleset
-                    .as_ref()
-                    .map_or(0, |ruleset| ruleset.per_extra_survivor_life_delta);
-                let combined_total = config.starting_life + delta * (survivor_count - 1);
+                // first. Both halves live on the per-deck ruleset (community
+                // decks: 100 base, −15 delta → 100/85/70 for 1/2/3 survivors;
+                // Theros: 20 base, 0 delta → flat shared 20). CR 810.9a routes
+                // every individual read through the team total, so an uneven
+                // split is fine. Fall back to the format-wide values only if a
+                // Horde config was built without a ruleset.
+                let (base_life, delta) =
+                    config
+                        .horde_ruleset
+                        .as_ref()
+                        .map_or((config.starting_life, 0), |ruleset| {
+                            (
+                                ruleset.combined_base_life,
+                                ruleset.per_extra_survivor_life_delta,
+                            )
+                        });
+                let combined_total = base_life + delta * (survivor_count - 1);
                 let base = combined_total / survivor_count;
                 let remainder = combined_total - base * survivor_count;
                 for (idx, &seat) in survivor_seats.iter().enumerate() {

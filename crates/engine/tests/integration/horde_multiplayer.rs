@@ -58,41 +58,76 @@ fn add_creature(state: &mut GameState, controller: PlayerId) -> ObjectId {
     id
 }
 
+/// The survivors' combined starting life for `survivors` survivors, DERIVED from
+/// the Cyberman ruleset's own formula (`combined_base_life + delta * (n - 1)`).
+/// These tests assert the shared-life *mechanism*, not a specific balance number,
+/// so they track the ruleset rather than hardcode a total that changes when life
+/// is retuned. Under the current community rules: 1 → 100, 2 → 85, 3 → 70.
+fn expected_combined_life(survivors: i32) -> i32 {
+    let r = ChallengeDeck::CybermanHorde.default_ruleset();
+    r.combined_base_life + r.per_extra_survivor_life_delta * (survivors - 1)
+}
+
+/// The expected per-seat life split: the combined total divided as evenly as
+/// possible, remainder on the first survivor — mirroring `GameState::new`.
+fn expected_survivor_split(survivors: i32) -> Vec<i32> {
+    let combined = expected_combined_life(survivors);
+    let base = combined / survivors;
+    let remainder = combined - base * survivors;
+    (0..survivors)
+        .map(|i| if i == 0 { base + remainder } else { base })
+        .collect()
+}
+
+/// What the team total would be if the distribution block were dropped: every
+/// survivor keeps its full undistributed seed (`combined_base_life`), summing to
+/// `survivors * combined_base_life`. The revert guards check the team is NOT this.
+fn undistributed_team_total(survivors: i32) -> i32 {
+    ChallengeDeck::CybermanHorde
+        .default_ruleset()
+        .combined_base_life
+        * survivors
+}
+
 /// Combined survivor life: with 2 survivors the survivor-team `team_life_total`
-/// equals the configured combined total (20), NOT 40 (2 × 20). The combined total
-/// is distributed across the survivor seats in `GameState::new`.
+/// equals the configured combined total, NOT the sum of two full undistributed
+/// seeds. The combined total is distributed across the survivor seats in
+/// `GameState::new`.
 ///
-/// Revert guard: removing the Horde life-distribution block in `GameState::new`
-/// leaves every survivor at the full 20, so `team_life_total` sums to 40 and the
-/// `== 20` / `!= 40` assertions flip. Reach-guard: the per-seat split (10 + 10)
-/// is asserted to sum to the combined total.
+/// Revert guard: removing the Horde life-distribution block leaves every survivor
+/// at the full base seed, so `team_life_total` sums to `undistributed_team_total`
+/// and the assertions flip. Reach-guard: the per-seat split sums to the combined
+/// total.
 #[test]
 fn two_survivors_share_one_combined_life_total() {
     let state = horde_game(2);
     let survivor_a = PlayerId(1);
     let survivor_b = PlayerId(2);
+    let combined = expected_combined_life(2);
+    let split = expected_survivor_split(2);
 
-    // Reach-guard: the split is even (10 each) and sums to the combined total.
+    // Reach-guard: the split matches the distribution and sums to the combined.
     let a_life = state.players[survivor_a.0 as usize].life;
     let b_life = state.players[survivor_b.0 as usize].life;
-    assert_eq!(a_life, 10, "survivor A gets half the combined 20");
-    assert_eq!(b_life, 10, "survivor B gets half the combined 20");
+    assert_eq!(a_life, split[0], "survivor A gets the first split share");
+    assert_eq!(b_life, split[1], "survivor B gets the second split share");
     assert_eq!(
         a_life + b_life,
-        20,
+        combined,
         "per-seat split sums to the combined total"
     );
 
-    // Load-bearing: the shared team total is 20, not 40.
+    // Load-bearing: the shared team total is the combined total, not the sum of
+    // two full base seeds.
     assert_eq!(
         team_life_total(&state, survivor_a),
-        20,
-        "the survivor team shares ONE combined life total of 20"
+        combined,
+        "the survivor team shares ONE combined life total"
     );
     assert_ne!(
         team_life_total(&state, survivor_a),
-        40,
-        "the survivors must NOT each keep a full 20 (that would sum to 40)"
+        undistributed_team_total(2),
+        "the survivors must NOT each keep a full base seed"
     );
     // Both survivors read the same shared total.
     assert_eq!(
@@ -102,40 +137,42 @@ fn two_survivors_share_one_combined_life_total() {
     );
 }
 
-/// Three survivors (player_count 4) also share one combined 20, split evenly with
-/// the remainder on the first survivor (8 + 6 + 6 = 20).
+/// Three survivors (player_count 4) also share one combined total, split as
+/// evenly as possible with the remainder on the first survivor.
 ///
 /// Revert guard: same as the 2-survivor case — dropping the distribution leaves
-/// three 20s summing to 60.
+/// three full base seeds summing to `undistributed_team_total(3)`.
 #[test]
 fn three_survivors_share_one_combined_life_total() {
     let state = horde_game(3);
     let (a, b, c) = (PlayerId(1), PlayerId(2), PlayerId(3));
+    let combined = expected_combined_life(3);
+    let split = expected_survivor_split(3);
 
-    // Even split of 20 across 3 survivors: 8 (remainder) + 6 + 6.
+    // Split across 3 survivors: remainder on A, then B and C equal.
     assert_eq!(
-        state.players[a.0 as usize].life, 8,
+        state.players[a.0 as usize].life, split[0],
         "remainder lands on survivor A"
     );
-    assert_eq!(state.players[b.0 as usize].life, 6);
-    assert_eq!(state.players[c.0 as usize].life, 6);
+    assert_eq!(state.players[b.0 as usize].life, split[1]);
+    assert_eq!(state.players[c.0 as usize].life, split[2]);
     assert_eq!(
         state.players[a.0 as usize].life
             + state.players[b.0 as usize].life
             + state.players[c.0 as usize].life,
-        20,
+        combined,
         "reach-guard: the 3-way split sums to the combined total"
     );
 
     assert_eq!(
         team_life_total(&state, a),
-        20,
-        "the 3-survivor team shares ONE combined life total of 20"
+        combined,
+        "the 3-survivor team shares ONE combined life total"
     );
     assert_ne!(
         team_life_total(&state, a),
-        60,
-        "must not sum three full 20s"
+        undistributed_team_total(3),
+        "must not sum three full base seeds"
     );
 }
 
@@ -153,8 +190,9 @@ fn damaging_one_survivor_reduces_shared_team_total() {
     let survivor_b = PlayerId(2);
     let team_before = team_life_total(&state, survivor_a);
     assert_eq!(
-        team_before, 20,
-        "reach-guard: team starts at the combined 20"
+        team_before,
+        expected_combined_life(2),
+        "reach-guard: team starts at the combined total"
     );
 
     let mut events = Vec::new();
@@ -327,7 +365,7 @@ fn horde_is_not_a_member_of_the_survivor_team() {
     state.players[HORDE.0 as usize].life = 999;
     assert_eq!(
         team_life_total(&state, survivor_a),
-        20,
+        expected_combined_life(2),
         "the Horde's life is NOT part of the survivor team total"
     );
 }
@@ -336,19 +374,21 @@ fn horde_is_not_a_member_of_the_survivor_team() {
 /// survivor's team total equals its own (unsplit) life, a degenerate team of one.
 ///
 /// Revert guard: an off-by-one in the distribution (e.g. dividing by the wrong
-/// count) would change the sole survivor's life away from the combined 20.
+/// count) would change the sole survivor's life away from the combined total.
 #[test]
 fn single_survivor_team_total_equals_own_life() {
     let state = horde_game(1);
     let survivor = PlayerId(1);
+    // A lone survivor keeps the full single-survivor combined base (no delta).
+    let combined = expected_combined_life(1);
 
     assert_eq!(
-        state.players[survivor.0 as usize].life, 20,
-        "a lone survivor keeps the full combined 20"
+        state.players[survivor.0 as usize].life, combined,
+        "a lone survivor keeps the full combined base life"
     );
     assert_eq!(
         team_life_total(&state, survivor),
-        20,
+        combined,
         "a degenerate team of one reads its own life as the team total"
     );
     // The Horde's default life is untouched by the distribution (it has no life total).
