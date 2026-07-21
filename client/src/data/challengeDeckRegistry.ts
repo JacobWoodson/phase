@@ -24,6 +24,15 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       per_extra_survivor_life_delta: -15,
       horde_creatures_forced_attackers: true,
     },
+    rules: [
+      { label: "Waves", detail: "Reveals until the first nontoken card is cast" },
+      { label: "Survivor life", detail: "100 life shared, -15 per extra survivor" },
+      {
+        label: "Setup",
+        detail: "Survivors take 3 turns to set up before the Horde's first turn",
+      },
+      { label: "Horde combat", detail: "The Horde's creatures attack every combat if able" },
+    ],
   },
   {
     deck: "DndHorde",
@@ -39,6 +48,15 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       per_extra_survivor_life_delta: -15,
       horde_creatures_forced_attackers: true,
     },
+    rules: [
+      { label: "Waves", detail: "A wave ends at the first uncommon or better card" },
+      { label: "Survivor life", detail: "100 life shared, -15 per extra survivor" },
+      {
+        label: "Setup",
+        detail: "Survivors take 3 turns to set up before the Horde's first turn",
+      },
+      { label: "Horde combat", detail: "The Horde's creatures attack every combat if able" },
+    ],
   },
   {
     deck: "ZombiesHorde",
@@ -57,6 +75,18 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       per_extra_survivor_life_delta: -15,
       horde_creatures_forced_attackers: true,
     },
+    rules: [
+      {
+        label: "Waves",
+        detail: "Reveals until N nontokens are cast — N snakes 1 → 3 → 1 each turn",
+      },
+      { label: "Survivor life", detail: "100 life shared, -15 per extra survivor" },
+      {
+        label: "Setup",
+        detail: "Survivors take 3 turns to set up before the Horde's first turn",
+      },
+      { label: "Horde combat", detail: "The Horde's creatures attack every combat if able" },
+    ],
   },
   {
     deck: "SliversHorde",
@@ -72,6 +102,15 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       per_extra_survivor_life_delta: -15,
       horde_creatures_forced_attackers: true,
     },
+    rules: [
+      { label: "Waves", detail: "A wave ends at the first uncommon or better card" },
+      { label: "Survivor life", detail: "100 life shared, -15 per extra survivor" },
+      {
+        label: "Setup",
+        detail: "Survivors take 3 turns to set up before the Horde's first turn",
+      },
+      { label: "Horde combat", detail: "The Horde's creatures attack every combat if able" },
+    ],
   },
   {
     deck: "HumansGodzillaHorde",
@@ -87,6 +126,15 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       per_extra_survivor_life_delta: -15,
       horde_creatures_forced_attackers: true,
     },
+    rules: [
+      { label: "Waves", detail: "A wave ends at the first uncommon or better card" },
+      { label: "Survivor life", detail: "100 life shared, -15 per extra survivor" },
+      {
+        label: "Setup",
+        detail: "Survivors take 3 turns to set up before the Horde's first turn",
+      },
+      { label: "Horde combat", detail: "The Horde's creatures attack every combat if able" },
+    ],
   },
 ];
 

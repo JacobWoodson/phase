@@ -61,6 +61,25 @@ export function HordeDeckSelector({ value, onChange }: HordeDeckSelectorProps) {
                 <span className="mt-0.5 block text-xs text-white/50">
                   {meta.description}
                 </span>
+                {/*
+                 * How this deck plays and how it differs from the others. Every
+                 * line is engine-authored (`ChallengeDeckMetadata.rules`, rendered
+                 * by `HordeRuleset::summary()`); the picker only styles them, so
+                 * the rules text stays owned by the engine. Shown for the selected
+                 * deck to keep the collapsed list scannable.
+                 */}
+                {selected && (
+                  <span className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+                    {meta.rules.map((rule) => (
+                      <span key={rule.label} className="contents">
+                        <span className="text-[10px] font-semibold uppercase tracking-wide text-amber-200/70">
+                          {rule.label}
+                        </span>
+                        <span className="text-xs text-white/70">{rule.detail}</span>
+                      </span>
+                    ))}
+                  </span>
+                )}
               </span>
               {selected && (
                 <span className="sr-only">{t("gameSetup.hordeDeck.selected")}</span>

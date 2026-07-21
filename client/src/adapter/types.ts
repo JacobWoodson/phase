@@ -112,13 +112,28 @@ export interface HordeRuleset {
 }
 
 /**
+ * One labeled line of a Horde deck's human-readable rules summary. Mirrors the
+ * engine `RuleSummaryLine` struct, rendered by `HordeRuleset::summary()`. The
+ * frontend displays these verbatim — the engine owns the wording so the display
+ * layer never derives rules prose from the structured `HordeRuleset` itself.
+ */
+export interface RuleSummaryLine {
+  /** Short category label, e.g. "Waves", "Survivor life", "Setup". */
+  label: string;
+  /** This deck's behavior for that category, human-readable. */
+  detail: string;
+}
+
+/**
  * Display metadata for one selectable Horde challenge deck. Mirrors the engine
  * `ChallengeDeckMetadata` struct, emitted by the `getChallengeDeckRegistry` WASM
  * export. Adding a Horde deck is a single engine-side change — the deck picker
  * renders this list, so the client never hardcodes which decks exist.
  *
  * `default_ruleset` is bundled so a picked entry can be turned into a complete
- * `FormatConfig` without a second engine call.
+ * `FormatConfig` without a second engine call. `rules` is the engine-authored,
+ * human-readable breakdown of that ruleset (one line per axis) for the picker to
+ * show HOW the deck plays — never re-derived on the client from `default_ruleset`.
  */
 export interface ChallengeDeckMetadata {
   deck: ChallengeDeck;
@@ -126,6 +141,7 @@ export interface ChallengeDeckMetadata {
   short_label: string;
   description: string;
   default_ruleset: HordeRuleset;
+  rules: RuleSummaryLine[];
 }
 
 export interface FormatConfig {

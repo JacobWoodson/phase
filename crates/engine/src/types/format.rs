@@ -188,6 +188,28 @@ pub struct ChallengeDeckMetadata {
     /// The deck's canonical ruleset, so a client can build the complete
     /// `FormatConfig` for a selected deck without a second call.
     pub default_ruleset: HordeRuleset,
+    /// Human-readable, engine-authored breakdown of how this deck plays — one
+    /// labeled line per rules axis (waves, survivor life, setup, Horde combat).
+    /// Rendered by [`HordeRuleset::summary`] from the structured ruleset, so the
+    /// frontend displays these verbatim and never derives rules prose from the
+    /// typed axes itself (that would put game-rule interpretation in the display
+    /// layer). Lets the deck picker and any in-game info panel show HOW each deck
+    /// plays and how it DIFFERS without a second source of truth.
+    pub rules: Vec<RuleSummaryLine>,
+}
+
+/// One labeled line of a Horde deck's human-readable rules summary.
+///
+/// The `label` is a short, stable category name the frontend can style (bold,
+/// column header, etc.); the `detail` is the deck-specific behavior for that
+/// category, already rendered into prose by the engine. Both are display text —
+/// the source of truth for the actual rules is the structured [`HordeRuleset`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleSummaryLine {
+    /// Short category label, e.g. "Waves", "Survivor life", "Setup".
+    pub label: &'static str,
+    /// This deck's behavior for that category, human-readable.
+    pub detail: String,
 }
 
 /// How many NON-token cards a [`WaveTermination::UntilNonToken`] wave must
@@ -321,6 +343,110 @@ pub struct HordeRuleset {
     pub horde_creatures_forced_attackers: bool,
 }
 
+impl HordeRuleset {
+    /// Render this ruleset's typed axes into human-readable, labeled lines for
+    /// the Horde deck picker and any in-game info panel.
+    ///
+    /// This is the single authority for turning the structured Horde rules into
+    /// prose. The frontend renders these lines verbatim; it must never interpret
+    /// [`WaveTermination`], the life deltas, or the setup count into its own
+    /// wording, because that is game-rule interpretation and belongs in the
+    /// engine. Because the summary is produced by matching over the struct's own
+    /// fields, every deck's summary is complete by construction — a new
+    /// advanced-rules axis added to `HordeRuleset` adds one line here and every
+    /// deck picks it up, rather than requiring a hand-authored per-deck string.
+    pub fn summary(&self) -> Vec<RuleSummaryLine> {
+        // Small pluralizer so counts read naturally without a formatting crate.
+        fn plural(n: u32) -> &'static str {
+            if n == 1 {
+                ""
+            } else {
+                "s"
+            }
+        }
+
+        // The wave line is the deck's signature difference, so it leads.
+        let waves = match self.wave {
+            WaveTermination::FixedCount(n) => {
+                format!("Reveals {n} card{} each Horde turn", plural(n))
+            }
+            WaveTermination::UntilNonToken {
+                count: WaveCount::Fixed(1),
+            } => "Reveals until the first nontoken card is cast".to_string(),
+            WaveTermination::UntilNonToken {
+                count: WaveCount::Fixed(n),
+            } => format!("Reveals until {n} nontoken cards are cast"),
+            WaveTermination::UntilNonToken {
+                count: WaveCount::Snaking { min, max },
+            } => format!(
+                "Reveals until N nontokens are cast — N snakes {min} \u{2192} {max} \u{2192} {min} \
+                 each turn"
+            ),
+            WaveTermination::UntilRarityAtLeast(rarity) => {
+                format!(
+                    "A wave ends at the first {} or better card",
+                    rarity_word(rarity)
+                )
+            }
+        };
+
+        // Survivor life: the combined base plus the per-extra-survivor scaling.
+        let life = if self.per_extra_survivor_life_delta == 0 {
+            format!("{} life, shared by all survivors", self.combined_base_life)
+        } else {
+            format!(
+                "{} life shared, {:+} per extra survivor",
+                self.combined_base_life, self.per_extra_survivor_life_delta
+            )
+        };
+
+        let setup = format!(
+            "Survivors take {} turn{} to set up before the Horde's first turn",
+            self.survivor_setup_turns,
+            plural(u32::from(self.survivor_setup_turns)),
+        );
+
+        let combat = if self.horde_creatures_forced_attackers {
+            "The Horde's creatures attack every combat if able".to_string()
+        } else {
+            "The Horde's creatures attack only when instructed".to_string()
+        };
+
+        vec![
+            RuleSummaryLine {
+                label: "Waves",
+                detail: waves,
+            },
+            RuleSummaryLine {
+                label: "Survivor life",
+                detail: life,
+            },
+            RuleSummaryLine {
+                label: "Setup",
+                detail: setup,
+            },
+            RuleSummaryLine {
+                label: "Horde combat",
+                detail: combat,
+            },
+        ]
+    }
+}
+
+/// Lowercase English word for a rarity, for the Horde wave-rule summary
+/// ("uncommon or better"). Horde Magic's community wave rule is keyed on rarity
+/// order (`Rarity` derives `Ord`); this is display text, not a CR concept.
+fn rarity_word(rarity: Rarity) -> &'static str {
+    match rarity {
+        Rarity::Common => "common",
+        Rarity::Uncommon => "uncommon",
+        Rarity::Rare => "rare",
+        Rarity::Mythic => "mythic",
+        Rarity::Special => "special",
+        Rarity::Bonus => "bonus",
+    }
+}
+
 impl ChallengeDeck {
     /// Every selectable challenge deck, in display order.
     ///
@@ -337,48 +463,53 @@ impl ChallengeDeck {
 
     /// Display metadata for a single deck. Exhaustive match: adding a
     /// `ChallengeDeck` variant fails to compile until it is described here.
+    ///
+    /// The flavor `label`/`short_label`/`description` are per-deck display text;
+    /// the structured `default_ruleset` and its rendered `rules` summary are the
+    /// single source of truth for the actual rules, so they are attached once
+    /// from [`Self::default_ruleset`] rather than restated per arm.
     pub fn metadata(self) -> ChallengeDeckMetadata {
-        match self {
-            ChallengeDeck::CybermanHorde => ChallengeDeckMetadata {
-                deck: self,
-                label: "Cyberman Horde",
-                short_label: "CYB",
-                description: "Doctor Who — Cybermen and Daleks swarm in waves that \
-                              run until a nontoken card is cast",
-                default_ruleset: self.default_ruleset(),
-            },
-            ChallengeDeck::DndHorde => ChallengeDeckMetadata {
-                deck: self,
-                label: "D&D Horde — Oozes",
-                short_label: "DND",
-                description: "Dungeons & Dragons — a self-replicating Ooze swarm; \
-                              each wave ends when an uncommon or better is revealed",
-                default_ruleset: self.default_ruleset(),
-            },
-            ChallengeDeck::ZombiesHorde => ChallengeDeckMetadata {
-                deck: self,
-                label: "Zombies Horde",
-                short_label: "ZOM",
-                description: "An undead swarm whose waves ramp 1 → 2 → 3 nontokens \
-                              and back down, snaking between pressure and respite",
-                default_ruleset: self.default_ruleset(),
-            },
-            ChallengeDeck::SliversHorde => ChallengeDeckMetadata {
-                deck: self,
-                label: "Slivers Horde",
-                short_label: "SLV",
-                description: "Every Sliver buffs every other Sliver — the swarm \
-                              compounds, growing stronger as it grows wider",
-                default_ruleset: self.default_ruleset(),
-            },
-            ChallengeDeck::HumansGodzillaHorde => ChallengeDeckMetadata {
-                deck: self,
-                label: "Humans & Godzilla Horde",
-                short_label: "HGZ",
-                description: "A wide, cheap human army punctuated by a handful of \
-                              enormous Godzilla-series titans",
-                default_ruleset: self.default_ruleset(),
-            },
+        let (label, short_label, description) = match self {
+            ChallengeDeck::CybermanHorde => (
+                "Cyberman Horde",
+                "CYB",
+                "Doctor Who — Cybermen and Daleks swarm in waves that \
+                 run until a nontoken card is cast",
+            ),
+            ChallengeDeck::DndHorde => (
+                "D&D Horde — Oozes",
+                "DND",
+                "Dungeons & Dragons — a self-replicating Ooze swarm; \
+                 each wave ends when an uncommon or better is revealed",
+            ),
+            ChallengeDeck::ZombiesHorde => (
+                "Zombies Horde",
+                "ZOM",
+                "An undead swarm whose waves ramp 1 → 2 → 3 nontokens \
+                 and back down, snaking between pressure and respite",
+            ),
+            ChallengeDeck::SliversHorde => (
+                "Slivers Horde",
+                "SLV",
+                "Every Sliver buffs every other Sliver — the swarm \
+                 compounds, growing stronger as it grows wider",
+            ),
+            ChallengeDeck::HumansGodzillaHorde => (
+                "Humans & Godzilla Horde",
+                "HGZ",
+                "A wide, cheap human army punctuated by a handful of \
+                 enormous Godzilla-series titans",
+            ),
+        };
+        let default_ruleset = self.default_ruleset();
+        let rules = default_ruleset.summary();
+        ChallengeDeckMetadata {
+            deck: self,
+            label,
+            short_label,
+            description,
+            default_ruleset,
+            rules,
         }
     }
 
@@ -1960,7 +2091,136 @@ mod tests {
                 "{:?} bundles a ruleset for a different deck",
                 meta.deck
             );
+            // Every entry ships a rendered rules summary the picker can display,
+            // and it must be exactly what the deck's ruleset renders — the two
+            // must not drift.
+            assert_eq!(
+                meta.rules,
+                meta.default_ruleset.summary(),
+                "{:?}'s bundled rules summary does not match its ruleset",
+                meta.deck
+            );
+            assert!(
+                !meta.rules.is_empty(),
+                "{:?} has no rules summary",
+                meta.deck
+            );
+            for line in &meta.rules {
+                assert!(
+                    !line.label.is_empty(),
+                    "{:?} has an unlabeled rule",
+                    meta.deck
+                );
+                assert!(
+                    !line.detail.is_empty(),
+                    "{:?}'s '{}' rule has no detail",
+                    meta.deck,
+                    line.label
+                );
+            }
         }
+    }
+
+    /// `HordeRuleset::summary` is the single authority for rules prose, so test it
+    /// as a building block across the full `WaveTermination` space — including the
+    /// `FixedCount` / `Fixed(n>1)` shapes no shipped deck uses yet (Theros decks
+    /// will) — not just the current decks' output.
+    #[test]
+    fn ruleset_summary_renders_every_wave_shape() {
+        let with_wave = |wave: WaveTermination| HordeRuleset {
+            challenge_deck: ChallengeDeck::CybermanHorde,
+            wave,
+            survivor_setup_turns: 3,
+            combined_base_life: 100,
+            per_extra_survivor_life_delta: -15,
+            horde_creatures_forced_attackers: true,
+        };
+        // Pull the "Waves" line out of the rendered summary.
+        let wave_detail = |wave: WaveTermination| -> String {
+            with_wave(wave)
+                .summary()
+                .into_iter()
+                .find(|l| l.label == "Waves")
+                .expect("summary always has a Waves line")
+                .detail
+        };
+
+        assert_eq!(
+            wave_detail(WaveTermination::UntilNonToken {
+                count: WaveCount::Fixed(1)
+            }),
+            "Reveals until the first nontoken card is cast"
+        );
+        assert_eq!(
+            wave_detail(WaveTermination::UntilNonToken {
+                count: WaveCount::Fixed(2)
+            }),
+            "Reveals until 2 nontoken cards are cast"
+        );
+        assert_eq!(
+            wave_detail(WaveTermination::UntilNonToken {
+                count: WaveCount::Snaking { min: 1, max: 3 }
+            }),
+            "Reveals until N nontokens are cast \u{2014} N snakes 1 \u{2192} 3 \u{2192} 1 each turn"
+        );
+        assert_eq!(
+            wave_detail(WaveTermination::UntilRarityAtLeast(Rarity::Uncommon)),
+            "A wave ends at the first uncommon or better card"
+        );
+        assert_eq!(
+            wave_detail(WaveTermination::FixedCount(2)),
+            "Reveals 2 cards each Horde turn"
+        );
+        // Singular grammar for a one-card fixed wave.
+        assert_eq!(
+            wave_detail(WaveTermination::FixedCount(1)),
+            "Reveals 1 card each Horde turn"
+        );
+    }
+
+    /// The life line must fold both the shared base and the per-extra-survivor
+    /// scaling; a flat total (Theros: `delta == 0`) drops the scaling clause.
+    #[test]
+    fn ruleset_summary_life_line_handles_flat_and_scaled_totals() {
+        let line = |base: i32, delta: i32| -> String {
+            HordeRuleset {
+                challenge_deck: ChallengeDeck::CybermanHorde,
+                wave: WaveTermination::FixedCount(1),
+                survivor_setup_turns: 3,
+                combined_base_life: base,
+                per_extra_survivor_life_delta: delta,
+                horde_creatures_forced_attackers: true,
+            }
+            .summary()
+            .into_iter()
+            .find(|l| l.label == "Survivor life")
+            .expect("summary always has a Survivor life line")
+            .detail
+        };
+        assert_eq!(line(100, -15), "100 life shared, -15 per extra survivor");
+        assert_eq!(line(20, 0), "20 life, shared by all survivors");
+    }
+
+    /// The whole point of the summary is to show how decks DIFFER — two decks with
+    /// different wave rules must produce different "Waves" lines.
+    #[test]
+    fn different_decks_produce_different_wave_summaries() {
+        let waves = |deck: ChallengeDeck| -> String {
+            deck.metadata()
+                .rules
+                .into_iter()
+                .find(|l| l.label == "Waves")
+                .unwrap()
+                .detail
+        };
+        assert_ne!(
+            waves(ChallengeDeck::CybermanHorde),
+            waves(ChallengeDeck::ZombiesHorde)
+        );
+        assert_ne!(
+            waves(ChallengeDeck::CybermanHorde),
+            waves(ChallengeDeck::DndHorde)
+        );
     }
 
     /// Pin each deck's defining wave rule — these are what make them play
