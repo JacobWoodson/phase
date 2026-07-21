@@ -120,10 +120,12 @@ mod tests {
     /// Pin that the pinned id is the SELF-REPLICATING Ooze (the SLD #2819 body),
     /// not one of the catalog's several vanilla 2/2 Oozes. The dies trigger is
     /// load-bearing for this deck's swarm, so a silent swap to a vanilla body
-    /// would change how the deck plays. The trigger itself is not yet installed
-    /// on reveal — that is the tracked "tokens with non-keyword abilities" gap —
-    /// so this asserts the *intent* is pinned and will become faithful when that
-    /// lands, rather than letting the wrong token in now.
+    /// would change how the deck plays. That trigger IS installed on reveal (the
+    /// library token carries this preset id, and `horde::reveal_library_token`
+    /// materializes the catalog `rules_text` abilities — see
+    /// `horde::tests::revealed_library_token_keeps_its_catalog_dies_trigger`);
+    /// this test guards the intent by pinning that the id is the ability-bearing
+    /// printing, so a re-pin to a vanilla body fails loudly.
     #[test]
     fn ooze_token_is_the_self_replicating_printing() {
         let (_, selector) = DND_OOZE_TOKENS[0];

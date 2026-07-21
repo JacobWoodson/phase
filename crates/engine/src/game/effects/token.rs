@@ -2997,7 +2997,7 @@ fn predefined_role_token_spec(name: &str) -> Option<RoleSpec> {
 /// CR 111.3 + CR 111.10: Apply predefined token abilities first; fall back to
 /// catalog `rules_text` only when the predefined path contributed nothing
 /// (artifacts, Roles, Incubator, …).
-pub(super) fn inject_resolved_token_abilities(
+pub(crate) fn inject_resolved_token_abilities(
     state: &mut GameState,
     obj_id: crate::types::identifiers::ObjectId,
 ) {

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::database::CardDatabase;
 use crate::game::bracket_estimate::CommanderBracketTier;
-use crate::types::card::CardFace;
+use crate::types::card::{CardFace, TokenImageRef};
 use crate::types::card_type::CoreType;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::CardId;
@@ -582,9 +582,34 @@ pub fn create_horde_library_card(
 /// projection round-trips the body faithfully. `TokenCharacteristics` has no
 /// channel for non-keyword abilities, so keyword-only / vanilla bodies (Cyberman
 /// 2/2 vanilla; Dalek 3/3 with Menace) round-trip fully.
+/// The predefined-token identity to stamp on an id-pinned Horde library token,
+/// so its catalog `rules_text` abilities can be recovered on reveal. Prefer the
+/// preset's own `token_image_ref` (correct art + preset id, matching how ordinary
+/// token creation resolves identity); if the catalog entry has none, synthesize a
+/// minimal ref keyed on the preset id — the only field the reveal-time injection
+/// needs to find the preset again.
+pub(crate) fn horde_token_image_ref(
+    preset: &crate::game::token_presets::TokenPreset,
+) -> TokenImageRef {
+    preset
+        .token_image_ref
+        .clone()
+        .unwrap_or_else(|| TokenImageRef {
+            scryfall_id: preset.id.clone(),
+            scryfall_oracle_id: None,
+            face_name: None,
+            preset_id: preset.id.clone(),
+        })
+}
+
+/// A token whose printed rules carry a non-keyword (triggered/activated) ability
+/// is stamped with its preset identity via `token_image_ref` (`None` for bodies
+/// without one); on reveal the apply path re-materializes the preset's catalog
+/// abilities from that identity (see `horde::reveal_library_token`).
 pub fn create_horde_library_token(
     state: &mut GameState,
     body: &crate::types::proposed_event::TokenCharacteristics,
+    token_image_ref: Option<TokenImageRef>,
     owner: PlayerId,
 ) -> crate::types::identifiers::ObjectId {
     let obj_id = create_object(
@@ -598,6 +623,9 @@ pub fn create_horde_library_token(
     // CR 111.1: mark as a token; CR 704.5d exemption while library-resident.
     obj.is_token = true;
     obj.in_horde_library = true;
+    // CR 111.4: the token's predefined identity, so `reveal_library_token` can
+    // recover its catalog `rules_text` abilities on the apply path.
+    obj.token_image_ref = token_image_ref;
     obj.power = body.power;
     obj.toughness = body.toughness;
     obj.base_power = body.power;
@@ -693,18 +721,28 @@ pub fn load_horde_library(
         // id path is required for generic subtype tokens whose display name maps
         // to multiple distinct bodies (the D&D Horde's "Ooze" — six same-name
         // bodies in the catalog make name lookup ambiguous, so it pins the id).
-        let body = crate::game::token_presets::known_token_body_by_name(selector)
-            .or_else(|| {
-                crate::game::token_presets::known_token_preset_by_id(selector).map(|p| &p.body)
-            })
-            .unwrap_or_else(|| {
-                panic!(
-                    "Horde deck {deck:?} token selector '{selector}' must resolve to a unique body \
-                     (by display name or preset id)"
-                )
-            });
+        // Prefer a preset id (the path generic subtype tokens must use — the D&D
+        // Horde's "Ooze" maps to six same-name bodies, so a name lookup is
+        // ambiguous), then a unique display name (Cyberman/Dalek). An id-pinned
+        // token also carries its preset IDENTITY onto the library object, so the
+        // reveal can materialize the preset's catalog abilities (the
+        // self-replicating Ooze's dies trigger). Name-resolved tokens are uniquely
+        // named vanilla/keyword bodies with no catalog abilities and pass `None`.
+        let (body, token_image_ref): (
+            &crate::types::proposed_event::TokenCharacteristics,
+            Option<TokenImageRef>,
+        ) = if let Some(preset) = crate::game::token_presets::known_token_preset_by_id(selector) {
+            (&preset.body, Some(horde_token_image_ref(preset)))
+        } else if let Some(body) = crate::game::token_presets::known_token_body_by_name(selector) {
+            (body, None)
+        } else {
+            panic!(
+                "Horde deck {deck:?} token selector '{selector}' must resolve to a unique body \
+                 (by display name or preset id)"
+            )
+        };
         for _ in 0..*count {
-            create_horde_library_token(state, body, horde_seat);
+            create_horde_library_token(state, body, token_image_ref.clone(), horde_seat);
         }
     }
 

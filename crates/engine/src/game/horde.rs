@@ -353,13 +353,17 @@ fn reveal_library_token(
         return;
     };
     // Reconstruct the token body from the revealed library object (mirrors the
-    // GameObject → TokenCharacteristics projection used by `token_copy`). A Horde
-    // library token is materialized from a `TokenCharacteristics` body, so this
-    // projection round-trips its full identity. `TokenCharacteristics` carries no
-    // channel for non-keyword activated/triggered/static abilities — the token
-    // body model only encodes P/T, types, colors, and keywords — so the created
-    // token carries exactly those (`static_abilities` empty). If a future Horde
-    // token needs granted statics, thread them through `TokenSpec::static_abilities`.
+    // GameObject → TokenCharacteristics projection used by `token_copy`). The body
+    // (P/T, types, colors, keywords) round-trips through `TokenCharacteristics`.
+    //
+    // A NON-keyword ability the printed token carries (a triggered/activated
+    // ability, e.g. the self-replicating Ooze's "when this dies, create two 1/1
+    // Oozes") is NOT on the body — it lives in the preset catalog's `rules_text`,
+    // and is recovered AFTER creation below from the token's pinned
+    // `token_image_ref` (stamped by `create_horde_library_token`). Vanilla /
+    // keyword-only tokens (Cyberman, Zombie, Metallic Sliver) have `None` here and
+    // are unchanged.
+    let pinned_token_ref = obj.token_image_ref.clone();
     let characteristics = TokenCharacteristics {
         display_name: obj.name.clone(),
         power: obj.power,
@@ -396,6 +400,9 @@ fn reveal_library_token(
         applied: HashSet::new(),
     };
     // CR 614.16: token-creation replacement effects apply to the revealed token.
+    // Snapshot the battlefield so we can identify the token this reveal creates
+    // (the create fns return `bool`, not ids).
+    let before: HashSet<ObjectId> = state.battlefield.iter().copied().collect();
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
             apply_create_token_after_replacement(state, event, events);
@@ -404,6 +411,45 @@ fn reveal_library_token(
         // replacement choice; treat prevention / (unreachable) choice as no ETB.
         ReplacementResult::Prevented | ReplacementResult::NeedsChoice(_) => {}
     }
+
+    // CR 111.3 + CR 111.4: recover the token's printed non-keyword abilities from
+    // its pinned preset identity. The generic create path already ran
+    // `inject_resolved_token_abilities`, but it matched identity by CHARACTERISTICS
+    // (`find_exact_token_ref`), which is ambiguous for a subtype body like "Ooze"
+    // (six catalog bodies) and cannot pick the right printing. Re-stamp the exact
+    // pinned `token_image_ref` and re-run the SAME injection so the catalog
+    // `rules_text` (the Ooze's dies trigger) is materialized from the correct
+    // preset — the identical path that gives the SOS Pest its trigger. Skip when
+    // the create path already resolved this exact preset (nothing to add — avoids
+    // a double install) or when there is no pinned identity (vanilla/keyword
+    // tokens: nothing to recover).
+    if let Some(pinned) = pinned_token_ref {
+        let created: Vec<ObjectId> = state
+            .battlefield
+            .iter()
+            .copied()
+            .filter(|id| !before.contains(id))
+            .collect();
+        for id in created {
+            let already_pinned = state
+                .objects
+                .get(&id)
+                .and_then(|o| o.token_image_ref.as_ref())
+                .is_some_and(|r| r.preset_id == pinned.preset_id);
+            if already_pinned {
+                continue;
+            }
+            if let Some(o) = state.objects.get_mut(&id) {
+                o.token_image_ref = Some(pinned.clone());
+            }
+            crate::game::effects::token::inject_resolved_token_abilities(state, id);
+        }
+        // A materialized static ability (rare for Horde tokens, but possible)
+        // affects the layer system; a triggered ability does not, but flushing is
+        // cheap and keeps derived state correct in every case.
+        crate::game::layers::flush_layers(state);
+    }
+
     // Remove the library placeholder so no duplicate token remains.
     crate::game::zones::remove_from_zone(state, card_id, Zone::Library, horde);
     state.objects.remove(&card_id);
@@ -436,7 +482,86 @@ fn free_cast_ability(card_id: ObjectId, horde: PlayerId) -> ResolvedAbility {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::format::WaveCount;
+    use crate::types::format::{ChallengeDeck, FormatConfig, WaveCount};
+
+    // The self-replicating Ooze: 2/2 green Ooze, "When this creature dies, create
+    // two 1/1 green Ooze creature tokens." (M11 #5 body of the SLD #2819 token).
+    const OOZE_PRESET_ID: &str = "6d30428c-f846-584a-8458-55de11d00213";
+    // A plain vanilla 2/2 Zombie — the negative control.
+    const ZOMBIE_PRESET_ID: &str = "011a9246-7f7c-50c7-ab99-3fc13469c13b";
+
+    /// Build a library token from `preset_id`, reveal it through the real
+    /// `create_horde_library_token` → `reveal_library_token` round-trip, and
+    /// return the resulting battlefield token.
+    fn reveal_preset_token(preset_id: &str) -> crate::game::game_object::GameObject {
+        let mut state = GameState::new(
+            FormatConfig::horde(ChallengeDeck::DndHorde.default_ruleset()),
+            2,
+            42,
+        );
+        let horde = horde_seat(&state).expect("horde seat");
+        let preset = crate::game::token_presets::known_token_preset_by_id(preset_id)
+            .expect("preset must exist in the catalog");
+        let token_image_ref = Some(crate::game::deck_loading::horde_token_image_ref(preset));
+        let library_id = crate::game::deck_loading::create_horde_library_token(
+            &mut state,
+            &preset.body,
+            token_image_ref,
+            horde,
+        );
+
+        let mut events = Vec::new();
+        reveal_library_token(&mut state, library_id, horde, &mut events);
+
+        state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .find(|o| o.is_token && o.controller == horde)
+            .cloned()
+            .expect("the revealed token must be on the battlefield")
+    }
+
+    /// A Horde library token whose catalog printing carries a non-keyword
+    /// triggered ability enters the battlefield WITH that ability. This is the
+    /// token-abilities fix: the library token is stamped with its preset
+    /// identity, so the apply path materializes the catalog `rules_text` dies
+    /// trigger — the self-replicating Ooze the D&D Horde depends on.
+    #[test]
+    fn revealed_library_token_keeps_its_catalog_dies_trigger() {
+        let ooze = reveal_preset_token(OOZE_PRESET_ID);
+        assert_eq!(ooze.name, "Ooze");
+        let dies_triggers: Vec<_> = ooze
+            .trigger_definitions
+            .as_slice()
+            .iter()
+            .filter(|t| {
+                t.mode == crate::types::triggers::TriggerMode::ChangesZone
+                    && t.destination == Some(Zone::Graveyard)
+            })
+            .collect();
+        assert_eq!(
+            dies_triggers.len(),
+            1,
+            "the revealed Ooze must carry EXACTLY one 'when this dies' trigger (no double \
+             install), got triggers: {:?}",
+            ooze.trigger_definitions.as_slice()
+        );
+    }
+
+    /// Negative control: a vanilla token (no catalog `rules_text`) reveals with NO
+    /// injected triggers, so the fix cannot spuriously grant abilities to the many
+    /// plain tokens the Horde decks use (Zombie, Metallic Sliver, Human Soldier).
+    #[test]
+    fn revealed_vanilla_token_gains_no_triggers() {
+        let zombie = reveal_preset_token(ZOMBIE_PRESET_ID);
+        assert_eq!(zombie.name, "Zombie");
+        assert!(
+            zombie.trigger_definitions.as_slice().is_empty(),
+            "a vanilla token must gain no triggers, got: {:?}",
+            zombie.trigger_definitions.as_slice()
+        );
+    }
 
     /// The rarity-wave gate is a `>=` comparison, so the `Ord` derive on
     /// [`Rarity`] must order least-rare first. Pin it: if the enum is ever

@@ -7,9 +7,7 @@
 //! Every card here is a real, already-implemented Magic card (all 38 distinct
 //! names resolve against the card DB and none parse to an `Unimplemented`
 //! effect), and both tokens are vanilla bodies catalogued at `fidelity = Full`.
-//! That makes this deck fully playable on the existing spine — unlike the D&D
-//! Horde, whose Ooze token needs a triggered ability the token primitive cannot
-//! yet carry.
+//! That makes this deck fully playable on the existing spine.
 //!
 //! Wave rule: `WaveTermination::UntilNonToken` with a
 //! [`crate::types::format::WaveCount::Snaking`] count of 1..=3. Per the published
