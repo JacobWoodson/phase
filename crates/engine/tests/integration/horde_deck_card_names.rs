@@ -18,7 +18,9 @@
 use std::path::Path;
 
 use engine::database::card_db::CardDatabase;
-use engine::types::format::ChallengeDeck;
+use engine::game::deck_loading::load_horde_library;
+use engine::types::format::{ChallengeDeck, FormatConfig};
+use engine::types::game_state::GameState;
 
 /// The generated full card database, or `None` when it has not been built.
 fn full_card_db() -> Option<CardDatabase> {
@@ -82,6 +84,68 @@ fn card_db_lookup_is_actually_working() {
         db.get_face_by_name("Island").is_some(),
         "positive control: a basic land must resolve, otherwise the name-resolution \
          check above proves nothing"
+    );
+}
+
+/// The D&D Horde's rarity-based wave depends on each non-token library card
+/// carrying a rarity. The runtime `card-data.json` export does NOT include rarity
+/// (`CardFace::rarities` is empty), so the rarity is PINNED in the deck and
+/// threaded through `create_horde_library_card`. This drives the REAL library
+/// load and asserts EVERY non-token card ends up with a rarity — the wiring
+/// guard for the live bug where a rarity-less wave revealed the entire library
+/// every turn.
+#[test]
+fn dnd_horde_library_cards_all_carry_a_rarity() {
+    let Some(db) = full_card_db() else {
+        return;
+    };
+    let mut state = GameState::new(
+        FormatConfig::horde(ChallengeDeck::DndHorde.default_ruleset()),
+        2,
+        42,
+    );
+    let horde = state.format_config.archenemy_player().expect("Horde seat");
+    load_horde_library(&mut state, &db, horde, ChallengeDeck::DndHorde);
+
+    let library: Vec<_> = state
+        .players
+        .iter()
+        .find(|p| p.id == horde)
+        .expect("horde player")
+        .library
+        .iter()
+        .copied()
+        .collect();
+
+    let mut nontoken_cards = 0usize;
+    let mut with_rarity = 0usize;
+    let mut uncommon_or_better = 0usize;
+    for id in &library {
+        let obj = state.objects.get(id).expect("library object");
+        if obj.is_token {
+            continue;
+        }
+        nontoken_cards += 1;
+        if let Some(r) = obj.horde_library_rarity {
+            with_rarity += 1;
+            if r >= engine::types::card::Rarity::Uncommon {
+                uncommon_or_better += 1;
+            }
+        }
+    }
+
+    assert_eq!(
+        nontoken_cards, 62,
+        "D&D Ooze library has 62 non-token cards"
+    );
+    assert_eq!(
+        with_rarity, nontoken_cards,
+        "EVERY non-token D&D library card must carry a rarity — a rarity-less card \
+         makes the UntilRarityAtLeast wave reveal the whole library"
+    );
+    assert!(
+        uncommon_or_better > 0,
+        "the library must contain uncommon-or-better cards so waves can terminate"
     );
 }
 

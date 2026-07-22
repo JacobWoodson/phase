@@ -10,8 +10,10 @@
 //! Wave rule: this deck uses `WaveTermination::UntilRarityAtLeast(Uncommon)` —
 //! commons and tokens build the board and the first uncommon-or-better card caps
 //! the wave (see `game::horde::maybe_reveal_next`). The per-card rarity that
-//! drives that gate is recorded on each library object at load time from the
-//! card DB (`deck_loading::create_horde_library_card`).
+//! drives that gate is PINNED here in [`card_rarity`], because the runtime
+//! card-data export does not carry rarity (`CardFace::rarities` is always empty);
+//! without a pinned rarity the wave could never find an uncommon-or-better card
+//! and would reveal the entire library every turn.
 //!
 //! Scope: this module is the **Level 1 Ooze** library (100 cards). The full D&D
 //! Horde escalates through three tiered libraries (Ooze → Goblin/Skeleton →
@@ -50,6 +52,44 @@ pub const DND_OOZE_NONTOKEN_CARDS: &[(u32, &str)] = &[
     (1, "Gutter Grime"),
     (1, "March of the World Ooze"),
 ];
+
+/// The rarity of each non-token card, for the `UntilRarityAtLeast(Uncommon)`
+/// wave rule (a wave ends when an uncommon-or-better card is revealed).
+///
+/// PINNED here rather than read from the card DB: the runtime `card-data.json`
+/// export does not carry rarity (`CardFace::rarities` is always empty), so the
+/// wave has no other way to tell a common (wave filler) from an uncommon-or-
+/// better card (wave ender). Values are each card's LOWEST rarity across all
+/// printings (a card ever printed common counts as common), computed from
+/// Scryfall bulk data — the same "most-common-printing" reading the original
+/// `card_face.rarities.iter().min()` intended.
+///
+/// Every name in [`DND_OOZE_NONTOKEN_CARDS`] must appear here; the
+/// `every_card_has_a_pinned_rarity` test enforces it, so a card added without a
+/// rarity fails loudly instead of silently making the wave run forever.
+pub fn card_rarity(name: &str) -> Option<crate::types::card::Rarity> {
+    use crate::types::card::Rarity;
+    Some(match name {
+        "Expanding Ooze"
+        | "Baleful Beholder"
+        | "Gelatinous Cube"
+        | "Arms of Hadar"
+        | "Power Word Kill"
+        | "Slime Against Humanity" => Rarity::Common,
+        "Acidic Slime" | "Slurrk, All-Ingesting" | "Split the Party" => Rarity::Uncommon,
+        "Biogenic Ooze"
+        | "Ravenous Slime"
+        | "Predator Ooze"
+        | "Sludge Monster"
+        | "Uchuulon"
+        | "Aeve, Progenitor Ooze"
+        | "Creeping Renaissance"
+        | "Crippling Fear"
+        | "Gutter Grime" => Rarity::Rare,
+        "March of the World Ooze" => Rarity::Mythic,
+        _ => return None,
+    })
+}
 
 /// The predefined tokens, as `(count, token selector)` pairs. The selector is a
 /// preset **id** (a UUID) rather than a display name: "Ooze" has six distinct
@@ -96,6 +136,37 @@ mod tests {
         assert_eq!(nontoken_card_count(), 62);
         assert_eq!(token_count(), 38);
         assert_eq!(nontoken_card_count() + token_count(), 100);
+    }
+
+    /// EVERY non-token card must have a pinned rarity. A card without one gets
+    /// `None`, which the `UntilRarityAtLeast` wave treats as "never ends" — so a
+    /// single missing entry makes the Horde reveal its ENTIRE library every turn
+    /// (the live bug this pinning fixes). This is the guard that would have caught
+    /// that regression.
+    #[test]
+    fn every_card_has_a_pinned_rarity() {
+        for (_, name) in DND_OOZE_NONTOKEN_CARDS {
+            assert!(
+                card_rarity(name).is_some(),
+                "D&D Horde card '{name}' has no pinned rarity — its wave would never end"
+            );
+        }
+    }
+
+    /// The wave can only terminate if at least one card is at or above the
+    /// threshold (Uncommon). If every card were common, `UntilRarityAtLeast`
+    /// would reveal the whole library — so assert the deck actually has enders.
+    #[test]
+    fn deck_has_uncommon_or_better_wave_enders() {
+        use crate::types::card::Rarity;
+        let enders = DND_OOZE_NONTOKEN_CARDS
+            .iter()
+            .filter(|(_, name)| card_rarity(name).is_some_and(|r| r >= Rarity::Uncommon))
+            .count();
+        assert!(
+            enders > 0,
+            "the D&D Horde must have uncommon-or-better cards to end its waves"
+        );
     }
 
     /// Every token selector must resolve through the same name-then-preset-id

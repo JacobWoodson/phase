@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::database::CardDatabase;
 use crate::game::bracket_estimate::CommanderBracketTier;
-use crate::types::card::{CardFace, TokenImageRef};
+use crate::types::card::{CardFace, Rarity, TokenImageRef};
 use crate::types::card_type::CoreType;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::CardId;
@@ -556,16 +556,20 @@ pub fn grant_horde_emblem(state: &mut GameState, horde_seat: PlayerId, forced_at
 pub fn create_horde_library_card(
     state: &mut GameState,
     card_face: &CardFace,
+    rarity_override: Option<Rarity>,
     owner: PlayerId,
 ) -> crate::types::identifiers::ObjectId {
     let obj_id = create_object_from_card_face(state, card_face, owner);
-    // Record the card's lowest printing rarity so a rarity-based wave
+    // Record the card's rarity so a rarity-based wave
     // (`WaveTermination::UntilRarityAtLeast`, the D&D Horde) can tell when a
-    // reveal-and-resolve wave ends. Lowest = "most-common printing": a card with
-    // any common printing counts as common and keeps the wave going, so the wave
-    // ends only on cards that are uncommon-or-better across every printing.
+    // reveal-and-resolve wave ends. Prefer the deck's PINNED rarity: the runtime
+    // `card-data.json` export does not carry rarity (`CardFace::rarities` is
+    // always empty), so without a pin the wave would never find an uncommon-or-
+    // better card and would reveal the whole library. Fall back to the card
+    // face's lowest printing rarity if a deck ever relies on DB-supplied rarity.
     if let Some(obj) = state.objects.get_mut(&obj_id) {
-        obj.horde_library_rarity = card_face.rarities.iter().min().copied();
+        obj.horde_library_rarity =
+            rarity_override.or_else(|| card_face.rarities.iter().min().copied());
     }
     obj_id
 }
@@ -662,26 +666,38 @@ pub fn load_horde_library(
 ) {
     use crate::types::format::ChallengeDeck;
 
-    let (nontokens, tokens) = match deck {
+    // Only rarity-wave decks pin per-card rarity (the D&D Horde); every other
+    // deck terminates its wave on a different axis (fixed count / nontoken count)
+    // and never consults rarity, so it resolves to `None`.
+    fn no_pinned_rarity(_name: &str) -> Option<Rarity> {
+        None
+    }
+
+    let (nontokens, tokens, card_rarity): (_, _, fn(&str) -> Option<Rarity>) = match deck {
         ChallengeDeck::CybermanHorde => (
             crate::game::decks::cyberman_horde::CYBERMAN_HORDE_NONTOKEN_CARDS,
             crate::game::decks::cyberman_horde::CYBERMAN_HORDE_TOKENS,
+            no_pinned_rarity,
         ),
         ChallengeDeck::DndHorde => (
             crate::game::decks::dnd_horde::DND_OOZE_NONTOKEN_CARDS,
             crate::game::decks::dnd_horde::DND_OOZE_TOKENS,
+            crate::game::decks::dnd_horde::card_rarity,
         ),
         ChallengeDeck::ZombiesHorde => (
             crate::game::decks::zombies_horde::ZOMBIES_HORDE_NONTOKEN_CARDS,
             crate::game::decks::zombies_horde::ZOMBIES_HORDE_TOKENS,
+            no_pinned_rarity,
         ),
         ChallengeDeck::SliversHorde => (
             crate::game::decks::slivers_horde::SLIVERS_HORDE_NONTOKEN_CARDS,
             crate::game::decks::slivers_horde::SLIVERS_HORDE_TOKENS,
+            no_pinned_rarity,
         ),
         ChallengeDeck::HumansGodzillaHorde => (
             crate::game::decks::humans_godzilla_horde::HUMANS_GODZILLA_HORDE_NONTOKEN_CARDS,
             crate::game::decks::humans_godzilla_horde::HUMANS_GODZILLA_HORDE_TOKENS,
+            no_pinned_rarity,
         ),
     };
 
@@ -710,8 +726,9 @@ pub fn load_horde_library(
                 panic!("Horde deck {deck:?} non-token card '{name}' must resolve in the card DB")
             })
             .clone();
+        let pinned = card_rarity(name);
         for _ in 0..*count {
-            create_horde_library_card(state, &face, horde_seat);
+            create_horde_library_card(state, &face, pinned, horde_seat);
         }
     }
 
