@@ -523,9 +523,12 @@ fn horde_emblem_static(forced_attackers: bool) -> crate::types::ability::StaticD
         )
 }
 
-/// Grant the Horde seat its game-start command-zone emblem (haste + forced
-/// attackers on its creatures). Single authority for the Horde emblem, mirroring
-/// the Momir emblem grant; `forced_attackers` comes from the ruleset.
+/// Grant the Horde seat its game-start setup: the command-zone emblem (haste +
+/// forced attackers on its creatures) and, under the advanced
+/// `HordePostCombatActivation::OncePerPermanent` rule, infinite mana (so its
+/// post-combat activation costs are payable). Single authority for Horde
+/// game-start setup, mirroring the Momir emblem grant; `forced_attackers` comes
+/// from the ruleset, and the infinite-mana grant reads the ruleset directly.
 pub fn grant_horde_emblem(state: &mut GameState, horde_seat: PlayerId, forced_attackers: bool) {
     let emblem_id = crate::game::effects::create_emblem::grant_emblem(
         state,
@@ -541,6 +544,20 @@ pub fn grant_horde_emblem(state: &mut GameState, horde_seat: PlayerId, forced_at
             name: HORDE_EMBLEM_SOURCE_NAME.to_string(),
             printed_ref: None,
         });
+    }
+
+    // Hordemagic advanced rule: "Horde has infinite mana (for … activation
+    // costs)." Only the decks that actually activate abilities post-combat need
+    // it, so gate on the ruleset axis. Reuses the standard unbounded-mana
+    // machinery — mark the axes, then `mana_payment::refill_infinite_mana` (run
+    // after every action) keeps the pool topped so activation mana costs are
+    // payable. Real non-mana costs (tap/sacrifice) are still paid normally.
+    if state.format_config.horde_ruleset.as_ref().is_some_and(|r| {
+        r.post_combat_activation
+            == crate::types::format::HordePostCombatActivation::OncePerPermanent
+    }) {
+        state.mark_unbounded_loop(horde_seat, &crate::game::mana_payment::INFINITE_MANA_AXES);
+        crate::game::mana_payment::refill_infinite_mana(state);
     }
 }
 

@@ -482,3 +482,78 @@ fn survivor_precombat_main_fires_no_wave() {
         "no Horde creature may enter on a survivor's turn"
     );
 }
+
+/// Integration (advanced rule): on the Horde's post-combat main under the
+/// `OncePerPermanent` policy, the turn engine drives the Horde to activate its
+/// permanent's ability end-to-end — the `finish_enter_phase` queue seed, the
+/// `auto_advance` post-combat kick, and the priority-grant seam together announce
+/// and resolve a `{T}` ability, leaving the source TAPPED.
+///
+/// Revert guard: dropping any of the three wiring points (seed / kick / seam)
+/// leaves the artifact untapped and the queue non-empty.
+#[test]
+fn horde_post_combat_activates_permanent_abilities_through_the_turn_engine() {
+    use engine::types::ability::{AbilityCost, AbilityDefinition, AbilityKind, Effect};
+    use engine::types::format::HordePostCombatActivation;
+    use std::sync::Arc;
+
+    let mut r = ruleset(0, true);
+    r.post_combat_activation = HordePostCombatActivation::OncePerPermanent;
+    let mut state = GameState::new(FormatConfig::horde(r), 2, 42);
+    state.turn_number = 4;
+    state.active_player = HORDE;
+    state.phase = Phase::Upkeep;
+    state.priority_player = HORDE;
+    state.waiting_for = WaitingFor::Priority { player: HORDE };
+
+    // The Horde needs a non-empty library, else it is already defeated
+    // (`horde_is_defeated`: empty library + no creature) and the game ends before
+    // the turn can advance. `FixedCount(0)` means these are never revealed.
+    for i in 0..3 {
+        add_library_creature(&mut state, HORDE, &format!("Filler {i}"), 2);
+    }
+
+    // A Horde ARTIFACT with a non-mana "{T}: Proliferate" ability. As a
+    // non-creature it never attacks (so the forced-attack combat can't tap it)
+    // and is never summoning-sick, so it reaches post-combat main untapped and
+    // activatable.
+    let card_id = CardId(state.next_object_id);
+    let rock = create_object(
+        &mut state,
+        card_id,
+        HORDE,
+        "Proliferation Engine".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&rock).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.base_card_types = obj.card_types.clone();
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(AbilityKind::Activated, Effect::Proliferate)
+                .cost(AbilityCost::Tap),
+        );
+    }
+
+    let mut runner = GameRunner::from_state(state);
+    runner.advance_to_phase(Phase::PostCombatMain);
+
+    // Drive priority until the activated ability resolves (bounded).
+    for _ in 0..40 {
+        if runner.state().objects[&rock].tapped && runner.state().stack.is_empty() {
+            break;
+        }
+        if runner.act(GameAction::PassPriority).is_err() {
+            break;
+        }
+    }
+
+    assert!(
+        runner.state().objects[&rock].tapped,
+        "the Horde must activate its artifact's tap ability post-combat, tapping it"
+    );
+    assert!(
+        runner.state().horde_postcombat_activation_queue.is_empty(),
+        "the post-combat activation queue must drain"
+    );
+}

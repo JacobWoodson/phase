@@ -102,6 +102,15 @@ export type WaveTermination =
 export type HordeLegendaryDeath = "Normal" | "EtbThenPhaseOut";
 
 /**
+ * Whether the engine-scripted Horde activates its permanents' activated abilities
+ * during its post-combat main phase. Mirrors the engine `HordePostCombatActivation`
+ * enum. `OncePerPermanent` is the advanced community rule (each permanent activates
+ * one non-mana ability once per turn, with the Horde's infinite mana). Basic decks
+ * use `None`.
+ */
+export type HordePostCombatActivation = "None" | "OncePerPermanent";
+
+/**
  * Per-deck Horde rules carried on a `GameFormat.Horde` `FormatConfig`. Mirrors
  * the engine `HordeRuleset` struct. The frontend only reads this; the engine is
  * the source of truth for the rules.
@@ -124,6 +133,11 @@ export interface HordeRuleset {
    * still parse; the engine's registry always emits it. Absent ⇒ `Normal`.
    */
   legendary_death?: HordeLegendaryDeath;
+  /**
+   * Whether the Horde activates its permanents' abilities post-combat. Optional
+   * (engine `#[serde(default)]`); the registry always emits it. Absent ⇒ `None`.
+   */
+  post_combat_activation?: HordePostCombatActivation;
 }
 
 /**

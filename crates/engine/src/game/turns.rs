@@ -598,6 +598,17 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
             crate::game::archenemy::set_in_motion(state, events);
         }
     }
+
+    // Horde Magic (advanced rule): as the Horde's post-combat main begins, seed
+    // its post-combat activation queue (sibling of `begin_wave` above). No-op for
+    // basic decks; the beat itself is driven one activation per priority window by
+    // `horde::maybe_activate_next_ability`.
+    if next == Phase::PostCombatMain
+        && state.format_config.format == GameFormat::Horde
+        && super::topology::archenemy(state) == Some(state.active_player)
+    {
+        crate::game::horde::begin_post_combat_activation(state, events);
+    }
 }
 
 /// CR 101.4 + CR 103.1 + CR 500.1 + CR 500.7 + CR 805.4: Display-only turn
@@ -2437,6 +2448,16 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     // `horde::maybe_reveal_next` from the priority-grant seam once
                     // each Horde spell resolves.
                     if let Some(wf) = super::horde::maybe_reveal_next(state, events) {
+                        return wf;
+                    }
+                }
+                // Horde Magic (advanced rule): kick off the Horde's post-combat
+                // activation beat (queue seeded in `finish_enter_phase`). This
+                // activates the FIRST eligible ability; subsequent ones are driven
+                // by `horde::maybe_activate_next_ability` from the priority seam as
+                // each resolves. No-op for basic decks / non-post-combat phases.
+                if state.phase == Phase::PostCombatMain {
+                    if let Some(wf) = super::horde::maybe_activate_next_ability(state, events) {
                         return wf;
                     }
                 }

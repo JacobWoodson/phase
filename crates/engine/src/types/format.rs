@@ -333,6 +333,34 @@ pub enum HordeLegendaryDeath {
     EtbThenPhaseOut,
 }
 
+/// Whether — and how — the engine-scripted Horde activates its permanents'
+/// activated abilities during its post-combat main phase.
+///
+/// A typed axis rather than a `bool` because the activation cadence has more than
+/// two plausible shapes (none / once per permanent / a single best-ability per
+/// turn), and a boolean could name only one. Casual community format
+/// (hordemagic.com): "Card-activated abilities … occur during the post-combat
+/// main phase, and only once per turn"; "Horde has infinite mana (for … activation
+/// costs)." The activation itself runs through the normal CR 602 activation path
+/// ([`crate::game::casting::handle_activate_ability`]); this axis only gates the
+/// scripted beat that drives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum HordePostCombatActivation {
+    /// Basic rules: the Horde never activates abilities. The default, and what
+    /// every currently-shipped deck uses.
+    #[default]
+    None,
+    /// Advanced rules (Walking Dead, Stranger Things, …): during its post-combat
+    /// main phase the Horde activates each of its permanents' non-mana activated
+    /// abilities once — once per permanent per turn — paying with its infinite
+    /// mana (real non-mana costs such as tap/sacrifice are still paid). Per the
+    /// rule "Card-activated abilities have summoning sickness", a creature's
+    /// `{T}`/`{Q}` ability stays summoning-sick the turn it enters even though the
+    /// emblem's Haste lets it attack (CR 302.6) — see
+    /// [`crate::game::horde`]'s `tap_ability_summoning_sick_for_horde`.
+    OncePerPermanent,
+}
+
 /// The parameters that distinguish one Horde deck's rules from another, carried
 /// on `FormatConfig` so a single `GameFormat::Horde` variant covers the whole
 /// family without sibling format variants. All fields are typed axes, not
@@ -375,6 +403,13 @@ pub struct HordeRuleset {
     /// predate any advanced deck, so the `Normal` back-fill is correct.
     #[serde(default)]
     pub legendary_death: HordeLegendaryDeath,
+    /// Whether the Horde activates its permanents' abilities post-combat. `None`
+    /// for the basic community decks; the advanced decks use
+    /// [`HordePostCombatActivation::OncePerPermanent`], which also grants the
+    /// Horde infinite mana (its activation costs are otherwise unpayable).
+    /// `#[serde(default)]` so pre-axis serialized Horde configs still deserialize.
+    #[serde(default)]
+    pub post_combat_activation: HordePostCombatActivation,
 }
 
 impl HordeRuleset {
@@ -476,6 +511,18 @@ impl HordeRuleset {
                 label: "Legendary deaths",
                 detail: "A milled legendary enters, triggers its ETB, then phases out — \
                          it returns on the Horde's next untap instead of being removed"
+                    .to_string(),
+            }),
+        }
+
+        // Post-combat activation is likewise an advanced-only axis — surfaced only
+        // for the decks that opt in, so basic decks keep their prior line set.
+        match self.post_combat_activation {
+            HordePostCombatActivation::None => {}
+            HordePostCombatActivation::OncePerPermanent => lines.push(RuleSummaryLine {
+                label: "Post-combat",
+                detail: "After combat the Horde activates each of its permanents' abilities \
+                         once, with infinite mana"
                     .to_string(),
             }),
         }
@@ -591,8 +638,10 @@ impl ChallengeDeck {
                 per_extra_survivor_life_delta: -15,
                 horde_creatures_forced_attackers: true,
                 // All shipped community decks are basic decks — the advanced
-                // legendary rule arrives with Walking Dead / Stranger Things.
+                // legendary and post-combat rules arrive with Walking Dead /
+                // Stranger Things.
                 legendary_death: HordeLegendaryDeath::Normal,
+                post_combat_activation: HordePostCombatActivation::None,
             },
             ChallengeDeck::DndHorde => HordeRuleset {
                 challenge_deck: ChallengeDeck::DndHorde,
@@ -606,8 +655,10 @@ impl ChallengeDeck {
                 per_extra_survivor_life_delta: -15,
                 horde_creatures_forced_attackers: true,
                 // All shipped community decks are basic decks — the advanced
-                // legendary rule arrives with Walking Dead / Stranger Things.
+                // legendary and post-combat rules arrive with Walking Dead /
+                // Stranger Things.
                 legendary_death: HordeLegendaryDeath::Normal,
+                post_combat_activation: HordePostCombatActivation::None,
             },
             ChallengeDeck::ZombiesHorde => HordeRuleset {
                 challenge_deck: ChallengeDeck::ZombiesHorde,
@@ -625,8 +676,10 @@ impl ChallengeDeck {
                 per_extra_survivor_life_delta: -15,
                 horde_creatures_forced_attackers: true,
                 // All shipped community decks are basic decks — the advanced
-                // legendary rule arrives with Walking Dead / Stranger Things.
+                // legendary and post-combat rules arrive with Walking Dead /
+                // Stranger Things.
                 legendary_death: HordeLegendaryDeath::Normal,
+                post_combat_activation: HordePostCombatActivation::None,
             },
             ChallengeDeck::SliversHorde => HordeRuleset {
                 challenge_deck: ChallengeDeck::SliversHorde,
@@ -641,8 +694,10 @@ impl ChallengeDeck {
                 per_extra_survivor_life_delta: -15,
                 horde_creatures_forced_attackers: true,
                 // All shipped community decks are basic decks — the advanced
-                // legendary rule arrives with Walking Dead / Stranger Things.
+                // legendary and post-combat rules arrive with Walking Dead /
+                // Stranger Things.
                 legendary_death: HordeLegendaryDeath::Normal,
+                post_combat_activation: HordePostCombatActivation::None,
             },
             ChallengeDeck::HumansGodzillaHorde => HordeRuleset {
                 challenge_deck: ChallengeDeck::HumansGodzillaHorde,
@@ -654,8 +709,10 @@ impl ChallengeDeck {
                 per_extra_survivor_life_delta: -15,
                 horde_creatures_forced_attackers: true,
                 // All shipped community decks are basic decks — the advanced
-                // legendary rule arrives with Walking Dead / Stranger Things.
+                // legendary and post-combat rules arrive with Walking Dead /
+                // Stranger Things.
                 legendary_death: HordeLegendaryDeath::Normal,
+                post_combat_activation: HordePostCombatActivation::None,
             },
         }
     }
@@ -2201,6 +2258,7 @@ mod tests {
             per_extra_survivor_life_delta: -15,
             horde_creatures_forced_attackers: true,
             legendary_death: HordeLegendaryDeath::Normal,
+            post_combat_activation: HordePostCombatActivation::None,
         };
         // Pull the "Waves" line out of the rendered summary.
         let wave_detail = |wave: WaveTermination| -> String {
@@ -2258,6 +2316,7 @@ mod tests {
                 per_extra_survivor_life_delta: delta,
                 horde_creatures_forced_attackers: true,
                 legendary_death: HordeLegendaryDeath::Normal,
+                post_combat_activation: HordePostCombatActivation::None,
             }
             .summary()
             .into_iter()
@@ -2283,6 +2342,7 @@ mod tests {
             per_extra_survivor_life_delta: -15,
             horde_creatures_forced_attackers: true,
             legendary_death: rule,
+            post_combat_activation: HordePostCombatActivation::None,
         };
 
         let basic = with_legendary(HordeLegendaryDeath::Normal).summary();
@@ -2300,6 +2360,39 @@ mod tests {
         assert!(
             legendary_line.detail.contains("phases out"),
             "the legendary line must describe the phase-out behavior"
+        );
+    }
+
+    /// The post-combat-activation axis is advanced-only too: `None` renders no
+    /// "Post-combat" line; `OncePerPermanent` adds exactly one.
+    #[test]
+    fn ruleset_summary_shows_post_combat_line_only_for_advanced_rule() {
+        let with_activation = |rule: HordePostCombatActivation| HordeRuleset {
+            challenge_deck: ChallengeDeck::CybermanHorde,
+            wave: WaveTermination::FixedCount(1),
+            survivor_setup_turns: 3,
+            combined_base_life: 100,
+            per_extra_survivor_life_delta: -15,
+            horde_creatures_forced_attackers: true,
+            legendary_death: HordeLegendaryDeath::Normal,
+            post_combat_activation: rule,
+        };
+
+        let basic = with_activation(HordePostCombatActivation::None).summary();
+        assert!(
+            !basic.iter().any(|l| l.label == "Post-combat"),
+            "a None ruleset must not advertise post-combat activation"
+        );
+        assert_eq!(basic.len(), 4, "basic decks stay their four rule lines");
+
+        let advanced = with_activation(HordePostCombatActivation::OncePerPermanent).summary();
+        let line = advanced
+            .iter()
+            .find(|l| l.label == "Post-combat")
+            .expect("an OncePerPermanent ruleset must surface a Post-combat line");
+        assert!(
+            line.detail.contains("infinite mana"),
+            "the post-combat line must mention the Horde's infinite mana"
         );
     }
 

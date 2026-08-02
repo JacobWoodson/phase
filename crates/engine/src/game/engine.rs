@@ -234,9 +234,11 @@ pub(super) fn apply_action_boundary_with_stack_limit(
     sync_waiting_for(state, &result.waiting_for);
     run_auto_pass_loop(state, &mut result);
     reconcile_terminal_result(state, &mut result);
-    // Debug "infinite mana" (CR 500.5 suppressed for flagged players): restore any
-    // pool that a spend during this action depleted, before public state is
-    // finalized and the next affordability probe runs. No-op when none flagged.
+    // Infinite mana (CR 500.5 suppressed for flagged players): restore any pool
+    // that a spend during this action depleted, before public state is finalized
+    // and the next affordability probe runs. No-op when none flagged. Flagged by
+    // either the `SetInfiniteMana` debug toggle or the production Horde advanced
+    // rule (`HordePostCombatActivation::OncePerPermanent`).
     super::mana_payment::refill_infinite_mana(state);
     remember_public_reveals(state, &result.events);
     // Targeted public-state dirty marking over the full accumulated event set
@@ -707,6 +709,14 @@ fn pass_priority_once_with_pipeline(
     // priority (they may respond to each Horde spell first).
     if matches!(wf, WaitingFor::Priority { player } if player == state.active_player) {
         if let Some(next) = crate::game::horde::maybe_reveal_next(state, events) {
+            sync_waiting_for(state, &next);
+            return Ok(next);
+        }
+        // Horde Magic (advanced rule): after the precombat wave, the same seam
+        // drives the Horde's post-combat activation beat — one ability per
+        // empty-stack priority window. `maybe_activate_next_ability` self-gates on
+        // PostCombatMain + the ruleset axis, so this is inert otherwise.
+        if let Some(next) = crate::game::horde::maybe_activate_next_ability(state, events) {
             sync_waiting_for(state, &next);
             return Ok(next);
         }

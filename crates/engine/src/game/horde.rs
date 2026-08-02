@@ -631,6 +631,177 @@ fn free_cast_ability(card_id: ObjectId, horde: PlayerId) -> ResolvedAbility {
     )
 }
 
+/// This Horde game's post-combat activation policy (`None` for basic decks and
+/// non-Horde formats).
+fn post_combat_activation_policy(
+    state: &GameState,
+) -> crate::types::format::HordePostCombatActivation {
+    use crate::types::format::HordePostCombatActivation;
+    state
+        .format_config
+        .horde_ruleset
+        .as_ref()
+        .map_or(HordePostCombatActivation::None, |r| {
+            r.post_combat_activation
+        })
+}
+
+/// Seed the Horde's post-combat activation queue as its post-combat main phase
+/// begins — the sibling of [`begin_wave`] for the precombat wave, dispatched from
+/// `turns::finish_enter_phase`.
+///
+/// Under the advanced `OncePerPermanent` rule the Horde activates each of its
+/// permanents' abilities once after combat. Snapshotting the permanents it
+/// controls NOW enforces "once per permanent per turn" structurally: a permanent
+/// that enters later (e.g. from an activation's own effect) is not in the queue,
+/// so it does not activate this turn. No-op for basic decks / non-Horde formats.
+///
+/// Caveat (shared with [`begin_wave`]): the snapshot is per post-combat-main
+/// ENTRY, not per turn, so an *additional* post-combat main phase this turn (a
+/// rare extra-phase effect) would re-seed and let each permanent activate again.
+/// This mirrors the precombat wave's identical per-entry re-seed and is latent —
+/// no shipped deck enables this axis. Promote to a per-turn latch if an advanced
+/// deck ever pairs post-combat activation with extra-phase generation.
+pub(crate) fn begin_post_combat_activation(state: &mut GameState, _events: &mut [GameEvent]) {
+    use crate::types::format::HordePostCombatActivation;
+    if !is_horde_turn(state)
+        || post_combat_activation_policy(state) != HordePostCombatActivation::OncePerPermanent
+    {
+        return;
+    }
+    let Some(horde) = horde_seat(state) else {
+        return;
+    };
+    // Battlefield order; each id is TRIED once, and its eligibility is re-checked
+    // at activation time because the board changes as earlier abilities resolve.
+    state.horde_postcombat_activation_queue = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| state.objects.get(id).is_some_and(|o| o.controller == horde))
+        .collect();
+}
+
+/// The index of the first non-mana, non-loyalty activated ability the Horde can
+/// legally activate on `source_id` right now, if any.
+///
+/// "Any OTHER ability" (the rule) excludes mana abilities (CR 605, the single
+/// `is_mana_ability` authority); planeswalker loyalty abilities are their own
+/// once-per-turn/sorcery-timing subsystem and are left out of this beat. Which
+/// eligible ability to pick is the first by index — a stable engine default;
+/// targets/modes are chosen by the Horde's AI seat at resolution. Mirrors the AI
+/// legal-action idiom in `ai_support/candidates.rs`.
+fn first_eligible_activated_ability(
+    state: &GameState,
+    horde: PlayerId,
+    source_id: ObjectId,
+    gates: &crate::game::restrictions::ActivationRestrictionStaticGates,
+) -> Option<usize> {
+    use crate::types::ability::{is_loyalty_ability_cost, AbilityKind};
+    crate::game::casting::activated_ability_definitions(state, source_id)
+        .into_iter()
+        .find(|(i, def)| {
+            def.kind == AbilityKind::Activated
+                && !crate::game::mana_abilities::is_mana_ability(def)
+                && !def.cost.as_ref().is_some_and(is_loyalty_ability_cost)
+                && !tap_ability_summoning_sick_for_horde(state, source_id, def)
+                && crate::game::casting::can_activate_ability_now_with_restriction_gates(
+                    state, horde, source_id, *i, gates,
+                )
+        })
+        .map(|(i, _)| i)
+}
+
+/// Hordemagic advanced rule: "Card-activated abilities have summoning sickness."
+/// The Horde emblem grants Haste so its creatures can ATTACK the turn they enter
+/// (and the wave deploys them mid-turn), but that Haste must NOT also lift the
+/// CR 302.6 summoning-sickness gate on their `{T}`/`{Q}` activated abilities — the
+/// rule explicitly keeps those sick. So gate tap-cost abilities on the haste-BLIND
+/// summoning-sick flag rather than `can_activate_ability_now`'s haste-aware
+/// [`crate::game::combat::has_summoning_sickness`]: a creature the Horde has not
+/// controlled since the start of its turn (`obj.summoning_sick`) cannot use a
+/// `{T}`/`{Q}` ability this turn, Haste notwithstanding. Non-creatures are never
+/// summoning-sick (CR 302.6), and non-tap abilities aren't gated at all.
+fn tap_ability_summoning_sick_for_horde(
+    state: &GameState,
+    source_id: ObjectId,
+    def: &crate::types::ability::AbilityDefinition,
+) -> bool {
+    let has_tap_cost = crate::game::mana_sources::has_tap_component(&def.cost)
+        || crate::game::mana_sources::has_untap_component(&def.cost);
+    if !has_tap_cost {
+        return false;
+    }
+    state.objects.get(&source_id).is_some_and(|obj| {
+        obj.card_types
+            .core_types
+            .contains(&crate::types::card_type::CoreType::Creature)
+            && obj.summoning_sick
+    })
+}
+
+/// If the Horde is at an empty-stack priority window during its post-combat main
+/// with a non-empty activation queue, activate the next eligible permanent's
+/// ability and return the resulting `WaitingFor` (target/mode prompts are answered
+/// by the Horde's AI seat, exactly like a free-cast wave spell). Returns `None`
+/// when the beat is ineligible (not the Horde's turn, wrong phase, non-empty stack,
+/// empty queue, or the rule is off) or when no queued permanent has a usable
+/// ability left.
+///
+/// Mirrors [`maybe_reveal_next`]: permanents with no usable ability never pause
+/// the beat (loop past them), and the function returns as soon as one ability is
+/// announced (which sets `waiting_for` and must resolve before the next).
+pub(crate) fn maybe_activate_next_ability(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
+    use crate::types::format::HordePostCombatActivation;
+    if state.phase != Phase::PostCombatMain
+        || !state.stack.is_empty()
+        || !is_horde_turn(state)
+        || state.horde_postcombat_activation_queue.is_empty()
+        || post_combat_activation_policy(state) != HordePostCombatActivation::OncePerPermanent
+    {
+        return None;
+    }
+    let horde = horde_seat(state)?;
+
+    // Hordemagic "infinite mana (for … activation costs)": top up the Horde's pool
+    // so mana components are payable. Real non-mana costs (tap/sacrifice/pay-life)
+    // are still paid by the activation path. No-op unless the Horde was flagged
+    // unbounded (see `deck_loading::grant_horde_emblem`).
+    crate::game::mana_payment::refill_infinite_mana(state);
+
+    let gates = crate::game::restrictions::ActivationRestrictionStaticGates::compute(state);
+
+    // Pop permanents until one announces an ability or the queue empties. A
+    // permanent with no usable ability never pauses the beat (mirrors the token
+    // branch of `maybe_reveal_next`).
+    while !state.horde_postcombat_activation_queue.is_empty() {
+        let source_id = state.horde_postcombat_activation_queue.remove(0);
+        let Some(ability_index) = first_eligible_activated_ability(state, horde, source_id, &gates)
+        else {
+            continue;
+        };
+        match crate::game::casting::handle_activate_ability(
+            state,
+            horde,
+            source_id,
+            ability_index,
+            events,
+        ) {
+            // The ability is announced (on the stack); its target/mode WaitingFor
+            // is answered by the AI seat, then it resolves and the priority seam
+            // re-invokes this for the next permanent.
+            Ok(waiting) => return Some(waiting),
+            // Defensive: the non-mutating pre-check passed but activation still
+            // failed (a subtle late illegality). Skip this permanent and continue.
+            Err(_) => continue,
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -951,6 +1122,256 @@ mod tests {
         );
         // (Phase-out-via-resolution is covered by the deploy test, whose boss has
         // no draw ETB, so it avoids resolving a draw against an emptied library.)
+    }
+
+    // ── Post-combat activation (advanced rule) ──────────────────────────────
+
+    use crate::types::format::HordePostCombatActivation;
+
+    /// Build a Horde game whose post-combat main phase is open, on the Horde's
+    /// turn, with the given activation policy — the shared scaffold for the
+    /// post-combat activation tests.
+    fn horde_post_combat_game(policy: HordePostCombatActivation) -> (GameState, PlayerId) {
+        let mut ruleset = ChallengeDeck::CybermanHorde.default_ruleset();
+        ruleset.post_combat_activation = policy;
+        let mut state = GameState::new(FormatConfig::horde(ruleset), 2, 42);
+        let horde = horde_seat(&state).expect("horde seat");
+        state.phase = Phase::PostCombatMain;
+        state.active_player = horde;
+        (state, horde)
+    }
+
+    /// Give the Horde a battlefield permanent carrying a single non-mana `{T}`
+    /// activated ability (Proliferate — no targets, so it announces cleanly with
+    /// no AI in the loop). Not summoning-sick, so the `{T}` cost is payable.
+    fn add_horde_ability_permanent(state: &mut GameState, horde: PlayerId, name: &str) -> ObjectId {
+        use crate::game::zones::create_object;
+        use crate::types::ability::{AbilityCost, AbilityDefinition, AbilityKind};
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+        use std::sync::Arc;
+
+        let card_id = CardId(state.next_object_id);
+        let id = create_object(state, card_id, horde, name.to_string(), Zone::Battlefield);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.summoning_sick = false;
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(AbilityKind::Activated, Effect::Proliferate)
+                .cost(AbilityCost::Tap),
+        );
+        id
+    }
+
+    /// The advanced rule: during the Horde's post-combat main, the beat seeds the
+    /// Horde's permanents and activates one's non-mana ability — announced on the
+    /// stack, its `{T}` cost paid, and the permanent consumed (once per turn).
+    #[test]
+    fn post_combat_beat_activates_a_horde_permanents_ability() {
+        let (mut state, horde) =
+            horde_post_combat_game(HordePostCombatActivation::OncePerPermanent);
+        let bot = add_horde_ability_permanent(&mut state, horde, "Ability Bot");
+
+        let mut events = Vec::new();
+        begin_post_combat_activation(&mut state, &mut events);
+        assert_eq!(
+            state.horde_postcombat_activation_queue,
+            vec![bot],
+            "the Horde permanent must be queued for post-combat activation"
+        );
+
+        let wf = maybe_activate_next_ability(&mut state, &mut events);
+        assert!(
+            wf.is_some(),
+            "the beat must announce the permanent's ability"
+        );
+        assert!(
+            !state.stack.is_empty(),
+            "the activated ability must be on the stack"
+        );
+        assert!(
+            state.objects[&bot].tapped,
+            "the {{T}} activation cost must have tapped the source"
+        );
+        assert!(
+            state.horde_postcombat_activation_queue.is_empty(),
+            "the permanent must be consumed — one activation per permanent per turn"
+        );
+    }
+
+    /// Negative control: with the basic `None` policy (every shipped deck) the
+    /// beat is completely inert — nothing is queued, nothing is announced.
+    #[test]
+    fn post_combat_beat_is_inert_under_the_basic_rule() {
+        let (mut state, horde) = horde_post_combat_game(HordePostCombatActivation::None);
+        let bot = add_horde_ability_permanent(&mut state, horde, "Ability Bot");
+
+        let mut events = Vec::new();
+        begin_post_combat_activation(&mut state, &mut events);
+        assert!(
+            state.horde_postcombat_activation_queue.is_empty(),
+            "the basic rule must not seed any activations"
+        );
+        assert!(
+            maybe_activate_next_ability(&mut state, &mut events).is_none(),
+            "the basic rule must not activate anything"
+        );
+        assert!(state.stack.is_empty());
+        assert!(!state.objects[&bot].tapped);
+    }
+
+    /// "Any OTHER ability" = non-mana: a Horde permanent whose only activated
+    /// ability is a mana ability must be skipped (never tapped for mana it can't
+    /// spend), and the queue drains to nothing announced.
+    #[test]
+    fn post_combat_beat_skips_mana_only_permanents() {
+        use crate::game::zones::create_object;
+        use crate::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, ManaProduction, QuantityExpr,
+        };
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+        use std::sync::Arc;
+
+        let (mut state, horde) =
+            horde_post_combat_game(HordePostCombatActivation::OncePerPermanent);
+        let card_id = CardId(state.next_object_id);
+        let rock = create_object(
+            &mut state,
+            card_id,
+            horde,
+            "Mana Rock".into(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&rock).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.summoning_sick = false;
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Colorless {
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+        }
+
+        let mut events = Vec::new();
+        begin_post_combat_activation(&mut state, &mut events);
+        assert_eq!(
+            state.horde_postcombat_activation_queue,
+            vec![rock],
+            "the permanent is queued (eligibility is decided at activation time)"
+        );
+
+        assert!(
+            maybe_activate_next_ability(&mut state, &mut events).is_none(),
+            "a mana-only permanent must be skipped — 'any OTHER ability' excludes mana abilities"
+        );
+        assert!(state.stack.is_empty(), "nothing may be announced");
+        assert!(
+            !state.objects[&rock].tapped,
+            "the mana rock must NOT be tapped for mana the Horde can't use"
+        );
+        assert!(
+            state.horde_postcombat_activation_queue.is_empty(),
+            "the skipped permanent is still consumed from the queue"
+        );
+    }
+
+    /// "Card-activated abilities have summoning sickness": a Horde creature that
+    /// entered this turn cannot use its `{T}` ability post-combat — EVEN with the
+    /// emblem's Haste (which only lets it attack). Revert guard: the creature is
+    /// given Haste, so `can_activate_ability_now` alone would allow it; only the
+    /// dedicated haste-blind gate keeps it summoning-sick. Non-tap abilities and
+    /// creatures controlled since the turn began are unaffected (covered above).
+    #[test]
+    fn post_combat_beat_keeps_tap_abilities_summoning_sick_despite_haste() {
+        use crate::game::zones::create_object;
+        use crate::types::ability::{AbilityCost, AbilityDefinition, AbilityKind};
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+        use crate::types::keywords::Keyword;
+        use std::sync::Arc;
+
+        let (mut state, horde) =
+            horde_post_combat_game(HordePostCombatActivation::OncePerPermanent);
+        let card_id = CardId(state.next_object_id);
+        let sick = create_object(
+            &mut state,
+            card_id,
+            horde,
+            "Fresh Recruit".into(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&sick).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            // Entered this turn: summoning-sick. Haste (as the emblem grants) lets
+            // it attack but must NOT lift the {T}-ability summoning-sickness gate.
+            obj.summoning_sick = true;
+            obj.base_keywords.push(Keyword::Haste);
+            obj.keywords.push(Keyword::Haste);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(AbilityKind::Activated, Effect::Proliferate)
+                    .cost(AbilityCost::Tap),
+            );
+        }
+
+        let mut events = Vec::new();
+        begin_post_combat_activation(&mut state, &mut events);
+        assert!(
+            maybe_activate_next_ability(&mut state, &mut events).is_none(),
+            "a summoning-sick creature's {{T}} ability must not activate the turn it entered, \
+             Haste notwithstanding"
+        );
+        assert!(
+            !state.objects[&sick].tapped,
+            "the summoning-sick creature must not be tapped"
+        );
+    }
+
+    /// "Horde has infinite mana (for … activation costs)" is granted at Horde
+    /// setup, but only for decks that actually activate abilities post-combat.
+    /// Observable as a filled mana pool after `grant_horde_emblem` (which tops up
+    /// the flagged pool). A basic-rule Horde must get no such pool.
+    #[test]
+    fn horde_gets_infinite_mana_only_under_the_post_combat_rule() {
+        use crate::game::deck_loading::grant_horde_emblem;
+
+        let (mut on, horde) = horde_post_combat_game(HordePostCombatActivation::OncePerPermanent);
+        grant_horde_emblem(&mut on, horde, true);
+        assert!(
+            !on.players
+                .iter()
+                .find(|p| p.id == horde)
+                .unwrap()
+                .mana_pool
+                .mana
+                .is_empty(),
+            "the post-combat rule must grant the Horde infinite mana (a filled pool)"
+        );
+
+        let (mut off, horde2) = horde_post_combat_game(HordePostCombatActivation::None);
+        grant_horde_emblem(&mut off, horde2, true);
+        assert!(
+            off.players
+                .iter()
+                .find(|p| p.id == horde2)
+                .unwrap()
+                .mana_pool
+                .mana
+                .is_empty(),
+            "a basic-rule Horde must not be granted infinite mana"
+        );
     }
 
     /// The rarity-wave gate is a `>=` comparison, so the `Ord` derive on

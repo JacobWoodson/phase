@@ -8315,6 +8315,18 @@ pub struct GameState {
     /// flag or other mutable bookkeeping.
     #[serde(default)]
     pub horde_turn_index: u32,
+    /// Horde Magic (advanced rule): the Horde permanents still owing a post-combat
+    /// activation this turn. Seeded once as the Horde's post-combat main begins
+    /// (`horde::begin_post_combat_activation`) with a snapshot of the Horde's
+    /// permanents, then drained one at a time by `horde::maybe_activate_next_ability`
+    /// from the priority seam — each activation may set `waiting_for` (targets) and
+    /// only one can be announced per resolution beat, exactly like the reveal wave.
+    /// Snapshotting up front enforces "each permanent activates once per turn"
+    /// structurally (a permanent that enters mid-beat is not added). Empty at every
+    /// non-activation moment and for every deck without the
+    /// `HordePostCombatActivation::OncePerPermanent` axis.
+    #[serde(default)]
+    pub horde_postcombat_activation_queue: Vec<crate::types::identifiers::ObjectId>,
     /// CR 725: The initiative designation (like monarch — one player at a time).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initiative: Option<PlayerId>,
@@ -9174,6 +9186,7 @@ impl GameState {
             horde_wave_remaining: 0,
             horde_wave_nontokens_remaining: 0,
             horde_turn_index: 0,
+            horde_postcombat_activation_queue: Vec::new(),
             initiative: None,
             combat_prevention_tally: None,
             cancelled_casts: Vec::new(),
@@ -9568,13 +9581,17 @@ impl GameState {
 
     /// CR 732.2a: record that an unbounded (net-progress) loop under `controller`
     /// pumps `axes`. The single write authority for `unbounded_resources` —
-    /// every producer routes through here, never mutating the map inline. Two
-    /// producers exist: the infinite-mana debug toggle
-    /// (`DebugAction::SetInfiniteMana`, ungated) and the live combo-detector at the
+    /// every producer routes through here, never mutating the map inline. Three
+    /// producers exist: (1) the infinite-mana debug toggle
+    /// (`DebugAction::SetInfiniteMana`, ungated); (2) the live combo-detector at the
     /// reconcile seam (`game::engine::reconcile_terminal_result`), which persists a
     /// confirmed loop's `delta.unbounded_axes_for(winner)` — the same axes
     /// `detect_loop` names in `LoopCertificate.unbounded` — but ONLY when the
-    /// user-controllable `GameState::loop_detection` gate is `On`. Idempotent
+    /// user-controllable `GameState::loop_detection` gate is `On`; and (3) the
+    /// production Horde advanced rule (`deck_loading::grant_horde_emblem`, gated on
+    /// `HordePostCombatActivation::OncePerPermanent`), which flags the Horde seat's
+    /// six `Mana(_)` axes so its post-combat activation costs are payable
+    /// ("the Horde has infinite mana"). Idempotent
     /// set-union: storing exactly the axes it is given
     /// (so a mana toggle stores its six `Mana(_)` axes, a drain certificate stores
     /// its `Life`/`DamageDealt` axes) without clobbering axes a prior producer
