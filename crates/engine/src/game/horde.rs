@@ -51,8 +51,11 @@ use crate::types::proposed_event::{EtbTapState, ProposedEvent, TokenCharacterist
 use crate::types::zones::Zone;
 use std::collections::HashSet;
 
-/// The Horde seat, if this is a Horde game. Live read via the topology accessor
-/// (single authority, CR 904.2a-style), never a latched copy.
+/// The PRIMARY Horde seat, if this is a Horde game. Live read via the topology
+/// accessor (single authority, CR 904.2a-style), never a latched copy. For a
+/// single-Horde game this is the sole Horde seat; for a two-Horde-force deck it
+/// is the first (the one-vs-many archenemy). Prefer [`horde_seats`] (all seats)
+/// for side-scoped logic (loss, no-life-total, opening-hand skip).
 pub(crate) fn horde_seat(state: &GameState) -> Option<PlayerId> {
     if state.format_config.format != GameFormat::Horde {
         return None;
@@ -60,21 +63,42 @@ pub(crate) fn horde_seat(state: &GameState) -> Option<PlayerId> {
     crate::game::topology::archenemy(state)
 }
 
-/// True when it is currently the Horde's turn — the active player is the Horde
-/// seat in a Horde game. Used to gate the draw-step skip and the wave.
-pub(crate) fn is_horde_turn(state: &GameState) -> bool {
-    horde_seat(state) == Some(state.active_player)
+/// EVERY seat on the Horde side. A single-Horde game leaves
+/// `GameState::horde_seats` empty and this falls back to the sole archenemy seat;
+/// a two-Horde-force deck (LOTR Two Towers) lists both Horde seats there. Empty
+/// for non-Horde formats. This is the single authority for "which seats are the
+/// Horde" — side-scoped logic (loss, no-life-total, opening-hand skip) folds over
+/// it rather than comparing against the one archenemy.
+pub(crate) fn horde_seats(state: &GameState) -> Vec<PlayerId> {
+    if state.format_config.format != GameFormat::Horde {
+        return Vec::new();
+    }
+    if !state.horde_seats.is_empty() {
+        return state.horde_seats.clone();
+    }
+    horde_seat(state).into_iter().collect()
 }
 
-/// True when `id` is the Horde seat, which in this casual variant has no life
+/// True when `id` is one of this game's Horde seats.
+pub(crate) fn is_horde_seat(state: &GameState, id: PlayerId) -> bool {
+    horde_seats(state).contains(&id)
+}
+
+/// True when it is currently a Horde seat's turn. Used to gate the draw-step skip
+/// and the wave. Tests membership so it holds for either seat of a two-Horde deck.
+pub(crate) fn is_horde_turn(state: &GameState) -> bool {
+    is_horde_seat(state, state.active_player)
+}
+
+/// True when `id` is a Horde seat, which in this casual variant has no life
 /// total. Damage/life loss it would suffer is redirected to milling (see
 /// `effects::life`), and it is exempt from the CR 704.5a "0 or less life loses"
 /// state-based action (`sba::collect_life_losers`). This is not a
 /// CR-sanctioned rule — Horde Magic is a casual format — so the helper names
 /// the *mechanism* (a seat with no life total) rather than citing a fictional
-/// rule number.
+/// rule number. Every Horde seat has no life total.
 pub(crate) fn player_has_no_life_total(state: &GameState, id: PlayerId) -> bool {
-    horde_seat(state) == Some(id)
+    is_horde_seat(state, id)
 }
 
 /// Redirect target for damage/life loss the Horde would suffer (CR 120.3a maps
@@ -240,35 +264,43 @@ fn is_legendary_permanent(state: &GameState, id: ObjectId) -> bool {
 /// ([`horde_is_defeated`]). Casual-format rule (no CR number), so this names the
 /// mechanism rather than citing a rule.
 pub(crate) fn player_skips_opening_hand(state: &GameState, id: PlayerId) -> bool {
-    horde_seat(state) == Some(id)
+    is_horde_seat(state, id)
 }
 
-/// The Horde is defeated (and the survivors win) when its library is empty AND
-/// it controls no creature on the battlefield. This is the Horde-variant loss
-/// condition consumed by `elimination::check_game_over` in place of the generic
-/// archenemy "still living" check — the Horde has no life total, so it can never
-/// be eliminated by the ordinary life/poison state-based actions. Casual-format
-/// rule (no CR number); it stands in for the archenemy-alive predicate of
-/// CR 104.2a's win check.
+/// The Horde SIDE is defeated (and the survivors win) when EVERY Horde seat's
+/// library is empty AND no Horde seat controls a creature on the battlefield.
+/// This is the Horde-variant loss condition consumed by
+/// `elimination::check_game_over` in place of the generic archenemy "still
+/// living" check — a Horde seat has no life total, so it can never be eliminated
+/// by the ordinary life/poison state-based actions. Casual-format rule (no CR
+/// number); it stands in for the archenemy-alive predicate of CR 104.2a's win
+/// check.
+///
+/// For a two-Horde-force deck (LOTR Two Towers) the fold is a conjunction: "The
+/// Horde loses when both Horde libraries have no cards" — one Horde running out
+/// while the other still has cards or creatures does NOT end the game.
 pub(crate) fn horde_is_defeated(state: &GameState) -> bool {
-    let Some(horde) = horde_seat(state) else {
+    let seats = horde_seats(state);
+    if seats.is_empty() {
         return false;
-    };
-    let library_empty = state
-        .players
-        .iter()
-        .find(|p| p.id == horde)
-        .is_none_or(|p| p.library.is_empty());
-    let controls_creature = state.battlefield.iter().any(|id| {
+    }
+    let all_libraries_empty = seats.iter().all(|seat| {
+        state
+            .players
+            .iter()
+            .find(|p| p.id == *seat)
+            .is_none_or(|p| p.library.is_empty())
+    });
+    let a_horde_controls_a_creature = state.battlefield.iter().any(|id| {
         state.objects.get(id).is_some_and(|obj| {
-            obj.controller == horde
+            seats.contains(&obj.controller)
                 && obj
                     .card_types
                     .core_types
                     .contains(&crate::types::card_type::CoreType::Creature)
         })
     });
-    library_empty && !controls_creature
+    all_libraries_empty && !a_horde_controls_a_creature
 }
 
 /// The wave policy for this Horde game, if any.
@@ -1371,6 +1403,122 @@ mod tests {
                 .mana
                 .is_empty(),
             "a basic-rule Horde must not be granted infinite mana"
+        );
+    }
+
+    // ── Two-Horde-seat side (LOTR Two Towers foundation) ────────────────────
+
+    /// Both designated Horde seats are recognized as Horde (no life total, skip
+    /// the opening hand); a non-designated seat is a survivor. With the set empty
+    /// the game falls back to the single archenemy seat (single-Horde unchanged).
+    #[test]
+    fn both_horde_seats_are_recognized_and_survivors_are_not() {
+        let mut state = GameState::new(
+            FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset()),
+            3,
+            42,
+        );
+        state.horde_seats = vec![PlayerId(0), PlayerId(1)];
+
+        for seat in [PlayerId(0), PlayerId(1)] {
+            assert!(is_horde_seat(&state, seat), "{seat:?} must be a Horde seat");
+            assert!(
+                player_has_no_life_total(&state, seat),
+                "{seat:?} has no life total"
+            );
+            assert!(
+                player_skips_opening_hand(&state, seat),
+                "{seat:?} skips the opening hand"
+            );
+        }
+        assert!(
+            !is_horde_seat(&state, PlayerId(2)),
+            "the survivor is not a Horde seat"
+        );
+        assert!(
+            !player_has_no_life_total(&state, PlayerId(2)),
+            "the survivor keeps its life total"
+        );
+
+        // Fallback: empty set → the one-vs-many archenemy is the sole Horde seat.
+        state.horde_seats.clear();
+        assert_eq!(
+            horde_seats(&state),
+            vec![PlayerId(0)],
+            "a single-Horde game resolves the sole archenemy seat"
+        );
+    }
+
+    /// Collective loss: a two-Horde side is defeated ONLY when EVERY Horde
+    /// library is empty AND no Horde seat controls a creature. One Horde running
+    /// dry while the other still has cards (or a creature) does NOT end the game.
+    #[test]
+    fn two_horde_side_loses_only_when_both_libraries_empty() {
+        use crate::game::zones::{create_object, move_to_zone};
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+
+        let mut state = GameState::new(
+            FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset()),
+            3,
+            42,
+        );
+        state.horde_seats = vec![PlayerId(0), PlayerId(1)];
+
+        // One library card for each Horde seat.
+        let a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Sauron card".into(),
+            Zone::Library,
+        );
+        let b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Saruman card".into(),
+            Zone::Library,
+        );
+
+        assert!(
+            !horde_is_defeated(&state),
+            "not defeated while both libraries have cards"
+        );
+
+        // Empty ONE library — still NOT defeated (the collective rule's whole point).
+        let mut ev = Vec::new();
+        move_to_zone(&mut state, a, Zone::Exile, &mut ev);
+        assert!(
+            !horde_is_defeated(&state),
+            "one empty Horde library must NOT defeat the two-Horde side"
+        );
+
+        // Empty the other too, with no Horde creatures → defeated.
+        move_to_zone(&mut state, b, Zone::Exile, &mut ev);
+        assert!(
+            horde_is_defeated(&state),
+            "both libraries empty and no Horde creature → the Horde side is defeated"
+        );
+
+        // A creature controlled by EITHER Horde seat keeps the side alive.
+        let goblin = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Uruk".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&goblin)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        assert!(
+            !horde_is_defeated(&state),
+            "a creature controlled by either Horde seat keeps the side undefeated"
         );
     }
 

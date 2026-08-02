@@ -662,10 +662,21 @@ fn check_game_over(state: &mut GameState, events: &mut Vec<GameEvent>) {
             } else {
                 living.contains(&archenemy)
             };
+        // CR 104.2a heroes = the living non-Horde seats. For a two-Horde-force
+        // Horde game (LOTR Two Towers) BOTH Horde seats must be excluded, not just
+        // the one archenemy — a second Horde seat has no life total and is never
+        // eliminated, so counting it as a living hero would keep the survivors from
+        // ever winning. Single-Horde and Archenemy reduce to `pid != archenemy`.
         let living_heroes: Vec<PlayerId> = living
             .iter()
             .copied()
-            .filter(|&pid| pid != archenemy)
+            .filter(|&pid| {
+                if state.format_config.format == crate::types::format::GameFormat::Horde {
+                    !super::horde::is_horde_seat(state, pid)
+                } else {
+                    pid != archenemy
+                }
+            })
             .collect();
         let winner = if archenemy_alive && living_heroes.is_empty() {
             Some(archenemy)

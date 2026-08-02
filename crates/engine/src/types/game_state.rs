@@ -8327,6 +8327,16 @@ pub struct GameState {
     /// `HordePostCombatActivation::OncePerPermanent` axis.
     #[serde(default)]
     pub horde_postcombat_activation_queue: Vec<crate::types::identifiers::ObjectId>,
+    /// Horde Magic: the seats that make up the Horde side. A single-Horde game
+    /// leaves this EMPTY and the Horde seat is resolved from the one-vs-many
+    /// archenemy (`horde::horde_seats` falls back to that). A two-Horde-force deck
+    /// (LOTR Two Towers: Sauron + Saruman — two players, each with its own deck,
+    /// battlefield, and graveyard, taking alternating turns) lists both Horde
+    /// seats here at game setup; the Horde SIDE loses only when EVERY listed seat's
+    /// library is empty and none controls a creature ([`horde::horde_is_defeated`]).
+    /// Runtime designation (assigned at setup), not a deck-intrinsic ruleset field.
+    #[serde(default)]
+    pub horde_seats: Vec<PlayerId>,
     /// CR 725: The initiative designation (like monarch — one player at a time).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initiative: Option<PlayerId>,
@@ -9187,6 +9197,7 @@ impl GameState {
             horde_wave_nontokens_remaining: 0,
             horde_turn_index: 0,
             horde_postcombat_activation_queue: Vec::new(),
+            horde_seats: Vec::new(),
             initiative: None,
             combat_prevention_tally: None,
             cancelled_casts: Vec::new(),
