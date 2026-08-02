@@ -377,6 +377,7 @@
     }
   },
   "badges": {
+    "hordeRulesAriaLabel": "Zasady talii Hordy",
     "monarch": "Monarcha",
     "monarchTooltip": "Monarcha — dobiera dodatkową kartę na końcu tury",
     "initiative": "Inicjatywa",

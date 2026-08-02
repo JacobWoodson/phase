@@ -377,6 +377,7 @@
     }
   },
   "badges": {
+    "hordeRulesAriaLabel": "Reglas del mazo de la Horda",
     "monarch": "Monarca",
     "monarchTooltip": "El Monarca — roba una carta extra al final del turno",
     "initiative": "Iniciativa",

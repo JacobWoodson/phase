@@ -377,6 +377,7 @@
     }
   },
   "badges": {
+    "hordeRulesAriaLabel": "Règles du deck de la Horde",
     "monarch": "Monarque",
     "monarchTooltip": "Le Monarque — pioche une carte supplémentaire en fin de tour",
     "initiative": "Initiative",

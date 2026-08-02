@@ -377,6 +377,7 @@
     }
   },
   "badges": {
+    "hordeRulesAriaLabel": "Horde-Deck-Regeln",
     "monarch": "Monarch",
     "monarchTooltip": "Der Monarch — zieht am Zugende eine zusätzliche Karte",
     "initiative": "Initiative",

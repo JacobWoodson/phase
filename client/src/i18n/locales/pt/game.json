@@ -377,6 +377,7 @@
     }
   },
   "badges": {
+    "hordeRulesAriaLabel": "Regras do baralho da Horda",
     "monarch": "Monarca",
     "monarchTooltip": "O Monarca — compra uma carta extra no fim do turno",
     "initiative": "Iniciativa",

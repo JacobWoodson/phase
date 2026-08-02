@@ -9,6 +9,7 @@ import { usePlayerDesignations } from "../../hooks/usePlayerDesignations.ts";
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
+import { useHordeDeckMeta } from "../../hooks/useHordeDeckMeta.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getOpponentDisplayName, useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -18,7 +19,7 @@ import { getOpponentIds, isOneOnOne, resolveFocusedOpponent } from "../../viewmo
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { ScoreBadge } from "../draft/ScoreBadge.tsx";
-import { CityBlessingBadge, CounterBadge, DungeonBadge, familyOf, InitiativeBadge, MonarchBadge, StatusBadge, UnboundedBadge } from "./HudBadges.tsx";
+import { CityBlessingBadge, CounterBadge, DungeonBadge, familyOf, HordeRulesBadge, InitiativeBadge, MonarchBadge, StatusBadge, UnboundedBadge } from "./HudBadges.tsx";
 import { AurasHoverPreview } from "./AurasHoverPreview.tsx";
 import { AvatarHoverPreview } from "./AvatarHoverPreview.tsx";
 import { BattlefieldPeekPopover } from "./BattlefieldPeekPopover.tsx";
@@ -64,6 +65,8 @@ export function OpponentHud({
   const forceCompactHud = isMobileViewport || isCompactHeight;
 
   const teamBased = gameState?.format_config?.team_based ?? false;
+  // The Horde deck's engine-authored rules summary (undefined outside Horde).
+  const hordeMeta = useHordeDeckMeta();
 
   const allOpponents = useMemo(() => {
     if (!gameState) return [];
@@ -267,6 +270,9 @@ export function OpponentHud({
     const isDisconnected = isOnline && disconnectedPlayers.has(opponentId);
     const isOpponentPhasedOut =
       gameState?.players[opponentId]?.status?.type === "PhasedOut";
+    // The Horde seat has no life total (it decks out instead) — the engine flag
+    // that marks it, also used by LifeTotal to show the library-as-clock.
+    const isOpponentHorde = gameState?.players[opponentId]?.has_no_life_total ?? false;
     const showMatchScore = gameState?.match_config?.match_type === "Bo3";
     const matchScore = showMatchScore ? gameState?.match_score ?? null : null;
     const label = opponentName ?? getOpponentDisplayName(opponentId);
@@ -300,6 +306,9 @@ export function OpponentHud({
           cornerBadge={<NextUpBadge playerId={opponentId} compact={compact} />}
           trailing={
             <>
+              {isOpponentHorde && hordeMeta ? (
+                <HordeRulesBadge deckLabel={hordeMeta.label} rules={hordeMeta.rules} />
+              ) : null}
               <EnchantmentsBadge playerId={opponentId} />
               {matchScore ? <ScoreBadge score={matchScore} player={1} /> : null}
               {opponentDesignations.isMonarch ? <MonarchBadge /> : null}
@@ -571,6 +580,7 @@ function OpponentTab({
   const { t } = useTranslation("game");
   const isMobile = useIsMobile();
   const gameState = useGameStore((s) => s.gameState);
+  const hordeMeta = useHordeDeckMeta();
   const isTheirTurn = gameState?.active_player === playerId;
   const { waitingSeatId, reason } = useTurnStatus();
   const isWaitingOnThem = waitingSeatId === playerId;
@@ -760,6 +770,9 @@ function OpponentTab({
         </svg>
         {player.life}
       </span>
+      {player.has_no_life_total && hordeMeta ? (
+        <HordeRulesBadge deckLabel={hordeMeta.label} rules={hordeMeta.rules} />
+      ) : null}
       {designations.isMonarch ? <MonarchBadge /> : null}
       {designations.hasInitiative ? <InitiativeBadge /> : null}
       {designations.hasCityBlessing ? <CityBlessingBadge /> : null}

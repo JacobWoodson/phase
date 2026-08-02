@@ -409,6 +409,7 @@
     }
   },
   "badges": {
+    "hordeRulesAriaLabel": "Horde deck rules",
     "monarch": "Monarch",
     "monarchTooltip": "The Monarch — draws an extra card at end of turn",
     "initiative": "Initiative",

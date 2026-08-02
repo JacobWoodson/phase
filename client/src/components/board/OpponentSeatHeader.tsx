@@ -6,6 +6,7 @@ import type { PlayerId } from "../../adapter/types.ts";
 import { usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { usePlayerDesignations } from "../../hooks/usePlayerDesignations.ts";
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
+import { useHordeDeckMeta } from "../../hooks/useHordeDeckMeta.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getOpponentDisplayName, useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { LifeTotal } from "../controls/LifeTotal.tsx";
@@ -15,6 +16,7 @@ import {
   CounterBadge,
   DungeonBadge,
   familyOf,
+  HordeRulesBadge,
   InitiativeBadge,
   MonarchBadge,
   PendingSpellBadge,
@@ -46,6 +48,8 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
   const designations = usePlayerDesignations(playerId);
   const player = gameState?.players[playerId];
   const label = getOpponentDisplayName(playerId);
+  // The Horde deck's engine-authored rules summary (undefined outside Horde).
+  const hordeMeta = useHordeDeckMeta();
 
   const currentLegalTargets = useMemo(() => {
     if (
@@ -185,6 +189,9 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
                 Kruphix…). Reads the engine's `auras_attached_to_player`
                 projection; brings the split seat header to parity with the
                 legacy 1v1/tab HUDs, which already surface curses. */}
+            {player.has_no_life_total && hordeMeta ? (
+              <HordeRulesBadge deckLabel={hordeMeta.label} rules={hordeMeta.rules} />
+            ) : null}
             <EnchantmentsBadge playerId={playerId} />
             {designations.isMonarch ? <MonarchBadge /> : null}
             {designations.hasInitiative ? <InitiativeBadge /> : null}
