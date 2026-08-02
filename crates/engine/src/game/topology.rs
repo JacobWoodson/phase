@@ -6,6 +6,57 @@ use crate::types::player::PlayerId;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct TeamId(pub u8);
 
+/// The game's SIDES — the groups of seats that share a win/loss fate (and, per
+/// format, may share turns or life). This is the single grouping authority that
+/// [`team_members`] derives from; [`team_id`] is kept as an O(1) equality key and
+/// pinned consistent with this by `team_id_matches_side_index` in tests.
+///
+/// Groups include EVERY seat (alive or not) so the ordering is stable — a side's
+/// index reproduces the historical [`TeamId`]: IndividualSeats is one side per
+/// seat ordered by id; FixedTeams is one side per team ordered by team index;
+/// OneVsMany is the archenemy side first, then the many (in seat order, matching
+/// the pre-refactor `team_members`). Alive-filtering is the caller's job.
+///
+/// Stage 1 of the general sides-based topology: it currently REPRODUCES the three
+/// [`FormatTopology`] shapes exactly (behavior-preserving). Later stages give each
+/// side its own turn structure + resource policy so mixed models become
+/// expressible — Horde's survivors-share-a-turn + individual alternating Horde
+/// turns, and Emperor's individual-turn teams (CR 809.4).
+pub(crate) fn sides(state: &GameState) -> Vec<Vec<PlayerId>> {
+    match state.format_config.topology() {
+        FormatTopology::IndividualSeats => {
+            let mut ids: Vec<PlayerId> = state.players.iter().map(|p| p.id).collect();
+            ids.sort_by_key(|id| id.0);
+            ids.into_iter().map(|id| vec![id]).collect()
+        }
+        FormatTopology::FixedTeams {
+            team_size,
+            team_count,
+            ..
+        } => {
+            let mut teams: Vec<Vec<PlayerId>> = vec![Vec::new(); team_count as usize];
+            let mut ids: Vec<PlayerId> = state.players.iter().map(|p| p.id).collect();
+            ids.sort_by_key(|id| id.0);
+            for id in ids {
+                let team = (id.0 / team_size) as usize;
+                if let Some(members) = teams.get_mut(team) {
+                    members.push(id);
+                }
+            }
+            teams
+        }
+        FormatTopology::OneVsMany { archenemy, .. } => {
+            let many: Vec<PlayerId> = state
+                .seat_order
+                .iter()
+                .copied()
+                .filter(|&id| id != archenemy)
+                .collect();
+            vec![vec![archenemy], many]
+        }
+    }
+}
+
 pub(crate) fn team_id(state: &GameState, player: PlayerId) -> TeamId {
     match state.format_config.topology() {
         FormatTopology::IndividualSeats => TeamId(player.0),
@@ -21,44 +72,15 @@ pub(crate) fn team_id(state: &GameState, player: PlayerId) -> TeamId {
 }
 
 pub(crate) fn team_members(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
-    match state.format_config.topology() {
-        FormatTopology::IndividualSeats => state
-            .seat_order
-            .iter()
-            .copied()
-            .filter(|&id| id == player && super::players::is_alive(state, id))
-            .collect(),
-        FormatTopology::FixedTeams { team_count, .. } => {
-            let team = team_id(state, player);
-            if team.0 >= team_count {
-                return Vec::new();
-            }
-
-            state
-                .players
-                .iter()
-                .map(|player| player.id)
-                .filter(|&id| team_id(state, id) == team && super::players::is_alive(state, id))
-                .collect()
-        }
-        FormatTopology::OneVsMany { archenemy, .. } => {
-            if player == archenemy {
-                state
-                    .seat_order
-                    .iter()
-                    .copied()
-                    .filter(|&id| id == archenemy && super::players::is_alive(state, id))
-                    .collect()
-            } else {
-                state
-                    .seat_order
-                    .iter()
-                    .copied()
-                    .filter(|&id| id != archenemy && super::players::is_alive(state, id))
-                    .collect()
-            }
-        }
-    }
+    // The living members of `player`'s side (see [`sides`], the grouping
+    // authority). A player with no side (shouldn't happen) has no teammates.
+    sides(state)
+        .into_iter()
+        .find(|side| side.contains(&player))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|&id| super::players::is_alive(state, id))
+        .collect()
 }
 
 pub(crate) fn teammates(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
@@ -331,5 +353,66 @@ mod tests {
             teammates(&state, PlayerId(1)),
             vec![PlayerId(3), PlayerId(4), PlayerId(5)]
         );
+    }
+
+    /// `sides()` reproduces the historical grouping for each `FormatTopology`
+    /// shape — this is what makes the Stage 1 refactor behavior-preserving.
+    #[test]
+    fn sides_reproduce_the_topology_groupings() {
+        // Free-for-all: one side per seat, ordered by id.
+        let ffa = GameState::new(FormatConfig::free_for_all(), 4, 42);
+        assert_eq!(
+            sides(&ffa),
+            vec![
+                vec![PlayerId(0)],
+                vec![PlayerId(1)],
+                vec![PlayerId(2)],
+                vec![PlayerId(3)],
+            ]
+        );
+
+        // Two-Headed Giant: two teams of two, by id.
+        let thg = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        assert_eq!(
+            sides(&thg),
+            vec![
+                vec![PlayerId(0), PlayerId(1)],
+                vec![PlayerId(2), PlayerId(3)],
+            ]
+        );
+
+        // Archenemy: the archenemy side first, then the heroes.
+        let arch = GameState::new(FormatConfig::archenemy(), 4, 42);
+        let s = sides(&arch);
+        assert_eq!(s[0], vec![PlayerId(0)], "archenemy side is first");
+        let mut heroes = s[1].clone();
+        heroes.sort_by_key(|id| id.0);
+        assert_eq!(heroes, vec![PlayerId(1), PlayerId(2), PlayerId(3)]);
+    }
+
+    /// The O(1) `team_id` equality key must never diverge from the full `sides()`
+    /// grouping: `team_id(player)` equals the index of the player's side.
+    #[test]
+    fn team_id_matches_side_index() {
+        for state in [
+            GameState::new(FormatConfig::free_for_all(), 4, 42),
+            GameState::new(FormatConfig::two_headed_giant(), 4, 42),
+            GameState::new(FormatConfig::archenemy(), 6, 42),
+        ] {
+            let groups = sides(&state);
+            for p in &state.players {
+                let idx = groups
+                    .iter()
+                    .position(|g| g.contains(&p.id))
+                    .expect("every seat belongs to a side");
+                assert_eq!(
+                    team_id(&state, p.id),
+                    TeamId(idx as u8),
+                    "team_id must equal the sides() index for {:?} in {:?}",
+                    p.id,
+                    state.format_config.format
+                );
+            }
+        }
     }
 }
