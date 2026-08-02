@@ -23,6 +23,7 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       combined_base_life: 100,
       per_extra_survivor_life_delta: -15,
       horde_creatures_forced_attackers: true,
+      legendary_death: "Normal",
     },
     rules: [
       { label: "Waves", detail: "Reveals until the first nontoken card is cast" },
@@ -47,6 +48,7 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       combined_base_life: 100,
       per_extra_survivor_life_delta: -15,
       horde_creatures_forced_attackers: true,
+      legendary_death: "Normal",
     },
     rules: [
       { label: "Waves", detail: "A wave ends at the first uncommon or better card" },
@@ -74,6 +76,7 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       combined_base_life: 100,
       per_extra_survivor_life_delta: -15,
       horde_creatures_forced_attackers: true,
+      legendary_death: "Normal",
     },
     rules: [
       {
@@ -101,6 +104,7 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       combined_base_life: 100,
       per_extra_survivor_life_delta: -15,
       horde_creatures_forced_attackers: true,
+      legendary_death: "Normal",
     },
     rules: [
       { label: "Waves", detail: "A wave ends at the first uncommon or better card" },
@@ -125,6 +129,7 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       combined_base_life: 100,
       per_extra_survivor_life_delta: -15,
       horde_creatures_forced_attackers: true,
+      legendary_death: "Normal",
     },
     rules: [
       { label: "Waves", detail: "A wave ends at the first uncommon or better card" },

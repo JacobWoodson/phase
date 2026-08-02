@@ -299,21 +299,14 @@ pub fn apply_life_loss_after_replacement(
     // action. Lifelink is unaffected: the dealer's life GAIN is a separate
     // upstream `LifeGain` event, not routed through this loss-mutation point.
     if crate::game::horde::player_has_no_life_total(state, pid) {
-        // Route through the shared mill building block so per-card graveyard
-        // replacements (Rest in Peace class) still consult, exactly as an
-        // ordinary mill would (CR 701.17a-b). A per-card CR 616.1 pause is
-        // discarded here — this redirect substitutes for a bare life mutation
-        // with no resolution frame of its own to park a prompt against.
-        let _ = crate::game::effects::mill::apply_mill_after_replacement(
-            state,
-            ProposedEvent::Mill {
-                player_id: pid,
-                count: loss_amount,
-                destination: crate::types::zones::Zone::Graveyard,
-                applied: HashSet::new(),
-            },
-            events,
-        );
+        // Single authority for the Horde damage→mill redirect. It routes through
+        // the shared mill building block so per-card graveyard replacements (Rest
+        // in Peace class) still consult (CR 701.17a-b), and it applies the
+        // community advanced legendary rule when the ruleset opts in (a milled
+        // legendary permanent enters + phases out instead of being buried). A
+        // per-card CR 616.1 pause is discarded there — this redirect substitutes
+        // for a bare life mutation with no resolution frame to park a prompt.
+        crate::game::horde::mill_from_loss(state, pid, loss_amount, events);
         return loss_amount;
     }
 

@@ -307,6 +307,32 @@ pub enum WaveTermination {
     UntilRarityAtLeast(Rarity),
 }
 
+/// How a Horde deck treats its own legendary permanent cards when they would be
+/// put into the Horde's graveyard from its library (the Horde is damage-milled,
+/// see [`crate::game::horde::mill_from_loss`]).
+///
+/// A typed axis rather than a `bool` because legendary handling has more than two
+/// plausible community variants — ordinary graveyard, the "boss recurs"
+/// phase-out rule below, or a future "shuffle back into the library" — and a
+/// boolean could name at most one of them. Casual community format
+/// (hordemagic.com advanced rules); no CR governs the axis itself, though
+/// [`EtbThenPhaseOut`](Self::EtbThenPhaseOut) resolves through CR 603.6 (enters-
+/// the-battlefield triggers) and CR 702.26 (phasing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum HordeLegendaryDeath {
+    /// Basic rules: a milled legendary is put into the graveyard like any other
+    /// card. The default, and what every currently-shipped deck uses.
+    #[default]
+    Normal,
+    /// Advanced rules (Walking Dead, Stranger Things, …): "any Legendary card
+    /// that goes to the Graveyard [when the Horde is damage-milled] instead
+    /// enters the battlefield, ETB triggers fire, then immediately Phases Out."
+    /// Milling one of the Horde's legendaries therefore DEPLOYS it (its ETB
+    /// resolves) rather than removing it, and it phases back in on the Horde's
+    /// next untap (CR 702.26c) — a recurring boss instead of a wasted mill.
+    EtbThenPhaseOut,
+}
+
 /// The parameters that distinguish one Horde deck's rules from another, carried
 /// on `FormatConfig` so a single `GameFormat::Horde` variant covers the whole
 /// family without sibling format variants. All fields are typed axes, not
@@ -341,6 +367,14 @@ pub struct HordeRuleset {
     /// (true for every published Horde ruleset; a typed axis so a future ruleset
     /// can opt out — e.g. Defeat a God's revelers that only attack when told).
     pub horde_creatures_forced_attackers: bool,
+    /// How the Horde's own legendary cards are treated when milled to its
+    /// graveyard by damage. `Normal` for the basic community decks; the advanced
+    /// decks (Walking Dead, Stranger Things, …) use
+    /// [`HordeLegendaryDeath::EtbThenPhaseOut`]. `#[serde(default)]` so Horde
+    /// configs serialized before this axis existed still deserialize — they
+    /// predate any advanced deck, so the `Normal` back-fill is correct.
+    #[serde(default)]
+    pub legendary_death: HordeLegendaryDeath,
 }
 
 impl HordeRuleset {
@@ -412,7 +446,7 @@ impl HordeRuleset {
             "The Horde's creatures attack only when instructed".to_string()
         };
 
-        vec![
+        let mut lines = vec![
             RuleSummaryLine {
                 label: "Waves",
                 detail: waves,
@@ -429,7 +463,24 @@ impl HordeRuleset {
                 label: "Horde combat",
                 detail: combat,
             },
-        ]
+        ];
+
+        // The legendary line is an *advanced-rules* axis: only the decks that opt
+        // into the "boss recurs" rule surface it, so a basic deck's summary stays
+        // exactly the four lines above (and byte-identical to before this axis
+        // existed). This is a distinguishing rule, not the vanilla default, so
+        // showing "legendaries die normally" for every basic deck would be noise.
+        match self.legendary_death {
+            HordeLegendaryDeath::Normal => {}
+            HordeLegendaryDeath::EtbThenPhaseOut => lines.push(RuleSummaryLine {
+                label: "Legendary deaths",
+                detail: "A milled legendary enters, triggers its ETB, then phases out — \
+                         it returns on the Horde's next untap instead of being removed"
+                    .to_string(),
+            }),
+        }
+
+        lines
     }
 }
 
@@ -539,6 +590,9 @@ impl ChallengeDeck {
                 combined_base_life: 100,
                 per_extra_survivor_life_delta: -15,
                 horde_creatures_forced_attackers: true,
+                // All shipped community decks are basic decks — the advanced
+                // legendary rule arrives with Walking Dead / Stranger Things.
+                legendary_death: HordeLegendaryDeath::Normal,
             },
             ChallengeDeck::DndHorde => HordeRuleset {
                 challenge_deck: ChallengeDeck::DndHorde,
@@ -551,6 +605,9 @@ impl ChallengeDeck {
                 combined_base_life: 100,
                 per_extra_survivor_life_delta: -15,
                 horde_creatures_forced_attackers: true,
+                // All shipped community decks are basic decks — the advanced
+                // legendary rule arrives with Walking Dead / Stranger Things.
+                legendary_death: HordeLegendaryDeath::Normal,
             },
             ChallengeDeck::ZombiesHorde => HordeRuleset {
                 challenge_deck: ChallengeDeck::ZombiesHorde,
@@ -567,6 +624,9 @@ impl ChallengeDeck {
                 combined_base_life: 100,
                 per_extra_survivor_life_delta: -15,
                 horde_creatures_forced_attackers: true,
+                // All shipped community decks are basic decks — the advanced
+                // legendary rule arrives with Walking Dead / Stranger Things.
+                legendary_death: HordeLegendaryDeath::Normal,
             },
             ChallengeDeck::SliversHorde => HordeRuleset {
                 challenge_deck: ChallengeDeck::SliversHorde,
@@ -580,6 +640,9 @@ impl ChallengeDeck {
                 combined_base_life: 100,
                 per_extra_survivor_life_delta: -15,
                 horde_creatures_forced_attackers: true,
+                // All shipped community decks are basic decks — the advanced
+                // legendary rule arrives with Walking Dead / Stranger Things.
+                legendary_death: HordeLegendaryDeath::Normal,
             },
             ChallengeDeck::HumansGodzillaHorde => HordeRuleset {
                 challenge_deck: ChallengeDeck::HumansGodzillaHorde,
@@ -590,6 +653,9 @@ impl ChallengeDeck {
                 combined_base_life: 100,
                 per_extra_survivor_life_delta: -15,
                 horde_creatures_forced_attackers: true,
+                // All shipped community decks are basic decks — the advanced
+                // legendary rule arrives with Walking Dead / Stranger Things.
+                legendary_death: HordeLegendaryDeath::Normal,
             },
         }
     }
@@ -2134,6 +2200,7 @@ mod tests {
             combined_base_life: 100,
             per_extra_survivor_life_delta: -15,
             horde_creatures_forced_attackers: true,
+            legendary_death: HordeLegendaryDeath::Normal,
         };
         // Pull the "Waves" line out of the rendered summary.
         let wave_detail = |wave: WaveTermination| -> String {
@@ -2190,6 +2257,7 @@ mod tests {
                 combined_base_life: base,
                 per_extra_survivor_life_delta: delta,
                 horde_creatures_forced_attackers: true,
+                legendary_death: HordeLegendaryDeath::Normal,
             }
             .summary()
             .into_iter()
@@ -2199,6 +2267,40 @@ mod tests {
         };
         assert_eq!(line(100, -15), "100 life shared, -15 per extra survivor");
         assert_eq!(line(20, 0), "20 life, shared by all survivors");
+    }
+
+    /// The legendary axis is advanced-only: a `Normal` ruleset renders no
+    /// "Legendary deaths" line (basic decks stay their four lines), while an
+    /// `EtbThenPhaseOut` ruleset adds exactly one. This is the axis's contract
+    /// with the picker — it surfaces only where the rule actually differs.
+    #[test]
+    fn ruleset_summary_shows_legendary_line_only_for_advanced_rule() {
+        let with_legendary = |rule: HordeLegendaryDeath| HordeRuleset {
+            challenge_deck: ChallengeDeck::CybermanHorde,
+            wave: WaveTermination::FixedCount(1),
+            survivor_setup_turns: 3,
+            combined_base_life: 100,
+            per_extra_survivor_life_delta: -15,
+            horde_creatures_forced_attackers: true,
+            legendary_death: rule,
+        };
+
+        let basic = with_legendary(HordeLegendaryDeath::Normal).summary();
+        assert!(
+            !basic.iter().any(|l| l.label == "Legendary deaths"),
+            "a Normal ruleset must not advertise the advanced legendary rule"
+        );
+        assert_eq!(basic.len(), 4, "basic decks stay their four rule lines");
+
+        let advanced = with_legendary(HordeLegendaryDeath::EtbThenPhaseOut).summary();
+        let legendary_line = advanced
+            .iter()
+            .find(|l| l.label == "Legendary deaths")
+            .expect("an EtbThenPhaseOut ruleset must surface a Legendary deaths line");
+        assert!(
+            legendary_line.detail.contains("phases out"),
+            "the legendary line must describe the phase-out behavior"
+        );
     }
 
     /// The whole point of the summary is to show how decks DIFFER — two decks with

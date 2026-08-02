@@ -77,6 +77,158 @@ pub(crate) fn player_has_no_life_total(state: &GameState, id: PlayerId) -> bool 
     horde_seat(state) == Some(id)
 }
 
+/// Redirect target for damage/life loss the Horde would suffer (CR 120.3a maps
+/// combat damage to a player onto life loss; CR 119.3 direct loss): mill `count`
+/// cards from the top of the Horde's library. The Horde has no life total, so
+/// the milled count stands in for the "loss" and its emptying library is the
+/// real clock ([`horde_is_defeated`]).
+///
+/// This is the single authority for the community *advanced* legendary rule
+/// ([`HordeLegendaryDeath::EtbThenPhaseOut`]): a legendary PERMANENT card among
+/// the milled cards is put onto the battlefield instead of into the graveyard
+/// (its enters-the-battlefield triggers fire, CR 603.6) and then immediately
+/// phases out (CR 702.26). Milling the Horde's boss therefore DEPLOYS it rather
+/// than removing it, and it phases back in on the Horde's next untap
+/// (CR 702.26c). Basic decks ([`HordeLegendaryDeath::Normal`], every currently
+/// shipped deck) mill straight to the graveyard.
+///
+/// Called from `effects::life`'s no-life-total redirect. A per-card CR 616.1
+/// ordering pause is discarded — the redirect substitutes for a bare life
+/// mutation and has no resolution frame of its own to park a prompt against
+/// (mirroring the basic-path note at the call site).
+pub(crate) fn mill_from_loss(
+    state: &mut GameState,
+    horde: PlayerId,
+    count: u32,
+    events: &mut Vec<GameEvent>,
+) {
+    use crate::game::zone_pipeline::{move_objects_simultaneously, ZoneMoveRequest};
+    use crate::types::format::HordeLegendaryDeath;
+
+    let legendary_rule = state
+        .format_config
+        .horde_ruleset
+        .as_ref()
+        .map_or(HordeLegendaryDeath::Normal, |r| r.legendary_death);
+
+    // Basic decks: ordinary mill to the graveyard, routed through the shared mill
+    // building block so per-card graveyard replacements (Rest in Peace class)
+    // still consult exactly as an ordinary mill would (CR 701.17a-b).
+    if legendary_rule == HordeLegendaryDeath::Normal {
+        let _ = crate::game::effects::mill::apply_mill_after_replacement(
+            state,
+            ProposedEvent::Mill {
+                player_id: horde,
+                count,
+                destination: Zone::Graveyard,
+                applied: HashSet::new(),
+            },
+            events,
+        );
+        return;
+    }
+
+    // Advanced rule. Take the top `count` cards (CR 701.17b: no more than the
+    // library holds) and split them by the legendary-permanent test.
+    let Some(player) = state.players.iter().find(|p| p.id == horde) else {
+        return;
+    };
+    let count = (count as usize).min(player.library.len());
+    let milled: Vec<ObjectId> = player.library.iter().take(count).copied().collect();
+    if milled.is_empty() {
+        return;
+    }
+    let legendaries: Vec<ObjectId> = milled
+        .iter()
+        .copied()
+        .filter(|&id| is_legendary_permanent(state, id))
+        .collect();
+    let legendary_set: HashSet<ObjectId> = legendaries.iter().copied().collect();
+
+    // One simultaneous batch (CR 701.17a): legendary permanents redirect to the
+    // battlefield (the shared pipeline runs full ETB machinery + emits the
+    // ZoneChanged that fires their ETB triggers); everything else goes to the
+    // graveyard, still consulting per-card graveyard-move replacements.
+    let reqs: Vec<ZoneMoveRequest> = milled
+        .iter()
+        .map(|&id| {
+            let dest = if legendary_set.contains(&id) {
+                Zone::Battlefield
+            } else {
+                Zone::Graveyard
+            };
+            // The milled card itself anchors the Effect cause, mirroring the
+            // graveyard mill batch in `effects::mill`.
+            ZoneMoveRequest::effect(id, dest, id)
+        })
+        .collect();
+    let _ = move_objects_simultaneously(state, reqs, events);
+
+    // CR 603.6 + CR 702.26: "ETB effects trigger, THEN immediately Phases Out."
+    // The phase-out is grafted onto each entered legendary as an ETB-triggered
+    // ability rather than performed synchronously here. This ordering is load-
+    // bearing: the shared trigger scan collects the legendary's OWN printed ETB
+    // abilities while it is still phased in, alongside this grafted trigger; when
+    // the grafted trigger resolves the legendary phases out. A synchronous
+    // `phase_out_object` here would flip `is_phased_out` before that scan, and
+    // `active_trigger_definitions` drops every trigger of a phased-out permanent —
+    // silently suppressing the legendary's own ETBs, which the rule requires to
+    // fire. Phasing out (vs. staying) makes the boss recur on the Horde's next
+    // untap (CR 702.26c) and dodges the legend rule while out (CR 704.5j /
+    // CR 702.26e), so two milled copies of one boss don't annihilate.
+    for id in legendaries {
+        // A `Moved` replacement (Rest in Peace class) could still have diverted
+        // the card, so only graft onto what actually entered.
+        if state.battlefield.contains(&id) {
+            if let Some(obj) = state.objects.get_mut(&id) {
+                obj.trigger_definitions
+                    .push(horde_legendary_phase_out_trigger());
+            }
+        }
+    }
+}
+
+/// The synthetic "when this enters the battlefield, phase it out" trigger the
+/// advanced legendary rule ([`crate::types::format::HordeLegendaryDeath::EtbThenPhaseOut`])
+/// grafts onto a milled legendary (see [`mill_from_loss`]). Modeling the phase-out
+/// as an ETB-triggered ability — rather than phasing out synchronously — is what
+/// lets the legendary's own printed ETB abilities still fire (CR 603.6): they are
+/// collected by the normal trigger scan while the permanent is phased in, then
+/// this trigger resolves and phases it out (CR 702.26). `TargetFilter::SelfRef`
+/// scopes both the trigger (fires only for THIS object's entry, not any other
+/// permanent's) and the phase-out target to the source.
+fn horde_legendary_phase_out_trigger() -> crate::types::ability::TriggerDefinition {
+    use crate::types::ability::{AbilityDefinition, AbilityKind, TriggerDefinition};
+    use crate::types::triggers::TriggerMode;
+
+    TriggerDefinition::new(TriggerMode::ChangesZone)
+        .destination(Zone::Battlefield)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::PhaseOut {
+                target: TargetFilter::SelfRef,
+            },
+        ))
+}
+
+/// A card that is both Legendary (CR 205.4a supertype) and a permanent type
+/// (CR 110.4a — only permanent cards can be put onto the battlefield). A
+/// legendary instant/sorcery can't enter, so the advanced rule can't apply to
+/// it and it mills normally.
+fn is_legendary_permanent(state: &GameState, id: ObjectId) -> bool {
+    state.objects.get(&id).is_some_and(|obj| {
+        obj.card_types
+            .supertypes
+            .contains(&crate::types::card_type::Supertype::Legendary)
+            && obj
+                .card_types
+                .core_types
+                .iter()
+                .any(|t| t.is_permanent_type())
+    })
+}
+
 /// True when `id` is the Horde seat, which draws NO opening hand and takes no
 /// mulligan (`mulligan::start_mulligan`).
 ///
@@ -561,6 +713,244 @@ mod tests {
             "a vanilla token must gain no triggers, got: {:?}",
             zombie.trigger_definitions.as_slice()
         );
+    }
+
+    /// Advanced legendary rule (`EtbThenPhaseOut`): when the Horde is damage-
+    /// milled, a legendary PERMANENT card enters the battlefield (its ETB event
+    /// fires) and immediately phases out (CR 702.26), while non-legendaries and
+    /// non-permanent legendaries mill to the graveyard normally. This is the
+    /// building-block test for the whole advanced Horde deck family.
+    #[test]
+    fn damage_mill_deploys_and_phases_out_the_hordes_legendaries() {
+        use crate::game::zones::create_object;
+        use crate::types::card_type::{CoreType, Supertype};
+        use crate::types::format::HordeLegendaryDeath;
+        use crate::types::identifiers::CardId;
+
+        let mut ruleset = ChallengeDeck::CybermanHorde.default_ruleset();
+        ruleset.legendary_death = HordeLegendaryDeath::EtbThenPhaseOut;
+        let mut state = GameState::new(FormatConfig::horde(ruleset), 2, 42);
+        let horde = horde_seat(&state).expect("horde seat");
+
+        // A fresh Horde state has an empty library (deck loading is separate), so
+        // these three cards are the entire top-of-library to mill.
+        let boss = create_object(
+            &mut state,
+            CardId(9001),
+            horde,
+            "Boss".into(),
+            Zone::Library,
+        );
+        {
+            let o = state.objects.get_mut(&boss).unwrap();
+            o.card_types.supertypes.push(Supertype::Legendary);
+            o.card_types.core_types.push(CoreType::Creature);
+        }
+        let grunt = create_object(
+            &mut state,
+            CardId(9002),
+            horde,
+            "Grunt".into(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&grunt)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let bolt = create_object(
+            &mut state,
+            CardId(9003),
+            horde,
+            "Legendary Bolt".into(),
+            Zone::Library,
+        );
+        {
+            // Legendary but a non-permanent type — it can't enter the battlefield.
+            let o = state.objects.get_mut(&bolt).unwrap();
+            o.card_types.supertypes.push(Supertype::Legendary);
+            o.card_types.core_types.push(CoreType::Instant);
+        }
+
+        let mut events = Vec::new();
+        mill_from_loss(&mut state, horde, 3, &mut events);
+
+        let in_horde_graveyard = |state: &GameState, id: ObjectId| {
+            state
+                .players
+                .iter()
+                .find(|p| p.id == horde)
+                .unwrap()
+                .graveyard
+                .contains(&id)
+        };
+
+        // The redirect DEPLOYED the boss: it entered the battlefield, not the
+        // graveyard. It phases out only when its grafted ETB trigger resolves
+        // (driven below) — so its own ETBs get to fire first.
+        assert!(
+            state.battlefield.contains(&boss),
+            "the legendary boss must enter the battlefield"
+        );
+        assert!(
+            !in_horde_graveyard(&state, boss),
+            "the boss must not be milled to the graveyard"
+        );
+
+        // Grunt (non-legendary) and Bolt (legendary but non-permanent) mill normally.
+        assert!(
+            in_horde_graveyard(&state, grunt) && !state.battlefield.contains(&grunt),
+            "a non-legendary card mills to the graveyard"
+        );
+        assert!(
+            in_horde_graveyard(&state, bolt) && !state.battlefield.contains(&bolt),
+            "a legendary INSTANT can't enter the battlefield — it mills normally"
+        );
+
+        // CR 603.6: the boss's entering-the-battlefield event fired — its own ETBs
+        // and the grafted phase-out both key off it.
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    to: Zone::Battlefield,
+                    ..
+                } if *object_id == boss
+            )),
+            "the boss's enters-the-battlefield event must fire"
+        );
+
+        // CR 702.26: driving the grafted ETB trigger to resolution phases the boss
+        // out — the "then immediately Phases Out" half of the rule.
+        crate::game::triggers::process_triggers(&mut state, &events);
+        crate::game::triggers::drain_order_triggers_with_identity(&mut state);
+        let mut guard = 0;
+        while !state.stack.is_empty() && guard < 8 {
+            let mut resolve_events = Vec::new();
+            crate::game::stack::resolve_top(&mut state, &mut resolve_events);
+            guard += 1;
+        }
+        assert!(
+            state.objects[&boss].is_phased_out(),
+            "the boss must phase out once its grafted ETB trigger resolves (CR 702.26)"
+        );
+    }
+
+    /// Negative control: under the basic rule (`Normal`, every shipped deck), a
+    /// milled legendary is buried like any other card — the advanced deploy-and-
+    /// phase-out behavior must be gated strictly on the opt-in axis.
+    #[test]
+    fn damage_mill_buries_legendaries_under_the_basic_rule() {
+        use crate::game::zones::create_object;
+        use crate::types::card_type::{CoreType, Supertype};
+        use crate::types::identifiers::CardId;
+
+        // default_ruleset() is `HordeLegendaryDeath::Normal` for every deck.
+        let mut state = GameState::new(
+            FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset()),
+            2,
+            42,
+        );
+        let horde = horde_seat(&state).expect("horde seat");
+        let boss = create_object(
+            &mut state,
+            CardId(9001),
+            horde,
+            "Boss".into(),
+            Zone::Library,
+        );
+        {
+            let o = state.objects.get_mut(&boss).unwrap();
+            o.card_types.supertypes.push(Supertype::Legendary);
+            o.card_types.core_types.push(CoreType::Creature);
+        }
+
+        let mut events = Vec::new();
+        mill_from_loss(&mut state, horde, 1, &mut events);
+
+        assert!(
+            !state.battlefield.contains(&boss),
+            "the basic rule must not deploy milled legendaries"
+        );
+        assert!(
+            state
+                .players
+                .iter()
+                .find(|p| p.id == horde)
+                .unwrap()
+                .graveyard
+                .contains(&boss),
+            "the basic rule mills legendaries straight to the graveyard"
+        );
+    }
+
+    /// Rules fidelity, the crux of the advanced rule: "ETB effects trigger, THEN
+    /// immediately Phases Out." The milled legendary's OWN enters-the-battlefield
+    /// trigger must be collected by the real scan (CR 603.6) — modeling the
+    /// phase-out as a grafted ETB trigger keeps the legendary phased in through
+    /// collection, so `active_trigger_definitions` doesn't drop its own ETBs. This
+    /// drives the real `process_triggers` collection path.
+    #[test]
+    fn milled_legendarys_own_etb_still_fires_despite_phasing_out() {
+        use crate::game::zones::create_object;
+        use crate::types::ability::{AbilityDefinition, AbilityKind, Effect, QuantityExpr};
+        use crate::types::card_type::{CoreType, Supertype};
+        use crate::types::identifiers::CardId;
+        use crate::types::triggers::TriggerMode;
+
+        let mut ruleset = ChallengeDeck::CybermanHorde.default_ruleset();
+        ruleset.legendary_death = crate::types::format::HordeLegendaryDeath::EtbThenPhaseOut;
+        let mut state = GameState::new(FormatConfig::horde(ruleset), 2, 42);
+        let horde = horde_seat(&state).expect("horde seat");
+
+        let boss = create_object(
+            &mut state,
+            CardId(9001),
+            horde,
+            "Boss".into(),
+            Zone::Library,
+        );
+        {
+            let o = state.objects.get_mut(&boss).unwrap();
+            o.card_types.supertypes.push(Supertype::Legendary);
+            o.card_types.core_types.push(CoreType::Creature);
+            // A plain, observable ETB trigger: "When this enters, draw a card."
+            o.trigger_definitions.push(
+                crate::types::ability::TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        },
+                    ))
+                    .destination(Zone::Battlefield),
+            );
+        }
+
+        let mut events = Vec::new();
+        mill_from_loss(&mut state, horde, 1, &mut events);
+
+        // The boss entered PHASED IN — the phase-out is a grafted ETB trigger, so
+        // the normal scan collects its own printed ETBs first. A minimal Horde
+        // state has no other trigger sources, so an empty stack after collection
+        // would mean the ETB was suppressed — the rules bug this guards.
+        assert!(
+            state.battlefield.contains(&boss),
+            "the boss must enter the battlefield"
+        );
+        crate::game::triggers::process_triggers(&mut state, &events);
+        crate::game::triggers::drain_order_triggers_with_identity(&mut state);
+        assert!(
+            !state.stack.is_empty(),
+            "the milled legendary's own ETB trigger must be collected, not suppressed \
+             by the phase-out"
+        );
+        // (Phase-out-via-resolution is covered by the deploy test, whose boss has
+        // no draw ETB, so it avoids resolving a draw against an emptied library.)
     }
 
     /// The rarity-wave gate is a `>=` comparison, so the `Ord` derive on

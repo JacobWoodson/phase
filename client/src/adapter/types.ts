@@ -93,6 +93,15 @@ export type WaveTermination =
   | { type: "UntilRarityAtLeast"; data: Rarity };
 
 /**
+ * How the Horde treats its own legendary permanent cards when they would be
+ * milled to its graveyard by damage. Mirrors the engine `HordeLegendaryDeath`
+ * enum. `EtbThenPhaseOut` is the advanced community rule (Walking Dead, Stranger
+ * Things): a milled legendary enters the battlefield (ETB triggers) then phases
+ * out, returning as a recurring boss. Basic decks use `Normal`.
+ */
+export type HordeLegendaryDeath = "Normal" | "EtbThenPhaseOut";
+
+/**
  * Per-deck Horde rules carried on a `GameFormat.Horde` `FormatConfig`. Mirrors
  * the engine `HordeRuleset` struct. The frontend only reads this; the engine is
  * the source of truth for the rules.
@@ -109,6 +118,12 @@ export interface HordeRuleset {
   combined_base_life: number;
   per_extra_survivor_life_delta: number;
   horde_creatures_forced_attackers: boolean;
+  /**
+   * How the Horde's legendary cards are treated when milled by damage. Optional
+   * here (like the engine's `#[serde(default)]`) so pre-axis serialized configs
+   * still parse; the engine's registry always emits it. Absent ⇒ `Normal`.
+   */
+  legendary_death?: HordeLegendaryDeath;
 }
 
 /**
