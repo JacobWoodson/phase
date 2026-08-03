@@ -42,7 +42,7 @@ pub fn eliminate_players_simultaneously(
             continue;
         }
         leaving_set.insert(player);
-        if super::topology::has_shared_life_resources(state) {
+        if super::topology::side_shares_life(state, player) {
             for teammate in players::teammates(state, player) {
                 if players::is_alive(state, teammate) {
                     leaving_set.insert(teammate);
@@ -61,7 +61,7 @@ pub fn eliminate_players_simultaneously(
         do_eliminate(state, player, &leaving_set, events);
         eliminated_any = true;
 
-        if super::topology::has_shared_life_resources(state) {
+        if super::topology::side_shares_life(state, player) {
             for teammate in players::teammates(state, player) {
                 if players::is_alive(state, teammate) {
                     do_eliminate(state, teammate, &leaving_set, events);
