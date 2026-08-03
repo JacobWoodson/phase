@@ -476,7 +476,8 @@ impl HordeRuleset {
         );
 
         let combat = if self.horde_creatures_forced_attackers {
-            "The Horde's creatures attack every combat if able".to_string()
+            "The Horde's creatures attack every combat if able, and only its Defenders can block"
+                .to_string()
         } else {
             "The Horde's creatures attack only when instructed".to_string()
         };

@@ -523,17 +523,60 @@ fn horde_emblem_static(forced_attackers: bool) -> crate::types::ability::StaticD
         )
 }
 
-/// Grant the Horde seat its game-start setup: the command-zone emblem (haste +
-/// forced attackers on its creatures) and, under the advanced
-/// `HordePostCombatActivation::OncePerPermanent` rule, infinite mana (so its
-/// post-combat activation costs are payable). Single authority for Horde
-/// game-start setup, mirroring the Momir emblem grant; `forced_attackers` comes
-/// from the ruleset, and the infinite-mana grant reads the ruleset directly.
+/// The Horde combat rule "only Horde creatures with Defender can block": a Layer 6
+/// `GrantStaticAbility` that gives every NON-Defender creature the Horde controls a
+/// `CantBlock` static (CR 509.1b). The Horde is an attacking force — its creatures
+/// must attack and don't hold the line — so this pairs with the forced-attackers
+/// grant as one aggressive-Horde combat package, gated on the same ruleset axis
+/// (`horde_creatures_forced_attackers`). A Defender creature (which can't attack,
+/// CR 702.3b) is excluded by the `WithoutKeyword(Defender)` affected-filter, so it
+/// remains the Horde's only legal blocker. `ControllerRef::You` resolves against the
+/// emblem's controller (the Horde), so this is a live "creatures the Horde controls"
+/// read, mirroring [`horde_emblem_static`].
+fn horde_no_block_static() -> crate::types::ability::StaticDefinition {
+    use crate::types::ability::{
+        ContinuousModification, ControllerRef, FilterProp, StaticDefinition, TargetFilter,
+        TypedFilter,
+    };
+    use crate::types::keywords::Keyword;
+    use crate::types::statics::StaticMode;
+
+    StaticDefinition::continuous()
+        .affected(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::WithoutKeyword {
+                    value: Keyword::Defender,
+                }]),
+        ))
+        .modifications(vec![ContinuousModification::GrantStaticAbility {
+            definition: Box::new(StaticDefinition::new(StaticMode::CantBlock)),
+        }])
+        .description(
+            "Non-Defender creatures the Horde controls can't block (only Defenders block)."
+                .to_string(),
+        )
+}
+
+/// Grant the Horde seat its game-start setup: the command-zone emblem (haste on
+/// its creatures always, plus — under `forced_attackers` — the aggressive-combat
+/// package of "attacks each combat if able" and "only Defenders can block") and,
+/// under the advanced `HordePostCombatActivation::OncePerPermanent` rule, infinite
+/// mana (so its post-combat activation costs are payable). Single authority for
+/// Horde game-start setup, mirroring the Momir emblem grant; `forced_attackers`
+/// comes from the ruleset, and the infinite-mana grant reads the ruleset directly.
 pub fn grant_horde_emblem(state: &mut GameState, horde_seat: PlayerId, forced_attackers: bool) {
+    // The aggressive-Horde combat package: haste + forced attackers (in
+    // `horde_emblem_static`) and, under the same forced-attackers axis, the
+    // "only Defenders block" restriction ([`horde_no_block_static`]).
+    let mut statics = vec![horde_emblem_static(forced_attackers)];
+    if forced_attackers {
+        statics.push(horde_no_block_static());
+    }
     let emblem_id = crate::game::effects::create_emblem::grant_emblem(
         state,
         horde_seat,
-        vec![horde_emblem_static(forced_attackers)],
+        statics,
         Vec::new(),
         Vec::new(),
     );

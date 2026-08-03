@@ -1610,4 +1610,165 @@ mod tests {
         assert!(!wave_ends_after_nontoken(fixed, None, 0));
         assert!(!wave_ends_after_nontoken(None, Some(Rarity::Mythic), 0));
     }
+
+    // ── Only-Defenders-block combat rule ────────────────────────────────────
+
+    /// Basic Horde rule "only Horde creatures with Defender can block": the
+    /// game-start emblem gives every NON-Defender creature the Horde controls a
+    /// `CantBlock` static (CR 509.1b), so it is excluded from the Horde's legal
+    /// blockers, while a Defender creature stays a valid blocker.
+    #[test]
+    fn horde_non_defender_creatures_cant_block_only_defenders_can() {
+        use crate::game::zones::create_object;
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+        use crate::types::keywords::Keyword;
+
+        let mut state = GameState::new(
+            FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset()),
+            2,
+            42,
+        );
+        let horde = horde_seat(&state).expect("horde seat");
+        let survivor = state
+            .players
+            .iter()
+            .map(|p| p.id)
+            .find(|&id| id != horde)
+            .expect("a survivor seat");
+
+        // Grant the Horde its game-start emblem (haste + forced attackers +
+        // only-Defenders-block).
+        crate::game::deck_loading::grant_horde_emblem(&mut state, horde, true);
+
+        // Two Horde creatures: a plain attacker and a Defender wall.
+        let grunt = create_object(
+            &mut state,
+            CardId(9101),
+            horde,
+            "Grunt".into(),
+            Zone::Battlefield,
+        );
+        let wall = create_object(
+            &mut state,
+            CardId(9102),
+            horde,
+            "Wall".into(),
+            Zone::Battlefield,
+        );
+        for &id in &[grunt, wall] {
+            let o = state.objects.get_mut(&id).unwrap();
+            o.card_types.core_types.push(CoreType::Creature);
+            o.power = Some(2);
+            o.toughness = Some(2);
+            o.summoning_sick = false;
+        }
+        {
+            // base_keywords is the layer base, so the Defender survives flush_layers.
+            let o = state.objects.get_mut(&wall).unwrap();
+            o.keywords.push(Keyword::Defender);
+            o.base_keywords.push(Keyword::Defender);
+        }
+        crate::game::layers::flush_layers(&mut state);
+
+        // A survivor attacks the Horde; the Horde must now declare blockers.
+        let attacker = create_object(
+            &mut state,
+            CardId(9103),
+            survivor,
+            "Raider".into(),
+            Zone::Battlefield,
+        );
+        {
+            let o = state.objects.get_mut(&attacker).unwrap();
+            o.card_types.core_types.push(CoreType::Creature);
+            o.power = Some(2);
+            o.toughness = Some(2);
+            o.summoning_sick = false;
+        }
+        state.combat = Some(crate::game::combat::CombatState {
+            attackers: vec![crate::game::combat::AttackerInfo::attacking_player(
+                attacker, horde,
+            )],
+            ..Default::default()
+        });
+
+        let valid = crate::game::combat::get_valid_block_targets_for_player(&state, horde);
+        assert!(
+            !valid.contains_key(&grunt),
+            "a non-Defender Horde creature can't block (only Defenders block)"
+        );
+        assert!(
+            valid.contains_key(&wall),
+            "a Defender Horde creature remains a legal blocker"
+        );
+    }
+
+    /// Negative control: with `forced_attackers = false` the aggressive-combat
+    /// package is off, so a non-Defender Horde creature CAN block normally — the
+    /// restriction is strictly gated on the ruleset axis.
+    #[test]
+    fn horde_without_forced_attackers_can_block_normally() {
+        use crate::game::zones::create_object;
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+
+        let mut state = GameState::new(
+            FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset()),
+            2,
+            42,
+        );
+        let horde = horde_seat(&state).expect("horde seat");
+        let survivor = state
+            .players
+            .iter()
+            .map(|p| p.id)
+            .find(|&id| id != horde)
+            .expect("a survivor seat");
+
+        crate::game::deck_loading::grant_horde_emblem(&mut state, horde, false);
+
+        let grunt = create_object(
+            &mut state,
+            CardId(9101),
+            horde,
+            "Grunt".into(),
+            Zone::Battlefield,
+        );
+        {
+            let o = state.objects.get_mut(&grunt).unwrap();
+            o.card_types.core_types.push(CoreType::Creature);
+            o.power = Some(2);
+            o.toughness = Some(2);
+            o.summoning_sick = false;
+        }
+        crate::game::layers::flush_layers(&mut state);
+
+        let attacker = create_object(
+            &mut state,
+            CardId(9103),
+            survivor,
+            "Raider".into(),
+            Zone::Battlefield,
+        );
+        {
+            let o = state.objects.get_mut(&attacker).unwrap();
+            o.card_types.core_types.push(CoreType::Creature);
+            o.power = Some(2);
+            o.toughness = Some(2);
+            o.summoning_sick = false;
+        }
+        state.combat = Some(crate::game::combat::CombatState {
+            attackers: vec![crate::game::combat::AttackerInfo::attacking_player(
+                attacker, horde,
+            )],
+            ..Default::default()
+        });
+
+        let valid = crate::game::combat::get_valid_block_targets_for_player(&state, horde);
+        assert!(
+            valid.contains_key(&grunt),
+            "without forced attackers, a non-Defender Horde creature blocks normally"
+        );
+    }
 }
