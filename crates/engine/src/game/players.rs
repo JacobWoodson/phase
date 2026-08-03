@@ -260,27 +260,13 @@ pub fn apnap_order_from(
         ) => state.active_player,
     };
 
-    if state.format_config.topology().has_shared_team_turns() {
-        return super::topology::apnap_order_from(state, start_player);
-    }
-
-    let start_idx = seat_order
-        .iter()
-        .position(|&id| id == start_player)
-        .unwrap_or(0);
-
-    let mut result = Vec::new();
-    for offset in 0..len {
-        // CR 101.4 + CR 103.1: APNAP follows the current turn-order direction.
-        let idx = turn_order_index(start_idx, offset, len, state.turn_direction);
-        let candidate = seat_order[idx];
-        // CR 800.4f: A player who has left the game does not pay costs or
-        // make choices on objects' behalf; skip eliminated players.
-        if is_alive(state, candidate) {
-            result.push(candidate);
-        }
-    }
-    result
+    // CR 101.4 + CR 103.1: APNAP follows the current turn-order direction, with
+    // each shared side collapsed to a single choice group and each individual seat
+    // its own group (see `topology::apnap_choice_groups_from`). Flattening that is
+    // the living APNAP order for every side shape — uniform-individual (one group
+    // per seat), uniform-shared, and the mixed Horde game alike — so this is a
+    // single delegation rather than a per-format branch.
+    super::topology::apnap_order_from(state, start_player)
 }
 
 /// CR 603.10a + CR 607.2a: Return the cards linked as "exiled with" `source_id`.

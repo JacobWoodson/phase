@@ -763,21 +763,6 @@ pub struct FormatConfig {
     pub horde_ruleset: Option<HordeRuleset>,
 }
 
-impl FormatTopology {
-    pub fn has_shared_team_turns(self) -> bool {
-        matches!(
-            self,
-            FormatTopology::FixedTeams {
-                turn_structure: TurnStructure::SharedTeamTurns,
-                ..
-            } | FormatTopology::OneVsMany {
-                turn_structure: TurnStructure::SharedTeamTurns,
-                ..
-            }
-        )
-    }
-}
-
 impl GameFormat {
     /// Maps a playable game format to its corresponding legality format for card pool validation.
     /// Returns `None` for formats that don't restrict card pools (FreeForAll, TwoHeadedGiant).

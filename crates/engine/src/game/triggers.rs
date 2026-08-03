@@ -1316,38 +1316,29 @@ pub(super) fn resolve_tap_mana_triggers_inline(
 }
 
 /// CR 101.4 + CR 603.3b: APNAP rank of `controller` for trigger ordering — its
-/// index in the living turn order from the active player (0 = active player,
-/// then each non-active player in turn order). This is the primary key the
+/// choice group's index in the living turn order from the active player (0 =
+/// active side, then each other side in turn order). This is the primary key the
 /// simultaneous-trigger sorts must use: a binary "active vs non-active" key
-/// collapses every non-active player into one bucket and cannot order two or
-/// more of them by turn order. Controllers not in the living order (e.g. an
-/// eliminated player) sort after all living players. In a two-player game the
-/// rank is 0/1, identical to the old binary key, so nothing regresses there.
-fn apnap_rank(order: &[PlayerId], controller: PlayerId) -> usize {
-    order
-        .iter()
-        .position(|p| *p == controller)
-        .unwrap_or(order.len())
-}
-
+/// collapses every non-active player into one bucket and cannot order two or more
+/// of them by turn order.
+///
+/// Per-side (see `topology::apnap_choice_groups`): each shared side ranks as one
+/// team, each individual seat as itself. For a uniform-individual format every
+/// group is a single seat, so this reduces to the seat's position in living
+/// turn order — the historical rank. Controllers not in any group (e.g. an
+/// eliminated player) sort after all living groups; in a two-player game the rank
+/// is 0/1, identical to the old binary key, so nothing regresses there.
 fn trigger_apnap_rank(state: &GameState, controller: PlayerId) -> usize {
-    if state.format_config.topology().has_shared_team_turns() {
-        super::topology::apnap_team_rank(state, controller)
-    } else {
-        let apnap = crate::game::players::apnap_order(state);
-        apnap_rank(&apnap, controller)
-    }
+    super::topology::apnap_team_rank(state, controller)
 }
 
 fn trigger_order_controller(state: &GameState, controller: PlayerId) -> PlayerId {
-    if state.format_config.topology().has_shared_team_turns() {
-        // CR 805.6 / CR 805.7 + CR 603.3b: APNAP choices are made by teams in
-        // shared-team-turn games. Keep each trigger's real controller intact;
-        // only the ordering prompt is assigned to the team's representative.
-        super::topology::priority_pass_representative(state, controller)
-    } else {
-        controller
-    }
+    // CR 805.6 / CR 805.7 + CR 603.3b: on a shared side, APNAP ordering choices
+    // are made by the team, so the prompt is assigned to the side's
+    // representative; the trigger's real controller is untouched. On an
+    // individual seat the representative IS the controller, so this is a no-op
+    // there (preserving the old non-shared behavior).
+    super::topology::priority_pass_representative(state, controller)
 }
 
 /// CR 603.2 + CR 603.3b: Collect every triggered ability matching `events`,

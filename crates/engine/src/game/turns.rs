@@ -1648,7 +1648,7 @@ fn execute_seedborn_statics(state: &mut GameState, events: &mut Vec<GameEvent>, 
 pub fn execute_draw(state: &mut GameState, events: &mut Vec<GameEvent>) -> Option<WaitingFor> {
     if state.pending_team_draw_step.is_empty() {
         state.pending_team_draw_step.push(state.active_player);
-        if state.format_config.topology().has_shared_team_turns() {
+        if super::topology::side_takes_shared_turn(state, state.active_player) {
             state
                 .pending_team_draw_step
                 .extend(super::players::teammates(state, state.active_player));

@@ -5518,7 +5518,7 @@ fn handle_play_land(
     // e.g. Mindslaver), which always act on the active player's own
     // resources regardless of who submits the choice — that path is
     // unaffected since it never uses shared team turns.
-    let player = if state.format_config.topology().has_shared_team_turns() {
+    let player = if super::topology::side_takes_shared_turn(state, state.active_player) {
         if !super::topology::team_members(state, state.active_player).contains(&acting_player) {
             return Err(EngineError::ActionNotAllowed(
                 "Only the active team may play lands during its turn".to_string(),
@@ -5552,7 +5552,7 @@ fn handle_play_land(
     // their own allowance); the legacy single-counter `lands_played_this_turn`
     // is correct outside team-based formats, where only the active player
     // ever plays lands during their own turn.
-    let lands_played = if state.format_config.topology().has_shared_team_turns() {
+    let lands_played = if super::topology::side_takes_shared_turn(state, state.active_player) {
         state
             .players
             .iter()

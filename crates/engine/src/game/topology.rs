@@ -37,6 +37,44 @@ pub(crate) struct Side {
 /// OneVsMany — so every side of a given format shares one structure today. Mixed
 /// structures (Horde, Emperor) arrive when those formats emit their own sides.
 pub(crate) fn sides(state: &GameState) -> Vec<Side> {
+    // A two-Horde-force deck (LOTR Two Towers) emits a MIXED side shape that no
+    // single `FormatTopology` variant can: the survivors form one side that takes
+    // a shared team turn (CR 805), while both Horde seats form a single ALLIED
+    // side (they never attack each other and share a collective loss) whose
+    // members each take their own INDIVIDUAL, alternating turn. A single-Horde
+    // game has no mixed structure — it is exactly the OneVsMany archenemy shape —
+    // so it falls through to the topology match below.
+    if let Some(hordes) = two_horde_seats(state) {
+        // Seat order gives a stable side ordering (matching OneVsMany, which the
+        // Horde replaces): survivors first (side 0), the Horde side second.
+        let survivors: Vec<PlayerId> = state
+            .seat_order
+            .iter()
+            .copied()
+            .filter(|id| !hordes.contains(id))
+            .collect();
+        let horde_seats: Vec<PlayerId> = state
+            .seat_order
+            .iter()
+            .copied()
+            .filter(|id| hordes.contains(id))
+            .collect();
+        // Per-side life-sharing is a later stage; today both Horde seats have no
+        // life total, so the survivor side's shared life still rides the whole-game
+        // `has_shared_life_resources` and the Horde side's (vestigial) life is
+        // never read.
+        return vec![
+            Side {
+                seats: survivors,
+                turn_structure: TurnStructure::SharedTeamTurns,
+            },
+            Side {
+                seats: horde_seats,
+                turn_structure: TurnStructure::IndividualTurns,
+            },
+        ];
+    }
+
     match state.format_config.topology() {
         FormatTopology::IndividualSeats => {
             let mut ids: Vec<PlayerId> = state.players.iter().map(|p| p.id).collect();
@@ -99,7 +137,30 @@ pub(crate) fn side_of(state: &GameState, player: PlayerId) -> Option<Side> {
     sides(state).into_iter().find(|s| s.seats.contains(&player))
 }
 
+/// The designated Horde seats when this game uses the two-Horde MIXED side shape
+/// (a Horde game with 2+ designated seats), else `None`. A single-Horde game
+/// (0 or 1 designated seats) is exactly the plain OneVsMany archenemy shape, so
+/// this returns `None` and callers fall through to the [`FormatTopology`] paths.
+///
+/// Reads the `horde_seats` field directly (not [`crate::game::horde::horde_seats`],
+/// which clones + falls back to the sole archenemy) so [`team_id`] stays an O(1),
+/// allocation-free equality key. The `len() >= 2` gate is equivalent: the
+/// fallback only ever yields 0 or 1 seat.
+fn two_horde_seats(state: &GameState) -> Option<&[PlayerId]> {
+    (state.format_config.format == GameFormat::Horde && state.horde_seats.len() >= 2)
+        .then_some(state.horde_seats.as_slice())
+}
+
 pub(crate) fn team_id(state: &GameState, player: PlayerId) -> TeamId {
+    // Two-Horde MIXED shape: survivors are side 0, the allied Horde seats side 1
+    // (kept consistent with [`sides`] and pinned by `team_id_matches_side_index`).
+    if let Some(hordes) = two_horde_seats(state) {
+        return if hordes.contains(&player) {
+            TeamId(1)
+        } else {
+            TeamId(0)
+        };
+    }
     match state.format_config.topology() {
         FormatTopology::IndividualSeats => TeamId(player.0),
         FormatTopology::FixedTeams { team_size, .. } => TeamId(player.0 / team_size),
@@ -126,11 +187,14 @@ pub(crate) fn team_members(state: &GameState, player: PlayerId) -> Vec<PlayerId>
 
 /// Whether `player`'s side takes a single shared team turn (CR 805) rather than
 /// each member taking an individual turn. Per-side, so a mixed game (Horde:
-/// survivors shared, Hordes individual) answers differently per player. Replaces
-/// the whole-game `topology().has_shared_team_turns()` inside the turn-rotation /
-/// priority / APNAP functions below; for today's uniform formats every side of a
-/// game shares one structure, so the answer matches the whole-game predicate.
-fn side_takes_shared_turn(state: &GameState, player: PlayerId) -> bool {
+/// survivors shared, Hordes individual) answers differently per player. This is
+/// THE turn-structure predicate — it replaced a whole-format one, which could not
+/// describe a mixed game — used both inside the turn-rotation / priority / APNAP
+/// functions below AND at the peripheral consumers (land-drop, draw step,
+/// turn-control authorization), each of which asks about the ACTIVE player's
+/// side. For today's uniform formats every side of a game shares one structure,
+/// so the answer matches the old whole-format predicate.
+pub(crate) fn side_takes_shared_turn(state: &GameState, player: PlayerId) -> bool {
     side_of(state, player).is_some_and(|s| s.turn_structure == TurnStructure::SharedTeamTurns)
 }
 
@@ -483,5 +547,101 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A two-Horde-force game (LOTR Two Towers): seats 0 and 1 are the allied
+    /// Horde seats, seats 2 and 3 the survivors. `seat_order` is pinned explicitly
+    /// so the rotation assertions don't depend on construction details.
+    fn two_horde_state() -> GameState {
+        use crate::types::format::ChallengeDeck;
+        let mut state = GameState::new(
+            FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset()),
+            4,
+            42,
+        );
+        state.horde_seats = vec![PlayerId(0), PlayerId(1)];
+        state.seat_order = vec![PlayerId(0), PlayerId(1), PlayerId(2), PlayerId(3)];
+        state
+    }
+
+    /// The mixed side shape no `FormatTopology` variant can express: the survivors
+    /// are one shared-turn side, both Horde seats a single individual-turn side.
+    #[test]
+    fn two_horde_game_splits_survivors_and_allied_hordes_into_sides() {
+        let state = two_horde_state();
+        let s = sides(&state);
+        assert_eq!(s.len(), 2, "survivors + Horde side");
+
+        assert_eq!(
+            s[0].seats,
+            vec![PlayerId(2), PlayerId(3)],
+            "survivors first"
+        );
+        assert_eq!(s[0].turn_structure, TurnStructure::SharedTeamTurns);
+
+        assert_eq!(
+            s[1].seats,
+            vec![PlayerId(0), PlayerId(1)],
+            "both Horde seats form one side"
+        );
+        assert_eq!(
+            s[1].turn_structure,
+            TurnStructure::IndividualTurns,
+            "each Horde takes its own turn"
+        );
+
+        // The O(1) `team_id` key cannot diverge from the mixed `sides()` grouping.
+        for p in &state.players {
+            let idx = s.iter().position(|g| g.seats.contains(&p.id)).unwrap();
+            assert_eq!(team_id(&state, p.id), TeamId(idx as u8));
+        }
+    }
+
+    /// The two Horde seats are allies (they never attack each other and share a
+    /// collective loss); each opposes every survivor.
+    #[test]
+    fn two_horde_seats_are_allies_survivors_are_their_opponents() {
+        let state = two_horde_state();
+        assert!(
+            !is_opponent(&state, PlayerId(0), PlayerId(1)),
+            "the two Hordes are allied"
+        );
+        assert!(
+            !is_opponent(&state, PlayerId(2), PlayerId(3)),
+            "the survivors are allied"
+        );
+        assert!(is_opponent(&state, PlayerId(0), PlayerId(2)));
+        assert!(is_opponent(&state, PlayerId(1), PlayerId(3)));
+        assert_eq!(
+            teammates(&state, PlayerId(0)),
+            vec![PlayerId(1)],
+            "a Horde seat's only ally is the other Horde seat"
+        );
+    }
+
+    /// Turn rotation treats each Horde seat individually but the survivors as one
+    /// shared turn: H0 → H1 → (one) survivor turn → back to H0.
+    #[test]
+    fn two_horde_rotation_gives_each_horde_a_turn_then_one_shared_survivor_turn() {
+        let state = two_horde_state();
+        // Each Horde seat takes its own individual turn.
+        assert_eq!(next_turn_representative(&state, PlayerId(0)), PlayerId(1));
+        // After the last Horde, the survivors take ONE shared turn (its rep).
+        assert_eq!(next_turn_representative(&state, PlayerId(1)), PlayerId(2));
+        // That single shared survivor turn hands straight back to the first Horde —
+        // the other survivor does NOT get a separate turn.
+        assert_eq!(next_turn_representative(&state, PlayerId(2)), PlayerId(0));
+    }
+
+    /// Priority: each individual Horde seat participates on its own, while the
+    /// survivor side collapses to a single representative.
+    #[test]
+    fn two_horde_priority_participants_collapse_survivors_but_not_hordes() {
+        let mut state = two_horde_state();
+        state.active_player = PlayerId(0);
+        assert_eq!(
+            priority_pass_participants(&state),
+            vec![PlayerId(0), PlayerId(1), PlayerId(2)]
+        );
     }
 }
