@@ -361,6 +361,30 @@ pub enum HordePostCombatActivation {
     OncePerPermanent,
 }
 
+/// The deck-construction format each SURVIVOR brings to a Horde game — a per-deck
+/// axis, because different Horde decks were designed against different survivor
+/// pools. The hordemagic community decks are built around EDH/Commander survivor
+/// decks ("Each player chooses an EDH deck"); the Theros challenge decks (Face the
+/// Hydra, Battle the Horde, Defeat a God) were built for 60-card Theros-block
+/// constructed decks. [`FormatConfig::horde`] derives the survivor deck
+/// constraints (size, singleton, commander) from this.
+///
+/// `Constructed` is the default (and the current behavior for every shipped deck).
+/// Promoting a community deck to `Commander` is more than a deck-size change — it
+/// turns on the commander subsystem for survivors (command-zone commanders, tax,
+/// damage), which Horde setup does not yet wire — so that is a deliberate,
+/// per-deck follow-up; this axis is the declaration point for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SurvivorDeckFormat {
+    /// 60-card (minimum) constructed: non-singleton, no commander. Theros-block
+    /// challenge decks, and the current default for every shipped deck.
+    #[default]
+    Constructed,
+    /// EDH / Commander: 100-card singleton with a commander (command zone) and
+    /// the 21-point commander-damage threshold.
+    Commander,
+}
+
 /// The parameters that distinguish one Horde deck's rules from another, carried
 /// on `FormatConfig` so a single `GameFormat::Horde` variant covers the whole
 /// family without sibling format variants. All fields are typed axes, not
@@ -410,6 +434,12 @@ pub struct HordeRuleset {
     /// `#[serde(default)]` so pre-axis serialized Horde configs still deserialize.
     #[serde(default)]
     pub post_combat_activation: HordePostCombatActivation,
+    /// The deck-construction format survivors bring (per-deck; see
+    /// [`SurvivorDeckFormat`]). `#[serde(default)]` back-fills `Constructed` for
+    /// Horde configs serialized before this axis — matching the pre-axis behavior
+    /// where `FormatConfig::horde` hardcoded a 60-card non-singleton survivor deck.
+    #[serde(default)]
+    pub survivor_deck_format: SurvivorDeckFormat,
 }
 
 impl HordeRuleset {
@@ -643,6 +673,11 @@ impl ChallengeDeck {
                 // Stranger Things.
                 legendary_death: HordeLegendaryDeath::Normal,
                 post_combat_activation: HordePostCombatActivation::None,
+                // Every shipped deck is a community deck; survivor decks currently
+                // load as 60-card constructed. Promoting these to `Commander`
+                // (per the basic EDH rule) is a follow-up that also wires survivor
+                // commanders into Horde setup.
+                survivor_deck_format: SurvivorDeckFormat::Constructed,
             },
             ChallengeDeck::DndHorde => HordeRuleset {
                 challenge_deck: ChallengeDeck::DndHorde,
@@ -660,6 +695,11 @@ impl ChallengeDeck {
                 // Stranger Things.
                 legendary_death: HordeLegendaryDeath::Normal,
                 post_combat_activation: HordePostCombatActivation::None,
+                // Every shipped deck is a community deck; survivor decks currently
+                // load as 60-card constructed. Promoting these to `Commander`
+                // (per the basic EDH rule) is a follow-up that also wires survivor
+                // commanders into Horde setup.
+                survivor_deck_format: SurvivorDeckFormat::Constructed,
             },
             ChallengeDeck::ZombiesHorde => HordeRuleset {
                 challenge_deck: ChallengeDeck::ZombiesHorde,
@@ -681,6 +721,11 @@ impl ChallengeDeck {
                 // Stranger Things.
                 legendary_death: HordeLegendaryDeath::Normal,
                 post_combat_activation: HordePostCombatActivation::None,
+                // Every shipped deck is a community deck; survivor decks currently
+                // load as 60-card constructed. Promoting these to `Commander`
+                // (per the basic EDH rule) is a follow-up that also wires survivor
+                // commanders into Horde setup.
+                survivor_deck_format: SurvivorDeckFormat::Constructed,
             },
             ChallengeDeck::SliversHorde => HordeRuleset {
                 challenge_deck: ChallengeDeck::SliversHorde,
@@ -699,6 +744,11 @@ impl ChallengeDeck {
                 // Stranger Things.
                 legendary_death: HordeLegendaryDeath::Normal,
                 post_combat_activation: HordePostCombatActivation::None,
+                // Every shipped deck is a community deck; survivor decks currently
+                // load as 60-card constructed. Promoting these to `Commander`
+                // (per the basic EDH rule) is a follow-up that also wires survivor
+                // commanders into Horde setup.
+                survivor_deck_format: SurvivorDeckFormat::Constructed,
             },
             ChallengeDeck::HumansGodzillaHorde => HordeRuleset {
                 challenge_deck: ChallengeDeck::HumansGodzillaHorde,
@@ -714,6 +764,11 @@ impl ChallengeDeck {
                 // Stranger Things.
                 legendary_death: HordeLegendaryDeath::Normal,
                 post_combat_activation: HordePostCombatActivation::None,
+                // Every shipped deck is a community deck; survivor decks currently
+                // load as 60-card constructed. Promoting these to `Commander`
+                // (per the basic EDH rule) is a follow-up that also wires survivor
+                // commanders into Horde setup.
+                survivor_deck_format: SurvivorDeckFormat::Constructed,
             },
         }
     }
@@ -1571,6 +1626,15 @@ impl FormatConfig {
     /// engine-supplied (injected like the Archenemy scheme deck); survivors
     /// build and select their own decks.
     pub fn horde(ruleset: HordeRuleset) -> Self {
+        // Survivor deck constraints are a per-deck axis (community decks want EDH,
+        // Theros-block decks want 60-card constructed). `command_zone` stays true
+        // regardless — the Horde's own game-start emblem lives in the command zone,
+        // independent of whether survivors run commanders.
+        let (deck_size, singleton, uses_commander, commander_damage_threshold) =
+            match ruleset.survivor_deck_format {
+                SurvivorDeckFormat::Constructed => (60, false, false, None),
+                SurvivorDeckFormat::Commander => (100, true, true, Some(21)),
+            };
         FormatConfig {
             format: GameFormat::Horde,
             // Fallback only. The authoritative survivors' combined base life is
@@ -1582,16 +1646,16 @@ impl FormatConfig {
             // 1 survivor + the Horde seat, up to 4 survivors + the Horde.
             min_players: 2,
             max_players: 5,
-            deck_size: 60,
-            singleton: false,
+            deck_size,
+            singleton,
             command_zone: true,
-            commander_damage_threshold: None,
+            commander_damage_threshold,
             range_of_influence: None,
             team_based: false,
             // The Horde occupies seat 0; survivors take the remaining seats and
             // act first (see `starting_player`).
             archenemy_player: Some(PlayerId(0)),
-            uses_commander: false,
+            uses_commander,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             horde_ruleset: Some(ruleset),
@@ -2037,6 +2101,36 @@ mod tests {
         assert_eq!(ruleset.challenge_deck, ChallengeDeck::CybermanHorde);
         assert_eq!(ruleset.survivor_setup_turns, 3);
         assert!(ruleset.horde_creatures_forced_attackers);
+        // Every shipped deck loads survivors as 60-card constructed today.
+        assert_eq!(
+            ruleset.survivor_deck_format,
+            SurvivorDeckFormat::Constructed
+        );
+    }
+
+    /// The per-deck survivor-deck-format axis drives `FormatConfig::horde`'s
+    /// survivor deck constraints: `Constructed` is 60-card non-singleton with no
+    /// commander; `Commander` is 100-card singleton EDH. `command_zone` is present
+    /// either way — the Horde's own emblem lives there.
+    #[test]
+    fn horde_survivor_deck_format_axis_drives_deck_constraints() {
+        let mut ruleset = ChallengeDeck::CybermanHorde.default_ruleset();
+
+        ruleset.survivor_deck_format = SurvivorDeckFormat::Constructed;
+        let cfg = FormatConfig::horde(ruleset.clone());
+        assert_eq!(cfg.deck_size, 60);
+        assert!(!cfg.singleton);
+        assert!(!cfg.uses_commander);
+        assert_eq!(cfg.commander_damage_threshold, None);
+        assert!(cfg.command_zone);
+
+        ruleset.survivor_deck_format = SurvivorDeckFormat::Commander;
+        let cfg = FormatConfig::horde(ruleset);
+        assert_eq!(cfg.deck_size, 100);
+        assert!(cfg.singleton);
+        assert!(cfg.uses_commander);
+        assert_eq!(cfg.commander_damage_threshold, Some(21));
+        assert!(cfg.command_zone);
     }
 
     #[test]
@@ -2245,6 +2339,7 @@ mod tests {
             horde_creatures_forced_attackers: true,
             legendary_death: HordeLegendaryDeath::Normal,
             post_combat_activation: HordePostCombatActivation::None,
+            survivor_deck_format: SurvivorDeckFormat::Constructed,
         };
         // Pull the "Waves" line out of the rendered summary.
         let wave_detail = |wave: WaveTermination| -> String {
@@ -2303,6 +2398,7 @@ mod tests {
                 horde_creatures_forced_attackers: true,
                 legendary_death: HordeLegendaryDeath::Normal,
                 post_combat_activation: HordePostCombatActivation::None,
+                survivor_deck_format: SurvivorDeckFormat::Constructed,
             }
             .summary()
             .into_iter()
@@ -2329,6 +2425,7 @@ mod tests {
             horde_creatures_forced_attackers: true,
             legendary_death: rule,
             post_combat_activation: HordePostCombatActivation::None,
+            survivor_deck_format: SurvivorDeckFormat::Constructed,
         };
 
         let basic = with_legendary(HordeLegendaryDeath::Normal).summary();
@@ -2362,6 +2459,7 @@ mod tests {
             horde_creatures_forced_attackers: true,
             legendary_death: HordeLegendaryDeath::Normal,
             post_combat_activation: rule,
+            survivor_deck_format: SurvivorDeckFormat::Constructed,
         };
 
         let basic = with_activation(HordePostCombatActivation::None).summary();
