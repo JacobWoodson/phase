@@ -1,38 +1,57 @@
 use crate::types::format::FormatTopology;
 use crate::types::format::GameFormat;
+use crate::types::format::TurnStructure;
 use crate::types::game_state::GameState;
 use crate::types::player::PlayerId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct TeamId(pub u8);
 
-/// The game's SIDES — the groups of seats that share a win/loss fate (and, per
-/// format, may share turns or life). This is the single grouping authority that
-/// [`team_members`] derives from; [`team_id`] is kept as an O(1) equality key and
-/// pinned consistent with this by `team_id_matches_side_index` in tests.
+/// One SIDE of the game: a group of seats that share a win/loss fate, together
+/// with how that side takes turns. A side's `turn_structure` is its own axis, so
+/// different sides can differ — the whole point of the general model: Horde's
+/// survivor side takes a shared team turn (CR 805) while each Horde takes its own
+/// individual turn (alternating, LOTR Two Towers), and Emperor's teams take
+/// individual turns (CR 809.4). (A future stage adds a `shared_life` axis here
+/// too, for Emperor's non-shared teams vs 2HG's shared ones.)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Side {
+    pub seats: Vec<PlayerId>,
+    pub turn_structure: TurnStructure,
+}
+
+/// The game's SIDES — the single grouping+turn-structure authority. [`team_members`]
+/// derives its grouping from this; the turn-rotation / priority / APNAP functions
+/// derive their per-side turn structure from it; [`team_id`] is kept as an O(1)
+/// equality key and pinned consistent with this by `team_id_matches_side_index`.
 ///
-/// Groups include EVERY seat (alive or not) so the ordering is stable — a side's
-/// index reproduces the historical [`TeamId`]: IndividualSeats is one side per
-/// seat ordered by id; FixedTeams is one side per team ordered by team index;
-/// OneVsMany is the archenemy side first, then the many (in seat order, matching
-/// the pre-refactor `team_members`). Alive-filtering is the caller's job.
+/// Sides include EVERY seat (alive or not) so ordering is stable — a side's index
+/// reproduces the historical [`TeamId`]: IndividualSeats is one side per seat
+/// ordered by id; FixedTeams is one side per team; OneVsMany is the archenemy side
+/// first, then the many (in seat order, matching the pre-refactor `team_members`).
+/// Alive-filtering is the caller's job.
 ///
-/// Stage 1 of the general sides-based topology: it currently REPRODUCES the three
-/// [`FormatTopology`] shapes exactly (behavior-preserving). Later stages give each
-/// side its own turn structure + resource policy so mixed models become
-/// expressible — Horde's survivors-share-a-turn + individual alternating Horde
-/// turns, and Emperor's individual-turn teams (CR 809.4).
-pub(crate) fn sides(state: &GameState) -> Vec<Vec<PlayerId>> {
+/// It currently REPRODUCES the three [`FormatTopology`] shapes exactly
+/// (behavior-preserving): each side's turn structure is IndividualTurns for
+/// IndividualSeats and the topology's own `turn_structure` for FixedTeams /
+/// OneVsMany — so every side of a given format shares one structure today. Mixed
+/// structures (Horde, Emperor) arrive when those formats emit their own sides.
+pub(crate) fn sides(state: &GameState) -> Vec<Side> {
     match state.format_config.topology() {
         FormatTopology::IndividualSeats => {
             let mut ids: Vec<PlayerId> = state.players.iter().map(|p| p.id).collect();
             ids.sort_by_key(|id| id.0);
-            ids.into_iter().map(|id| vec![id]).collect()
+            ids.into_iter()
+                .map(|id| Side {
+                    seats: vec![id],
+                    turn_structure: TurnStructure::IndividualTurns,
+                })
+                .collect()
         }
         FormatTopology::FixedTeams {
             team_size,
             team_count,
-            ..
+            turn_structure,
         } => {
             let mut teams: Vec<Vec<PlayerId>> = vec![Vec::new(); team_count as usize];
             let mut ids: Vec<PlayerId> = state.players.iter().map(|p| p.id).collect();
@@ -44,17 +63,40 @@ pub(crate) fn sides(state: &GameState) -> Vec<Vec<PlayerId>> {
                 }
             }
             teams
+                .into_iter()
+                .map(|seats| Side {
+                    seats,
+                    turn_structure,
+                })
+                .collect()
         }
-        FormatTopology::OneVsMany { archenemy, .. } => {
+        FormatTopology::OneVsMany {
+            archenemy,
+            turn_structure,
+        } => {
             let many: Vec<PlayerId> = state
                 .seat_order
                 .iter()
                 .copied()
                 .filter(|&id| id != archenemy)
                 .collect();
-            vec![vec![archenemy], many]
+            vec![
+                Side {
+                    seats: vec![archenemy],
+                    turn_structure,
+                },
+                Side {
+                    seats: many,
+                    turn_structure,
+                },
+            ]
         }
     }
+}
+
+/// The side that contains `player`, if any.
+pub(crate) fn side_of(state: &GameState, player: PlayerId) -> Option<Side> {
+    sides(state).into_iter().find(|s| s.seats.contains(&player))
 }
 
 pub(crate) fn team_id(state: &GameState, player: PlayerId) -> TeamId {
@@ -74,13 +116,22 @@ pub(crate) fn team_id(state: &GameState, player: PlayerId) -> TeamId {
 pub(crate) fn team_members(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
     // The living members of `player`'s side (see [`sides`], the grouping
     // authority). A player with no side (shouldn't happen) has no teammates.
-    sides(state)
-        .into_iter()
-        .find(|side| side.contains(&player))
+    side_of(state, player)
+        .map(|side| side.seats)
         .unwrap_or_default()
         .into_iter()
         .filter(|&id| super::players::is_alive(state, id))
         .collect()
+}
+
+/// Whether `player`'s side takes a single shared team turn (CR 805) rather than
+/// each member taking an individual turn. Per-side, so a mixed game (Horde:
+/// survivors shared, Hordes individual) answers differently per player. Replaces
+/// the whole-game `topology().has_shared_team_turns()` inside the turn-rotation /
+/// priority / APNAP functions below; for today's uniform formats every side of a
+/// game shares one structure, so the answer matches the whole-game predicate.
+fn side_takes_shared_turn(state: &GameState, player: PlayerId) -> bool {
+    side_of(state, player).is_some_and(|s| s.turn_structure == TurnStructure::SharedTeamTurns)
 }
 
 pub(crate) fn teammates(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
@@ -162,38 +213,31 @@ pub(crate) fn apnap_choice_groups_from(
         return Vec::new();
     }
 
-    if !state.format_config.topology().has_shared_team_turns() {
-        let start_idx = seat_order
-            .iter()
-            .position(|&id| id == start_player)
-            .unwrap_or(0);
-        return (0..len)
-            .filter_map(|offset| {
-                // CR 101.4 + CR 103.1: APNAP follows the current turn-order direction.
-                let idx =
-                    super::players::turn_order_index(start_idx, offset, len, state.turn_direction);
-                let candidate = seat_order[idx];
-                super::players::is_alive(state, candidate).then_some(vec![candidate])
-            })
-            .collect();
-    }
-
+    // CR 101.4 + CR 103.1: APNAP follows the current turn-order direction. Per
+    // side: a shared-team side chooses as ONE group (its living members), deduped
+    // so it appears once; an individual-turn seat is its own group. For today's
+    // uniform formats this reduces to the old two-branch behavior (all-individual
+    // → one group per seat; all-shared → one group per team).
     let start_idx = seat_order
         .iter()
         .position(|&id| id == start_player)
         .unwrap_or(0);
-    let mut seen = std::collections::BTreeSet::new();
+    let mut seen_shared = std::collections::BTreeSet::new();
     let mut groups = Vec::new();
     for offset in 0..len {
-        // CR 101.4 + CR 103.1: APNAP follows the current turn-order direction.
         let idx = super::players::turn_order_index(start_idx, offset, len, state.turn_direction);
         let candidate = seat_order[idx];
         if !super::players::is_alive(state, candidate) {
             continue;
         }
-        let key = team_dedup_key(state, candidate);
-        if seen.insert(key) {
-            groups.push(team_members(state, candidate));
+        if side_takes_shared_turn(state, candidate) {
+            // Dedup the shared side by its stable side key so it contributes one
+            // group at its first-appearing member's position.
+            if seen_shared.insert(team_dedup_key(state, candidate)) {
+                groups.push(team_members(state, candidate));
+            }
+        } else {
+            groups.push(vec![candidate]);
         }
     }
     groups
@@ -215,7 +259,7 @@ pub(crate) fn apnap_team_rank(state: &GameState, player: PlayerId) -> usize {
 }
 
 pub(crate) fn normalize_shared_turn_recipient(state: &GameState, player: PlayerId) -> PlayerId {
-    if !state.format_config.topology().has_shared_team_turns() {
+    if !side_takes_shared_turn(state, player) {
         return player;
     }
 
@@ -229,24 +273,32 @@ pub(crate) fn normalize_shared_turn_recipient(state: &GameState, player: PlayerI
 /// than individual players have priority; when no player on a team acts, that
 /// team passes.
 pub(crate) fn priority_pass_representative(state: &GameState, player: PlayerId) -> PlayerId {
-    if !state.format_config.topology().has_shared_team_turns() {
-        return player;
-    }
-
+    // `normalize_shared_turn_recipient` already returns `player` unchanged when
+    // their side takes individual turns, so this is correct per-side.
     normalize_shared_turn_recipient(state, player)
 }
 
 /// CR 805.4: In shared-team-turn formats, each team takes turns rather than
 /// each player.
 pub(crate) fn next_turn_representative(state: &GameState, current: PlayerId) -> PlayerId {
-    if !state.format_config.topology().has_shared_team_turns() {
-        // CR 103.1: the next turn proceeds in the current turn-order direction.
-        return super::players::next_player_in_turn_order(state, current);
+    // Individual-turn side: the next turn is simply the next living seat in turn
+    // order (CR 103.1), normalized in case that seat belongs to a shared side — a
+    // mixed game, e.g. the last individual Horde turn handing back to the shared
+    // survivor side. For today's uniform individual formats the normalize is a
+    // no-op, preserving the plain `next_player_in_turn_order` behavior.
+    if !side_takes_shared_turn(state, current) {
+        return normalize_shared_turn_recipient(
+            state,
+            super::players::next_player_in_turn_order(state, current),
+        );
     }
 
+    // Shared side (CR 805.4): the whole side took ONE turn, so skip the rest of it
+    // and hand the next turn to the next living seat on a DIFFERENT side (its
+    // representative).
     let seat_order = &state.seat_order;
     let len = seat_order.len();
-    if seat_order.is_empty() {
+    if len == 0 {
         return normalize_shared_turn_recipient(state, current);
     }
 
@@ -266,12 +318,12 @@ pub(crate) fn next_turn_representative(state: &GameState, current: PlayerId) -> 
 }
 
 pub(crate) fn priority_pass_participants(state: &GameState) -> Vec<PlayerId> {
-    let participants = super::players::apnap_order(state);
-    if !state.format_config.topology().has_shared_team_turns() {
-        return participants;
-    }
-
-    participants
+    // Map every APNAP player to its per-side priority representative (self for an
+    // individual seat, the side's representative for a shared side) and dedup. For
+    // uniform-individual formats every player is its own rep, so this returns the
+    // plain APNAP order; for shared/mixed games it collapses each shared side to
+    // one representative.
+    super::players::apnap_order(state)
         .into_iter()
         .map(|player| priority_pass_representative(state, player))
         .fold(Vec::new(), |mut reps, rep| {
@@ -355,14 +407,21 @@ mod tests {
         );
     }
 
-    /// `sides()` reproduces the historical grouping for each `FormatTopology`
-    /// shape — this is what makes the Stage 1 refactor behavior-preserving.
+    /// `sides()` reproduces the historical grouping AND per-side turn structure
+    /// for each `FormatTopology` shape — what makes the refactor behavior-preserving.
     #[test]
     fn sides_reproduce_the_topology_groupings() {
-        // Free-for-all: one side per seat, ordered by id.
+        let seats = |state: &GameState| -> Vec<Vec<PlayerId>> {
+            sides(state).into_iter().map(|s| s.seats).collect()
+        };
+        let turn_kinds = |state: &GameState| -> Vec<TurnStructure> {
+            sides(state).into_iter().map(|s| s.turn_structure).collect()
+        };
+
+        // Free-for-all: one side per seat, ordered by id, each individual-turn.
         let ffa = GameState::new(FormatConfig::free_for_all(), 4, 42);
         assert_eq!(
-            sides(&ffa),
+            seats(&ffa),
             vec![
                 vec![PlayerId(0)],
                 vec![PlayerId(1)],
@@ -370,24 +429,34 @@ mod tests {
                 vec![PlayerId(3)],
             ]
         );
+        assert!(turn_kinds(&ffa)
+            .iter()
+            .all(|t| *t == TurnStructure::IndividualTurns));
 
-        // Two-Headed Giant: two teams of two, by id.
+        // Two-Headed Giant: two teams of two (by id), each shared-turn.
         let thg = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
         assert_eq!(
-            sides(&thg),
+            seats(&thg),
             vec![
                 vec![PlayerId(0), PlayerId(1)],
                 vec![PlayerId(2), PlayerId(3)],
             ]
         );
+        assert!(turn_kinds(&thg)
+            .iter()
+            .all(|t| *t == TurnStructure::SharedTeamTurns));
 
-        // Archenemy: the archenemy side first, then the heroes.
+        // Archenemy: the archenemy side first, then the heroes; both shared-turn
+        // (CR 904.2 uses the shared-team-turns option).
         let arch = GameState::new(FormatConfig::archenemy(), 4, 42);
         let s = sides(&arch);
-        assert_eq!(s[0], vec![PlayerId(0)], "archenemy side is first");
-        let mut heroes = s[1].clone();
+        assert_eq!(s[0].seats, vec![PlayerId(0)], "archenemy side is first");
+        let mut heroes = s[1].seats.clone();
         heroes.sort_by_key(|id| id.0);
         assert_eq!(heroes, vec![PlayerId(1), PlayerId(2), PlayerId(3)]);
+        assert!(turn_kinds(&arch)
+            .iter()
+            .all(|t| *t == TurnStructure::SharedTeamTurns));
     }
 
     /// The O(1) `team_id` equality key must never diverge from the full `sides()`
@@ -403,7 +472,7 @@ mod tests {
             for p in &state.players {
                 let idx = groups
                     .iter()
-                    .position(|g| g.contains(&p.id))
+                    .position(|g| g.seats.contains(&p.id))
                     .expect("every seat belongs to a side");
                 assert_eq!(
                     team_id(&state, p.id),
