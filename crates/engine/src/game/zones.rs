@@ -691,6 +691,18 @@ pub fn move_to_zone(
         // than battlefield, exile, or command move to command instead.
         to = Zone::Command;
     }
+    // Basic Horde rule (hordemagic.com): "If a permanent is returned to the
+    // Horde's 'hand' and is owned by the Horde, it goes on top of the library."
+    // The Horde has no hand — it plays off the top of its library — so redirect
+    // ANY move that would put a Horde-owned card into a hand to the TOP of that
+    // Horde's library instead (generalizing "permanent" to any card, since the
+    // Horde can never hold a card in hand). Owner-scoped so a survivor's bounced
+    // card is unaffected; `is_horde_seat` is a no-op outside Horde games. The
+    // top-of-library placement is applied after the move completes below.
+    let horde_hand_to_top = to == Zone::Hand && super::horde::is_horde_seat(state, owner);
+    if horde_hand_to_top {
+        to = Zone::Library;
+    }
     let unattached_from = state.objects.get(&object_id).and_then(|obj| {
         obj.attached_to
             .map(super::effects::attach::target_ref_from_attach_target)
@@ -736,6 +748,15 @@ pub fn move_to_zone(
             .in_attraction_deck = false;
     }
     add_to_zone(state, object_id, to, owner);
+
+    // Horde hand→library redirect (above): `add_to_zone` appended to the BOTTOM of
+    // the library, but the rule puts the card on TOP, so move it to the front.
+    if horde_hand_to_top {
+        if let Some(player) = state.players.iter_mut().find(|p| p.id == owner) {
+            player.library.retain(|&id| id != object_id);
+            player.library.push_front(object_id);
+        }
+    }
 
     // CR 603.6c: Drop the leaving permanent from the TriggerIndex. The
     // leaves-battlefield last-known-information scan in

@@ -1771,4 +1771,113 @@ mod tests {
             "without forced attackers, a non-Defender Horde creature blocks normally"
         );
     }
+
+    // ── Bounce → top of the Horde's library ─────────────────────────────────
+
+    /// Basic Horde rule: a Horde-owned permanent returned to the Horde's hand goes
+    /// on TOP of the Horde's library instead (the Horde has no hand).
+    #[test]
+    fn horde_owned_permanent_bounced_to_hand_goes_to_top_of_library() {
+        use crate::game::zones::create_object;
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+
+        let mut state = GameState::new(
+            FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset()),
+            2,
+            42,
+        );
+        let horde = horde_seat(&state).expect("horde seat");
+
+        // A marker already on top of the library, to prove the bounced card lands
+        // ABOVE it (top), not at the bottom.
+        let existing = create_object(
+            &mut state,
+            CardId(8000),
+            horde,
+            "Existing".into(),
+            Zone::Library,
+        );
+
+        let creature = create_object(
+            &mut state,
+            CardId(8001),
+            horde,
+            "Horde Beast".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, creature, Zone::Hand, &mut events);
+
+        let horde_player = state.players.iter().find(|p| p.id == horde).unwrap();
+        assert!(
+            !horde_player.hand.contains(&creature),
+            "the Horde never holds a card in hand"
+        );
+        assert_eq!(
+            horde_player.library.front(),
+            Some(&creature),
+            "the bounced Horde permanent goes on TOP of the Horde's library"
+        );
+        assert_eq!(state.objects[&creature].zone, Zone::Library);
+        assert!(
+            horde_player.library.contains(&existing),
+            "the pre-existing library card is still present (pushed below the new top)"
+        );
+    }
+
+    /// Negative control: a SURVIVOR's bounced permanent goes to their hand
+    /// normally — the redirect is strictly owner-scoped to the Horde.
+    #[test]
+    fn survivor_permanent_bounced_to_hand_is_not_redirected() {
+        use crate::game::zones::create_object;
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+
+        let mut state = GameState::new(
+            FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset()),
+            2,
+            42,
+        );
+        let horde = horde_seat(&state).expect("horde seat");
+        let survivor = state
+            .players
+            .iter()
+            .map(|p| p.id)
+            .find(|&id| id != horde)
+            .expect("a survivor seat");
+
+        let creature = create_object(
+            &mut state,
+            CardId(8010),
+            survivor,
+            "Survivor Bear".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, creature, Zone::Hand, &mut events);
+
+        let survivor_player = state.players.iter().find(|p| p.id == survivor).unwrap();
+        assert!(
+            survivor_player.hand.contains(&creature),
+            "a survivor's bounced card goes to their hand normally"
+        );
+        assert_eq!(state.objects[&creature].zone, Zone::Hand);
+    }
 }
