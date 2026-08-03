@@ -25,15 +25,21 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       horde_creatures_forced_attackers: true,
       legendary_death: "Normal",
       post_combat_activation: "None",
+      survivor_deck_format: "Constructed",
     },
     rules: [
       { label: "Waves", detail: "Reveals until the first nontoken card is cast" },
       { label: "Survivor life", detail: "100 life shared, -15 per extra survivor" },
+      { label: "Survivor decks", detail: "Survivors bring 60-card constructed decks" },
       {
         label: "Setup",
         detail: "Survivors take 3 turns to set up before the Horde's first turn",
       },
-      { label: "Horde combat", detail: "The Horde's creatures attack every combat if able" },
+      {
+        label: "Horde combat",
+        detail:
+          "The Horde's creatures attack every combat if able, and only its Defenders can block",
+      },
     ],
   },
   {
@@ -51,15 +57,21 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       horde_creatures_forced_attackers: true,
       legendary_death: "Normal",
       post_combat_activation: "None",
+      survivor_deck_format: "Constructed",
     },
     rules: [
       { label: "Waves", detail: "A wave ends at the first uncommon or better card" },
       { label: "Survivor life", detail: "100 life shared, -15 per extra survivor" },
+      { label: "Survivor decks", detail: "Survivors bring 60-card constructed decks" },
       {
         label: "Setup",
         detail: "Survivors take 3 turns to set up before the Horde's first turn",
       },
-      { label: "Horde combat", detail: "The Horde's creatures attack every combat if able" },
+      {
+        label: "Horde combat",
+        detail:
+          "The Horde's creatures attack every combat if able, and only its Defenders can block",
+      },
     ],
   },
   {
@@ -80,6 +92,7 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       horde_creatures_forced_attackers: true,
       legendary_death: "Normal",
       post_combat_activation: "None",
+      survivor_deck_format: "Constructed",
     },
     rules: [
       {
@@ -87,11 +100,16 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
         detail: "Reveals until N nontokens are cast — N snakes 1 → 3 → 1 each turn",
       },
       { label: "Survivor life", detail: "100 life shared, -15 per extra survivor" },
+      { label: "Survivor decks", detail: "Survivors bring 60-card constructed decks" },
       {
         label: "Setup",
         detail: "Survivors take 3 turns to set up before the Horde's first turn",
       },
-      { label: "Horde combat", detail: "The Horde's creatures attack every combat if able" },
+      {
+        label: "Horde combat",
+        detail:
+          "The Horde's creatures attack every combat if able, and only its Defenders can block",
+      },
     ],
   },
   {
@@ -109,15 +127,21 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       horde_creatures_forced_attackers: true,
       legendary_death: "Normal",
       post_combat_activation: "None",
+      survivor_deck_format: "Constructed",
     },
     rules: [
       { label: "Waves", detail: "A wave ends at the first uncommon or better card" },
       { label: "Survivor life", detail: "100 life shared, -15 per extra survivor" },
+      { label: "Survivor decks", detail: "Survivors bring 60-card constructed decks" },
       {
         label: "Setup",
         detail: "Survivors take 3 turns to set up before the Horde's first turn",
       },
-      { label: "Horde combat", detail: "The Horde's creatures attack every combat if able" },
+      {
+        label: "Horde combat",
+        detail:
+          "The Horde's creatures attack every combat if able, and only its Defenders can block",
+      },
     ],
   },
   {
@@ -135,15 +159,21 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       horde_creatures_forced_attackers: true,
       legendary_death: "Normal",
       post_combat_activation: "None",
+      survivor_deck_format: "Constructed",
     },
     rules: [
       { label: "Waves", detail: "A wave ends at the first uncommon or better card" },
       { label: "Survivor life", detail: "100 life shared, -15 per extra survivor" },
+      { label: "Survivor decks", detail: "Survivors bring 60-card constructed decks" },
       {
         label: "Setup",
         detail: "Survivors take 3 turns to set up before the Horde's first turn",
       },
-      { label: "Horde combat", detail: "The Horde's creatures attack every combat if able" },
+      {
+        label: "Horde combat",
+        detail:
+          "The Horde's creatures attack every combat if able, and only its Defenders can block",
+      },
     ],
   },
 ];

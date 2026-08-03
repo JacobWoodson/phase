@@ -512,6 +512,16 @@ impl HordeRuleset {
             "The Horde's creatures attack only when instructed".to_string()
         };
 
+        // What survivor decks to bring — a per-deck property (community decks are
+        // built for EDH; Theros-block decks for 60-card constructed).
+        let survivor_decks = match self.survivor_deck_format {
+            SurvivorDeckFormat::Constructed => "Survivors bring 60-card constructed decks",
+            SurvivorDeckFormat::Commander => {
+                "Survivors bring 100-card singleton Commander (EDH) decks"
+            }
+        }
+        .to_string();
+
         let mut lines = vec![
             RuleSummaryLine {
                 label: "Waves",
@@ -520,6 +530,10 @@ impl HordeRuleset {
             RuleSummaryLine {
                 label: "Survivor life",
                 detail: life,
+            },
+            RuleSummaryLine {
+                label: "Survivor decks",
+                detail: survivor_decks,
             },
             RuleSummaryLine {
                 label: "Setup",
@@ -533,9 +547,9 @@ impl HordeRuleset {
 
         // The legendary line is an *advanced-rules* axis: only the decks that opt
         // into the "boss recurs" rule surface it, so a basic deck's summary stays
-        // exactly the four lines above (and byte-identical to before this axis
-        // existed). This is a distinguishing rule, not the vanilla default, so
-        // showing "legendaries die normally" for every basic deck would be noise.
+        // exactly the five base lines above. This is a distinguishing rule, not the
+        // vanilla default, so showing "legendaries die normally" for every basic
+        // deck would be noise.
         match self.legendary_death {
             HordeLegendaryDeath::Normal => {}
             HordeLegendaryDeath::EtbThenPhaseOut => lines.push(RuleSummaryLine {
@@ -2411,7 +2425,7 @@ mod tests {
     }
 
     /// The legendary axis is advanced-only: a `Normal` ruleset renders no
-    /// "Legendary deaths" line (basic decks stay their four lines), while an
+    /// "Legendary deaths" line (basic decks stay their five base lines), while an
     /// `EtbThenPhaseOut` ruleset adds exactly one. This is the axis's contract
     /// with the picker — it surfaces only where the rule actually differs.
     #[test]
@@ -2433,7 +2447,11 @@ mod tests {
             !basic.iter().any(|l| l.label == "Legendary deaths"),
             "a Normal ruleset must not advertise the advanced legendary rule"
         );
-        assert_eq!(basic.len(), 4, "basic decks stay their four rule lines");
+        assert_eq!(
+            basic.len(),
+            5,
+            "basic decks stay their five base rule lines"
+        );
 
         let advanced = with_legendary(HordeLegendaryDeath::EtbThenPhaseOut).summary();
         let legendary_line = advanced
@@ -2467,7 +2485,11 @@ mod tests {
             !basic.iter().any(|l| l.label == "Post-combat"),
             "a None ruleset must not advertise post-combat activation"
         );
-        assert_eq!(basic.len(), 4, "basic decks stay their four rule lines");
+        assert_eq!(
+            basic.len(),
+            5,
+            "basic decks stay their five base rule lines"
+        );
 
         let advanced = with_activation(HordePostCombatActivation::OncePerPermanent).summary();
         let line = advanced

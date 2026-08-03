@@ -111,6 +111,13 @@ export type HordeLegendaryDeath = "Normal" | "EtbThenPhaseOut";
 export type HordePostCombatActivation = "None" | "OncePerPermanent";
 
 /**
+ * The deck-construction format survivors bring to a Horde game (per-deck).
+ * `Constructed` = 60-card constructed; `Commander` = 100-card singleton EDH.
+ * Mirrors the engine `SurvivorDeckFormat` enum.
+ */
+export type SurvivorDeckFormat = "Constructed" | "Commander";
+
+/**
  * Per-deck Horde rules carried on a `GameFormat.Horde` `FormatConfig`. Mirrors
  * the engine `HordeRuleset` struct. The frontend only reads this; the engine is
  * the source of truth for the rules.
@@ -138,6 +145,11 @@ export interface HordeRuleset {
    * (engine `#[serde(default)]`); the registry always emits it. Absent ⇒ `None`.
    */
   post_combat_activation?: HordePostCombatActivation;
+  /**
+   * The deck-construction format survivors bring (per-deck). Optional (engine
+   * `#[serde(default)]`); the registry always emits it. Absent ⇒ `Constructed`.
+   */
+  survivor_deck_format?: SurvivorDeckFormat;
 }
 
 /**
