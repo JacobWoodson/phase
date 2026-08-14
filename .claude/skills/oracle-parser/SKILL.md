@@ -790,8 +790,31 @@ public `parse_static_line()` (two-phase: `parse_static_line_ir` →
 | `oracle_nom/bridge.rs` | `nom_on_lower` (run nom on lowercase, map consumed bytes back to original-case remainder), `nom_on_lower_required` (Result variant), `nom_parse_lower` (discard remainder) | Bridging mixed-case Oracle text to lowercase nom combinators |
 | `oracle_nom/context.rs` | `ParseContext` (subject, quantity_ref, card_name, in_trigger, in_replacement) | Threading parse state across combinator boundaries |
 | `oracle_util.rs` | `TextPair` (dual original/lowercase slices with `strip_prefix`/`strip_suffix`), `parse_number` wrapper, mana symbol parsing, `strip_reminder_text`, `normalize_card_name_refs`, possessive/pronoun matching (`contains_possessive`, `contains_object_pronoun`, `starts_with_possessive`), `match_phrase_variants`, `merge_or_filters`, `SELF_REF_TYPE_PHRASES`, `SELF_REF_PARSE_ONLY_PHRASES` | Case-bridging structural ops, shared string utilities, phrase matching |
-| `oracle_target.rs` | `parse_target` (full target extraction), `parse_type_phrase` (type descriptions without "target"), `parse_player_reference`, `parse_event_context_ref`, `parse_zone_suffix` | High-level target/filter extraction from Oracle text |
+| `oracle_target.rs` | `parse_target` (full target extraction), `parse_type_phrase` (type descriptions without "target" — the **Legacy** grammar; see the two-grammar note below), `parse_player_reference`, `parse_event_context_ref`, `parse_zone_suffix` | High-level target/filter extraction from Oracle text |
 | `oracle_quantity.rs` | **Frozen legacy fall-through** — `parse_quantity_ref` (semantic interpretation), `parse_cda_quantity` (CDAs), `parse_for_each_clause` ("for each [filter]") | Existing call sites only. Do NOT add new `QuantityRef` recognition here — it goes in `oracle_nom/quantity.rs` (see doctrine below) |
+
+### TRAP: there are TWO `parse_type_phrase` functions, and they are not interchangeable
+
+They have swapped return shapes AND different grammars, so picking the wrong one
+silently changes which cards a head accepts. Pin them by fully-qualified path at
+every call site, and never transpose the destructuring.
+
+| | **Strict** — `oracle_nom::target::parse_type_phrase` | **Legacy** — `oracle_target::parse_type_phrase` |
+|---|---|---|
+| Return | `OracleResult<'_, TargetFilter>` = `(remainder, filter)` | `(TargetFilter, &str)` = `(filter, remainder)` |
+| Failure | `Err` | **Infallible** — an EMPTY `TypedFilter` plus the whole input (NOT `TargetFilter::Any`, so an `Any` guard does not catch it) |
+| Type-list join | `" or "` only (`parse_type_list`) | `" or "`, `" and "`, `" and/or "` and their comma forms (`TYPE_SEPARATORS`), so `"creatures and planeswalkers they control"` FOLDS into one `Or[..]` consumed whole |
+| Ownership / token / combat-relation grammar | no | yes |
+
+Measured consequence: `"permanents you control and spells you've cast this
+turn"` is NOT folded by either grammar (the controller suffix intervenes before
+the separator scan), while `"creatures and planeswalkers they control"` is folded
+by Legacy and split by Strict. Neither reader carries the anaphor grammar — that
+lives in `parse_target`, not in either type-phrase function.
+
+`oracle_nom/quantity.rs` makes the choice a typed parameter (`TypePhraseGrammar`)
+rather than an accident of which import is in scope: the card-type and subtype
+characteristic heads read with `Legacy`, the colours head with `Strict`.
 
 ### Where New Grammar Goes — Single-Authority Doctrine
 
