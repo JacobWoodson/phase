@@ -1263,13 +1263,16 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     // emblem grant above; scoped to the single Horde seat, unlike Momir's
     // all-seat loop, because only the Horde controls Horde creatures.
     if state.format_config.format == crate::types::format::GameFormat::Horde {
-        let horde_seat = crate::game::topology::archenemy(state).unwrap_or(PlayerId(0));
         let forced_attackers = state
             .format_config
             .horde_ruleset
             .as_ref()
             .is_some_and(|r| r.horde_creatures_forced_attackers);
-        grant_horde_emblem(state, horde_seat, forced_attackers);
+        // Every Horde seat gets the emblem — a two-Horde deck (LOTR Two Towers) has
+        // two commanders, each controlling its own creatures.
+        for horde_seat in crate::game::horde::horde_seats(state) {
+            grant_horde_emblem(state, horde_seat, forced_attackers);
+        }
     }
 
     // Collect all creature subtypes for Changeling CDA expansion.
@@ -1424,13 +1427,18 @@ pub fn load_and_hydrate_decks(
             // (CR 103.3) — `load_deck_into_state`'s per-player shuffle already
             // ran, before these cards existed.
             if state.format_config.format == crate::types::format::GameFormat::Horde {
-                if let Some(deck) = state
+                // Load each Horde seat's own library: seat i gets `horde_decks()[i]`
+                // (the primary `challenge_deck` for the archenemy seat, then each
+                // co-horde for a two-Horde deck like LOTR Two Towers). `horde_seats`
+                // and `horde_decks` are both in seat order, so they zip 1:1.
+                let horde_seats = crate::game::horde::horde_seats(state);
+                let horde_decks: Vec<crate::types::format::ChallengeDeck> = state
                     .format_config
                     .horde_ruleset
                     .as_ref()
-                    .map(|r| r.challenge_deck)
-                {
-                    let horde_seat = crate::game::topology::archenemy(state).unwrap_or(PlayerId(0));
+                    .map(|r| r.horde_decks())
+                    .unwrap_or_default();
+                for (horde_seat, deck) in horde_seats.into_iter().zip(horde_decks) {
                     load_horde_library(state, db, horde_seat, deck);
                 }
             }

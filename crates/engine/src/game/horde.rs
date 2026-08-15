@@ -2035,4 +2035,32 @@ mod tests {
             "the single army grew to two +1/+1 counters (2/2)"
         );
     }
+
+    // ── Two-Horde per-seat setup ─────────────────────────────────────────────
+
+    /// A two-Horde game (LOTR Two Towers) grants EACH Horde seat its own game-start
+    /// emblem — both commanders control their own creatures, so each needs the
+    /// haste + forced-attackers + only-Defenders-block package.
+    #[test]
+    fn two_horde_game_grants_each_seat_an_emblem() {
+        let mut ruleset = ChallengeDeck::CybermanHorde.default_ruleset();
+        ruleset.co_horde_decks = vec![ChallengeDeck::CybermanHorde];
+        let mut state = GameState::new(FormatConfig::horde(ruleset), 4, 42);
+
+        let seats = horde_seats(&state);
+        assert_eq!(seats.len(), 2, "two Horde seats");
+        for &seat in &seats {
+            crate::game::deck_loading::grant_horde_emblem(&mut state, seat, true);
+        }
+
+        for &seat in &seats {
+            assert!(
+                state
+                    .objects
+                    .values()
+                    .any(|o| o.controller == seat && o.emblem_source.is_some()),
+                "Horde seat {seat:?} controls its own emblem"
+            );
+        }
+    }
 }
