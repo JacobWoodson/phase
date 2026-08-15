@@ -8867,12 +8867,23 @@ impl GameState {
         // `team_life_total` sums to it. The Horde seat's life is left untouched:
         // it has no life total (damage mills it; exempt from the CR 704.5a life
         // SBA) and is never consulted.
+        // The Horde seats: the primary archenemy plus, for a two-Horde deck (LOTR
+        // "Two Towers"), one seat per co-horde library — the first
+        // `horde_decks().len()` seats. Survivors take the rest.
+        let horde_seats_designated: Vec<PlayerId> = if config.format == GameFormat::Horde {
+            let seat_count = config
+                .horde_ruleset
+                .as_ref()
+                .map_or(1, |r| r.horde_decks().len());
+            seat_order.iter().copied().take(seat_count).collect()
+        } else {
+            Vec::new()
+        };
         if config.format == GameFormat::Horde {
-            let horde_seat = archenemy;
             let survivor_seats: Vec<PlayerId> = seat_order
                 .iter()
                 .copied()
-                .filter(|&id| Some(id) != horde_seat)
+                .filter(|id| !horde_seats_designated.contains(id))
                 .collect();
             let survivor_count = survivor_seats.len() as i32;
             if survivor_count > 0 {
@@ -8908,7 +8919,9 @@ impl GameState {
             // Set here, at the single point where the format config first meets
             // the seats, so every construction path agrees — not only the live
             // deck-loading one.
-            if let Some(horde_seat) = horde_seat {
+            // Every Horde seat has no life total (damage mills it; exempt from the
+            // CR 704.5a life SBA) — its library is the real clock.
+            for &horde_seat in &horde_seats_designated {
                 players[horde_seat.0 as usize].has_no_life_total = true;
             }
         }
@@ -9197,7 +9210,7 @@ impl GameState {
             horde_wave_nontokens_remaining: 0,
             horde_turn_index: 0,
             horde_postcombat_activation_queue: Vec::new(),
-            horde_seats: Vec::new(),
+            horde_seats: horde_seats_designated,
             initiative: None,
             combat_prevention_tally: None,
             cancelled_casts: Vec::new(),
