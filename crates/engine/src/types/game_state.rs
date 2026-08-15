@@ -8877,17 +8877,23 @@ impl GameState {
         // `team_life_total` sums to it. The Horde seat's life is left untouched:
         // it has no life total (damage mills it; exempt from the CR 704.5a life
         // SBA) and is never consulted.
-        // The Horde seats: the primary archenemy plus, for a two-Horde deck (LOTR
-        // "Two Towers"), one seat per co-horde library — the first
-        // `horde_decks().len()` seats. Survivors take the rest.
-        let horde_seats_designated: Vec<PlayerId> = if config.format == GameFormat::Horde {
-            let seat_count = config
-                .horde_ruleset
-                .as_ref()
-                .map_or(1, |r| r.horde_decks().len());
-            seat_order.iter().copied().take(seat_count).collect()
-        } else {
-            Vec::new()
+        // The Horde seats: the primary archenemy seat, plus — for a two-Horde deck
+        // (LOTR "Two Towers") — the co-horde commanders at the seats immediately
+        // after it. Anchored on `archenemy` (NOT seat 0) because the transport layer
+        // remaps the archenemy onto the AI seat (`server-core::session`); survivors
+        // take every other seat. A single-Horde game is exactly `[archenemy]`.
+        let horde_seats_designated: Vec<PlayerId> = match (config.format, archenemy) {
+            (GameFormat::Horde, Some(primary)) => {
+                let seat_count = config
+                    .horde_ruleset
+                    .as_ref()
+                    .map_or(1, |r| r.horde_decks().len()) as u8;
+                (0..seat_count)
+                    .map(|offset| PlayerId(primary.0 + offset))
+                    .filter(|id| seat_order.contains(id))
+                    .collect()
+            }
+            _ => Vec::new(),
         };
         if config.format == GameFormat::Horde {
             let survivor_seats: Vec<PlayerId> = seat_order
