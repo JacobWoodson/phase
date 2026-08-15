@@ -14679,12 +14679,11 @@ fn shared_target_untap_or_tap_reversed_ordering_parses() {
 /// the grant has no turn-scoped expiry. Keyed on the typed `Keyword::Suspend`
 /// variant in `build_continuous_clause`.
 ///
-/// NOTE: The parsed `SourceLacksKeyword { Suspend }` condition on this clause
-/// resolves against the activating object (Jhoira / The Tenth Doctor), not
-/// the exiled card. For these two cards this is inert — neither granter ever
-/// has Suspend, so the grant fires unconditionally. A future "if it doesn't
-/// have X" pattern whose subject is the cost-paid object will need a typed
-/// `CostPaidObjectLacksKeyword` variant; flag and skip here.
+/// This test asserts DURATION only. The clause's subject-binding condition is
+/// covered separately: `it_doesnt_have_keyword_lowers_to_target_matches_filter`
+/// pins the context-free lowering and
+/// `keyword_anaphor_rebinds_to_cost_paid_object_after_cost_paid_parent` pins the
+/// clause-context re-anchoring to the cost-paid object.
 #[test]
 fn suspend_keyword_grant_carries_permanent_duration() {
     use crate::types::keywords::Keyword;
@@ -14722,6 +14721,633 @@ fn suspend_keyword_grant_carries_permanent_duration() {
         Some(Duration::Permanent),
         "the ParsedEffectClause duration must also be Permanent"
     );
+}
+
+/// Expected shape of the keyword anaphor's context-free lowering: a
+/// controller-agnostic, type-agnostic typed filter carrying exactly one
+/// kind-level negated keyword predicate.
+#[cfg(test)]
+fn without_keyword_kind_filter(kind: crate::types::keywords::KeywordKind) -> TargetFilter {
+    TargetFilter::Typed(TypedFilter {
+        properties: vec![FilterProp::WithoutKeywordKind { value: kind }],
+        ..Default::default()
+    })
+}
+
+/// CR 702.62a + CR 608.2c + CR 608.2k: "if it doesn't have <keyword>" is an
+/// ANAPHOR to the object the preceding instruction / cost / trigger condition
+/// introduced — never to the ability's source. Its context-free lowering must be
+/// the target-scoped, KIND-level, off-zone-aware `TargetMatchesFilter`.
+///
+/// Revert-fail: before this fix the arm emitted
+/// `AbilityCondition::SourceLacksKeyword { Suspend }`, whose evaluator reads
+/// `ability.source_id`, so every `assert_eq!` below fails on revert.
+#[test]
+fn it_doesnt_have_keyword_lowers_to_target_matches_filter() {
+    use crate::types::keywords::{Keyword, KeywordKind};
+
+    let def = parse_effect_chain(
+        "If it doesn't have suspend, it gains suspend",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        def.condition,
+        Some(AbilityCondition::TargetMatchesFilter {
+            filter: without_keyword_kind_filter(KeywordKind::Suspend),
+            use_lki: false,
+            subject_slot: None,
+        }),
+        "the anaphor must bind the ability's object subject, not its source"
+    );
+    // Reach-guard: the gated body is still the real suspend grant, so the
+    // condition assertion above cannot pass vacuously against an
+    // `Effect::Unimplemented` short-circuit.
+    match &*def.effect {
+        Effect::GenericEffect {
+            static_abilities,
+            duration,
+            ..
+        } => {
+            assert_eq!(*duration, Some(Duration::Permanent));
+            assert!(
+                static_abilities
+                    .iter()
+                    .any(|s| s.modifications.iter().any(|m| matches!(
+                        m,
+                        ContinuousModification::AddKeyword {
+                            keyword: Keyword::Suspend { .. }
+                        }
+                    ))),
+                "the gated body must still be the suspend grant"
+            );
+        }
+        other => panic!("expected the suspend grant body, got {other:?}"),
+    }
+
+    // The "does not" spelling is the same arm.
+    let spelled_out = parse_effect_chain(
+        "If it does not have suspend, it gains suspend",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        spelled_out.condition,
+        Some(AbilityCondition::TargetMatchesFilter {
+            filter: without_keyword_kind_filter(KeywordKind::Suspend),
+            use_lki: false,
+            subject_slot: None,
+        }),
+        "\"does not have\" must lower identically to \"doesn't have\""
+    );
+
+    // Parameterized on the keyword, not Suspend-specific (Momentum Rumbler's
+    // grammar).
+    let first_strike = parse_effect_chain(
+        "If it doesn't have first strike, put a first strike counter on it",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        first_strike.condition,
+        Some(AbilityCondition::TargetMatchesFilter {
+            filter: without_keyword_kind_filter(KeywordKind::FirstStrike),
+            use_lki: false,
+            subject_slot: None,
+        }),
+        "the arm must cover the whole keyword class, not just Suspend"
+    );
+
+    // Hostile fixture (Aven Courier's grammar): "doesn't have" followed by a
+    // COUNTER predicate is not a keyword at all — it must reach the
+    // `Keyword::Unknown` reject guard and never produce a keyword condition.
+    let counter_predicate = parse_effect_chain(
+        "Put a counter of that kind on target permanent you control if it doesn't \
+         have a counter of that kind on it",
+        AbilityKind::Spell,
+    );
+    assert!(
+        !matches!(
+            counter_predicate.condition,
+            Some(AbilityCondition::TargetMatchesFilter {
+                filter: TargetFilter::Typed(TypedFilter { ref properties, .. }),
+                ..
+            }) if properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::WithoutKeywordKind { .. }))
+        ),
+        "a counter predicate must not be mistaken for a keyword predicate, got {:?}",
+        counter_predicate.condition
+    );
+}
+
+/// Expected shape of the affirmative twin's lowering — the kind-level mirror of
+/// [`without_keyword_kind_filter`].
+#[cfg(test)]
+fn has_keyword_kind_filter(kind: crate::types::keywords::KeywordKind) -> TargetFilter {
+    TargetFilter::Typed(TypedFilter {
+        properties: vec![FilterProp::HasKeywordKind { value: kind }],
+        ..Default::default()
+    })
+}
+
+/// CR 608.2c + CR 702.1 + CR 613.1f: polarity symmetry — the affirmative twin
+/// lowers into the same `TargetMatchesFilter` family AND the same kind-level,
+/// off-zone-aware prop, so both halves of a card like Momentum Rumbler read the
+/// same subject through the same evaluator.
+///
+/// Revert-fail: with the object-level `FilterProp::WithKeyword`, this assertion
+/// fails — and, more importantly, the shape stops satisfying
+/// `filter_is_bare_keyword_kind_predicate`, so the cost-paid re-anchoring can
+/// never fire for the affirmative polarity (pinned below).
+#[test]
+fn it_has_keyword_lowers_to_the_same_kind_level_prop_as_its_negative_twin() {
+    use crate::types::keywords::KeywordKind;
+    let def = parse_effect_chain(
+        "If it has first strike, it gains double strike until end of turn",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        def.condition,
+        Some(AbilityCondition::TargetMatchesFilter {
+            filter: has_keyword_kind_filter(KeywordKind::FirstStrike),
+            use_lki: false,
+            subject_slot: None,
+        }),
+        "the affirmative arm must emit the kind-level HasKeywordKind prop"
+    );
+}
+
+/// CR 608.2k + CR 702.62a: the affirmative polarity reaches the cost-paid
+/// re-anchoring too. An "if it has <kw>" gate after a cost-paid parent has an
+/// EMPTY `targets` slot and (for an activated ability) no trigger event, so the
+/// context-free target-scoped reading would fail closed and the gated body would
+/// silently never run.
+///
+/// Revert-fail: with the affirmative arm emitting `FilterProp::WithKeyword`,
+/// `filter_is_bare_keyword_kind_predicate` rejects the shape and the condition
+/// stays `TargetMatchesFilter`.
+#[test]
+fn affirmative_keyword_anaphor_rebinds_to_cost_paid_object() {
+    use crate::types::keywords::KeywordKind;
+
+    // Jhoira's grammar with the affirmative polarity substituted, so the only
+    // difference from the pinned negative case is the polarity itself.
+    let def = parse_oracle_text(
+        "{2}, Exile a nonland card from your hand: Put four time counters on the \
+         exiled card. If it has suspend, draw a card.",
+        "Affirmative Jhoira",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let gated = def.abilities[0]
+        .sub_ability
+        .as_deref()
+        .expect("the gated draw is a sub-ability");
+    assert_eq!(
+        gated.condition,
+        Some(AbilityCondition::CostPaidObjectMatchesFilter {
+            filter: has_keyword_kind_filter(KeywordKind::Suspend),
+        }),
+        "a cost-paid parent must re-anchor BOTH polarities to the cost-paid snapshot"
+    );
+}
+
+/// CR 702.11d + CR 702.14a + CR 702.16a + CR 702.124a: the keyword-presence
+/// anaphor must strict-fail whenever `Keyword::kind()` does not identify the
+/// parsed ability. Emitting the kind-level prop there would collapse ~60
+/// keywords into `KeywordKind::Unknown` ("it doesn't have storm" reading FALSE
+/// for anything that happens to have banding), and the object-level props are
+/// discriminant-matched, so they cannot express the parameterized families
+/// either. Both polarities share the guard.
+///
+/// Revert-fail: guarding only on the `Keyword::Unknown(_)` VARIANT lets every
+/// row below through and produces a keyword predicate.
+#[test]
+fn keyword_anaphor_strict_fails_when_kind_does_not_identify_the_ability() {
+    fn keyword_predicate(def: &AbilityDefinition) -> Option<&FilterProp> {
+        let Some(AbilityCondition::TargetMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter { properties, .. }),
+            ..
+        }) = def.condition.as_ref()
+        else {
+            return None;
+        };
+        properties.iter().find(|prop| {
+            matches!(
+                prop,
+                FilterProp::WithKeyword { .. }
+                    | FilterProp::WithoutKeyword { .. }
+                    | FilterProp::HasKeywordKind { .. }
+                    | FilterProp::WithoutKeywordKind { .. }
+            )
+        })
+    }
+
+    // (kind() == KeywordKind::Unknown) — parses from bare text, so the variant
+    // guard alone would pass it through.
+    for text in [
+        "If it doesn't have storm, draw a card",
+        "If it doesn't have banding, draw a card",
+        "If it doesn't have melee, draw a card",
+        "If it has storm, draw a card",
+        // Parameter renames the printed keyword: one shared kind each.
+        "If it doesn't have hexproof, draw a card",
+        "If it doesn't have hexproof from black, draw a card",
+        "If it doesn't have islandwalk, draw a card",
+        "If it doesn't have partner, draw a card",
+        "If it has hexproof, draw a card",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert_eq!(
+            keyword_predicate(&def),
+            None,
+            "{text:?} must not lower to a keyword predicate, got {:?}",
+            def.condition
+        );
+    }
+
+    // Positive control at the same seam: an identifying kind still lowers.
+    let suspend = parse_effect_chain(
+        "If it doesn't have suspend, draw a card",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        suspend.condition,
+        Some(AbilityCondition::TargetMatchesFilter {
+            filter: without_keyword_kind_filter(crate::types::keywords::KeywordKind::Suspend),
+            use_lki: false,
+            subject_slot: None,
+        }),
+        "the guard must narrow the arm, not disable it"
+    );
+}
+
+/// CR 608.2k: the anaphor's referent lives in a DIFFERENT runtime slot depending
+/// on the clause that introduced it. When the preceding clause binds its subject
+/// through the ability's COST (Jhoira of the Ghitu), `targets` is empty and there
+/// is no trigger event, so the context-free target-scoped reading would fail
+/// closed — the clause-context rewrite must re-anchor it to the cost-paid slot.
+///
+/// Revert-fail: without `rewrite_keyword_anaphor_for_cost_paid_parent`, Jhoira's
+/// gated sub-ability carries `TargetMatchesFilter` instead of
+/// `CostPaidObjectMatchesFilter`.
+#[test]
+fn keyword_anaphor_rebinds_to_cost_paid_object_after_cost_paid_parent() {
+    use crate::types::keywords::KeywordKind;
+
+    // Verbatim Jhoira of the Ghitu Oracle text (reminder text elided; the
+    // reminder is stripped before dispatch).
+    let jhoira = parse_oracle_text(
+        "{2}, Exile a nonland card from your hand: Put four time counters on the \
+         exiled card. If it doesn't have suspend, it gains suspend.",
+        "Jhoira of the Ghitu",
+        &[],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Human".to_string(), "Wizard".to_string()],
+    );
+    let gated = jhoira.abilities[0]
+        .sub_ability
+        .as_deref()
+        .expect("Jhoira's suspend grant is a gated sub-ability");
+    assert_eq!(
+        gated.condition,
+        Some(AbilityCondition::CostPaidObjectMatchesFilter {
+            filter: without_keyword_kind_filter(KeywordKind::Suspend),
+        }),
+        "a cost-paid parent must re-anchor the anaphor to the cost-paid snapshot"
+    );
+
+    // Negative sibling: an EFFECT-introduced referent (Kang Prime) keeps the
+    // context-free target-scoped reading — proving the rewrite is context-gated
+    // and does not fire on a `ParentTarget` parent.
+    let kang = parse_oracle_text(
+        "Flying\nWhenever Kang Prime enters or attacks, exile cards from the top of \
+         your library until you exile a nonland card. Put two time counters on that \
+         card. If it doesn't have suspend, it gains suspend.",
+        "Kang Prime",
+        &["Flying".to_string()],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Human".to_string(), "Villain".to_string()],
+    );
+    let kang_gated = kang.triggers[0]
+        .execute
+        .as_deref()
+        .and_then(|execute| execute.sub_ability.as_deref())
+        .and_then(|put_counter| put_counter.sub_ability.as_deref())
+        .expect("Kang Prime's suspend grant is the second gated sub-ability");
+    assert_eq!(
+        kang_gated.condition,
+        Some(AbilityCondition::TargetMatchesFilter {
+            filter: without_keyword_kind_filter(KeywordKind::Suspend),
+            use_lki: false,
+            subject_slot: None,
+        }),
+        "an effect-introduced referent must keep the target-scoped reading"
+    );
+
+    // Hostile fixture: the sibling rewrite at the same hook (Ardyn's
+    // "If you exiled a card this way") must be unaffected — the two rewrites
+    // key on disjoint input shapes and must not interfere.
+    let ardyn = parse_effect_chain(
+        "Exile up to one target creature card from a graveyard. If you exiled a card \
+         this way, draw a card.",
+        AbilityKind::Spell,
+    );
+    let ardyn_gated = ardyn
+        .sub_ability
+        .as_deref()
+        .expect("the reflexive draw is a gated sub-ability");
+    assert!(
+        matches!(
+            ardyn_gated.condition,
+            Some(AbilityCondition::ZoneChangedThisWay { .. })
+        ),
+        "the effect-exile reflexive rewrite must still win its own shape, got {:?}",
+        ardyn_gated.condition
+    );
+}
+
+/// CR 608.2d + CR 115.10a: when the anaphor's referent is a RESOLUTION-TIME PICK
+/// (The Eleventh Doctor, Amy's Home), it never reaches `ResolvedAbility.targets`
+/// — the gate would silently fall back to the trigger source and re-grant the
+/// keyword onto a card that already has it, clobbering its printed parameters,
+/// while `cargo coverage` reported the card fully supported. The clause
+/// strict-fails to `Effect::Unimplemented` instead, so the gap is visible.
+///
+/// Revert-fail: without
+/// `keyword_anaphor_referent_is_unpublished_resolution_pick` the gated grant
+/// parses as a supported `GenericEffect` carrying `WithoutKeywordKind`.
+#[test]
+fn keyword_anaphor_after_resolution_time_pick_strict_fails_to_unimplemented() {
+    // Verbatim The Eleventh Doctor Oracle text (ability-word prefix elided; it
+    // is stripped before dispatch).
+    let doctor = parse_oracle_text(
+        "Whenever The Eleventh Doctor deals combat damage to a player, you may exile \
+         a card from your hand with a number of time counters on it equal to its \
+         mana value. If it doesn't have suspend, it gains suspend.",
+        "The Eleventh Doctor",
+        &[],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Time Lord".to_string(), "Doctor".to_string()],
+    );
+    let execute = doctor.triggers[0]
+        .execute
+        .as_deref()
+        .expect("the combat-damage trigger has an execute chain");
+    assert!(
+        matches!(&*execute.effect, Effect::ChangeZone { .. }),
+        "the hand exile itself must still parse, got {:?}",
+        execute.effect
+    );
+    let gated = execute
+        .sub_ability
+        .as_deref()
+        .expect("the suspend grant is the gated sub-ability");
+    assert_eq!(
+        gated.effect.unimplemented_description(),
+        Some("If it doesn't have suspend, it gains suspend"),
+        "the unbindable gate must surface as a coverage gap, got {:?}",
+        gated.effect
+    );
+
+    // The class, not the card: Amy's Home is the second corpus member and words
+    // its pick differently ("a nonland card from your hand"). Parsed as a bare
+    // chain so the assertion is about the pick→anaphor pair, not about the
+    // planeswalk/upkeep trigger shell.
+    let amys_home = parse_effect_chain(
+        "you may exile a nonland card from your hand with a number of time counters \
+         on it equal to its mana value. If it doesn't have suspend, it gains suspend.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        amys_home
+            .sub_ability
+            .as_deref()
+            .and_then(|sub| sub.effect.unimplemented_description()),
+        Some("If it doesn't have suspend, it gains suspend"),
+        "the same pick→anaphor pair must strict-fail for Amy's Home, got {:?}",
+        amys_home.sub_ability
+    );
+
+    // Hostile fixture #1 — Delay. Its exile clause is `TargetChoiceTiming::
+    // Resolution` too (off-battlefield origin, no printed "target"), but its
+    // filter is `TargetFilter::ParentTarget`: the resolver binds the countered
+    // spell deterministically, nothing is picked, and the anaphor binds. It must
+    // keep its condition.
+    let delay = parse_oracle_text(
+        "Counter target spell. If the spell is countered this way, exile it with \
+         three time counters on it instead of putting it into its owner's graveyard. \
+         If it doesn't have suspend, it gains suspend.",
+        "Delay",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let delay_gated = delay.abilities[0]
+        .sub_ability
+        .as_deref()
+        .and_then(|exile| exile.sub_ability.as_deref())
+        .expect("Delay's suspend grant is the second gated sub-ability");
+    assert_eq!(
+        delay_gated.condition,
+        Some(AbilityCondition::TargetMatchesFilter {
+            filter: without_keyword_kind_filter(crate::types::keywords::KeywordKind::Suspend),
+            use_lki: false,
+            subject_slot: None,
+        }),
+        "a deterministic context-ref parent must not be mistaken for a player pick"
+    );
+
+    // Hostile fixture #2 — Kang Prime. An injected `ParentTarget` referent after
+    // a stack-timed parent is likewise untouched (the pinned baseline above
+    // asserts the same shape from the other direction).
+    let kang = parse_oracle_text(
+        "Flying\nWhenever Kang Prime enters or attacks, exile cards from the top of \
+         your library until you exile a nonland card. Put two time counters on that \
+         card. If it doesn't have suspend, it gains suspend.",
+        "Kang Prime",
+        &["Flying".to_string()],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Human".to_string(), "Villain".to_string()],
+    );
+    let kang_gated = kang.triggers[0]
+        .execute
+        .as_deref()
+        .and_then(|execute| execute.sub_ability.as_deref())
+        .and_then(|put_counter| put_counter.sub_ability.as_deref())
+        .expect("Kang Prime's suspend grant is the second gated sub-ability");
+    assert!(
+        kang_gated.condition.is_some(),
+        "Kang Prime's target-scoped reading must survive"
+    );
+    assert_eq!(
+        kang_gated.effect.unimplemented_description(),
+        None,
+        "Kang Prime must stay supported, got {:?}",
+        kang_gated.effect
+    );
+}
+
+/// CR 702.1c: a replicated "the same is true for <keyword list>" continuation
+/// must swap the gating keyword on BOTH subject seams the anaphor can lower to.
+/// Before this change the class lived in `SourceLacksKeyword`, which
+/// `rewrite_ability_condition_keyword` handles explicitly; moving it into the
+/// `*MatchesFilter` family without these arms would silently drop the swap into
+/// the walker's `_ => {}` fallback.
+///
+/// Revert-fail: removing either the condition arms or the `rewrite_filter_keyword`
+/// kind-prop arm leaves the `KeywordKind::Suspend` value in place.
+#[test]
+fn rewrite_ability_condition_keyword_swaps_subject_filter_keyword_props() {
+    use crate::types::keywords::{Keyword, KeywordKind};
+
+    // (a) `TargetMatchesFilter` — the effect/trigger-subject seam.
+    let mut target_seam = AbilityCondition::TargetMatchesFilter {
+        filter: without_keyword_kind_filter(KeywordKind::Suspend),
+        use_lki: false,
+        subject_slot: None,
+    };
+    rewrite_ability_condition_keyword(&mut target_seam, &Keyword::Flying);
+    assert_eq!(
+        target_seam,
+        AbilityCondition::TargetMatchesFilter {
+            filter: without_keyword_kind_filter(KeywordKind::Flying),
+            use_lki: false,
+            subject_slot: None,
+        }
+    );
+
+    // (b) `CostPaidObjectMatchesFilter` — the cost-paid seam.
+    let mut cost_seam = AbilityCondition::CostPaidObjectMatchesFilter {
+        filter: without_keyword_kind_filter(KeywordKind::Suspend),
+    };
+    rewrite_ability_condition_keyword(&mut cost_seam, &Keyword::Flying);
+    assert_eq!(
+        cost_seam,
+        AbilityCondition::CostPaidObjectMatchesFilter {
+            filter: without_keyword_kind_filter(KeywordKind::Flying),
+        }
+    );
+
+    // (c) The affirmative kind-level prop swaps too, asserted separately so each
+    // kind prop carries its own proof.
+    let mut has_kind = AbilityCondition::TargetMatchesFilter {
+        filter: TargetFilter::Typed(TypedFilter {
+            properties: vec![FilterProp::HasKeywordKind {
+                value: KeywordKind::Suspend,
+            }],
+            ..Default::default()
+        }),
+        use_lki: false,
+        subject_slot: None,
+    };
+    rewrite_ability_condition_keyword(&mut has_kind, &Keyword::Flying);
+    assert_eq!(
+        has_kind,
+        AbilityCondition::TargetMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter {
+                properties: vec![FilterProp::HasKeywordKind {
+                    value: KeywordKind::Flying
+                }],
+                ..Default::default()
+            }),
+            use_lki: false,
+            subject_slot: None,
+        }
+    );
+
+    // (d) Pre-existing behavior must not move: the object-level `WithKeyword`
+    // prop inside a `ZoneChangeObjectMatchesFilter` (Mutable Pupa) still swaps.
+    let mut pupa = AbilityCondition::ZoneChangeObjectMatchesFilter {
+        origin: None,
+        destination: Zone::Battlefield,
+        filter: TargetFilter::Typed(TypedFilter {
+            properties: vec![FilterProp::WithKeyword {
+                value: Keyword::Suspend {
+                    count: 0,
+                    cost: ManaCost::default(),
+                },
+            }],
+            ..Default::default()
+        }),
+    };
+    rewrite_ability_condition_keyword(&mut pupa, &Keyword::Flying);
+    match &pupa {
+        AbilityCondition::ZoneChangeObjectMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter { properties, .. }),
+            ..
+        } => assert_eq!(
+            properties.as_slice(),
+            [FilterProp::WithKeyword {
+                value: Keyword::Flying
+            }]
+        ),
+        other => panic!("the Mutable Pupa shape must be preserved, got {other:?}"),
+    }
+
+    // (e) Super-Adaptoid's conjunction still rewrites both conjuncts.
+    let mut conjunction = AbilityCondition::And {
+        conditions: vec![
+            AbilityCondition::TargetHasKeywordInstead {
+                keyword: Keyword::Suspend {
+                    count: 0,
+                    cost: ManaCost::default(),
+                },
+            },
+            AbilityCondition::SourceLacksKeyword {
+                keyword: Keyword::Suspend {
+                    count: 0,
+                    cost: ManaCost::default(),
+                },
+            },
+        ],
+    };
+    rewrite_ability_condition_keyword(&mut conjunction, &Keyword::Flying);
+    assert_eq!(
+        conjunction,
+        AbilityCondition::And {
+            conditions: vec![
+                AbilityCondition::TargetHasKeywordInstead {
+                    keyword: Keyword::Flying
+                },
+                AbilityCondition::SourceLacksKeyword {
+                    keyword: Keyword::Flying
+                },
+            ],
+        }
+    );
+}
+
+/// Scope-boundary pin for the `rewrite_filter_keyword` extension: the
+/// OBJECT-level `FilterProp::WithoutKeyword` is deliberately left unhandled. No
+/// card routes it through this walker today, and adding it would change behavior
+/// for pre-existing conditions reachable via the `ZoneChangeObjectMatchesFilter`
+/// arm — outside the keyword-anaphor class. A future widening must flip this
+/// assertion consciously rather than land silently.
+#[test]
+fn rewrite_filter_keyword_leaves_object_level_without_keyword_alone() {
+    use crate::types::keywords::Keyword;
+    let mut filter = TargetFilter::Typed(TypedFilter {
+        properties: vec![FilterProp::WithoutKeyword {
+            value: Keyword::Suspend {
+                count: 0,
+                cost: ManaCost::default(),
+            },
+        }],
+        ..Default::default()
+    });
+    rewrite_filter_keyword(&mut filter, &Keyword::Flying);
+    match &filter {
+        TargetFilter::Typed(TypedFilter { properties, .. }) => assert!(
+            matches!(
+                properties.as_slice(),
+                [FilterProp::WithoutKeyword {
+                    value: Keyword::Suspend { .. }
+                }]
+            ),
+            "object-level WithoutKeyword must stay unchanged, got {properties:?}"
+        ),
+        other => panic!("expected a typed filter, got {other:?}"),
+    }
 }
 
 /// Issue #501 FOLLOW-UP — negative sibling for Root Cause A. The
@@ -25960,8 +26586,10 @@ fn if_its_a_subtype_otherwise_attaches_else_branch() {
     );
 }
 
-/// CR 608.2c + CR 702.1: "If it has [keyword], A. Otherwise, B." — affirmative
-/// keyword guard parses to FilterProp::WithKeyword and attaches the else-branch.
+/// CR 608.2c + CR 702.1 + CR 613.1f: "If it has [keyword], A. Otherwise, B." —
+/// affirmative keyword guard parses to the kind-level FilterProp::HasKeywordKind
+/// (shared with its negative twin via `keyword_presence_kind`) and attaches the
+/// else-branch.
 #[test]
 fn if_it_has_keyword_otherwise_attaches_else_branch() {
     let def = parse_effect_chain(
@@ -25982,10 +26610,10 @@ fn if_it_has_keyword_otherwise_attaches_else_branch() {
         panic!("expected Typed keyword filter");
     };
     assert!(
-        tf.properties.contains(&FilterProp::WithKeyword {
-            value: Keyword::Flying
+        tf.properties.contains(&FilterProp::HasKeywordKind {
+            value: crate::types::keywords::KeywordKind::Flying
         }),
-        "expected WithKeyword(Flying), got {:?}",
+        "expected HasKeywordKind(Flying), got {:?}",
         tf.properties
     );
     assert!(matches!(*sub.effect, Effect::Destroy { .. }));

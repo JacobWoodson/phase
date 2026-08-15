@@ -1641,6 +1641,59 @@ impl Keyword {
         }
     }
 
+    /// True when [`Keyword::kind`] IDENTIFIES this keyword ability — the
+    /// returned `KeywordKind` names this ability and no other, so a kind-level
+    /// presence test ("does it have suspend?", CR 702.62a) asks exactly the
+    /// question the Oracle text asks.
+    ///
+    /// False in exactly two situations, each of which makes a kind-level test
+    /// answer a DIFFERENT question than the printed text:
+    ///
+    ///   * `KeywordKind::Unknown` — the catch-all bucket the `kind()` match
+    ///     above assigns to ~60 unrelated keywords (`Banding`, `Melee`,
+    ///     `Storm`, `Toxic`, `Echo`, `StartingIntensity`, …). "Has an
+    ///     Unknown-kind keyword" is TRUE for a creature with banding when the
+    ///     text asked about storm. The off-zone keyword ledger
+    ///     (`game::off_zone_characteristics`) is kind-indexed as well, so these
+    ///     keywords have no per-ability presence answer off the battlefield at
+    ///     all.
+    ///   * the families whose PRINTED keyword name varies with the parameter:
+    ///     "protection from red" (CR 702.16a), "hexproof from black"
+    ///     (CR 702.11d — which shares `KeywordKind::Hexproof` with plain
+    ///     hexproof), "islandwalk" (CR 702.14a), "landcycling" (CR 702.29e),
+    ///     and the partner family (CR 702.124a). Each parameter value is its
+    ///     own keyword ability, and they all share one kind.
+    ///
+    /// A `false` answer means "no exact presence test exists", NOT "use
+    /// `FilterProp::WithKeyword`/`WithoutKeyword` instead": those props are
+    /// discriminant-matched on the live-object path
+    /// (`game::keywords::has_keyword`) and value-matched on the snapshot paths
+    /// (`game::filter::spell_record_matches_property`), so neither is a
+    /// per-ability test either — the first cannot separate protection from red
+    /// from protection from blue, and the second cannot separate `Suspend 4—{U}`
+    /// from `Suspend 0—{}`. Callers should strict-fail so coverage stays honest.
+    ///
+    /// Deliberately conservative: `Partner(DoctorsCompanion)` and
+    /// `Partner(ChooseABackground)` do get their own kinds, but the whole
+    /// partner family answers `false` because under-reporting injectivity only
+    /// costs a strict failure, while over-reporting it ships a wrong guard.
+    ///
+    /// Maintenance: this is a hand-derived property of the `kind()` match above,
+    /// which is exhaustive — when adding a `Keyword` variant, decide here too. A
+    /// new parameterized family whose parameter renames the printed keyword
+    /// belongs in the `false` arm.
+    pub fn kind_identifies_ability(&self) -> bool {
+        match self {
+            Keyword::Hexproof
+            | Keyword::HexproofFrom(_)
+            | Keyword::Protection(_)
+            | Keyword::Landwalk(_)
+            | Keyword::Typecycling { .. }
+            | Keyword::Partner(_) => false,
+            other => other.kind() != KeywordKind::Unknown,
+        }
+    }
+
     /// CR 601.2f + CR 707.2: Keywords that only function while a player is
     /// casting a spell. A token created by `CopyTokenOf` was not cast, so these
     /// keywords are inert on the copy and are stripped at creation time so the
@@ -3619,6 +3672,78 @@ pub fn has_keyword(obj: &crate::game::game_object::GameObject, keyword: &Keyword
 mod tests {
     use super::*;
     use crate::types::ability::Effect;
+
+    /// CR 702.62a + CR 702.4a: the ordinary case — a keyword whose `kind()` names
+    /// it and nothing else supports a kind-level presence test.
+    #[test]
+    fn kind_identifies_ability_accepts_one_to_one_keywords() {
+        for keyword in [
+            Keyword::Suspend {
+                count: 4,
+                cost: crate::types::mana::ManaCost::generic(1),
+            },
+            Keyword::FirstStrike,
+            Keyword::Flying,
+            Keyword::Ward(WardCost::Mana(crate::types::mana::ManaCost::generic(2))),
+            Keyword::Foretell(crate::types::mana::ManaCost::generic(2)),
+        ] {
+            assert!(
+                keyword.kind_identifies_ability(),
+                "{keyword:?} maps 1:1 onto {:?}",
+                keyword.kind()
+            );
+        }
+    }
+
+    /// The catch-all bucket: ~60 unrelated keywords share `KeywordKind::Unknown`,
+    /// so a kind-level presence test on any of them answers "does it have ANY
+    /// Unknown-kind keyword" — TRUE for a creature with banding when the text
+    /// asked about storm.
+    #[test]
+    fn kind_identifies_ability_rejects_the_unknown_bucket() {
+        for keyword in [
+            Keyword::Storm,
+            Keyword::Banding,
+            Keyword::Melee,
+            Keyword::Mentor,
+            Keyword::Toxic(1),
+            Keyword::StartingIntensity(3),
+            Keyword::Unknown("rapid fire".to_string()),
+        ] {
+            assert_eq!(keyword.kind(), KeywordKind::Unknown);
+            assert!(
+                !keyword.kind_identifies_ability(),
+                "{keyword:?} shares the catch-all kind"
+            );
+        }
+    }
+
+    /// CR 702.11d + CR 702.14a + CR 702.16a + CR 702.29e + CR 702.124a: families
+    /// whose PRINTED keyword name varies with the parameter. Each parameter value
+    /// is its own keyword ability, and they all collapse into one kind —
+    /// `KeywordKind::Hexproof` even absorbs plain hexproof.
+    #[test]
+    fn kind_identifies_ability_rejects_parameter_renamed_families() {
+        assert_eq!(Keyword::Hexproof.kind(), KeywordKind::Hexproof);
+        assert_eq!(
+            Keyword::HexproofFrom(HexproofFilter::Color(crate::types::mana::ManaColor::Black))
+                .kind(),
+            KeywordKind::Hexproof,
+        );
+        for keyword in [
+            Keyword::Hexproof,
+            Keyword::HexproofFrom(HexproofFilter::Color(crate::types::mana::ManaColor::Black)),
+            Keyword::Protection(ProtectionTarget::Color(crate::types::mana::ManaColor::Red)),
+            Keyword::Landwalk("Island".to_string()),
+            Keyword::Partner(PartnerType::Generic),
+        ] {
+            assert!(
+                !keyword.kind_identifies_ability(),
+                "{keyword:?} shares {:?} with a differently-named keyword ability",
+                keyword.kind()
+            );
+        }
+    }
 
     /// CR 702.143d + CR 702 (alt-cost family): `with_cost` maps each variant to
     /// its `Keyword::X(ManaCost)`, and `matches_keyword`/`from_name` round-trip.
