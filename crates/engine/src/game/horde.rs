@@ -457,11 +457,19 @@ pub(crate) fn maybe_reveal_next(
         let is_token = state.objects.get(&card_id).is_some_and(|obj| obj.is_token);
 
         if is_token {
-            // CR 111 + CR 111.1: a token can never be cast, so a revealed library
-            // token is put directly onto the battlefield under the Horde's
-            // control. Enters synchronously (no stack), so continue the wave with
-            // the next card in this same call.
-            reveal_library_token(state, card_id, horde, events);
+            // LOTR "Two Towers" rule "Orc Armies grow as a single army": a revealed
+            // Army token does NOT enter as a fresh 0/0 (which would die to SBAs
+            // immediately) — it AMASSES the Horde's single Army instead. Any other
+            // token enters normally.
+            if let Some(subtype) = revealed_army_subtype(state, card_id) {
+                amass_revealed_army(state, horde, card_id, &subtype, events);
+            } else {
+                // CR 111 + CR 111.1: a token can never be cast, so a revealed library
+                // token is put directly onto the battlefield under the Horde's
+                // control. Enters synchronously (no stack), so continue the wave with
+                // the next card in this same call.
+                reveal_library_token(state, card_id, horde, events);
+            }
             continue;
         }
 
@@ -511,6 +519,59 @@ pub(crate) fn maybe_reveal_next(
             Err(_) => None,
         };
     }
+}
+
+/// The Amass flavor subtype of a revealed library token when it is an Army
+/// creature token (LOTR's "Orc Army" — subtypes `["Orc", "Army"]`), else `None`.
+/// The flavor subtype ("Orc") is the non-"Army" creature subtype; a bare "Army"
+/// token with no flavor returns `None` and reveals as an ordinary token. This is
+/// the dispatch key in [`maybe_reveal_next`]: a revealed Army token amasses the
+/// Horde's single Army rather than entering as a fresh (dying) 0/0 token.
+fn revealed_army_subtype(state: &GameState, card_id: ObjectId) -> Option<String> {
+    use crate::types::card_type::CoreType;
+    let obj = state.objects.get(&card_id)?;
+    if !obj.card_types.core_types.contains(&CoreType::Creature)
+        || !obj.card_types.subtypes.iter().any(|s| s == "Army")
+    {
+        return None;
+    }
+    obj.card_types
+        .subtypes
+        .iter()
+        .find(|s| *s != "Army")
+        .cloned()
+}
+
+/// LOTR "Two Towers" rule "Orc Armies grow as a single army": a revealed Army
+/// library token amasses the Horde's single Army by 1 (CR 701.47a) rather than
+/// entering as a fresh 0/0 token that would die to state-based actions. Composes
+/// the shared Amass resolver ([`crate::game::effects::amass::resolve`]): it grows
+/// the Army the Horde already controls, or creates it (0/0, then a +1/+1 counter
+/// → 1/1) if the Horde controls none. The library placeholder is then removed —
+/// the Orc Army grew the Horde's Army rather than materializing as this token.
+fn amass_revealed_army(
+    state: &mut GameState,
+    horde: PlayerId,
+    card_id: ObjectId,
+    subtype: &str,
+    events: &mut Vec<GameEvent>,
+) {
+    use crate::types::ability::QuantityExpr;
+    // CR 701.47a: Amass [subtype] 1 for the Horde. The revealed Orc Army card is
+    // the amass source; it is removed just below (amass grows a *different* object,
+    // the Horde's battlefield Army, so ordering is safe).
+    let ability = ResolvedAbility::new(
+        Effect::Amass {
+            subtype: subtype.to_string(),
+            count: QuantityExpr::Fixed { value: 1 },
+        },
+        Vec::new(),
+        card_id,
+        horde,
+    );
+    let _ = crate::game::effects::amass::resolve(state, &ability, events);
+    crate::game::zones::remove_from_zone(state, card_id, Zone::Library, horde);
+    state.objects.remove(&card_id);
 }
 
 /// Reveal a token from the top of the Horde's library onto the battlefield.
@@ -1879,5 +1940,99 @@ mod tests {
             "a survivor's bounced card goes to their hand normally"
         );
         assert_eq!(state.objects[&creature].zone, Zone::Hand);
+    }
+
+    // ── LOTR Orc Army: revealed Army tokens amass one shared army ────────────
+
+    /// LOTR "Two Towers" rule "Orc Armies grow as a single army": a revealed Orc
+    /// Army library token amasses the Horde's SINGLE Army (CR 701.47a) instead of
+    /// entering as a fresh 0/0 that dies to SBAs. A second revealed Orc Army grows
+    /// the SAME army — it never multiplies into a second one.
+    #[test]
+    fn revealed_orc_army_amasses_the_hordes_single_army() {
+        use crate::game::deck_loading::{create_horde_library_token, horde_token_image_ref};
+        use crate::types::counter::CounterType;
+
+        let mut state = GameState::new(
+            FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset()),
+            2,
+            42,
+        );
+        let horde = horde_seat(&state).expect("horde seat");
+
+        let preset = crate::game::token_presets::known_token_presets()
+            .iter()
+            .find(|p| p.body.display_name == "Orc Army")
+            .expect("Orc Army preset");
+        let a1 = create_horde_library_token(
+            &mut state,
+            &preset.body,
+            Some(horde_token_image_ref(preset)),
+            horde,
+        );
+        let a2 = create_horde_library_token(
+            &mut state,
+            &preset.body,
+            Some(horde_token_image_ref(preset)),
+            horde,
+        );
+
+        // Dispatch key: an Orc Army token amasses the "Orc" army.
+        assert_eq!(revealed_army_subtype(&state, a1).as_deref(), Some("Orc"));
+
+        let armies = |state: &GameState| -> Vec<ObjectId> {
+            state
+                .battlefield
+                .iter()
+                .copied()
+                .filter(|id| {
+                    state.objects.get(id).is_some_and(|o| {
+                        o.controller == horde && o.card_types.subtypes.iter().any(|s| s == "Army")
+                    })
+                })
+                .collect()
+        };
+
+        let mut events = Vec::new();
+        amass_revealed_army(&mut state, horde, a1, "Orc", &mut events);
+
+        let first = armies(&state);
+        assert_eq!(first.len(), 1, "one Orc Army entered");
+        assert_eq!(
+            state.objects[&first[0]]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(1),
+            "amass 1 put a +1/+1 counter (0/0 -> 1/1)"
+        );
+        assert!(
+            state.objects[&first[0]]
+                .card_types
+                .subtypes
+                .contains(&"Orc".to_string()),
+            "the amassed army is an Orc Army"
+        );
+        assert!(
+            !state.objects.contains_key(&a1),
+            "the library placeholder is consumed, not materialized"
+        );
+
+        // The second Orc Army grows the SAME army, not a new one.
+        amass_revealed_army(&mut state, horde, a2, "Orc", &mut events);
+        let second = armies(&state);
+        assert_eq!(
+            second.len(),
+            1,
+            "still ONE Orc Army — it grew, not multiplied"
+        );
+        assert_eq!(
+            state.objects[&second[0]]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(2),
+            "the single army grew to two +1/+1 counters (2/2)"
+        );
     }
 }
