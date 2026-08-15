@@ -3038,15 +3038,44 @@ fn filter_contains_last_created(filter: &TargetFilter) -> bool {
 /// Whether the object population a `CardTypeSetSource` reads is selected by a
 /// filter satisfying `filter_pred`.
 ///
-/// Exhaustive: the three non-`Objects` sources name a zone, the source's exile
-/// set, or a tracked set, none of which carries a `TargetFilter`.
+/// Exhaustive: the three fixed-vocabulary sources name a zone, the source's
+/// exile set, or a tracked set, none of which carries a `TargetFilter`. The
+/// journal carries an optional narrowing filter, and `AnyOf` recurses.
 fn card_type_set_source_counts_population_matching(
+    source: &crate::types::ability::CardTypeSetSource,
+    filter_pred: &dyn Fn(&TargetFilter) -> bool,
+) -> bool {
+    let mut found = false;
+    let complete =
+        source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
+            if !found {
+                found = card_type_set_leaf_counts_population_matching(leaf, filter_pred);
+            }
+        });
+    // A truncated walk claims the match: an unreported anaphor is the silent
+    // failure this predicate exists to prevent.
+    found || !complete
+}
+
+fn card_type_set_leaf_counts_population_matching(
     source: &crate::types::ability::CardTypeSetSource,
     filter_pred: &dyn Fn(&TargetFilter) -> bool,
 ) -> bool {
     use crate::types::ability::CardTypeSetSource;
     match source {
         CardTypeSetSource::Objects { filter } => filter_pred(filter),
+        // The journal's optional narrowing filter is a population selector like
+        // any other, so an anaphor inside it must be reported. Uncited: this is
+        // an engine claim about where filters live, not a rule. (It cited
+        // CR 601.2a, which describes putting a spell on the stack as it is cast
+        // — the event the journal records, not its narrowing filter.)
+        CardTypeSetSource::TurnJournal { filter, .. } => filter.as_ref().is_some_and(filter_pred),
+        // Unrolled by the bounded walker in the caller, so a union never reaches
+        // this arm. Uncited for the same reason as the union arm in
+        // `ability_rw::characteristic_source_read`: no CR rule defines set union
+        // of populations. (It cited CR 109.2, the battlefield-default rule for a
+        // bare type description.)
+        CardTypeSetSource::AnyOf { .. } => false,
         CardTypeSetSource::Zone { .. }
         | CardTypeSetSource::ExiledBySource
         | CardTypeSetSource::TrackedSet { .. } => false,
@@ -3085,7 +3114,6 @@ fn quantity_ref_counts_population_matching(
         | QuantityRef::CountersOnObjects { filter, .. }
         | QuantityRef::Aggregate { filter, .. }
         | QuantityRef::ControlledByEachPlayer { filter, .. }
-        | QuantityRef::DistinctColorsAmongPermanents { filter }
         | QuantityRef::DistinctCounterKindsAmong { filter }
         | QuantityRef::EnteredThisTurn { filter }
         | QuantityRef::SacrificedThisTurn { filter, .. }
@@ -3112,7 +3140,8 @@ fn quantity_ref_counts_population_matching(
             filter_pred(source) || filter_pred(target)
         }
         QuantityRef::DistinctCardTypes { source }
-        | QuantityRef::DistinctSubtypes { source, .. } => {
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source } => {
             card_type_set_source_counts_population_matching(source, filter_pred)
         }
         // No `TargetFilter` anywhere: player-scoped totals, per-object scopes,

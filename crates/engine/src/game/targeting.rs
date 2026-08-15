@@ -220,8 +220,12 @@ fn find_legal_targets_with_context(
     // (handled above as `is_any_other_target`) is the sole property-bearing
     // exception: it adds players above and falls through to the object
     // enumeration below instead of collapsing to players-only here.
+    //
+    // The players-only shape test itself lives on `TargetFilter` as
+    // `denotes_player_target`, so the Aura-token host resolver reads the same
+    // authority rather than re-deriving it (CR 115.1a).
     if let TargetFilter::Typed(ref tf) = filter {
-        if tf.type_filters.is_empty() && tf.properties.is_empty() && !is_any_other_target {
+        if filter.denotes_player_target() && !is_any_other_target {
             let controller = &tf.controller;
             for player in &state.players {
                 // CR 115.1: one authority for player-target legality — existence
