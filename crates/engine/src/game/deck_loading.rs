@@ -767,6 +767,13 @@ pub fn load_horde_library(
             crate::game::decks::sauron_horde::SAURON_HORDE_TOKENS,
             crate::game::decks::sauron_horde::card_rarity,
         ),
+        // LOTR "Two Towers" — Saruman. Rarity pinned per card for the uncommon+
+        // wave; revealed Orc Army tokens amass (see `horde::maybe_reveal_next`).
+        ChallengeDeck::SarumanHorde => (
+            crate::game::decks::saruman_horde::SARUMAN_HORDE_NONTOKEN_CARDS,
+            crate::game::decks::saruman_horde::SARUMAN_HORDE_TOKENS,
+            crate::game::decks::saruman_horde::card_rarity,
+        ),
     };
 
     // REPLACE, don't append: the Horde seat is an engine-supplied seat, but in a

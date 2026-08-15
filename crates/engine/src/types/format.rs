@@ -175,6 +175,12 @@ pub enum ChallengeDeck {
     /// enters then phases out" rule. Half of the two-Horde "Two Towers" experience
     /// (Saruman is the other half); playable on its own as a single Horde.
     SauronHorde,
+    /// The Lord of the Rings "Two Towers" — Saruman, the White Hand (community
+    /// format, hordemagic.com). Uruk-hai and Orcs backed by removal and
+    /// enchantments that grow the White Hand's Orc Army; same advanced LOTR rules
+    /// as Sauron. The other half of the two-Horde "Two Towers" experience;
+    /// playable on its own as a single Horde.
+    SarumanHorde,
 }
 
 /// Authoritative display metadata for one selectable Horde challenge deck.
@@ -610,6 +616,7 @@ impl ChallengeDeck {
         ChallengeDeck::SliversHorde,
         ChallengeDeck::HumansGodzillaHorde,
         ChallengeDeck::SauronHorde,
+        ChallengeDeck::SarumanHorde,
     ];
 
     /// Display metadata for a single deck. Exhaustive match: adding a
@@ -658,6 +665,14 @@ impl ChallengeDeck {
                  near-all-creature swarm of Orcs, Nazg\u{fb}l, and siege beasts; \
                  revealed Orc Armies amass one growing army, and milled legendaries \
                  recur by phasing out",
+            ),
+            ChallengeDeck::SarumanHorde => (
+                "Saruman, the White Hand Horde",
+                "SAR",
+                "The Lord of the Rings \u{201c}Two Towers\u{201d} — Saruman's \
+                 Uruk-hai and Orcs backed by removal and enchantments that grow the \
+                 White Hand's Orc Army; uncommon+ waves and legendaries that recur \
+                 by phasing out",
             ),
         };
         let default_ruleset = self.default_ruleset();
@@ -815,6 +830,19 @@ impl ChallengeDeck {
                 post_combat_activation: HordePostCombatActivation::None,
                 // The published deck is played against upgraded Commander (EDH)
                 // survivor decks (Aragorn, the Uniter) — the first Commander deck.
+                survivor_deck_format: SurvivorDeckFormat::Commander,
+            },
+            ChallengeDeck::SarumanHorde => HordeRuleset {
+                challenge_deck: ChallengeDeck::SarumanHorde,
+                // LOTR "Two Towers": same advanced rules as Sauron. Per-card rarity
+                // is pinned by `saruman_horde::card_rarity`.
+                wave: WaveTermination::UntilRarityAtLeast(Rarity::Uncommon),
+                survivor_setup_turns: 3,
+                combined_base_life: 100,
+                per_extra_survivor_life_delta: -15,
+                horde_creatures_forced_attackers: true,
+                legendary_death: HordeLegendaryDeath::EtbThenPhaseOut,
+                post_combat_activation: HordePostCombatActivation::None,
                 survivor_deck_format: SurvivorDeckFormat::Commander,
             },
         }
@@ -2311,7 +2339,8 @@ mod tests {
                 | ChallengeDeck::ZombiesHorde
                 | ChallengeDeck::SliversHorde
                 | ChallengeDeck::HumansGodzillaHorde
-                | ChallengeDeck::SauronHorde => {}
+                | ChallengeDeck::SauronHorde
+                | ChallengeDeck::SarumanHorde => {}
             }
             assert!(
                 registry.iter().any(|meta| meta.deck == *deck),

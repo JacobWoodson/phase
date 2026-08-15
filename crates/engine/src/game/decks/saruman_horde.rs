@@ -97,6 +97,87 @@ pub const SARUMAN_HORDE_NONTOKEN_CARDS: &[(u32, &str)] = &[
     (1, "The Bath Song"),
 ];
 
+/// The rarity of each non-token card, for the `UntilRarityAtLeast(Uncommon)`
+/// wave rule (a wave ends when an uncommon-or-better card is revealed).
+///
+/// PINNED here rather than read from the card DB: the runtime `card-data.json`
+/// export does not carry rarity (`CardFace::rarities` is always empty), so the
+/// wave has no other way to tell a common (wave filler) from an uncommon-or-
+/// better card (wave ender). Values are each card's LOWEST rarity across all
+/// printings (a card ever printed common counts as common), resolved from
+/// Scryfall — the same "most-common-printing" reading the original
+/// `card_face.rarities.iter().min()` intended.
+///
+/// Every name in [`SARUMAN_HORDE_NONTOKEN_CARDS`] must appear here; the
+/// `every_card_has_a_pinned_rarity` test enforces it, so a card added without a
+/// rarity fails loudly instead of silently making the wave run forever.
+pub fn card_rarity(name: &str) -> Option<crate::types::card::Rarity> {
+    use crate::types::card::Rarity;
+    Some(match name {
+        "Goblin Assailant"
+        | "Mirkwood Bats"
+        | "Uruk-hai Berserker"
+        | "Willow-Wind"
+        | "Cast into the Fire"
+        | "Dreadful as the Storm"
+        | "Feed the Swarm"
+        | "Fire of Orthanc"
+        | "Isolation at Orthanc"
+        | "Lash of the Balrog"
+        | "Orcish Medicine"
+        | "Smite the Deathless"
+        | "Surrounded by Orcs"
+        | "Treason of Isengard"
+        | "Crude Bent Blade"
+        | "Goblin Plate Mail"
+        | "Guttersnipe"
+        | "Morgul-Knife Wound" => Rarity::Common,
+        "Uglúk of the White Hand"
+        | "Saruman the White"
+        | "Gothmog, Morgul Lieutenant"
+        | "The Mouth of Sauron"
+        | "Goblin Cratermaker"
+        | "Gríma Wormtongue"
+        | "Misty Mountains Raider"
+        | "Great Ugly-Looking Goblin"
+        | "Bitter Downfall"
+        | "Extract from Darkness"
+        | "Fear, Fire, Foes!"
+        | "Foray of Orcs"
+        | "Reanimate"
+        | "Rise of the Witch-king"
+        | "Barrow-Blade"
+        | "Fiery Inscription"
+        | "Book of Mazarbul"
+        | "March from the Black Gate"
+        | "The Bath Song" => Rarity::Uncommon,
+        "The Balrog, Durin's Bane"
+        | "Gríma, Saruman's Footman"
+        | "Shagrat, Loot Bearer"
+        | "Fires of Mount Doom"
+        | "Goblin Dark-Dwellers"
+        | "Assault on Osgiliath"
+        | "Blasphemous Act"
+        | "Flame of Anor"
+        | "Languish"
+        | "Lidless Gaze"
+        | "Subjugate the Hobbits"
+        | "Taunt from the Rampart"
+        | "Too Greedily, Too Deep"
+        | "Wake the Dragon"
+        | "Call of the Ring"
+        | "Fall of Cair Andros"
+        | "In the Darkness Bind Them"
+        | "Leyline of Punishment"
+        | "One Ring to Rule Them All" => Rarity::Rare,
+        "Saruman, the White Hand"
+        | "Saruman of Many Colors"
+        | "Shadow of the Enemy"
+        | "Storm of Saruman" => Rarity::Mythic,
+        _ => return None,
+    })
+}
+
 /// The predefined tokens, as `(count, preset token name)` pairs. Each name is
 /// resolved to a `TokenCharacteristics` body via
 /// `token_presets::known_token_body_by_name`; the body is materialized into a
@@ -127,6 +208,36 @@ mod tests {
         assert_eq!(nontoken_card_count(), 215, "215 non-token cards");
         assert_eq!(token_count(), 65, "65 tokens");
         assert_eq!(nontoken_card_count() + token_count(), 280);
+    }
+
+    /// EVERY non-token card must have a pinned rarity. A card without one gets
+    /// `None`, which the `UntilRarityAtLeast` wave treats as "never ends" — so a
+    /// single missing entry makes the Horde reveal its ENTIRE library every turn.
+    /// This is the guard that catches that regression.
+    #[test]
+    fn every_card_has_a_pinned_rarity() {
+        for (_, name) in SARUMAN_HORDE_NONTOKEN_CARDS {
+            assert!(
+                card_rarity(name).is_some(),
+                "Saruman Horde card '{name}' has no pinned rarity — its wave would never end"
+            );
+        }
+    }
+
+    /// The wave can only terminate if at least one card is at or above the
+    /// threshold (Uncommon). If every card were common, `UntilRarityAtLeast`
+    /// would reveal the whole library — so assert the deck actually has enders.
+    #[test]
+    fn deck_has_uncommon_or_better_wave_enders() {
+        use crate::types::card::Rarity;
+        let enders = SARUMAN_HORDE_NONTOKEN_CARDS
+            .iter()
+            .filter(|(_, name)| card_rarity(name).is_some_and(|r| r >= Rarity::Uncommon))
+            .count();
+        assert!(
+            enders > 0,
+            "the Saruman Horde must have uncommon-or-better cards to end its waves"
+        );
     }
 
     /// Every token preset name must resolve to a single unambiguous body — the

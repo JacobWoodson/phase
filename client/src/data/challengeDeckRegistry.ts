@@ -216,6 +216,46 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       },
     ],
   },
+  {
+    deck: "SarumanHorde",
+    label: "Saruman, the White Hand Horde",
+    short_label: "SAR",
+    description:
+      "The Lord of the Rings “Two Towers” — Saruman's Uruk-hai and Orcs backed by removal and enchantments that grow the White Hand's Orc Army; uncommon+ waves and legendaries that recur by phasing out",
+    default_ruleset: {
+      challenge_deck: "SarumanHorde",
+      wave: { type: "UntilRarityAtLeast", data: "uncommon" },
+      survivor_setup_turns: 3,
+      combined_base_life: 100,
+      per_extra_survivor_life_delta: -15,
+      horde_creatures_forced_attackers: true,
+      legendary_death: "EtbThenPhaseOut",
+      post_combat_activation: "None",
+      survivor_deck_format: "Commander",
+    },
+    rules: [
+      { label: "Waves", detail: "A wave ends at the first uncommon or better card" },
+      { label: "Survivor life", detail: "100 life shared, -15 per extra survivor" },
+      {
+        label: "Survivor decks",
+        detail: "Survivors bring 100-card singleton Commander (EDH) decks",
+      },
+      {
+        label: "Setup",
+        detail: "Survivors take 3 turns to set up before the Horde's first turn",
+      },
+      {
+        label: "Horde combat",
+        detail:
+          "The Horde's creatures attack every combat if able, and only its Defenders can block",
+      },
+      {
+        label: "Legendary deaths",
+        detail:
+          "A milled legendary enters, triggers its ETB, then phases out — it returns on the Horde's next untap instead of being removed",
+      },
+    ],
+  },
 ];
 
 /** The deck a Horde game uses when the player hasn't picked one. */
