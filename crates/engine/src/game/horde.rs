@@ -90,6 +90,16 @@ pub(crate) fn is_horde_turn(state: &GameState) -> bool {
     is_horde_seat(state, state.active_player)
 }
 
+/// The Horde seat whose turn it currently is — the ACTIVE commander. For a
+/// two-Horde deck (LOTR "Two Towers") the commanders alternate turns (Reading B),
+/// so this is `active_player`, not the primary seat; the wave, post-combat
+/// activation, and the damage-mill clock all key off it so each commander reveals
+/// from / mills its OWN library and activates only its OWN permanents. For a
+/// single-Horde game it is the sole Horde seat. `None` when it is not a Horde turn.
+pub(crate) fn active_horde_seat(state: &GameState) -> Option<PlayerId> {
+    is_horde_turn(state).then_some(state.active_player)
+}
+
 /// True when `id` is a Horde seat, which in this casual variant has no life
 /// total. Damage/life loss it would suffer is redirected to milling (see
 /// `effects::life`), and it is exempt from the CR 704.5a "0 or less life loses"
@@ -324,7 +334,7 @@ fn wave_seed(state: &GameState) -> u32 {
     match wave_policy(state) {
         Some(WaveTermination::FixedCount(n)) => n,
         Some(WaveTermination::UntilNonToken { .. })
-        | Some(WaveTermination::UntilRarityAtLeast(_)) => horde_seat(state)
+        | Some(WaveTermination::UntilRarityAtLeast(_)) => active_horde_seat(state)
             .and_then(|horde| state.players.iter().find(|p| p.id == horde))
             .map_or(0, |p| p.library.len() as u32),
         None => 0,
@@ -426,7 +436,7 @@ pub(crate) fn maybe_reveal_next(
     {
         return None;
     }
-    let horde = horde_seat(state)?;
+    let horde = active_horde_seat(state)?;
 
     // Reveal-and-resolve cards until either the wave pauses on a nontoken spell
     // (which is put on the stack and resolved through the normal priority loop
@@ -772,7 +782,7 @@ pub(crate) fn begin_post_combat_activation(state: &mut GameState, _events: &mut 
     {
         return;
     }
-    let Some(horde) = horde_seat(state) else {
+    let Some(horde) = active_horde_seat(state) else {
         return;
     };
     // Battlefield order; each id is TRIED once, and its eligibility is re-checked
@@ -867,7 +877,7 @@ pub(crate) fn maybe_activate_next_ability(
     {
         return None;
     }
-    let horde = horde_seat(state)?;
+    let horde = active_horde_seat(state)?;
 
     // Hordemagic "infinite mana (for … activation costs)": top up the Horde's pool
     // so mana components are payable. Real non-mana costs (tap/sacrifice/pay-life)
@@ -2096,5 +2106,25 @@ mod tests {
         state.active_player = state.horde_seats[1];
         begin_wave(&mut state, &mut events);
         assert_eq!(state.active_horde_index, 0);
+    }
+
+    /// `active_horde_seat` is the commander whose turn it is — so the wave/mill draw
+    /// from that commander's own library, not always the primary's.
+    #[test]
+    fn active_horde_seat_is_the_current_commander() {
+        let mut ruleset = ChallengeDeck::CybermanHorde.default_ruleset();
+        ruleset.co_horde_decks = vec![ChallengeDeck::CybermanHorde];
+        let mut state = GameState::new(FormatConfig::horde(ruleset), 4, 42);
+
+        state.active_player = state.horde_seats[0];
+        assert_eq!(active_horde_seat(&state), Some(state.horde_seats[0]));
+        state.active_player = state.horde_seats[1];
+        assert_eq!(
+            active_horde_seat(&state),
+            Some(state.horde_seats[1]),
+            "the OTHER commander drives its own turn"
+        );
+        state.active_player = PlayerId(2);
+        assert_eq!(active_horde_seat(&state), None, "not a Horde turn");
     }
 }
