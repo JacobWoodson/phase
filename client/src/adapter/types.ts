@@ -152,6 +152,12 @@ export interface HordeRuleset {
    * `#[serde(default)]`); the registry always emits it. Absent ⇒ `Constructed`.
    */
   survivor_deck_format?: SurvivorDeckFormat;
+  /**
+   * Additional Horde libraries beyond `challenge_deck`, one per extra Horde seat
+   * (the LOTR two-Horde pairing). Omitted for single-Horde decks
+   * (`skip_serializing_if` empty). Absent ⇒ no co-hordes.
+   */
+  co_horde_decks?: ChallengeDeck[];
 }
 
 /**

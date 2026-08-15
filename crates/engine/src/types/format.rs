@@ -453,9 +453,28 @@ pub struct HordeRuleset {
     /// where `FormatConfig::horde` hardcoded a 60-card non-singleton survivor deck.
     #[serde(default)]
     pub survivor_deck_format: SurvivorDeckFormat,
+    /// Additional Horde libraries beyond [`challenge_deck`](Self::challenge_deck),
+    /// one per extra Horde seat — the LOTR "Two Towers" two-Horde experience pairs
+    /// Sauron (`challenge_deck`) with Saruman here. Empty for every single-Horde
+    /// deck. The full per-seat deck list is [`horde_decks`](Self::horde_decks):
+    /// `challenge_deck` (seat 0) then each of these in order. `#[serde(default,
+    /// skip_serializing_if)]` so single-Horde configs serialize byte-identically
+    /// to before this axis existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub co_horde_decks: Vec<ChallengeDeck>,
 }
 
 impl HordeRuleset {
+    /// The per-seat Horde libraries in seat order: the primary
+    /// [`challenge_deck`](Self::challenge_deck) followed by each
+    /// [`co_horde_decks`](Self::co_horde_decks) entry. A single-Horde deck yields
+    /// one; the LOTR two-Horde deck yields `[Sauron, Saruman]`. The length is the
+    /// number of Horde seats the game designates.
+    pub fn horde_decks(&self) -> Vec<ChallengeDeck> {
+        std::iter::once(self.challenge_deck)
+            .chain(self.co_horde_decks.iter().copied())
+            .collect()
+    }
     /// Render this ruleset's typed axes into human-readable, labeled lines for
     /// the Horde deck picker and any in-game info panel.
     ///
@@ -723,6 +742,7 @@ impl ChallengeDeck {
                 // (per the basic EDH rule) is a follow-up that also wires survivor
                 // commanders into Horde setup.
                 survivor_deck_format: SurvivorDeckFormat::Constructed,
+                co_horde_decks: Vec::new(),
             },
             ChallengeDeck::DndHorde => HordeRuleset {
                 challenge_deck: ChallengeDeck::DndHorde,
@@ -745,6 +765,7 @@ impl ChallengeDeck {
                 // (per the basic EDH rule) is a follow-up that also wires survivor
                 // commanders into Horde setup.
                 survivor_deck_format: SurvivorDeckFormat::Constructed,
+                co_horde_decks: Vec::new(),
             },
             ChallengeDeck::ZombiesHorde => HordeRuleset {
                 challenge_deck: ChallengeDeck::ZombiesHorde,
@@ -771,6 +792,7 @@ impl ChallengeDeck {
                 // (per the basic EDH rule) is a follow-up that also wires survivor
                 // commanders into Horde setup.
                 survivor_deck_format: SurvivorDeckFormat::Constructed,
+                co_horde_decks: Vec::new(),
             },
             ChallengeDeck::SliversHorde => HordeRuleset {
                 challenge_deck: ChallengeDeck::SliversHorde,
@@ -794,6 +816,7 @@ impl ChallengeDeck {
                 // (per the basic EDH rule) is a follow-up that also wires survivor
                 // commanders into Horde setup.
                 survivor_deck_format: SurvivorDeckFormat::Constructed,
+                co_horde_decks: Vec::new(),
             },
             ChallengeDeck::HumansGodzillaHorde => HordeRuleset {
                 challenge_deck: ChallengeDeck::HumansGodzillaHorde,
@@ -814,6 +837,7 @@ impl ChallengeDeck {
                 // (per the basic EDH rule) is a follow-up that also wires survivor
                 // commanders into Horde setup.
                 survivor_deck_format: SurvivorDeckFormat::Constructed,
+                co_horde_decks: Vec::new(),
             },
             ChallengeDeck::SauronHorde => HordeRuleset {
                 challenge_deck: ChallengeDeck::SauronHorde,
@@ -831,6 +855,7 @@ impl ChallengeDeck {
                 // The published deck is played against upgraded Commander (EDH)
                 // survivor decks (Aragorn, the Uniter) — the first Commander deck.
                 survivor_deck_format: SurvivorDeckFormat::Commander,
+                co_horde_decks: Vec::new(),
             },
             ChallengeDeck::SarumanHorde => HordeRuleset {
                 challenge_deck: ChallengeDeck::SarumanHorde,
@@ -844,6 +869,7 @@ impl ChallengeDeck {
                 legendary_death: HordeLegendaryDeath::EtbThenPhaseOut,
                 post_combat_activation: HordePostCombatActivation::None,
                 survivor_deck_format: SurvivorDeckFormat::Commander,
+                co_horde_decks: Vec::new(),
             },
         }
     }
@@ -2208,6 +2234,24 @@ mod tests {
         assert!(cfg.command_zone);
     }
 
+    /// `horde_decks()` is the per-seat library list: the primary `challenge_deck`
+    /// then each `co_horde_decks` entry in order. Single-Horde decks list one; the
+    /// LOTR two-Horde pairing lists [Sauron, Saruman] (two Horde seats).
+    #[test]
+    fn horde_decks_lists_primary_then_co_hordes() {
+        let single = ChallengeDeck::SauronHorde.default_ruleset();
+        assert!(single.co_horde_decks.is_empty());
+        assert_eq!(single.horde_decks(), vec![ChallengeDeck::SauronHorde]);
+
+        let mut two = ChallengeDeck::SauronHorde.default_ruleset();
+        two.co_horde_decks = vec![ChallengeDeck::SarumanHorde];
+        assert_eq!(
+            two.horde_decks(),
+            vec![ChallengeDeck::SauronHorde, ChallengeDeck::SarumanHorde],
+            "primary then co-hordes, in seat order"
+        );
+    }
+
     #[test]
     fn horde_uses_one_vs_many_shared_turn_topology() {
         let config = FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset());
@@ -2417,6 +2461,7 @@ mod tests {
             legendary_death: HordeLegendaryDeath::Normal,
             post_combat_activation: HordePostCombatActivation::None,
             survivor_deck_format: SurvivorDeckFormat::Constructed,
+            co_horde_decks: Vec::new(),
         };
         // Pull the "Waves" line out of the rendered summary.
         let wave_detail = |wave: WaveTermination| -> String {
@@ -2476,6 +2521,7 @@ mod tests {
                 legendary_death: HordeLegendaryDeath::Normal,
                 post_combat_activation: HordePostCombatActivation::None,
                 survivor_deck_format: SurvivorDeckFormat::Constructed,
+                co_horde_decks: Vec::new(),
             }
             .summary()
             .into_iter()
@@ -2503,6 +2549,7 @@ mod tests {
             legendary_death: rule,
             post_combat_activation: HordePostCombatActivation::None,
             survivor_deck_format: SurvivorDeckFormat::Constructed,
+            co_horde_decks: Vec::new(),
         };
 
         let basic = with_legendary(HordeLegendaryDeath::Normal).summary();
@@ -2541,6 +2588,7 @@ mod tests {
             legendary_death: HordeLegendaryDeath::Normal,
             post_combat_activation: rule,
             survivor_deck_format: SurvivorDeckFormat::Constructed,
+            co_horde_decks: Vec::new(),
         };
 
         let basic = with_activation(HordePostCombatActivation::None).summary();
