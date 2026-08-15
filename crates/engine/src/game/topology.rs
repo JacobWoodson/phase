@@ -361,10 +361,48 @@ pub(crate) fn normalize_shared_turn_recipient(state: &GameState, player: PlayerI
         return player;
     }
 
+    // LOTR "Two Towers" (Reading B): the Horde side's representative is its ACTIVE
+    // commander — the current `active_player` during a Horde turn, else the
+    // scheduled next commander (which rotates each Horde turn). Every Horde-side
+    // member normalizes to it, so the turn recipient, priority, and APNAP all agree
+    // on which commander is driving the Horde. The survivor side (and any other
+    // shared side) keeps the first-living-member rule.
+    if two_horde_seats(state).is_some_and(|h| h.contains(&player)) {
+        if let Some(active) = active_horde_seat_now_or_next(state) {
+            return active;
+        }
+    }
+
     team_members(state, player)
         .into_iter()
         .next()
         .unwrap_or(player)
+}
+
+/// The Horde side's active commander for turn/priority purposes in a two-Horde
+/// (LOTR "Two Towers") game: the current `active_player` when it is a Horde seat
+/// (the Horde's own turn), otherwise the commander scheduled to drive the next
+/// Horde turn. `None` outside a two-Horde game.
+fn active_horde_seat_now_or_next(state: &GameState) -> Option<PlayerId> {
+    let hordes = two_horde_seats(state)?;
+    if hordes.contains(&state.active_player) {
+        return Some(state.active_player);
+    }
+    scheduled_active_horde(state)
+}
+
+/// The Horde commander scheduled to drive the NEXT Horde turn — Reading B has the
+/// two commanders alternate, so this is `horde_seats[active_horde_index % living]`
+/// in seat order (advanced once per Horde turn in `horde::begin_wave`). `None`
+/// outside a two-Horde game. Horde seats have no life total so all stay alive; the
+/// alive filter keeps it robust regardless.
+fn scheduled_active_horde(state: &GameState) -> Option<PlayerId> {
+    let living: Vec<PlayerId> = two_horde_seats(state)?
+        .iter()
+        .copied()
+        .filter(|&id| super::players::is_alive(state, id))
+        .collect();
+    (!living.is_empty()).then(|| living[state.active_horde_index % living.len()])
 }
 
 /// CR 117.6 + CR 805.5b: In shared-team-turn multiplayer games, teams rather
@@ -595,6 +633,10 @@ mod tests {
         );
         state.horde_seats = vec![PlayerId(0), PlayerId(1)];
         state.seat_order = vec![PlayerId(0), PlayerId(1), PlayerId(2), PlayerId(3)];
+        // A survivor is the active player (their setup turn) — the common case for
+        // "survivor turn hands to the scheduled Horde commander". Tests that need a
+        // specific active player override this.
+        state.active_player = PlayerId(2);
         state
     }
 
@@ -707,6 +749,44 @@ mod tests {
         assert_eq!(s.len(), 2);
         assert_eq!(s[1].seats, vec![PlayerId(0), PlayerId(1)]);
         assert_eq!(s[1].turn_structure, TurnStructure::SharedTeamTurns);
+    }
+
+    /// Reading B: the survivors' shared turn hands to the SCHEDULED Horde commander,
+    /// which alternates with `active_horde_index` (advanced each Horde turn by
+    /// `horde::begin_wave`) — Sauron (seat 0), then Saruman (seat 1), wrapping.
+    #[test]
+    fn two_horde_active_commander_alternates_with_the_cursor() {
+        let mut state = two_horde_state();
+
+        state.active_horde_index = 0;
+        assert_eq!(
+            next_turn_representative(&state, PlayerId(2)),
+            PlayerId(0),
+            "cursor 0 → first commander (Sauron)"
+        );
+        state.active_horde_index = 1;
+        assert_eq!(
+            next_turn_representative(&state, PlayerId(2)),
+            PlayerId(1),
+            "cursor 1 → the other commander (Saruman)"
+        );
+        state.active_horde_index = 2;
+        assert_eq!(
+            next_turn_representative(&state, PlayerId(2)),
+            PlayerId(0),
+            "wraps mod the seat count"
+        );
+
+        // During a commander's OWN turn the Horde side normalizes to THAT seat (the
+        // active_player), regardless of where the cursor points next — so priority
+        // and the turn recipient track the acting commander.
+        state.active_horde_index = 1; // cursor points at Saruman for next time…
+        state.active_player = PlayerId(0); // …but it is Sauron's turn right now.
+        assert_eq!(
+            normalize_shared_turn_recipient(&state, PlayerId(1)),
+            PlayerId(0),
+            "both Horde seats normalize to the acting commander (Sauron)"
+        );
     }
 
     /// `side_shares_life` is per-side: the survivor side pools (2HG-style) while

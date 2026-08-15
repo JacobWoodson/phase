@@ -8337,6 +8337,16 @@ pub struct GameState {
     /// Runtime designation (assigned at setup), not a deck-intrinsic ruleset field.
     #[serde(default)]
     pub horde_seats: Vec<PlayerId>,
+    /// Horde Magic (LOTR "Two Towers"): which [`horde_seats`] commander drives the
+    /// NEXT Horde turn. The rules have the two Horde commanders alternate turns
+    /// (Reading B): the Horde side takes one turn per round (2HG-style), but the
+    /// acting seat rotates — `horde_seats[active_horde_index % len]`.
+    /// `next_turn_representative` reads it to pick the upcoming commander; it
+    /// advances (mod the seat count) once per REAL Horde turn in
+    /// [`crate::game::horde::begin_wave`] — which only runs on a Horde's own turn,
+    /// so setup-skipped turns never bump it. Only meaningful when `len >= 2`.
+    #[serde(default)]
+    pub active_horde_index: usize,
     /// CR 725: The initiative designation (like monarch — one player at a time).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initiative: Option<PlayerId>,
@@ -9211,6 +9221,7 @@ impl GameState {
             horde_turn_index: 0,
             horde_postcombat_activation_queue: Vec::new(),
             horde_seats: horde_seats_designated,
+            active_horde_index: 0,
             initiative: None,
             combat_prevention_tally: None,
             cancelled_casts: Vec::new(),

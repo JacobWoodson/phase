@@ -394,6 +394,16 @@ pub(crate) fn begin_wave(state: &mut GameState, _events: &mut [GameEvent]) {
     state.horde_wave_nontokens_remaining = wave_nontoken_seed(state, turn_index);
     // Advance for the NEXT Horde turn; this turn's wave keeps `turn_index`.
     state.horde_turn_index = turn_index.saturating_add(1);
+
+    // LOTR "Two Towers" (Reading B): the two commanders alternate Horde turns.
+    // `begin_wave` runs only on a REAL Horde turn (a setup-skipped turn never
+    // reaches its precombat main), so this is the skip-safe point to rotate the
+    // active-commander cursor for the NEXT Horde turn. No-op for a single-Horde
+    // game (`active_horde_index` stays 0, unread).
+    let horde_seat_count = state.horde_seats.len();
+    if horde_seat_count >= 2 {
+        state.active_horde_index = (state.active_horde_index + 1) % horde_seat_count;
+    }
 }
 
 /// If a Horde wave is in progress and the Horde is at an empty-stack priority
@@ -2062,5 +2072,29 @@ mod tests {
                 "Horde seat {seat:?} controls its own emblem"
             );
         }
+    }
+
+    /// Reading B: `begin_wave` is the skip-safe hook that rotates the active-Horde
+    /// cursor — it runs only on a real Horde turn, so each Horde turn hands the next
+    /// one to the OTHER commander (Sauron ↔ Saruman).
+    #[test]
+    fn begin_wave_rotates_the_active_horde_commander() {
+        let mut ruleset = ChallengeDeck::CybermanHorde.default_ruleset();
+        ruleset.co_horde_decks = vec![ChallengeDeck::CybermanHorde];
+        let mut state = GameState::new(FormatConfig::horde(ruleset), 4, 42);
+        state.phase = Phase::PreCombatMain;
+
+        assert_eq!(state.active_horde_index, 0);
+
+        // Sauron's (seat 0) Horde turn advances the cursor to Saruman.
+        state.active_player = state.horde_seats[0];
+        let mut events = Vec::new();
+        begin_wave(&mut state, &mut events);
+        assert_eq!(state.active_horde_index, 1);
+
+        // Saruman's (seat 1) Horde turn wraps it back (mod the seat count).
+        state.active_player = state.horde_seats[1];
+        begin_wave(&mut state, &mut events);
+        assert_eq!(state.active_horde_index, 0);
     }
 }
