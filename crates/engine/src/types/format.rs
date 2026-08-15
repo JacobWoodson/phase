@@ -168,6 +168,13 @@ pub enum ChallengeDeck {
     /// cards plus 200 Human Soldier tokens: a wide, cheap human army punctuated
     /// by a handful of enormous Godzilla-series titans.
     HumansGodzillaHorde,
+    /// The Lord of the Rings "Two Towers" — Sauron, the Dark Lord (community
+    /// format, hordemagic.com). A near-all-creature swarm of Orcs, Nazgûl, and
+    /// siege beasts, with revealed Orc Army tokens amassing one growing army. Uses
+    /// the advanced LOTR rules: the uncommon+ rarity wave and the "milled legendary
+    /// enters then phases out" rule. Half of the two-Horde "Two Towers" experience
+    /// (Saruman is the other half); playable on its own as a single Horde.
+    SauronHorde,
 }
 
 /// Authoritative display metadata for one selectable Horde challenge deck.
@@ -602,6 +609,7 @@ impl ChallengeDeck {
         ChallengeDeck::ZombiesHorde,
         ChallengeDeck::SliversHorde,
         ChallengeDeck::HumansGodzillaHorde,
+        ChallengeDeck::SauronHorde,
     ];
 
     /// Display metadata for a single deck. Exhaustive match: adding a
@@ -642,6 +650,14 @@ impl ChallengeDeck {
                 "HGZ",
                 "A wide, cheap human army punctuated by a handful of \
                  enormous Godzilla-series titans",
+            ),
+            ChallengeDeck::SauronHorde => (
+                "Sauron, the Dark Lord Horde",
+                "SAU",
+                "The Lord of the Rings \u{201c}Two Towers\u{201d} — Sauron's \
+                 near-all-creature swarm of Orcs, Nazg\u{fb}l, and siege beasts; \
+                 revealed Orc Armies amass one growing army, and milled legendaries \
+                 recur by phasing out",
             ),
         };
         let default_ruleset = self.default_ruleset();
@@ -783,6 +799,23 @@ impl ChallengeDeck {
                 // (per the basic EDH rule) is a follow-up that also wires survivor
                 // commanders into Horde setup.
                 survivor_deck_format: SurvivorDeckFormat::Constructed,
+            },
+            ChallengeDeck::SauronHorde => HordeRuleset {
+                challenge_deck: ChallengeDeck::SauronHorde,
+                // LOTR "Two Towers": "Waves end when an Uncommon, Rare, or Mythic
+                // ETB." Per-card rarity is pinned by `sauron_horde::card_rarity`.
+                wave: WaveTermination::UntilRarityAtLeast(Rarity::Uncommon),
+                survivor_setup_turns: 3,
+                combined_base_life: 100,
+                per_extra_survivor_life_delta: -15,
+                horde_creatures_forced_attackers: true,
+                // LOTR advanced rule: a legendary that would be milled to the
+                // graveyard by damage instead enters the battlefield and phases out.
+                legendary_death: HordeLegendaryDeath::EtbThenPhaseOut,
+                post_combat_activation: HordePostCombatActivation::None,
+                // The published deck is played against upgraded Commander (EDH)
+                // survivor decks (Aragorn, the Uniter) — the first Commander deck.
+                survivor_deck_format: SurvivorDeckFormat::Commander,
             },
         }
     }
@@ -2277,7 +2310,8 @@ mod tests {
                 | ChallengeDeck::DndHorde
                 | ChallengeDeck::ZombiesHorde
                 | ChallengeDeck::SliversHorde
-                | ChallengeDeck::HumansGodzillaHorde => {}
+                | ChallengeDeck::HumansGodzillaHorde
+                | ChallengeDeck::SauronHorde => {}
             }
             assert!(
                 registry.iter().any(|meta| meta.deck == *deck),

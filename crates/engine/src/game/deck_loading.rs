@@ -759,6 +759,14 @@ pub fn load_horde_library(
             crate::game::decks::humans_godzilla_horde::HUMANS_GODZILLA_HORDE_TOKENS,
             no_pinned_rarity,
         ),
+        // LOTR "Two Towers" — Sauron. Rarity is pinned per card for the uncommon+
+        // wave (the runtime DB carries no rarity); revealed Orc Army tokens amass
+        // (see `horde::maybe_reveal_next`).
+        ChallengeDeck::SauronHorde => (
+            crate::game::decks::sauron_horde::SAURON_HORDE_NONTOKEN_CARDS,
+            crate::game::decks::sauron_horde::SAURON_HORDE_TOKENS,
+            crate::game::decks::sauron_horde::card_rarity,
+        ),
     };
 
     // REPLACE, don't append: the Horde seat is an engine-supplied seat, but in a
