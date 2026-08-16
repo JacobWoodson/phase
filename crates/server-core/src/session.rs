@@ -294,8 +294,25 @@ impl GameSession {
         // Horde — loading the challenge-deck library there, seating the humans as
         // the survivor team, and giving the survivors the first turn.
         if format_config.format == GameFormat::Horde {
-            if let Some(&horde_seat) = self.ai_seats.iter().min() {
-                format_config.archenemy_player = Some(horde_seat);
+            // `GameState::new` designates seats `archenemy..archenemy+N` as the Horde
+            // (N = the number of Horde libraries; 1 for a single-Horde deck, 2 for the
+            // LOTR "Two Towers" pairing). Those seats must ALL be AI — the survivors
+            // are the humans — so anchor the archenemy on the LOWEST run of N
+            // contiguous AI seats. For the standard layout (humans first, AI after)
+            // that is `min(ai_seats)`; the fallback keeps single-Horde robust.
+            let horde_seat_count = format_config
+                .horde_ruleset
+                .as_ref()
+                .map_or(1, |r| r.horde_decks().len()) as u8;
+            let anchor = (0..player_count)
+                .find(|&s| {
+                    (0..horde_seat_count)
+                        .all(|offset| self.ai_seats.contains(&PlayerId(s + offset)))
+                })
+                .map(PlayerId)
+                .or_else(|| self.ai_seats.iter().min().copied());
+            if let Some(anchor) = anchor {
+                format_config.archenemy_player = Some(anchor);
             }
         }
         let match_config = self.state.match_config;

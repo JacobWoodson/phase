@@ -774,6 +774,13 @@ pub fn load_horde_library(
             crate::game::decks::saruman_horde::SARUMAN_HORDE_TOKENS,
             crate::game::decks::saruman_horde::card_rarity,
         ),
+        // The Two Towers picker identity: seat 0's library IS Sauron's (Saruman is
+        // the co-horde loaded into seat 1 via `horde_decks()`).
+        ChallengeDeck::LotrTwoTowersHorde => (
+            crate::game::decks::sauron_horde::SAURON_HORDE_NONTOKEN_CARDS,
+            crate::game::decks::sauron_horde::SAURON_HORDE_TOKENS,
+            crate::game::decks::sauron_horde::card_rarity,
+        ),
     };
 
     // REPLACE, don't append: the Horde seat is an engine-supplied seat, but in a

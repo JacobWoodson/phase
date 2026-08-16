@@ -66,7 +66,8 @@ export type ChallengeDeck =
   | "SliversHorde"
   | "HumansGodzillaHorde"
   | "SauronHorde"
-  | "SarumanHorde";
+  | "SarumanHorde"
+  | "LotrTwoTowersHorde";
 
 /**
  * Card rarity. Mirrors the engine `Rarity` enum (serde `rename_all =

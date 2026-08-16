@@ -181,6 +181,12 @@ pub enum ChallengeDeck {
     /// as Sauron. The other half of the two-Horde "Two Towers" experience;
     /// playable on its own as a single Horde.
     SarumanHorde,
+    /// The Lord of the Rings "Two Towers" — the full TWO-Horde experience: Sauron
+    /// and Saruman as two commanders, each with its own library, battlefield, and
+    /// graveyard, alternating turns (Reading B). The picker identity that pairs the
+    /// two half-decks — its `default_ruleset` has `challenge_deck` = this (seat 0's
+    /// library is Sauron's cards) and `co_horde_decks = [SarumanHorde]` (seat 1).
+    LotrTwoTowersHorde,
 }
 
 /// Authoritative display metadata for one selectable Horde challenge deck.
@@ -636,6 +642,7 @@ impl ChallengeDeck {
         ChallengeDeck::HumansGodzillaHorde,
         ChallengeDeck::SauronHorde,
         ChallengeDeck::SarumanHorde,
+        ChallengeDeck::LotrTwoTowersHorde,
     ];
 
     /// Display metadata for a single deck. Exhaustive match: adding a
@@ -692,6 +699,14 @@ impl ChallengeDeck {
                  Uruk-hai and Orcs backed by removal and enchantments that grow the \
                  White Hand's Orc Army; uncommon+ waves and legendaries that recur \
                  by phasing out",
+            ),
+            ChallengeDeck::LotrTwoTowersHorde => (
+                "LOTR: The Two Towers Horde",
+                "2TW",
+                "The Lord of the Rings \u{201c}Two Towers\u{201d} — the full \
+                 two-Horde experience: Sauron and Saruman as two commanders, each \
+                 with its own deck, battlefield, and graveyard, ALTERNATING turns \
+                 against the survivor team",
             ),
         };
         let default_ruleset = self.default_ruleset();
@@ -870,6 +885,21 @@ impl ChallengeDeck {
                 post_combat_activation: HordePostCombatActivation::None,
                 survivor_deck_format: SurvivorDeckFormat::Commander,
                 co_horde_decks: Vec::new(),
+            },
+            ChallengeDeck::LotrTwoTowersHorde => HordeRuleset {
+                // Seat 0's library is Sauron's (its `load_horde_library` arm loads
+                // the Sauron cards); Saruman is the co-horde in seat 1. The registry
+                // requires `challenge_deck == deck`, so it is this variant itself.
+                challenge_deck: ChallengeDeck::LotrTwoTowersHorde,
+                co_horde_decks: vec![ChallengeDeck::SarumanHorde],
+                wave: WaveTermination::UntilRarityAtLeast(Rarity::Uncommon),
+                survivor_setup_turns: 3,
+                combined_base_life: 100,
+                per_extra_survivor_life_delta: -15,
+                horde_creatures_forced_attackers: true,
+                legendary_death: HordeLegendaryDeath::EtbThenPhaseOut,
+                post_combat_activation: HordePostCombatActivation::None,
+                survivor_deck_format: SurvivorDeckFormat::Commander,
             },
         }
     }
@@ -2384,7 +2414,8 @@ mod tests {
                 | ChallengeDeck::SliversHorde
                 | ChallengeDeck::HumansGodzillaHorde
                 | ChallengeDeck::SauronHorde
-                | ChallengeDeck::SarumanHorde => {}
+                | ChallengeDeck::SarumanHorde
+                | ChallengeDeck::LotrTwoTowersHorde => {}
             }
             assert!(
                 registry.iter().any(|meta| meta.deck == *deck),
