@@ -2,9 +2,21 @@
 //! <keyword>, …" (Kang Prime, Jhoira of the Ghitu, Suspend, Delay, Momentum
 //! Rumbler, …).
 //!
-//! `it` is an ANAPHOR (CR 608.2k) to the object introduced by the preceding
-//! instruction, by the ability's cost, or by the trigger condition — never to
-//! the ability's source. The parser used to lower it to
+//! `it` is an ANAPHOR to the object introduced by the preceding instruction, by
+//! the ability's cost, or by the trigger condition — never to the ability's
+//! source. Which rule supplies the referent depends on the binding class:
+//!
+//!   * CR 608.2c — a referent introduced by a PRECEDING INSTRUCTION of the same
+//!     effect. "Read the whole text and apply the rules of English to the text":
+//!     `it` in "Put two time counters on that card. If it doesn't have suspend"
+//!     is the nonland card the earlier sentence exiled (Kang Prime, Suspend,
+//!     Delay, Doom's Time Platform).
+//!   * CR 608.2k — a referent previously referred to by the ability's COST or
+//!     TRIGGER CONDITION, which keeps pointing at that object even after its
+//!     characteristics change (Jhoira of the Ghitu's cost-paid card; Momentum
+//!     Rumbler's attacking creature).
+//!
+//! The parser used to lower it to
 //! `AbilityCondition::SourceLacksKeyword`, whose evaluator reads
 //! `ability.source_id`, so the gate was unconditionally TRUE for every card
 //! whose `it` is not the source. The observable symptom is a redundant grant
@@ -20,8 +32,10 @@
 //!
 //!   * the SUB-ABILITY gate, which passes the PARENT node as the condition
 //!     ability — used by `injected_target` and `declared_stack_target` below;
-//!   * the TOP-LEVEL gate (CR 608.2c), which passes the RESOLVING node itself —
-//!     used by `top_level_trigger_source` below, and by no other module here.
+//!   * the TOP-LEVEL gate, which passes the RESOLVING node itself — used by
+//!     `top_level_trigger_source` below, and by no other module here. That is
+//!     where an intervening-"if" condition is rechecked on resolution
+//!     (CR 603.4 + CR 608.2a).
 //!
 //! The cost-paid binding class (Jhoira of the Ghitu) is covered in
 //! `crates/engine/src/game/casting_tests.rs`, next to the pre-existing
@@ -67,9 +81,16 @@ fn printed_suspend_four_blue() -> Keyword {
     }
 }
 
-/// Drive the pipeline until the stack is empty, answering the prompts an
-/// anaphor chain can raise. Bounded so a stuck state fails the test rather than
-/// hanging.
+/// Drive the pipeline to the ONE terminal state these scenarios may end in: an
+/// empty stack at a priority window.
+///
+/// Every other exit is a test failure, not a stopping condition. An action
+/// error, an unanticipated prompt, or running out of steps all mean the chain
+/// under test never resolved — and the assertions downstream are written so a
+/// stalled game passes them for the wrong reason: a card still sitting in the
+/// library trivially has no suspend, no time counters, and is not the source.
+/// Returning quietly from here would turn every one of them into coverage
+/// theatre, so each non-terminal exit panics with the state that caused it.
 fn settle(runner: &mut GameRunner) {
     for _ in 0..60 {
         match runner.state().waiting_for.clone() {
@@ -77,21 +98,26 @@ fn settle(runner: &mut GameRunner) {
                 engine::game::triggers::drain_order_triggers_with_identity(runner.state_mut());
             }
             WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
-                if runner.choose_first_legal_target().is_err() {
-                    break;
-                }
+                runner
+                    .choose_first_legal_target()
+                    .expect("a pending target selection must offer a legal target");
             }
             WaitingFor::Priority { .. } => {
                 if runner.state().stack.is_empty() {
-                    break;
+                    return;
                 }
-                if runner.act(GameAction::PassPriority).is_err() {
-                    break;
-                }
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("passing priority on a non-empty stack must be legal");
             }
-            _ => break,
+            other => panic!("unexpected prompt while settling the stack: {other:?}"),
         }
     }
+    panic!(
+        "the stack never emptied within 60 steps (waiting_for = {:?}, stack depth = {})",
+        runner.state().waiting_for,
+        runner.state().stack.len(),
+    );
 }
 
 /// Binding class 1 — the referent is INJECTED into the parent's `targets` by the
@@ -123,8 +149,9 @@ mod injected_target {
         exiled: ObjectId,
     }
 
-    /// THE FIX. CR 702.62a + CR 608.2k: the exiled card already has printed
-    /// `Suspend 4—{U}`, so the gate must be FALSE and no grant may fire.
+    /// THE FIX. CR 608.2c + CR 702.62a: `it` is the card the PRECEDING
+    /// instruction exiled, and that card already has printed `Suspend 4—{U}`, so
+    /// the gate must be FALSE and no grant may fire.
     ///
     /// Revert-fail: with `SourceLacksKeyword`, the gate reads Kang Prime (which
     /// never has suspend), fires the grant, and
@@ -253,8 +280,9 @@ mod top_level_trigger_source {
             .unwrap_or(0)
     }
 
-    /// CR 608.2c: with no first strike, the top-level gate is true and the
-    /// counter is placed.
+    /// CR 603.4 + CR 608.2a: the "if it doesn't have first strike" clause is an
+    /// intervening "if", rechecked as the ability resolves. With no first
+    /// strike the gate is true and the counter is placed.
     #[test]
     fn attacker_without_first_strike_gets_the_counter() {
         let mut scenario = GameScenario::new();
@@ -502,9 +530,14 @@ mod resolution_time_choice_disclosed_gap {
         let mut runner = scenario.build();
         run_combat(&mut runner, vec![doctor], vec![]);
 
-        // Answer the optional trigger and its resolution-time card pick.
+        // Answer the optional trigger and its resolution-time card pick. Same
+        // terminal-state contract as `settle`: only an empty stack at a priority
+        // window is a legal exit, because both pins below (a zero time-counter
+        // count, an absent suspend grant) are exactly what a card that never
+        // left the hand would also show.
         let mut saw_optional = false;
         let mut saw_pick = false;
+        let mut settled = false;
         for _ in 0..40 {
             match runner.state().waiting_for.clone() {
                 WaitingFor::OrderTriggers { .. } => {
@@ -513,41 +546,42 @@ mod resolution_time_choice_disclosed_gap {
                 // Accept the trigger's "you may" so the exile actually happens.
                 WaitingFor::OptionalEffectChoice { .. } => {
                     saw_optional = true;
-                    if runner
+                    runner
                         .act(GameAction::DecideOptionalEffect { accept: true })
-                        .is_err()
-                    {
-                        break;
-                    }
+                        .expect("the optional combat-damage trigger must accept");
                 }
                 // The resolution-time pick of which hand card to exile.
                 WaitingFor::EffectZoneChoice { .. } => {
                     saw_pick = true;
-                    if runner
+                    runner
                         .act(GameAction::SelectCards {
                             cards: vec![hand_card],
                         })
-                        .is_err()
-                    {
-                        break;
-                    }
+                        .expect("the chosen hand card must be a legal pick");
                 }
                 WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
-                    if runner.choose_first_legal_target().is_err() {
-                        break;
-                    }
+                    runner
+                        .choose_first_legal_target()
+                        .expect("a pending target selection must offer a legal target");
                 }
                 WaitingFor::Priority { .. } => {
                     if runner.state().stack.is_empty() {
+                        settled = true;
                         break;
                     }
-                    if runner.act(GameAction::PassPriority).is_err() {
-                        break;
-                    }
+                    runner
+                        .act(GameAction::PassPriority)
+                        .expect("passing priority on a non-empty stack must be legal");
                 }
-                _ => break,
+                other => panic!("unexpected prompt while driving the trigger: {other:?}"),
             }
         }
+        assert!(
+            settled,
+            "the stack never emptied within 40 steps (waiting_for = {:?}, stack depth = {})",
+            runner.state().waiting_for,
+            runner.state().stack.len(),
+        );
         assert!(
             saw_optional,
             "reach-guard: the optional combat-damage trigger must be offered"
@@ -634,6 +668,13 @@ mod resolution_time_choice_disclosed_gap {
     fn mana_value_time_counters_read_the_source_not_the_chosen_card() {
         let (runner, card) = drive(false);
 
+        // Reach-guard: a card still in hand also has zero time counters, so the
+        // pin below only means anything once the exile has actually happened.
+        assert_eq!(
+            runner.state().objects[&card].zone,
+            Zone::Exile,
+            "reach-guard: the chosen hand card must actually be exiled"
+        );
         assert_eq!(
             runner.state().objects[&card]
                 .counters

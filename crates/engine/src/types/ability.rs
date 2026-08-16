@@ -16140,6 +16140,32 @@ impl TargetFilter {
         }
     }
 
+    /// CR 613.1f + CR 702.1: True when this filter tree asks a KIND-level keyword
+    /// question (`HasKeywordKind` / `WithoutKeywordKind`) at any structural
+    /// position. Mirrors [`Self::references_cost_paid_object`]'s recursion.
+    ///
+    /// Those two props are the only ones that must be answered from an object's
+    /// LIVE effective keyword set rather than a snapshot, because they route
+    /// through the off-zone Layer-6 ledger. Evaluators that would otherwise pay
+    /// to recompute that ledger use this as a cheap early-out — see
+    /// `game::filter::matches_target_filter_on_cost_paid_reference`.
+    pub fn queries_keyword_kind(&self) -> bool {
+        match self {
+            TargetFilter::Typed(TypedFilter { properties, .. }) => properties.iter().any(|prop| {
+                matches!(
+                    prop,
+                    FilterProp::HasKeywordKind { .. } | FilterProp::WithoutKeywordKind { .. }
+                )
+            }),
+            TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+                filters.iter().any(TargetFilter::queries_keyword_kind)
+            }
+            TargetFilter::Not { filter } => filter.queries_keyword_kind(),
+            TargetFilter::TrackedSetFiltered { filter, .. } => filter.queries_keyword_kind(),
+            _ => false,
+        }
+    }
+
     pub fn contains_source_attachment_host(&self) -> bool {
         match self {
             TargetFilter::Typed(TypedFilter { properties, .. }) => properties

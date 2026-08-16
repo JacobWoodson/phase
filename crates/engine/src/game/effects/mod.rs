@@ -13175,9 +13175,14 @@ pub(crate) fn evaluate_condition(
                 .iter()
                 .any(|&id| crate::game::filter::matches_target_filter(state, id, filter, &ctx))
         }
+        // CR 608.2k + CR 608.2h: the cost-paid object is a persistent untargeted
+        // reference, so it reads CURRENT information while it is still in a
+        // public zone — not the payment-time snapshot. See
+        // `matches_target_filter_on_cost_paid_reference` for why only the
+        // keyword set is refreshed.
         AbilityCondition::CostPaidObjectMatchesFilter { filter } => {
             if let Some(snapshot) = &ability.cost_paid_object {
-                crate::game::filter::matches_target_filter_on_lki_snapshot(
+                crate::game::filter::matches_target_filter_on_cost_paid_reference(
                     state,
                     snapshot.object_id,
                     &snapshot.lki,

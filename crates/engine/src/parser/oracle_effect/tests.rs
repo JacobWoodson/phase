@@ -14850,6 +14850,26 @@ fn it_doesnt_have_keyword_lowers_to_target_matches_filter() {
          have a counter of that kind on it",
         AbilityKind::Spell,
     );
+    // Reach-guard for the negative below. An absent keyword predicate is also
+    // what an upstream short-circuit produces, so first prove the clause was
+    // actually CONSUMED — by the counter path, as the `target_condition` rider on
+    // `PutChosenCounter`. CR 122.1 + CR 608.2c: "if it doesn't have a counter of
+    // that kind on it" is a count-of-the-chosen-kind == 0 eligibility test, not a
+    // keyword test. If this shape ever changes, the negative assertion below
+    // stops discriminating and must be re-derived alongside it.
+    match &*counter_predicate.effect {
+        Effect::PutChosenCounter {
+            target_condition, ..
+        } => assert_eq!(
+            target_condition.as_ref(),
+            Some(&crate::types::ability::ChosenCounterCountCondition {
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            }),
+            "the counter clause must survive as the chosen-counter eligibility rider"
+        ),
+        other => panic!("the counter clause must reach the counter path, got {other:?}"),
+    }
     assert!(
         !matches!(
             counter_predicate.condition,
@@ -14984,11 +15004,30 @@ fn keyword_anaphor_strict_fails_when_kind_does_not_identify_the_ability() {
         "If it has hexproof, draw a card",
     ] {
         let def = parse_effect_chain(text, AbilityKind::Spell);
+        // Per-row reach-guard: the strict failure must drop ONLY the gate. A row
+        // that never reached the keyword-presence arm — swallowed upstream, or
+        // collapsed to `Unimplemented` — would satisfy the negatives below for
+        // the wrong reason, so pin the surviving "draw a card" body first.
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                }
+            ),
+            "{text:?} must keep its draw body — only the gate may be dropped, got {:?}",
+            def.effect
+        );
         assert_eq!(
             keyword_predicate(&def),
             None,
             "{text:?} must not lower to a keyword predicate, got {:?}",
             def.condition
+        );
+        assert_eq!(
+            def.condition, None,
+            "{text:?} must drop the gate outright rather than lower it to some other condition"
         );
     }
 

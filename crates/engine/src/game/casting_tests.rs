@@ -9138,6 +9138,156 @@ fn jhoira_does_not_regrant_suspend_to_a_natively_suspended_card() {
     );
 }
 
+/// CR 608.2h + CR 608.2k + CR 613.1f: the cost-paid referent must be read at
+/// RESOLUTION, not from the payment-time snapshot.
+///
+/// The card enters the cost with NO suspend at all, so the payment-time
+/// `LKISnapshot` honestly records "no suspend". Only after the cost is paid —
+/// while the card is sitting in EXILE, and before the ability resolves — does a
+/// Layer-6 continuous effect grant it `Suspend 4—{U}`. CR 608.2k keeps the
+/// ability pointing at that object, and CR 608.2h says a reference to an object
+/// still in the public zone it was expected to be in reads that object's CURRENT
+/// information. So by the time the gate is evaluated the card DOES have suspend
+/// and no grant may fire.
+///
+/// This is the case a snapshot read cannot get right in principle: the kind-level
+/// keyword props exist to consult the off-zone keyword ledger, and an off-zone
+/// grant is applied to the live object, never captured in an LKI snapshot.
+///
+/// Revert-fail: evaluate the filter through `matches_target_filter_on_lki_snapshot`
+/// instead of `matches_target_filter_on_cost_paid_reference` and the gate reads
+/// the payment-time keyword list (empty), fires the redundant grant, and
+/// `upsert_keyword_contribution` replaces the granted `Suspend 4—{U}` contribution
+/// with `Suspend { count: 0, cost: {} }` — so this reads `Some({0})`.
+#[test]
+fn jhoira_reads_a_suspend_granted_in_exile_after_the_cost_was_paid() {
+    use super::super::engine::apply_as_current;
+    use crate::types::ability::{ContinuousModification, Duration, TargetFilter};
+    use crate::types::counter::CounterType;
+    use crate::types::keywords::Keyword;
+    use crate::types::mana::ManaCostShard;
+
+    let blue = ManaCost::Cost {
+        shards: vec![ManaCostShard::Blue],
+        generic: 0,
+    };
+
+    let mut state = setup_game_at_main_phase();
+    let jhoira = create_object(
+        &mut state,
+        CardId(985),
+        PlayerId(0),
+        "Jhoira of the Ghitu".to_string(),
+        Zone::Battlefield,
+    );
+    // Deliberately NO printed suspend, on either list: the payment-time snapshot
+    // must honestly say "no suspend" so the grant below is the only source.
+    let nonland = create_object(
+        &mut state,
+        CardId(986),
+        PlayerId(0),
+        "Plain Sorcery".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&jhoira).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "{2}, Exile a nonland card from your hand: Put four time \
+                 counters on the exiled card. If it doesn't have suspend, it \
+                 gains suspend.",
+            "Jhoira of the Ghitu",
+            &[],
+            &[String::from("Creature")],
+            &[],
+        );
+        Arc::make_mut(&mut obj.abilities).extend(parsed.abilities);
+    }
+    {
+        let nl = state.objects.get_mut(&nonland).unwrap();
+        nl.card_types.core_types.push(CoreType::Sorcery);
+        nl.base_card_types = nl.card_types.clone();
+    }
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+
+    apply_as_current(
+        &mut state,
+        GameAction::ActivateAbility {
+            source_id: jhoira,
+            ability_index: 0,
+        },
+    )
+    .expect("Jhoira's exile-cost ability must enter the activation pipeline");
+    apply_as_current(
+        &mut state,
+        GameAction::SelectCards {
+            cards: vec![nonland],
+        },
+    )
+    .expect("paying the exile-from-hand cost must succeed");
+
+    // Reach-guard: the cost really moved the card to exile, so the grant below is
+    // an EXILE-zone characteristic change and the snapshot is already stale.
+    assert_eq!(
+        state.objects[&nonland].zone,
+        Zone::Exile,
+        "reach-guard: paying the cost must have exiled the card"
+    );
+    assert!(
+        !crate::game::keywords::object_has_effective_keyword_kind(
+            &state,
+            nonland,
+            crate::types::keywords::KeywordKind::Suspend,
+        ),
+        "reach-guard: the card must have no suspend at payment time, or the \
+         grant below proves nothing"
+    );
+
+    // The characteristic change, AFTER payment and BEFORE resolution.
+    state.add_transient_continuous_effect(
+        jhoira,
+        PlayerId(0),
+        Duration::Permanent,
+        TargetFilter::SpecificObject { id: nonland },
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Suspend {
+                count: 4,
+                cost: blue.clone(),
+            },
+        }],
+        None,
+    );
+    assert!(
+        crate::game::keywords::object_has_effective_keyword_kind(
+            &state,
+            nonland,
+            crate::types::keywords::KeywordKind::Suspend,
+        ),
+        "reach-guard: the off-zone grant must be visible before resolution, or \
+         the gate below is not being asked the question this test intends"
+    );
+
+    let mut events = Vec::new();
+    stack::resolve_top(&mut state, &mut events);
+
+    // Reach-guard: the chain really ran — CR 122.1, four time counters landed.
+    assert_eq!(
+        state.objects[&nonland]
+            .counters
+            .get(&CounterType::Time)
+            .copied(),
+        Some(4),
+        "the exiled card must carry four time counters"
+    );
+    assert_eq!(
+        crate::game::keywords::effective_suspend_cost(&state, nonland),
+        Some(blue),
+        "CR 608.2h: the gate must read the card's state AT RESOLUTION, where the \
+         exile-zone grant already gave it Suspend 4—{{U}} — no redundant grant may \
+         clobber that to {{0}}"
+    );
+}
+
 /// The Wedding of River Song (WHO) — runtime regression for the core chain.
 /// Drives the real cast pipeline (CastSpell → resolution) and asserts:
 /// (a) the controller draws two cards; (b) the controller's nonland card is

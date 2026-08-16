@@ -2769,6 +2769,63 @@ pub fn matches_target_filter_on_lki_snapshot(
     matches_target_filter_on_zone_change_record(state, &record, filter, ctx)
 }
 
+/// CR 608.2k + CR 608.2h: Evaluate a target filter against an ability's
+/// PERSISTENT untargeted reference — today, its cost-paid object.
+///
+/// This is NOT the same question as [`matches_target_filter_on_lki_snapshot`].
+/// A zone-change subject is gone, so its snapshot IS the answer. A cost-paid
+/// referent is a live reference the ability keeps pointing at (CR 608.2k), and
+/// CR 608.2h says such a reference reads the object's CURRENT information while
+/// it is in the public zone it was expected to be in — only a departed or
+/// hidden-zone object falls back to last known information.
+///
+/// The refresh is deliberately scoped to `keywords`. That is the one field the
+/// payment-time snapshot cannot answer honestly: the kind-level keyword props
+/// exist to consult Layer-6 grants recorded in the off-zone ledger
+/// (CR 613.1f), which by construction are applied to the LIVE object and are
+/// absent from any snapshot. A card discarded to Jhoira of the Ghitu's cost and
+/// then granted (or stripped of) suspend in the graveyard or in exile before the
+/// ability resolves must be read as it is at resolution, or the gate answers a
+/// question about a game state that no longer exists. Every other LKI field stays
+/// on the snapshot: type, name, P/T, colors and controller are look-back facts
+/// about the payment itself. (A filter that pairs a kind-level prop with an
+/// object-level `WithKeyword`/`WithoutKeyword` would see the refreshed list for
+/// both, since they read the same field — no card does that today, and CR 608.2h
+/// makes the live reading the correct one either way.)
+///
+/// Guarded by `TargetFilter::queries_keyword_kind` so the common cost-paid filter
+/// — a plain type/name look-back with no keyword question — costs one recursive
+/// predicate walk and skips both the ledger recomputation
+/// (`effective_off_zone_keywords` collects every applicable continuous effect)
+/// and the snapshot clone.
+pub fn matches_target_filter_on_cost_paid_reference(
+    state: &GameState,
+    object_id: ObjectId,
+    lki: &LKISnapshot,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    let refreshed = filter
+        .queries_keyword_kind()
+        .then(|| state.objects.get(&object_id))
+        .flatten()
+        .filter(|object| object.zone.is_public())
+        .map(|_| {
+            crate::game::off_zone_characteristics::effective_off_zone_keywords(state, object_id)
+        });
+
+    match refreshed {
+        Some(keywords) => {
+            let mut lki = lki.clone();
+            lki.keywords = keywords;
+            matches_target_filter_on_lki_snapshot(state, object_id, &lki, filter, ctx)
+        }
+        // Gone, or moved to a hidden zone: CR 608.2h mandates last known
+        // information, which is exactly what the payment snapshot holds.
+        None => matches_target_filter_on_lki_snapshot(state, object_id, lki, filter, ctx),
+    }
+}
+
 /// CR 400.7 + CR 603.10a: Match an event subject from its captured facts,
 /// never by re-reading the live object at the same storage id. Connive uses
 /// this for its exact completion snapshot after a replacement-ordering pause.

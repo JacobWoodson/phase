@@ -858,10 +858,16 @@ fn filter_is_bare_keyword_kind_predicate(filter: &TargetFilter) -> bool {
 /// `keyword_anaphor_referent_is_unpublished_resolution_pick` below rather than
 /// left to the misleading `TriggeringSource` fallback.
 ///
-/// Note the two readings also differ in freshness, and both are correct for their
-/// own subclass: `TargetMatchesFilter` reads the subject LIVE, while
-/// `CostPaidObjectMatchesFilter` reads the cost-payment-time snapshot — which is
-/// precisely what CR 608.2k prescribes for a cost-introduced referent.
+/// Both readings are LIVE for the keyword-kind props, and deliberately so.
+/// CR 608.2k keeps a cost-introduced reference pointing at its object "even if
+/// the object has changed characteristics" — it does NOT freeze the object's
+/// characteristics at payment time. CR 608.2h then supplies the timing: a
+/// reference to an object still in the public zone it was expected to be in
+/// reads that object's CURRENT information. `CostPaidObjectMatchesFilter` is
+/// evaluated through `filter::matches_target_filter_on_cost_paid_reference`,
+/// which preserves the payment snapshot's look-back facts while reading the
+/// keyword set off the live object, so an off-zone Layer-6 grant applied after
+/// payment (CR 613.1f) is visible to the gate.
 fn rewrite_keyword_anaphor_for_cost_paid_parent(
     condition: Option<AbilityCondition>,
     clauses: &[ClauseIr],

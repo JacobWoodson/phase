@@ -1711,18 +1711,246 @@ impl Keyword {
     /// costs a strict failure, while over-reporting it ships a wrong guard.
     ///
     /// Maintenance: this is a hand-derived property of the `kind()` match above,
-    /// which is exhaustive — when adding a `Keyword` variant, decide here too. A
-    /// new parameterized family whose parameter renames the printed keyword
-    /// belongs in the `false` arm.
+    /// so the census below is exhaustive for the same reason that one is — adding
+    /// a `Keyword` variant fails compilation here until the author makes the
+    /// injectivity call.
+    ///
+    /// Do NOT collapse the `true` arm back into an `other => other.kind() !=
+    /// KeywordKind::Unknown` fallback. That derivation is only sound while every
+    /// non-`Unknown` kind has exactly one `Keyword` variant producing it, which is
+    /// a property of the *current* `kind()` match rather than a guarantee: a new
+    /// variant that aliases an existing non-`Unknown` kind (the
+    /// `Hexproof`/`HexproofFrom` shape) would silently answer `true` and ship the
+    /// wrong guard. A new parameterized family whose parameter renames the printed
+    /// keyword belongs in the first `false` arm.
     pub fn kind_identifies_ability(&self) -> bool {
         match self {
+            // CR 702.11d + CR 702.14a + CR 702.16a + CR 702.29e + CR 702.124a:
+            // the PRINTED keyword ability name varies with the parameter, so a
+            // single kind spans several distinct abilities and no kind-level test
+            // can separate them.
             Keyword::Hexproof
             | Keyword::HexproofFrom(_)
-            | Keyword::Protection(_)
             | Keyword::Landwalk(_)
-            | Keyword::Typecycling { .. }
-            | Keyword::Partner(_) => false,
-            other => other.kind() != KeywordKind::Unknown,
+            | Keyword::Partner(_)
+            | Keyword::Protection(_)
+            | Keyword::Typecycling { .. } => false,
+
+            // The `KeywordKind::Unknown` catch-all bucket — "has an Unknown-kind
+            // keyword" is true for a creature with banding when the text asked
+            // about storm, and the kind-indexed off-zone ledger has no per-ability
+            // answer for these at all.
+            Keyword::Affinity(_)
+            | Keyword::Amplify(_)
+            | Keyword::Backup(_)
+            | Keyword::Banding
+            | Keyword::Bloodthirst(_)
+            | Keyword::Buyback(_)
+            | Keyword::Casualty(_)
+            | Keyword::Compleated
+            | Keyword::Conspire
+            | Keyword::CumulativeUpkeep(_)
+            | Keyword::Daybound
+            | Keyword::Demonstrate
+            | Keyword::Dethrone
+            | Keyword::Discover(_)
+            | Keyword::DoubleTeam
+            | Keyword::Echo(_)
+            | Keyword::Emerge(_)
+            | Keyword::Encore(_)
+            | Keyword::Enlist
+            | Keyword::Entwine(_)
+            | Keyword::Epic
+            | Keyword::Evoke(_)
+            | Keyword::Fortify(_)
+            | Keyword::Gravestorm
+            | Keyword::Haunt
+            | Keyword::Hideaway(_)
+            | Keyword::Impending { .. }
+            | Keyword::Improvise
+            | Keyword::Ingest
+            | Keyword::LevelUp(_)
+            | Keyword::LivingMetal
+            | Keyword::Melee
+            | Keyword::Mentor
+            | Keyword::Mobilize(_)
+            | Keyword::Myriad
+            | Keyword::Nightbound
+            | Keyword::Overload(_)
+            | Keyword::Poisonous(_)
+            | Keyword::Prototype { .. }
+            | Keyword::Provoke
+            | Keyword::Prowl(_)
+            | Keyword::Ravenous
+            | Keyword::ReadAhead
+            | Keyword::Rebound
+            | Keyword::Reinforce { .. }
+            | Keyword::Ripple(_)
+            | Keyword::Saddle(_)
+            | Keyword::Scavenge(_)
+            | Keyword::Soulshift(_)
+            | Keyword::Spectacle(_)
+            | Keyword::SplitSecond
+            | Keyword::Spree
+            | Keyword::Squad(_)
+            | Keyword::StartingIntensity(_)
+            | Keyword::Storm
+            | Keyword::Surge(_)
+            | Keyword::Teamwork(_)
+            | Keyword::Totem
+            | Keyword::Toxic(_)
+            | Keyword::Unknown(_)
+            | Keyword::WebSlinging(_) => false,
+
+            // 1:1 with their kind: the kind names this ability and no other, so a
+            // kind-level presence test asks exactly what the Oracle text asks.
+            Keyword::Absorb(_)
+            | Keyword::Afflict(_)
+            | Keyword::Afterlife(_)
+            | Keyword::Aftermath
+            | Keyword::Annihilator(_)
+            | Keyword::Ascend
+            | Keyword::Assist
+            | Keyword::Augment
+            | Keyword::Awaken { .. }
+            | Keyword::BandsWithOther(_)
+            | Keyword::Bargain
+            | Keyword::Battlecry
+            | Keyword::Bestow(_)
+            | Keyword::Blitz(_)
+            | Keyword::Bushido(_)
+            | Keyword::Cascade
+            | Keyword::Champion(_)
+            | Keyword::Changeling
+            | Keyword::Cipher
+            | Keyword::Cleave(_)
+            | Keyword::CommanderNinjutsu(_)
+            | Keyword::Companion(_)
+            | Keyword::Convoke
+            | Keyword::Craft { .. }
+            | Keyword::Crew { .. }
+            | Keyword::Cycling(_)
+            | Keyword::Dash(_)
+            | Keyword::Deathtouch
+            | Keyword::Decayed
+            | Keyword::Defender
+            | Keyword::Delve
+            | Keyword::Devoid
+            | Keyword::Devour { .. }
+            | Keyword::Disguise(_)
+            | Keyword::Disturb(_)
+            | Keyword::DoubleStrike
+            | Keyword::Dredge(_)
+            | Keyword::Embalm(_)
+            | Keyword::Enchant(_)
+            | Keyword::Equip(_)
+            | Keyword::Escalate(_)
+            | Keyword::Escape(_)
+            | Keyword::EtbCounter { .. }
+            | Keyword::Eternalize(_)
+            | Keyword::Evolve
+            | Keyword::Exalted
+            | Keyword::Exploit
+            | Keyword::Explore
+            | Keyword::Extort
+            | Keyword::Fabricate(_)
+            | Keyword::Fading(_)
+            | Keyword::Fear
+            | Keyword::Firebending(_)
+            | Keyword::FirstStrike
+            | Keyword::Flanking
+            | Keyword::Flash
+            | Keyword::Flashback(_)
+            | Keyword::Flying
+            | Keyword::ForMirrodin
+            | Keyword::Foretell(_)
+            | Keyword::Freerunning(_)
+            | Keyword::Frenzy(_)
+            | Keyword::Fuse
+            | Keyword::Gift(_)
+            | Keyword::Graft(_)
+            | Keyword::Harmonize(_)
+            | Keyword::Haste
+            | Keyword::Horsemanship
+            | Keyword::Increment
+            | Keyword::Indestructible
+            | Keyword::Infect
+            | Keyword::Intimidate
+            | Keyword::JobSelect
+            | Keyword::JumpStart
+            | Keyword::Kicker(_)
+            | Keyword::Lifelink
+            | Keyword::LivingWeapon
+            | Keyword::Madness(_)
+            | Keyword::Mayhem(_)
+            | Keyword::Megamorph(_)
+            | Keyword::Menace
+            | Keyword::Miracle(_)
+            | Keyword::Modular(_)
+            | Keyword::MoreThanMeetsTheEye(_)
+            | Keyword::Morph(_)
+            | Keyword::Mutate(_)
+            | Keyword::Ninjutsu(_)
+            | Keyword::Offering(_)
+            | Keyword::Offspring(_)
+            | Keyword::Outlast(_)
+            | Keyword::Paradigm
+            | Keyword::Persist
+            | Keyword::Phasing
+            | Keyword::Plot(_)
+            | Keyword::Prowess
+            | Keyword::Rampage(_)
+            | Keyword::Reach
+            | Keyword::Reconfigure(_)
+            | Keyword::Recover(_)
+            | Keyword::Renown(_)
+            | Keyword::Replicate(_)
+            | Keyword::Retrace
+            | Keyword::Riot
+            | Keyword::Shadow
+            | Keyword::Shroud
+            | Keyword::Skulk
+            | Keyword::Sneak(_)
+            | Keyword::Soulbond
+            | Keyword::Specialize(_)
+            | Keyword::Splice { .. }
+            | Keyword::StartYourEngines
+            | Keyword::Station
+            | Keyword::Storied
+            | Keyword::Sunburst
+            | Keyword::Suspend { .. }
+            | Keyword::TotemArmor
+            | Keyword::Training
+            | Keyword::Trample
+            | Keyword::TrampleOverPlaneswalkers
+            | Keyword::Transfigure(_)
+            | Keyword::Transmute(_)
+            | Keyword::Tribute(_)
+            | Keyword::Undaunted
+            | Keyword::Undying
+            | Keyword::Unearth(_)
+            | Keyword::Unleash
+            | Keyword::Vanishing(_)
+            | Keyword::Vigilance
+            | Keyword::Ward(_)
+            | Keyword::Warp(_)
+            | Keyword::Waterbend
+            | Keyword::Wither => {
+                // The census above is hand-derived, so it can disagree with
+                // `kind()` in a way the compiler cannot see: a variant listed
+                // here but mapped to the catch-all would hand a kind-level
+                // presence test the shared `Unknown` bucket — the exact
+                // over-report this predicate exists to prevent. Only this arm
+                // can be wrong that way (the other two answer `false`, which is
+                // always safe), and the predicate runs at parse time, so pin the
+                // invariant rather than deriving it.
+                debug_assert_ne!(
+                    self.kind(),
+                    KeywordKind::Unknown,
+                    "{self:?} is censused as kind-identifying but maps to the Unknown bucket",
+                );
+                true
+            }
         }
     }
 
@@ -3718,7 +3946,7 @@ mod tests {
     use super::*;
     use crate::types::ability::Effect;
 
-    /// CR 702.62a + CR 702.4a: the ordinary case — a keyword whose `kind()` names
+    /// CR 702.62a + CR 702.7a: the ordinary case — a keyword whose `kind()` names
     /// it and nothing else supports a kind-level presence test.
     #[test]
     fn kind_identifies_ability_accepts_one_to_one_keywords() {
