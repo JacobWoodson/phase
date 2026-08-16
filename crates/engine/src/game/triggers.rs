@@ -10173,6 +10173,16 @@ fn delayed_body_outlives_a_false_gate(ability: &ResolvedAbility) -> bool {
 /// others (`IsYourTurn`, `CompletedDungeon`, `SourceAttachedToCreature`,
 /// `ControlsCommander`) are payload-free. `And`/`Or` do not bridge today; they
 /// recurse here anyway so adding them to the bridge cannot silently bypass this.
+///
+/// EXHAUSTIVE and wildcard-free, matching every other classifier on this path.
+/// The former `_ => false` tail was inert ONLY because the bridge happens to
+/// decline the arms it covered — which made it a claim about a DIFFERENT
+/// function, silently re-underwritten every time that bridge grows an arm. Each
+/// variant is therefore adjudicated on its own reading, so widening the bridge
+/// can never make this guard fail open: a condition whose reading is
+/// resolution-scoped answers `true` here whether or not it bridges today. Under
+/// today's bridge every reachable arm below answers `false` or recurses, so this
+/// is pure hardening — no hoist changes because of it.
 fn gate_binding_diverges_at_fire_time(condition: &AbilityCondition) -> bool {
     match condition {
         AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
@@ -10182,7 +10192,113 @@ fn gate_binding_diverges_at_fire_time(condition: &AbilityCondition) -> bool {
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
             conditions.iter().any(gate_binding_diverges_at_fire_time)
         }
-        _ => false,
+        // CR 400.7 + CR 109.5: source- and controller-relative populations. The
+        // gate itself binds identically on both legs, so only its filter payload
+        // can diverge — recurse rather than answer for it.
+        AbilityCondition::SourceMatchesFilter { filter }
+        | AbilityCondition::ControllerControlsMatching { filter } => {
+            filter_binding_diverges(filter)
+        }
+        // CR 103.1: a game-setup fact about one player; only the player axis can
+        // be re-scoped.
+        AbilityCondition::WasStartingPlayer { controller } => {
+            controller_ref_binding_diverges(controller)
+        }
+
+        // ---- RESOLUTION-SCOPED: the fire-time leg has no resolving spell or
+        // ---- ability to read, so these cannot be reproduced. Always decline.
+        //
+        // CR 601.2: the CASTING context of the spell that produced this ability —
+        // its cost payments, its mana, its timing permission, the board as it was
+        // cast. A delayed triggered ability is never cast, and the fire-time
+        // reader is handed no `SpellContext` at all.
+        AbilityCondition::AdditionalCostPaid { .. }
+        | AbilityCondition::AdditionalCostPaidInstead
+        | AbilityCondition::AlternativeManaCostPaid
+        | AbilityCondition::WasCast { .. }
+        | AbilityCondition::CastDuringPhase { .. }
+        | AbilityCondition::CastTimingPermission { .. }
+        | AbilityCondition::ManaColorSpent { .. }
+        | AbilityCondition::CastVariantPaid { .. }
+        | AbilityCondition::CastVariantPaidInstead { .. }
+        | AbilityCondition::ControllerControlledMatchingAsCast { .. }
+        // CR 608.2c: signals published BY an earlier step of the SAME resolution
+        // — an effect's outcome, a coin flip (CR 705.1), a reveal (CR 701.20), a
+        // reflexive "when you do" (CR 603.12), the previous effect's amount, the
+        // per-turn resolution count. None of them exist at detection time.
+        | AbilityCondition::EffectOutcome { .. }
+        | AbilityCondition::EventOutcomeWon
+        | AbilityCondition::CoinFlipOutcome { .. }
+        | AbilityCondition::WhenYouDo
+        | AbilityCondition::RevealedHasCardType { .. }
+        | AbilityCondition::PreviousEffectAmount { .. }
+        | AbilityCondition::NthResolutionThisTurn { .. }
+        | AbilityCondition::DiscardedCardMatchesFilter { .. }
+        // CR 608.2c: the "this way" ledgers — `state.last_zone_changed_ids` and
+        // the tracked sets — declined for exactly the reason their
+        // `TargetFilter` counterparts are.
+        | AbilityCondition::ZoneChangedThisWay { .. }
+        | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
+        // CR 115.1 + CR 608.2k: reads the resolving ability's declared targets or
+        // its cost-paid referent, both empty at fire time — the condition-axis
+        // counterpart of `ObjectScope::Target` / `CostPaidObject`.
+        | AbilityCondition::TargetMatchesFilter { .. }
+        | AbilityCondition::TargetHasKeywordInstead { .. }
+        | AbilityCondition::HasObjectTarget
+        | AbilityCondition::ObjectsShareQuality { .. }
+        | AbilityCondition::TargetSharesNameWithOtherExiledThisWay { .. }
+        | AbilityCondition::CostPaidObjectMatchesFilter { .. }
+        // CR 115.10: the per-iteration player of the RESOLVING ability, which the
+        // fire-time context derives from the matched event instead.
+        | AbilityCondition::ScopedPlayerMatches { .. }
+        // CR 615.5: the post-replacement window, populated only while a
+        // prevention replacement is being applied.
+        | AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
+        // CR 603.2 + CR 120.3: pairs the trigger event's damaged object with the
+        // source's damage ledger. The tie-break decides this one: the delayed
+        // ability's matched event need not be the damage event the resolver
+        // reads, and declining costs only the fire-time half.
+        | AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+        | AbilityCondition::TriggeringSpellTargetsFilter { .. }
+        // CR 614.1: an "instead" gate is a replacement-time reading of the
+        // enclosing resolution, not a game-state predicate. Declined as a whole
+        // rather than recursed into: the wrapper itself is the divergent part.
+        | AbilityCondition::ConditionInstead { .. } => true,
+
+        // ---- Binds IDENTICALLY on both legs: global, turn-structure, or
+        // ---- controller-/source-keyed game state.
+        //
+        // CR 500.1 + CR 506.1 + CR 513.1: turn structure, read live from
+        // `state` by both legs.
+        AbilityCondition::IsYourTurn
+        | AbilityCondition::CurrentPhaseIs { .. }
+        | AbilityCondition::FirstCombatPhaseOfTurn
+        | AbilityCondition::FirstEndStepOfTurn
+        // CR 731.1: day/night is a designation the GAME has.
+        | AbilityCondition::DayNightIs { .. }
+        | AbilityCondition::DayNightIsNeither
+        // Controller-keyed designations and per-game/per-turn accumulators. The
+        // fire-time leg is handed the delayed ability's own controller
+        // (CR 109.5), so each reads the same player's row: CR 725.1 monarch,
+        // CR 726.1 initiative, CR 702.131a city's blessing, CR 702.195b enduring
+        // story, CR 701.54b Ring-bearer, CR 702.179e max speed, CR 309.7 dungeon
+        // completion, CR 903.3 commander control.
+        | AbilityCondition::IsMonarch
+        | AbilityCondition::IsInitiative
+        | AbilityCondition::HasCityBlessing
+        | AbilityCondition::HasEnduringStory
+        | AbilityCondition::IsRingBearer
+        | AbilityCondition::HasMaxSpeed
+        | AbilityCondition::CompletedDungeon { .. }
+        | AbilityCondition::ControlsCommander { .. }
+        | AbilityCondition::SpellCastWithVariantThisTurn { .. }
+        // CR 400.7 + CR 301.5: reads of the CR 400.7 source object the fire-time
+        // `TriggerSourceContext` carries — the same authority
+        // `ObjectScope::Source` is adjudicated non-divergent under.
+        | AbilityCondition::SourceEnteredThisTurn
+        | AbilityCondition::SourceIsTapped
+        | AbilityCondition::SourceAttachedToCreature
+        | AbilityCondition::SourceLacksKeyword { .. } => false,
     }
 }
 
@@ -10513,21 +10629,74 @@ fn card_type_set_source_binding_diverges(source: &CardTypeSetSource) -> bool {
     diverges || !complete
 }
 
-/// CR 603.4: the filter half of [`quantity_ref_binding_diverges`]. Recurses
-/// through exactly the shapes `oracle_trigger::substitute_another_in_filter`
-/// rewrites — `Typed` property lists plus the `And`/`Or`/`Not` combinators — so
-/// the decline covers precisely the population the fire-time leg would have
-/// re-scoped, no more and no less.
+/// CR 603.4: the POPULATION half of [`quantity_ref_binding_diverges`] — does the
+/// fire-time leg bind the objects this filter names the same way the resolving
+/// ability does?
+///
+/// The fire-time reader (`quantity::resolve_quantity_for_trigger_check` →
+/// `resolve_ref`) builds its `FilterContext` from the delayed ability's
+/// controller and its CR 400.7 `TriggerSourceContext`, with `ability = None`,
+/// `targets = &[]` and `recipient = None`; the matched event is visible only
+/// through the `DETECTION_TRIGGER_EVENT` thread-local. The resolution-time
+/// reader gets the whole `ResolvedAbility`. So three families of filter diverge:
+///
+/// * ABILITY-BOUND anaphora — they read `ability.targets` /
+///   `ability.cost_paid_object`, which are the empty set at fire time. The
+///   population-level counterpart of `ObjectScope::Target`;
+/// * RESOLUTION-PUBLISHED LEDGERS — `state.last_*_ids`, the tracked sets, the
+///   linked-exile order and the post-replacement window are all established BY a
+///   resolution (CR 608.2c). At fire time they hold whatever an unrelated earlier
+///   resolution left behind, exactly like `QuantityRef::TrackedSetSize`;
+/// * BRIDGE-REWRITTEN populations — `oracle_trigger::static_condition_to_trigger_condition`
+///   substitutes `FilterProp::Another` → `FilterProp::OtherThanTriggerObject` on
+///   the fire-time leg only (CR 603.4, Valakut's ruling), so the same printed
+///   "two or more OTHER creatures" counts a different population on each leg.
+///
+/// EXHAUSTIVE and wildcard-free, matching `object_scope_unbound_at_fire_time` /
+/// `player_scope_unbound_at_fire_time` / `quantity_ref_binding_diverges`: a new
+/// `TargetFilter` variant must be adjudicated here rather than silently
+/// defaulting to "cannot diverge". The earlier `_ => false` tail rested on
+/// exactly that claim for ~45 variants, and it was FALSE for the whole
+/// resolution-published family below — the same tail was already found wrong in
+/// practice on the `QuantityRef` axis. When in doubt the answer is `true`:
+/// declining costs only the fire-time half of CR 603.4 for that shape, while a
+/// wrong `false` deletes a real ability off the stack
+/// (`false_gate_consumes_one_shot`).
+///
+/// NOT YET ADJUDICATED (deliberately, and narrower than this tail was): the
+/// `FilterProp` payload axis of `Typed`. Props that carry their own nested
+/// `TargetFilter` or a resolution-scoped referent (`SharesQuality`,
+/// `InTrackedSet`, `SameNameAsParentTarget`, …) are still read only for
+/// `Another`. That is a separate ~90-variant classifier; the `ControllerRef`
+/// sub-axis, which is small and reaches the same `ability.targets` binding this
+/// function exists to screen, IS adjudicated — see
+/// [`controller_ref_binding_diverges`].
 fn filter_binding_diverges(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::Typed(tf) => tf
-            .properties
-            .iter()
-            .any(|prop| matches!(prop, FilterProp::Another)),
+        // CR 603.4: the `Another` rewrite, plus the controller axis that reaches
+        // `ability.targets` / the per-iteration player through `ControllerRef`.
+        TargetFilter::Typed(tf) => {
+            tf.controller
+                .as_ref()
+                .is_some_and(controller_ref_binding_diverges)
+                || tf
+                    .properties
+                    .iter()
+                    .any(|prop| matches!(prop, FilterProp::Another))
+        }
         TargetFilter::Not { filter } => filter_binding_diverges(filter),
         TargetFilter::And { filters } | TargetFilter::Or { filters } => {
             filters.iter().any(filter_binding_diverges)
         }
+        // CR 113.7a: a live stack scan on both legs. The optional `controller`
+        // narrowing is the one re-scopable part, so it recurses.
+        TargetFilter::StackAbility { controller, .. } => controller
+            .as_ref()
+            .is_some_and(controller_ref_binding_diverges),
+
+        // ---- ABILITY-BOUND: reads the resolving ability, which is `None` at
+        // ---- fire time. Always diverges.
+        //
         // CR 115.1 + CR 115.10: resolution-scoped anaphora read `ability.targets`
         // / the per-iteration player, neither of which the fire-time context has
         // — the population-level counterpart of `ObjectScope::Target`.
@@ -10535,8 +10704,163 @@ fn filter_binding_diverges(filter: &TargetFilter) -> bool {
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
-        | TargetFilter::ScopedPlayer => true,
-        _ => false,
+        | TargetFilter::ScopedPlayer
+        // CR 608.2k: the cost-paid / effect-context referent lives on
+        // `ResolvedAbility`, so this matches nothing at fire time. The
+        // population-level counterpart of `ObjectScope::CostPaidObject`.
+        | TargetFilter::CostPaidObject
+
+        // ---- RESOLUTION-PUBLISHED LEDGERS (CR 608.2c): established BY a
+        // ---- resolution, so the fire-time read is a different moment's set.
+        //
+        // The `last_*_ids` anaphora ("the token you created", "that card",
+        // "milled this way") are written by the resolving effect that produced
+        // them and cleared per resolution.
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        // CR 603.7 + CR 608.2c: chain-local tracked sets, including the
+        // `TrackedSetId(0)` "most recent set" sentinel, whose resolution ladder
+        // prefers the ACTIVE resolution chain. Declined for the same reason
+        // `CardTypeSetSource::TrackedSet` and `QuantityRef::TrackedSetSize` are.
+        // The inner filter of the `Filtered` form needs no recursion: set
+        // membership already diverges, so the conjunction does.
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        // CR 607.2a: the source's linked-exile population and its ORDER — the
+        // same two the quantity axis already declines for
+        // (`QuantityRef::CardsExiledBySource`, `CardTypeSetSource::ExiledBySource`).
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        // CR 609.7a: the chosen damage source is published by the resolution
+        // that ran the choice; `state.last_chosen_damage_source` holds an
+        // unrelated choice, or none, at fire time.
+        | TargetFilter::ChosenDamageSource { .. }
+        // CR 615.5: the post-replacement window exists only while a prevention
+        // replacement is being applied. Nothing populates it at detection.
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner => true,
+
+        // ---- Binds IDENTICALLY on both legs ----
+        //
+        // Constants and pure-predicate populations: a literal, a live board or
+        // stack scan, or a population that names nothing to re-scope.
+        // CR 118.12a: `AllPlayers` is an unless-payer role, never an object
+        // population; `Player` / `Opponent` (CR 102.3) are player-reference
+        // roles the object matcher answers `false` for on both legs.
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::AllPlayers
+        | TargetFilter::Opponent
+        | TargetFilter::StackSpell
+        | TargetFilter::Named { .. }
+        // CR 615: a parse-layer compound recipient, lowered to
+        // `DamageTargetFilter` before runtime.
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        // CR 109.4 + CR 611.2: ids already SNAPSHOTTED at resolution — literals,
+        // so there is nothing left to bind. Same argument
+        // `PlayerScope::SpecificPlayer` is adjudicated non-divergent under.
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        // CR 109.5: the delayed ability's own controller, which the fire-time
+        // leg is handed. `OriginalController` is the same player by
+        // construction (the printed controller); CR 102.1 + CR 103.1 derive a
+        // `Neighbor` from it through `state.seat_order`.
+        | TargetFilter::Controller
+        | TargetFilter::OriginalController
+        | TargetFilter::Neighbor { .. }
+        // CR 113.7a + CR 608.2h: source-relative reads, all served by the
+        // `TriggerSourceContext` the fire-time leg carries — the same authority
+        // `ObjectScope::Source` is adjudicated non-divergent under.
+        // `OriginalSource` and `GrantingObject` are concretized to
+        // `SpecificObject` before runtime and degrade to the source if not;
+        // CR 400.3 `Owner` and `SourceController` project a player off it;
+        // CR 301.5 / CR 303.4 `AttachedTo` and CR 702.95b `SourceOrPaired` read
+        // the source's attachment / pairing.
+        | TargetFilter::SelfRef
+        | TargetFilter::OriginalSource
+        | TargetFilter::GrantingObject
+        | TargetFilter::SourceController
+        | TargetFilter::Owner
+        | TargetFilter::AttachedTo
+        | TargetFilter::SourceOrPaired
+        // CR 613.1 + CR 607.2d: durable per-object / per-player choices persisted
+        // on the source (`chosen_attributes`) or on the player, read live from
+        // the same place on both legs — the filter-axis counterpart of
+        // `PlayerScope::SourceChosenPlayer`.
+        | TargetFilter::ChosenCard
+        | TargetFilter::HasChosenName
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        // CR 603.2 + CR 508.5: the matched event's own referents. The fire-time
+        // leg publishes that event through `DETECTION_TRIGGER_EVENT`, and every
+        // reader here (`triggering_event_player` / `_target_object` /
+        // `_source_object`, `combat::defending_player_cr508_5`) takes the
+        // resolution-time `current_trigger_event` OR that thread-local — the
+        // same dual path `ObjectScope::EventSource` / `EventTarget` and
+        // `PlayerScope::DefendingPlayer` are adjudicated non-divergent under.
+        | TargetFilter::TriggeringSource
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::EventTarget
+        | TargetFilter::DefendingPlayer => false,
+    }
+}
+
+/// CR 109.4 + CR 603.4: the CONTROLLER axis of [`filter_binding_diverges`] —
+/// which player a `Typed` / `StackAbility` population is scoped to.
+///
+/// Same fail-closed rule and the same three referents as the sibling
+/// classifiers: a `ControllerRef` that resolves through the RESOLVING ability
+/// (`ability.targets`, `ability.chosen_players`, the per-iteration player) reads
+/// a binding the fire-time `FilterContext` — built with `ability = None` and
+/// `targets = &[]` — cannot reproduce, so the two legs would scope the same
+/// printed population to different players.
+///
+/// Exhaustive and wildcard-free for the same reason `player_scope_unbound_at_fire_time`
+/// is: this axis is reachable from every `Typed` filter in the engine, which
+/// makes it the widest door into the hoist decision.
+fn controller_ref_binding_diverges(controller: &ControllerRef) -> bool {
+    match controller {
+        // CR 115.1: reads the resolving ability's declared targets. At fire time
+        // `ability.targets` is empty and both arms silently fall back to the
+        // TRIGGERING player instead — a different player, with no gate rejection
+        // to catch it.
+        ControllerRef::TargetPlayer
+        | ControllerRef::TargetOpponent
+        // CR 109.4 + CR 108.3: the parent target's controller / owner, read off
+        // the same empty `ability.targets`.
+        | ControllerRef::ParentTargetController
+        | ControllerRef::ParentTargetOwner
+        // CR 608.2c: `ability.chosen_players`, populated BY the resolution that
+        // ran the `Choose(Player)`.
+        | ControllerRef::ChosenPlayer { .. }
+        // CR 115.10: the RESOLVING ability's per-iteration player. The fire-time
+        // context derives its scoped player from the matched event instead — the
+        // controller-axis counterpart of `PlayerScope::ScopedPlayer` and
+        // `TargetFilter::ScopedPlayer`.
+        | ControllerRef::ScopedPlayer => true,
+        // CR 109.5: the delayed ability's own controller, which the fire-time leg
+        // is handed, and the opponents derived from it (CR 102.3 + CR 800.4).
+        ControllerRef::You
+        | ControllerRef::Opponent
+        // CR 102.1: global turn state.
+        | ControllerRef::ActivePlayer
+        // CR 603.2 + CR 508.5: event-derived players, resolved through the same
+        // resolution-or-detection dual path as the event-scoped filters above.
+        | ControllerRef::TriggeringPlayer
+        | ControllerRef::DefendingPlayer
+        // CR 613.1 + CR 303.4b: persisted on / attached to the source, which the
+        // fire-time `TriggerSourceContext` carries.
+        | ControllerRef::SourceChosenPlayer
+        | ControllerRef::EnchantedPlayer
+        // CR 611.2: a player id already snapshotted at resolution — a literal.
+        | ControllerRef::SpecificPlayer { .. } => false,
     }
 }
 
@@ -21563,6 +21887,187 @@ pub mod tests {
             tracked_remaining, 0,
             "the ability FIRED (it is off the delayed list because it went on the stack), \
              not because a false gate deleted it — see the stack assertion above"
+        );
+    }
+
+    /// CR 608.2c + CR 603.4: the POPULATION axis of the same defect. A filter can
+    /// name a ledger a RESOLUTION writes (`state.last_zone_changed_ids`, the
+    /// tracked sets, the CR 607.2a linked-exile order), so the fire-time leg
+    /// counts whatever an unrelated earlier resolution left behind — here,
+    /// nothing — exactly as `TrackedSetSize` does one axis over.
+    ///
+    /// The second pair is the CONTROLLER axis of that same filter. CR 115.1
+    /// `ControllerRef::TargetPlayer` scopes the population to the RESOLVING
+    /// ability's player target; the fire-time `FilterContext` is built with
+    /// `ability = None` and `targets = &[]`, so it silently re-scopes the same
+    /// printed population to the TRIGGERING player instead. That axis was
+    /// reachable through `TargetFilter::Typed` — the widest door in the engine —
+    /// while the arm read only `FilterProp::Another`.
+    ///
+    /// MINIMAL PAIRS: every half is `ObjectCount{F} >= 2` and differs from the
+    /// reach-guard only in `F`. The reach-guard proves an `ObjectCount`
+    /// comparison really does bridge and really is evaluated at fire time, so the
+    /// declined halves' `stack == 1` is the decline and nothing else.
+    ///
+    /// REVERT-TO-RED: restore the `_ => false` tail of `filter_binding_diverges`
+    /// (and drop the `controller` leg of its `Typed` arm) and both declined
+    /// halves report `stack == 0` with `delayed_triggers` emptied — the one-shot
+    /// deleted by `false_gate_consumes_one_shot` on a population the resolver
+    /// never counted.
+    #[test]
+    fn resolution_published_population_gate_declines_the_fire_time_hoist() {
+        // Unit pins for the adjudications the production pairs below drive, one
+        // per family the former wildcard tail swallowed.
+        for filter in [
+            TargetFilter::LastZoneChanged,
+            TargetFilter::LastCreated,
+            TargetFilter::LastRevealed,
+            TargetFilter::TrackedSet {
+                id: crate::types::identifiers::TrackedSetId(1),
+            },
+            TargetFilter::ExiledBySource,
+            TargetFilter::CostPaidObject,
+            TargetFilter::ChosenDamageSource { filter: None },
+            TargetFilter::PostReplacementDamageSource,
+        ] {
+            assert!(
+                filter_binding_diverges(&filter),
+                "CR 608.2c: {filter:?} names a population a RESOLUTION publishes, so the \
+                 fire-time leg cannot reproduce it"
+            );
+        }
+        for filter in [
+            TargetFilter::Any,
+            TargetFilter::SelfRef,
+            TargetFilter::AttachedTo,
+            TargetFilter::TriggeringSource,
+            TargetFilter::EventTarget,
+            TargetFilter::Named {
+                name: "Mountain".to_string(),
+            },
+        ] {
+            assert!(
+                !filter_binding_diverges(&filter),
+                "CR 400.7 + CR 603.2: {filter:?} reads the source, the matched event or a \
+                 literal — all of which the fire-time context carries"
+            );
+        }
+        assert!(
+            controller_ref_binding_diverges(&ControllerRef::TargetPlayer),
+            "CR 115.1: a target-scoped population reads `ability.targets`"
+        );
+        assert!(
+            controller_ref_binding_diverges(&ControllerRef::ScopedPlayer),
+            "CR 115.10: the per-iteration player of the RESOLVING ability"
+        );
+        assert!(
+            !controller_ref_binding_diverges(&ControllerRef::You),
+            "CR 109.5: the fire-time leg is handed the delayed ability's own controller"
+        );
+
+        // The four payload-free gates the bridge actually passes must stay
+        // hoistable — the `AbilityCondition` axis is hardening, not a behaviour
+        // change, and this is what proves it.
+        for condition in [
+            AbilityCondition::IsYourTurn,
+            AbilityCondition::CompletedDungeon { specific: None },
+            AbilityCondition::SourceAttachedToCreature,
+            AbilityCondition::ControlsCommander {
+                ownership: CommanderOwnership::Own,
+            },
+        ] {
+            assert!(
+                !gate_binding_diverges_at_fire_time(&condition),
+                "CR 603.4: {condition:?} is payload-free and reads the controller or the \
+                 CR 400.7 source, both of which the fire-time context carries"
+            );
+        }
+
+        fn run(filter: TargetFilter) -> (usize, usize) {
+            let mut state = setup();
+            let controller = PlayerId(0);
+            state.active_player = controller;
+            state.priority_player = controller;
+
+            let source = create_object(
+                &mut state,
+                CardId(0x0603_040C),
+                controller,
+                "Ledger Rider".to_string(),
+                Zone::Battlefield,
+            );
+            let victim = make_creature(&mut state, PlayerId(1), "Doomed Squire", 1, 1);
+
+            let mut ability = ResolvedAbility::new(
+                Effect::BecomeMonarch {
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                controller,
+            );
+            // `>= 2` keeps this out of the `ObjectCount{f} >= 1` → `IsPresent`
+            // fold, so every half bridges as the SAME `QuantityComparison` and
+            // the pair isolates the filter.
+            ability.condition = Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { filter },
+                },
+                comparator: crate::types::ability::Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 2 },
+            });
+            state.delayed_triggers.push(DelayedTrigger {
+                // A bound single object, so a false gate CONSUMES the one-shot
+                // (`false_gate_consumes_one_shot`) — the deletion half.
+                condition: DelayedTriggerCondition::WhenDies {
+                    filter: TargetFilter::SpecificObject { id: victim },
+                },
+                ability: Box::new(ability),
+                controller,
+                source_id: source,
+                one_shot: true,
+                provenance: DelayedInstallIdentity::LegacyDelayed,
+            });
+
+            let death = zone_changed_event(
+                victim,
+                Zone::Battlefield,
+                Zone::Graveyard,
+                vec![CoreType::Creature],
+                Vec::new(),
+            );
+            check_delayed_triggers(&mut state, &[death]);
+            (state.stack.len(), state.delayed_triggers.len())
+        }
+
+        let typed_creature = |ctrl| TargetFilter::Typed(TypedFilter::creature().controller(ctrl));
+
+        let (guard_stack, guard_remaining) = run(typed_creature(ControllerRef::You));
+        assert_eq!(
+            guard_stack, 0,
+            "reach-guard: a controller-scoped `ObjectCount >= 2` gate bridges and IS \
+             evaluated at fire time — the controller controls no creature, so CR 603.4 \
+             keeps the ability off the stack"
+        );
+        assert_eq!(
+            guard_remaining, 0,
+            "CR 603.7b: the bound-object one-shot is consumed by its own event"
+        );
+
+        let (ledger_stack, _) = run(TargetFilter::LastZoneChanged);
+        assert_eq!(
+            ledger_stack, 1,
+            "CR 608.2c: `LastZoneChanged` is written BY a resolution; the fire-time leg \
+             reads a foreign (here empty) ledger, so the gate must keep its \
+             resolution-only reading and the ability must reach the stack"
+        );
+
+        let (target_scoped_stack, _) = run(typed_creature(ControllerRef::TargetPlayer));
+        assert_eq!(
+            target_scoped_stack, 1,
+            "CR 115.1: a target-player-scoped population reads `ability.targets`, which the \
+             fire-time context does not carry — it would count the TRIGGERING player's \
+             creatures instead of the target's"
         );
     }
 
