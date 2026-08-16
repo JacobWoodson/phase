@@ -7,7 +7,9 @@ use crate::database::CardDatabase;
 use crate::parser::oracle::{compute_deck_copy_limit_from_text, oracle_text_allows_commander};
 use crate::types::card::{CardFace, CardRules, PrintedCardRef};
 use crate::types::card_type::{CoreType, Supertype};
-use crate::types::format::{DeckCopyLimit, GameFormat, SideboardPolicy};
+use crate::types::format::{
+    ChallengeDeck, DeckCopyLimit, GameFormat, SideboardPolicy, SurvivorDeckFormat,
+};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::match_config::MatchType;
@@ -31,6 +33,15 @@ pub struct DeckCompatibilityRequest {
     pub signature_spell: Vec<String>,
     #[serde(default)]
     pub selected_format: Option<GameFormat>,
+    /// The Horde challenge deck the survivor is building against, when
+    /// `selected_format` is [`GameFormat::Horde`]. Its
+    /// [`SurvivorDeckFormat`](crate::types::format::SurvivorDeckFormat) decides
+    /// how survivor decks are validated: EDH-designed hordes (Sauron, Saruman)
+    /// validate survivors as 100-card singleton Commander decks, while
+    /// constructed-block hordes (Theros) leave them unrestricted. `None` (the
+    /// serde default) preserves the legacy "accept any survivor deck" behavior.
+    #[serde(default)]
+    pub selected_challenge_deck: Option<ChallengeDeck>,
     #[serde(default)]
     pub selected_match_type: Option<MatchType>,
     #[serde(default = "default_player_count")]
@@ -292,6 +303,7 @@ pub fn validate_name_deck_for_format_full(
         scheme_deck: scheme_deck.to_vec(),
         signature_spell: signature_spell.to_vec(),
         selected_format: Some(selected_format),
+        selected_challenge_deck: None,
         selected_match_type,
         player_count,
         summary_only: false,
@@ -647,6 +659,11 @@ struct CommanderVariantRules {
     eligible: fn(&CardFace) -> bool,
     eligibility_error: &'static str,
     skip_commander_legality: bool,
+    /// Whether every card in the deck is checked against a format legality
+    /// table. Sanctioned Commander variants enforce their ban lists; the casual
+    /// Horde survivor variant validates only *structure* (100-card singleton,
+    /// eligible commander, color identity) and leaves the card pool unrestricted.
+    enforce_card_legality: bool,
 }
 
 impl CommanderVariantRules {
@@ -656,6 +673,7 @@ impl CommanderVariantRules {
             eligibility_error:
                 "Commander cards must be legendary creatures or explicitly allow being a commander",
             skip_commander_legality: false,
+            enforce_card_legality: true,
         }
     }
 
@@ -665,6 +683,7 @@ impl CommanderVariantRules {
             eligibility_error:
                 "Duel Commander cards must be legendary creatures or explicitly allow being a commander",
             skip_commander_legality: false,
+            enforce_card_legality: true,
         }
     }
 
@@ -674,6 +693,22 @@ impl CommanderVariantRules {
             eligibility_error:
                 "Pauper Commander commander must be an uncommon creature, Vehicle, or Spacecraft",
             skip_commander_legality: true,
+            enforce_card_legality: true,
+        }
+    }
+
+    /// Horde Magic survivor decks for an EDH-designed challenge deck
+    /// (`SurvivorDeckFormat::Commander`). Survivors bring 100-card singleton
+    /// Commander decks, but Horde is a casual community variant with no
+    /// sanctioned card pool — so commander eligibility, deck shape, singleton,
+    /// and color identity are enforced while the Commander ban list is not.
+    fn horde_commander() -> Self {
+        Self {
+            eligible: is_commander_eligible,
+            eligibility_error:
+                "Horde survivor commanders must be legendary creatures or explicitly allow being a commander",
+            skip_commander_legality: true,
+            enforce_card_legality: false,
         }
     }
 }
@@ -794,35 +829,39 @@ fn evaluate_commander_with_format(
         ));
     }
 
-    let mut illegal_cards = BTreeSet::new();
-    for name in all_deck_cards(request) {
-        if unknown_cards.contains(name) {
-            continue;
-        }
-        if rules.skip_commander_legality
-            && request
-                .commander
-                .iter()
-                .any(|commander| commander.eq_ignore_ascii_case(name))
-        {
-            continue;
-        }
-        match db.legality_status(resolve_card_name(db, name), legality_format) {
-            Some(status) if status.is_legal() => {}
-            Some(status) => {
-                illegal_cards.insert(format!("{name} ({})", status_label(status)));
+    // Casual variants (Horde survivors) skip the ban-list check entirely and
+    // validate structure only; sanctioned variants enforce their legality table.
+    if rules.enforce_card_legality {
+        let mut illegal_cards = BTreeSet::new();
+        for name in all_deck_cards(request) {
+            if unknown_cards.contains(name) {
+                continue;
             }
-            None => {
-                illegal_cards.insert(format!("{name} (not legal in {format_label})"));
+            if rules.skip_commander_legality
+                && request
+                    .commander
+                    .iter()
+                    .any(|commander| commander.eq_ignore_ascii_case(name))
+            {
+                continue;
+            }
+            match db.legality_status(resolve_card_name(db, name), legality_format) {
+                Some(status) if status.is_legal() => {}
+                Some(status) => {
+                    illegal_cards.insert(format!("{name} ({})", status_label(status)));
+                }
+                None => {
+                    illegal_cards.insert(format!("{name} (not legal in {format_label})"));
+                }
             }
         }
-    }
-    if !illegal_cards.is_empty() {
-        reasons.push(summarize_cards(
-            &format!("Not {format_label} legal"),
-            &illegal_cards,
-            6,
-        ));
+        if !illegal_cards.is_empty() {
+            reasons.push(summarize_cards(
+                &format!("Not {format_label} legal"),
+                &illegal_cards,
+                6,
+            ));
+        }
     }
 
     // CR 903.4: Each non-commander card's color identity must be a subset of
@@ -1781,14 +1820,25 @@ fn evaluate_selected_format_summary(
             format.legality_format().unwrap(),
             format.label(),
         ),
-        // Horde survivors bring their own decks and the format imposes no
-        // constructed legality restriction (`legality_format()` is `None`), so
-        // any submitted deck is compatible — same as the other unrestricted
-        // multiplayer variants.
-        GameFormat::FreeForAll
-        | GameFormat::TwoHeadedGiant
-        | GameFormat::Horde
-        | GameFormat::Limited => QuickCheckResult::compatible(),
+        // Horde: EDH-designed challenge decks validate survivors as 100-card
+        // singleton Commander decks (casual card pool); constructed-block and
+        // unspecified hordes leave survivor decks unrestricted.
+        GameFormat::Horde => match horde_survivor_format(request) {
+            Some(SurvivorDeckFormat::Commander) => quick_commander_check(
+                db,
+                request,
+                LegalityFormat::Commander,
+                "Horde (Commander)",
+                CommanderVariantRules::horde_commander(),
+                100,
+            ),
+            _ => QuickCheckResult::compatible(),
+        },
+        // Other unrestricted multiplayer variants impose no legality restriction,
+        // so any submitted deck is compatible.
+        GameFormat::FreeForAll | GameFormat::TwoHeadedGiant | GameFormat::Limited => {
+            QuickCheckResult::compatible()
+        }
     };
 
     (
@@ -1970,11 +2020,12 @@ fn quick_commander_check(
         *counts
             .entry(canonical_deck_count_key(db, name))
             .or_insert(0) += 1;
-        if !rules.skip_commander_legality
-            || !request
-                .commander
-                .iter()
-                .any(|commander| commander.eq_ignore_ascii_case(name))
+        if rules.enforce_card_legality
+            && (!rules.skip_commander_legality
+                || !request
+                    .commander
+                    .iter()
+                    .any(|commander| commander.eq_ignore_ascii_case(name)))
         {
             match db.legality_status(resolved, legality_format) {
                 Some(status) if status.is_legal() => {}
@@ -2046,9 +2097,22 @@ fn quick_brawl_check(
             eligibility_error:
                 "Brawl commander must be a legendary creature or legendary planeswalker",
             skip_commander_legality: false,
+            enforce_card_legality: true,
         },
         60,
     )
+}
+
+/// The survivor deck format for the selected Horde challenge deck, or `None`
+/// when no challenge deck is specified. Horde survivors' deck constraints are a
+/// per-challenge-deck axis (EDH-designed hordes want 100-card Commander decks;
+/// constructed-block hordes want 60-card decks), carried on the deck's
+/// [`HordeRuleset`](crate::types::format::HordeRuleset). Validation reads it here
+/// so a `None` challenge deck falls back to the legacy unrestricted behavior.
+fn horde_survivor_format(request: &DeckCompatibilityRequest) -> Option<SurvivorDeckFormat> {
+    request
+        .selected_challenge_deck
+        .map(|deck| deck.default_ruleset().survivor_deck_format)
 }
 
 fn evaluate_selected_format(
@@ -2168,13 +2232,30 @@ fn evaluate_selected_format(
             }
             check.compatible
         }
-        // Horde: survivors bring unrestricted decks (no constructed legality),
-        // so any submitted deck is compatible — same as the other unrestricted
-        // multiplayer variants.
-        GameFormat::FreeForAll
-        | GameFormat::TwoHeadedGiant
-        | GameFormat::Horde
-        | GameFormat::Limited => true,
+        // Horde: how survivors are validated depends on the selected challenge
+        // deck's survivor format. EDH-designed hordes validate survivors as
+        // 100-card singleton Commander decks (structure + color identity, casual
+        // card pool); constructed-block and unspecified hordes stay unrestricted.
+        GameFormat::Horde => match horde_survivor_format(request) {
+            Some(SurvivorDeckFormat::Commander) => {
+                let check = evaluate_commander_with_format(
+                    db,
+                    request,
+                    unknown_cards,
+                    LegalityFormat::Commander,
+                    "Horde (Commander)",
+                    CommanderVariantRules::horde_commander(),
+                );
+                if !check.compatible {
+                    reasons.extend(check.reasons);
+                }
+                check.compatible
+            }
+            _ => true,
+        },
+        // Other unrestricted multiplayer variants: any submitted deck is
+        // compatible.
+        GameFormat::FreeForAll | GameFormat::TwoHeadedGiant | GameFormat::Limited => true,
     };
 
     // CR 100.4 × MatchType::Bo3: BO3 requires a sideboard regardless of format.
@@ -3203,6 +3284,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Planechase),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count,
             summary_only: false,
@@ -3250,6 +3332,7 @@ mod tests {
             scheme_deck,
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Archenemy),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: 4,
             summary_only: false,
@@ -3563,6 +3646,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: None,
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -3589,6 +3673,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: None,
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -3667,6 +3752,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: None,
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -3690,6 +3776,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: None,
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -3716,6 +3803,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: true,
@@ -3743,6 +3831,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: None,
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -3773,6 +3862,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
+            selected_challenge_deck: None,
             selected_match_type: Some(MatchType::Bo3),
             player_count: default_player_count(),
             summary_only: false,
@@ -3805,6 +3895,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: None,
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -3832,6 +3923,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: None,
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -3844,6 +3936,262 @@ mod tests {
             .reasons
             .iter()
             .any(|reason| reason.contains("must be legendary creatures")));
+    }
+
+    // --- Horde survivor (Commander) validation ---
+    //
+    // EDH-designed Horde challenge decks (Sauron/Saruman) validate survivor
+    // decks as 100-card singleton Commander decks: structure + color identity
+    // are enforced, but the Commander ban list is NOT (Horde is a casual
+    // community variant). Constructed-block hordes and an unspecified challenge
+    // deck leave survivor decks unrestricted.
+
+    /// White legendary-creature commander, White basics, a White card BANNED in
+    /// sanctioned Commander (to prove the casual pool accepts it), and an
+    /// off-color card (to prove color identity is still enforced).
+    fn horde_commander_test_db() -> CardDatabase {
+        let cards = serde_json::json!({
+            "white general": {
+                "name": "White General",
+                "mana_cost": { "type": "Cost", "shards": ["White"], "generic": 2 },
+                "card_type": { "supertypes": ["Legendary"], "core_types": ["Creature"], "subtypes": [] },
+                "power": "3", "toughness": "3", "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [], "static_abilities": [],
+                "replacements": [], "color_override": null, "color_identity": ["White"],
+                "scryfall_oracle_id": null,
+                "legalities": { "commander": "legal" }
+            },
+            "plains": {
+                "name": "Plains",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": ["Basic"], "core_types": ["Land"], "subtypes": ["Plains"] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [], "static_abilities": [],
+                "replacements": [], "color_override": null,
+                "scryfall_oracle_id": null,
+                "legalities": { "commander": "legal" }
+            },
+            "white banned bomb": {
+                "name": "White Banned Bomb",
+                "mana_cost": { "type": "Cost", "shards": ["White"], "generic": 1 },
+                "card_type": { "supertypes": [], "core_types": ["Sorcery"], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [], "static_abilities": [],
+                "replacements": [], "color_override": null, "color_identity": ["White"],
+                "scryfall_oracle_id": null,
+                "legalities": { "commander": "banned" }
+            },
+            "blue intruder": {
+                "name": "Blue Intruder",
+                "mana_cost": { "type": "Cost", "shards": ["Blue"], "generic": 1 },
+                "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+                "power": "1", "toughness": "1", "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [], "static_abilities": [],
+                "replacements": [], "color_override": null, "color_identity": ["Blue"],
+                "scryfall_oracle_id": null,
+                "legalities": { "commander": "legal" }
+            }
+        });
+        CardDatabase::from_json_str(&cards.to_string()).unwrap()
+    }
+
+    fn horde_request(
+        main: Vec<String>,
+        commander: Vec<String>,
+        challenge_deck: Option<ChallengeDeck>,
+        summary_only: bool,
+    ) -> DeckCompatibilityRequest {
+        DeckCompatibilityRequest {
+            main_deck: main,
+            commander,
+            selected_format: Some(GameFormat::Horde),
+            selected_challenge_deck: challenge_deck,
+            summary_only,
+            ..Default::default()
+        }
+    }
+
+    /// A valid 100-card singleton EDH survivor deck passes a Commander-format
+    /// Horde (Sauron). Reach-guard: the challenge deck's survivor format IS
+    /// Commander, so the commander shape check actually runs.
+    #[test]
+    fn horde_commander_survivor_valid_edh_deck_passes() {
+        assert_eq!(
+            ChallengeDeck::SauronHorde
+                .default_ruleset()
+                .survivor_deck_format,
+            SurvivorDeckFormat::Commander,
+            "reach-guard: SauronHorde survivors are Commander format"
+        );
+        let db = horde_commander_test_db();
+        let req = horde_request(
+            expand("Plains", 99),
+            vec!["White General".to_string()],
+            Some(ChallengeDeck::SauronHorde),
+            false,
+        );
+        assert_eq!(
+            validate_deck_for_format(&db, &req),
+            Ok(()),
+            "a 100-card singleton EDH deck within color identity is a legal Horde survivor deck"
+        );
+    }
+
+    /// Casual pool: a card BANNED in sanctioned Commander is accepted in a
+    /// Commander-format Horde, but the SAME deck fails real Commander — proving
+    /// only the ban list is relaxed, not deck structure.
+    #[test]
+    fn horde_commander_survivor_accepts_commander_banned_card() {
+        let db = horde_commander_test_db();
+        let mut main = expand("Plains", 98);
+        main.push("White Banned Bomb".to_string());
+        let horde = horde_request(
+            main.clone(),
+            vec!["White General".to_string()],
+            Some(ChallengeDeck::SauronHorde),
+            false,
+        );
+        assert_eq!(
+            validate_deck_for_format(&db, &horde),
+            Ok(()),
+            "Horde survivors run a casual pool — a Commander-banned card is allowed"
+        );
+
+        // The very same deck is illegal in sanctioned Commander (ban list applies).
+        let commander = DeckCompatibilityRequest {
+            selected_format: Some(GameFormat::Commander),
+            selected_challenge_deck: None,
+            ..horde
+        };
+        let result = validate_deck_for_format(&db, &commander);
+        assert!(
+            result.is_err(),
+            "the ban list still applies to sanctioned Commander"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .iter()
+                .any(|r| r.contains("White Banned Bomb")),
+            "the banned card is the reason it fails Commander"
+        );
+    }
+
+    /// Structure is still enforced: a survivor deck that is not exactly 100
+    /// cards fails a Commander-format Horde.
+    #[test]
+    fn horde_commander_survivor_rejects_wrong_size() {
+        let db = horde_commander_test_db();
+        let req = horde_request(
+            expand("Plains", 50),
+            vec!["White General".to_string()],
+            Some(ChallengeDeck::SauronHorde),
+            false,
+        );
+        let err = validate_deck_for_format(&db, &req).unwrap_err();
+        assert!(
+            err.iter().any(|r| r.contains("exactly 100 cards")),
+            "a 51-card survivor deck is rejected: {err:?}"
+        );
+    }
+
+    /// Color identity is still enforced: an off-color card outside the
+    /// commander's identity fails a Commander-format Horde.
+    #[test]
+    fn horde_commander_survivor_rejects_off_color_identity() {
+        let db = horde_commander_test_db();
+        let mut main = expand("Plains", 98);
+        main.push("Blue Intruder".to_string());
+        let req = horde_request(
+            main,
+            vec!["White General".to_string()],
+            Some(ChallengeDeck::SauronHorde),
+            false,
+        );
+        let err = validate_deck_for_format(&db, &req).unwrap_err();
+        assert!(
+            err.iter().any(|r| r.contains("color identity")),
+            "an off-color card is rejected: {err:?}"
+        );
+    }
+
+    /// Constructed-block Hordes (Cyberman) and an unspecified challenge deck
+    /// leave survivor decks unrestricted — a deck that would fail the Commander
+    /// shape check still passes.
+    #[test]
+    fn horde_constructed_survivor_is_unrestricted() {
+        assert_eq!(
+            ChallengeDeck::CybermanHorde
+                .default_ruleset()
+                .survivor_deck_format,
+            SurvivorDeckFormat::Constructed,
+            "reach-guard: Cyberman survivors are Constructed format"
+        );
+        let db = horde_commander_test_db();
+        // A 3-card deck with no commander: illegal as EDH, fine for a casual
+        // Constructed-survivor Horde.
+        let tiny = expand("Plains", 3);
+        let constructed = horde_request(
+            tiny.clone(),
+            Vec::new(),
+            Some(ChallengeDeck::CybermanHorde),
+            false,
+        );
+        assert_eq!(
+            validate_deck_for_format(&db, &constructed),
+            Ok(()),
+            "Constructed-survivor Hordes impose no deck-shape restriction"
+        );
+        // No challenge deck specified → also unrestricted (legacy behavior).
+        let unspecified = horde_request(tiny, Vec::new(), None, false);
+        assert_eq!(
+            validate_deck_for_format(&db, &unspecified),
+            Ok(()),
+            "an unspecified challenge deck falls back to unrestricted"
+        );
+    }
+
+    /// The summary (fast-path) validator agrees with the full validator: a valid
+    /// EDH survivor deck passes and a wrong-size one fails a Commander-format Horde.
+    #[test]
+    fn horde_commander_survivor_summary_matches_full() {
+        let db = horde_commander_test_db();
+        let valid = horde_request(
+            expand("Plains", 99),
+            vec!["White General".to_string()],
+            Some(ChallengeDeck::SauronHorde),
+            true,
+        );
+        assert_eq!(
+            evaluate_deck_compatibility(&db, &valid).selected_format_compatible,
+            Some(true),
+            "summary path accepts a valid EDH survivor deck"
+        );
+
+        let wrong_size = horde_request(
+            expand("Plains", 50),
+            vec!["White General".to_string()],
+            Some(ChallengeDeck::SauronHorde),
+            true,
+        );
+        let result = evaluate_deck_compatibility(&db, &wrong_size);
+        assert_eq!(
+            result.selected_format_compatible,
+            Some(false),
+            "summary path rejects a wrong-size survivor deck"
+        );
+        assert!(
+            result
+                .selected_format_reasons
+                .iter()
+                .any(|r| r.contains("100")),
+            "summary path surfaces the size reason: {:?}",
+            result.selected_format_reasons
+        );
     }
 
     #[test]
@@ -3905,6 +4253,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::PauperCommander),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -3979,6 +4328,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::PauperCommander),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -4052,6 +4402,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::PauperCommander),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -4080,6 +4431,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: None,
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -4105,6 +4457,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::FreeForAll),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -4136,6 +4489,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
+            selected_challenge_deck: None,
             selected_match_type: Some(MatchType::Bo1),
             player_count: default_player_count(),
             summary_only: false,
@@ -4148,6 +4502,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
+            selected_challenge_deck: None,
             selected_match_type: Some(MatchType::Bo1),
             player_count: default_player_count(),
             summary_only: false,
@@ -4185,6 +4540,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Pioneer),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -4204,6 +4560,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Premodern),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -4225,6 +4582,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Premodern),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -4250,6 +4608,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Premodern),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -4276,6 +4635,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Premodern),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -4295,6 +4655,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Premodern),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -4316,6 +4677,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Premodern),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -4351,6 +4713,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Pauper),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -4376,6 +4739,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: None,
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -4407,6 +4771,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Brawl),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -4426,6 +4791,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Brawl),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -4445,6 +4811,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Brawl),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -4471,6 +4838,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Brawl),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -4494,6 +4862,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Brawl),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -4517,6 +4886,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::TinyLeaders),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -4556,6 +4926,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::TinyLeaders),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -4585,6 +4956,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::TinyLeaders),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -4614,6 +4986,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::HistoricBrawl),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -5016,6 +5389,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -5048,6 +5422,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -5066,6 +5441,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::FreeForAll),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -5084,6 +5460,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: vec!["Big Spell".to_string()],
             selected_format: Some(GameFormat::Oathbreaker),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -5117,6 +5494,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: None,
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -5137,6 +5515,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -5161,6 +5540,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -5187,6 +5567,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -5211,6 +5592,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -5235,6 +5617,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -5287,6 +5670,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -5312,6 +5696,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -5338,6 +5723,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -5401,6 +5787,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -5463,6 +5850,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -5490,6 +5878,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -5517,6 +5906,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -5540,6 +5930,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::FreeForAll),
+            selected_challenge_deck: None,
             selected_match_type: Some(MatchType::Bo3),
             player_count: default_player_count(),
             summary_only: false,
@@ -5570,6 +5961,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -5673,6 +6065,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -5698,6 +6091,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -5723,6 +6117,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -5752,6 +6147,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -5812,6 +6208,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Vintage),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -5841,6 +6238,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Vintage),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -5875,6 +6273,7 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Momir),
+            selected_challenge_deck: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,

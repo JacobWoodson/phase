@@ -47,6 +47,13 @@ fn deck_nontoken_cards(deck: ChallengeDeck) -> &'static [(u32, &'static str)] {
         ChallengeDeck::HumansGodzillaHorde => {
             decks::humans_godzilla_horde::HUMANS_GODZILLA_HORDE_NONTOKEN_CARDS
         }
+        ChallengeDeck::SauronHorde => decks::sauron_horde::SAURON_HORDE_NONTOKEN_CARDS,
+        ChallengeDeck::SarumanHorde => decks::saruman_horde::SARUMAN_HORDE_NONTOKEN_CARDS,
+        // The combined "Two Towers" pairing loads Sauron's library at seat 0 (its
+        // co-Horde Saruman library is covered by the `SarumanHorde` arm above), so
+        // this name-resolution guard checks the same seat-0 list `load_horde_library`
+        // resolves for it.
+        ChallengeDeck::LotrTwoTowersHorde => decks::sauron_horde::SAURON_HORDE_NONTOKEN_CARDS,
     }
 }
 

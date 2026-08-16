@@ -11,15 +11,17 @@
 //! reverted. Negative assertions are paired with a positive reach-guard proving
 //! the input reached the seam under test.
 
+use engine::game::deck_loading::{load_deck_into_state, DeckEntry, DeckPayload, PlayerDeckPayload};
 use engine::game::effects::life::apply_damage_life_loss;
 use engine::game::engine::start_game;
 use engine::game::players::{team_life_total, teammates};
 use engine::game::sba::check_state_based_actions;
 use engine::game::turns::start_next_turn;
 use engine::game::zones::create_object;
-use engine::types::card_type::CoreType;
+use engine::types::card::CardFace;
+use engine::types::card_type::{CoreType, Supertype};
 use engine::types::events::GameEvent;
-use engine::types::format::{ChallengeDeck, FormatConfig};
+use engine::types::format::{ChallengeDeck, FormatConfig, SurvivorDeckFormat};
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::phase::Phase;
@@ -453,5 +455,108 @@ fn horde_game_start_gives_survivors_the_first_turn_and_setup_turns() {
         HORDE,
         "the Horde's first turn is turn {}",
         setup_turns + 1
+    );
+}
+
+/// A `Supertype::Legendary` creature `CardFace` — an eligible EDH commander.
+fn survivor_commander_face() -> CardFace {
+    let mut face = CardFace {
+        name: "Survivor General".to_string(),
+        ..CardFace::default()
+    };
+    face.card_type.supertypes.push(Supertype::Legendary);
+    face.card_type.core_types.push(CoreType::Creature);
+    face
+}
+
+/// A basic land `CardFace` for filling out the 99-card main deck.
+fn plains_face() -> CardFace {
+    let mut face = CardFace {
+        name: "Plains".to_string(),
+        ..CardFace::default()
+    };
+    face.card_type.supertypes.push(Supertype::Basic);
+    face.card_type.core_types.push(CoreType::Land);
+    face.card_type.subtypes.push("Plains".to_string());
+    face
+}
+
+/// A Commander-format Horde (e.g. Sauron/Saruman, built for EDH survivors)
+/// wires the SURVIVORS as EDH players end-to-end: `command_zone`, the 21
+/// commander-damage SBA, `uses_commander`, and a 100-card deck size all derive
+/// from `SurvivorDeckFormat::Commander`, and the data-driven deck loader places
+/// the survivor's commander in the command zone. This proves survivors can bring
+/// and play full EDH decks against the Horde.
+///
+/// Revert guard: if the survivor-format axis stopped driving the command
+/// zone / threshold, the config asserts flip; if `load_deck_into_state` stopped
+/// honoring the survivor's commander slot, the command-zone lookup returns None.
+#[test]
+fn commander_format_horde_wires_survivor_commanders() {
+    let ruleset = ChallengeDeck::SauronHorde.default_ruleset();
+    assert_eq!(
+        ruleset.survivor_deck_format,
+        SurvivorDeckFormat::Commander,
+        "reach-guard: Sauron survivors are EDH (Commander) players"
+    );
+
+    let config = FormatConfig::horde(ruleset);
+    // The survivor EDH axis: command zone + 21 commander-damage + 100-card deck.
+    assert!(
+        config.command_zone,
+        "Horde-Commander survivors get a command zone"
+    );
+    assert_eq!(
+        config.commander_damage_threshold,
+        Some(21),
+        "CR 903.10a commander-damage SBA is active for survivors"
+    );
+    assert!(config.uses_commander);
+    assert_eq!(config.deck_size, 100);
+
+    // Seat 0 = Horde, seat 1 = survivor. The loader maps `payload.opponent`
+    // to seat 1, so the survivor's EDH deck (99 basics + a commander) goes there.
+    let mut state = GameState::new(config, 2, 42);
+    let survivor = PlayerId(1);
+
+    let payload = DeckPayload {
+        opponent: PlayerDeckPayload {
+            main_deck: vec![DeckEntry {
+                card: plains_face(),
+                count: 99,
+            }],
+            commander: vec![DeckEntry {
+                card: survivor_commander_face(),
+                count: 1,
+            }],
+            ..PlayerDeckPayload::default()
+        },
+        ..DeckPayload::default()
+    };
+    load_deck_into_state(&mut state, &payload);
+
+    // The survivor's commander is a real command-zone commander they own.
+    let placed = state
+        .command_zone
+        .iter()
+        .map(|id| &state.objects[id])
+        .find(|o| o.is_commander && o.owner == survivor);
+    assert!(
+        placed.is_some(),
+        "the survivor's commander is placed in the command zone"
+    );
+    assert_eq!(
+        placed.unwrap().name,
+        "Survivor General",
+        "the placed commander is the survivor's chosen EDH commander"
+    );
+
+    // The Horde seat (0) runs the challenge library, never an EDH commander.
+    assert!(
+        !state
+            .command_zone
+            .iter()
+            .any(|id| state.objects[id].is_commander && state.objects[id].owner == HORDE),
+        "the Horde seat has no commander"
     );
 }
