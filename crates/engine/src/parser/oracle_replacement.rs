@@ -4058,7 +4058,18 @@ fn parse_enters_with_counters(
         }
     }
 
-    let counter_entries = parse_enters_counter_entries(after_additional);
+    // CR 122.1: the conjoined-list reader gets `after_with`, NOT
+    // `after_additional`. The caller-level "an additional " strip above exists
+    // for the single-counter path, and it eats the very article that anchors the
+    // list's leading element: "an additional +1/+1 counter and deathtouch
+    // counter on it" (March Toward Perfection) would arrive as "+1/+1 counter
+    // and …", whose head carries no count, so the whole list was rejected and
+    // every conjunct past the first silently dropped. The element grammar
+    // consumes "[an] additional" itself (`strip_additional_counter_qualifier`),
+    // so handing it the unstripped text is strictly more permissive — it also
+    // picks up "an additional +1/+1 counter and a lifelink counter on it", which
+    // the strip likewise used to break.
+    let counter_entries = parse_enters_counter_entries(after_with);
     // Detect dynamic count: "a number of [type] counters ... equal to [qty]"
     let after_prefix = tag::<_, _, OracleError<'_>>("a number of ")
         .parse(after_additional)
@@ -4729,27 +4740,11 @@ fn parse_enters_counter_entries(after_with: &str) -> Option<Vec<(CounterType, Qu
     let mut entries = Vec::new();
 
     loop {
-        let (mut count_expr, rest) = parse_count_expr(remaining)?;
-        rewrite_variable_x_to_cost_x_paid(&mut count_expr);
-        // CR 122.1: strip the "additional" qualifier that follows the count word
-        // ("two additional +1/+1 counters") so it doesn't leak into the type.
-        let rest = strip_additional_counter_qualifier(rest);
-
-        let (at_counter, counter_type_raw) = take_until::<_, _, OracleError<'_>>(" counter")
-            .parse(rest)
-            .ok()?;
-        if counter_type_raw.trim().is_empty() {
-            return None;
-        }
-        let counter_type =
-            crate::parser::oracle_effect::counter::normalize_counter_type(counter_type_raw);
-        let (after_space, _) = tag::<_, _, OracleError<'_>>(" ").parse(at_counter).ok()?;
-        let (after_counter_word, _) =
-            alt((tag::<_, _, OracleError<'_>>("counters"), tag("counter")))
-                .parse(after_space)
-                .ok()?;
-
-        entries.push((counter_type, count_expr));
+        // CR 122.1: only a NON-LEADING conjunct may elide its count — the first
+        // element's mandatory count is what anchors the list.
+        let (entry, after_counter_word) =
+            parse_enters_counter_entry(remaining, !entries.is_empty())?;
+        entries.push(entry);
 
         if let Some(next) = parse_enters_counter_separator(after_counter_word) {
             remaining = next;
@@ -4765,6 +4760,68 @@ fn parse_enters_counter_entries(after_with: &str) -> Option<Vec<(CounterType, Qu
     (entries.len() >= 2).then_some(entries)
 }
 
+/// CR 122.1: parse ONE element of an "enters with" counter list, returning the
+/// entry and the remainder after its `counter`/`counters` noun.
+///
+/// Two element shapes, tried in that order:
+///   * COUNTED — "two +1/+1 counters", "an additional lifelink counter",
+///     "X charge counters". The count opens with `oracle_util::parse_count_expr`,
+///     so the whole arithmetic grammar (X, `twice X`, `half X, rounded up`,
+///     `N plus/minus X`) is available and any surviving `X` is rewritten to the
+///     entering object's `CostXPaid` (CR 614.12).
+///   * ELIDED — "…and deathtouch counter on it", where the leading element's
+///     determiner distributes across the conjunction. Delegated to the shared
+///     `oracle_effect::parse_countless_counter_element` so this reader and the
+///     battlefield-rider list in `oracle_effect::lower` cannot drift on the
+///     element grammar; see that function for the recognized-type and
+///     singular-noun guards that keep an unanchored element from over-claiming.
+///
+/// `allow_elided_count` is false at the head of the list and true after any
+/// separator — the count is what anchors the leading element.
+fn parse_enters_counter_entry(
+    input: &str,
+    allow_elided_count: bool,
+) -> Option<((CounterType, QuantityExpr), &str)> {
+    if let Some(parsed) = parse_counted_enters_counter_entry(input) {
+        return Some(parsed);
+    }
+    if !allow_elided_count {
+        return None;
+    }
+    let (rest, entry) =
+        crate::parser::oracle_effect::parse_countless_counter_element(input).ok()?;
+    Some((entry, rest))
+}
+
+/// The COUNTED element shape of [`parse_enters_counter_entry`] — see there.
+fn parse_counted_enters_counter_entry(input: &str) -> Option<((CounterType, QuantityExpr), &str)> {
+    let (mut count_expr, rest) = parse_count_expr(input)?;
+    rewrite_variable_x_to_cost_x_paid(&mut count_expr);
+    // CR 122.1: strip the "additional" qualifier that follows the count word
+    // ("two additional +1/+1 counters") so it doesn't leak into the type.
+    let rest = strip_additional_counter_qualifier(rest);
+
+    let (at_counter, counter_type_raw) = take_until::<_, _, OracleError<'_>>(" counter")
+        .parse(rest)
+        .ok()?;
+    if counter_type_raw.trim().is_empty() {
+        return None;
+    }
+    let counter_type =
+        crate::parser::oracle_effect::counter::normalize_counter_type(counter_type_raw);
+    let (after_space, _) = tag::<_, _, OracleError<'_>>(" ").parse(at_counter).ok()?;
+    let (after_counter_word, _) = alt((tag::<_, _, OracleError<'_>>("counters"), tag("counter")))
+        .parse(after_space)
+        .ok()?;
+
+    Some(((counter_type, count_expr), after_counter_word))
+}
+
+/// Match a list separator AND verify the element after it parses, so a
+/// separator that is really a sentence connective ("…on it, then draw a card")
+/// leaves the list intact. This is the hand-rolled equivalent of the backtracking
+/// nom gets for free from `many0(preceded(sep, element))`; it lives here because
+/// this reader's counted element is not a pure combinator.
 fn parse_enters_counter_separator(input: &str) -> Option<&str> {
     let (after_sep, _) = alt((
         tag::<_, _, OracleError<'_>>(", and "),
@@ -4774,17 +4831,8 @@ fn parse_enters_counter_separator(input: &str) -> Option<&str> {
     .parse(input)
     .ok()?;
 
-    let (_, rest) = parse_count_expr(after_sep)?;
-    let (at_counter, counter_type_raw) = take_until::<_, _, OracleError<'_>>(" counter")
-        .parse(rest)
-        .ok()?;
-    if counter_type_raw.trim().is_empty() {
-        return None;
-    }
-    let (after_space, _) = tag::<_, _, OracleError<'_>>(" ").parse(at_counter).ok()?;
-    alt((tag::<_, _, OracleError<'_>>("counters"), tag("counter")))
-        .parse(after_space)
-        .ok()?;
+    // Post-separator position, so the elided-count form is in scope here too.
+    parse_enters_counter_entry(after_sep, true)?;
 
     Some(after_sep)
 }
@@ -15588,6 +15636,203 @@ mod tests {
             } else {
                 cursor = cursor.sub_ability.as_deref().expect("next counter");
             }
+        }
+    }
+
+    /// CR 614.1c: a conjoined "enters with" counter list must survive a GATE.
+    /// `self_enters_with_multiple_counter_types` pins the ungated, all-singular
+    /// list (Agent's Toolkit); this pins the two axes that card does not cover,
+    /// because both are places the list could be truncated to its first element:
+    ///
+    ///   * a gate is peeled BEFORE the payload is read — sentence-initial
+    ///     "If <game state>, " (CR 614.1c, Dust Animus) and kicker-conditional
+    ///     "If ~ was kicked, " (CR 702.33d, Voidpouncer). The gate must land on
+    ///     the definition's single condition slot AND leave the whole list.
+    ///   * a non-counter conjunct printed AFTER the list ("… on it and with
+    ///     haste", Voidpouncer) must stop the list rather than be consumed as a
+    ///     third counter — and must not take the second counter down with it.
+    ///
+    /// A multi-count leading element ("two +1/+1 counters") is used deliberately:
+    /// Agent's Toolkit's elements are all bare articles, so the count axis and
+    /// the conjunct axis have never been exercised together.
+    ///
+    /// This is the direct-evidence pin for the claim in
+    /// `oracle_effect::lower::parse_enter_counters_clause_body`'s doc comment
+    /// that the replacement seam needs no routing through that list.
+    #[test]
+    fn gated_self_enters_with_conjoined_counters() {
+        let assert_chain = |text: &str, card: &str, expected: &[(CounterType, i32)]| {
+            let def = parse_replacement_line(text, card)
+                .unwrap_or_else(|| panic!("{card}: gated conjoined enters-with must parse"));
+            assert_eq!(def.event, ReplacementEvent::Moved, "{card}: self-ETB event");
+            assert_eq!(
+                def.valid_card,
+                Some(TargetFilter::SelfRef),
+                "{card}: self-referential subject"
+            );
+            assert!(
+                def.condition.is_some(),
+                "{card}: the gate must reach the condition slot, not be dropped"
+            );
+
+            let mut cursor = Some(def.execute.as_deref().expect("execute ability"));
+            for (index, (counter, count)) in expected.iter().enumerate() {
+                let ability = cursor.unwrap_or_else(|| {
+                    panic!("{card}: conjunct {index} ({counter:?}) was dropped from the chain")
+                });
+                assert!(
+                    matches!(
+                        &*ability.effect,
+                        Effect::PutCounter {
+                            counter_type,
+                            count: QuantityExpr::Fixed { value },
+                            target: TargetFilter::SelfRef,
+                        } if counter_type == counter && value == count
+                    ),
+                    "{card}: conjunct {index} expected {counter:?} x{count}, got {:?}",
+                    ability.effect
+                );
+                cursor = ability.sub_ability.as_deref();
+            }
+            assert!(
+                cursor.is_none(),
+                "{card}: a non-counter conjunct was swallowed as an extra PutCounter"
+            );
+        };
+
+        // Dust Animus — leading game-state gate.
+        assert_chain(
+            "If you control five or more untapped lands, this creature enters with two +1/+1 \
+             counters and a lifelink counter on it.",
+            "Dust Animus",
+            &[
+                (CounterType::Plus1Plus1, 2),
+                (
+                    CounterType::Keyword(crate::types::keywords::KeywordKind::Lifelink),
+                    1,
+                ),
+            ],
+        );
+
+        // Voidpouncer — kicker gate, plus a trailing "and with haste" rider that
+        // must terminate the list without truncating it.
+        assert_chain(
+            "If this creature was kicked, it enters with two +1/+1 counters and a trample \
+             counter on it and with haste.",
+            "Voidpouncer",
+            &[
+                (CounterType::Plus1Plus1, 2),
+                (
+                    CounterType::Keyword(crate::types::keywords::KeywordKind::Trample),
+                    1,
+                ),
+            ],
+        );
+    }
+
+    /// CR 122.1: a conjunct whose count is ELIDED must still place its counter.
+    /// English coordination lets the leading determiner distribute — "an
+    /// additional [+1/+1 counter] and [deathtouch counter]" — and every conjunct
+    /// past the first used to be dropped on the floor, so these cards entered
+    /// with only their +1/+1.
+    ///
+    /// These three are the entire printed class (corpus sweep over every
+    /// "enters/enter with … counter" and battlefield-rider line), and they cover
+    /// both separator shapes: bare `" and "` and the Oxford `", …, and "` list.
+    /// The last one also pins that the longer "enters the battlefield with"
+    /// spelling takes the same path as the short "enters with".
+    #[test]
+    fn enters_with_elided_count_conjuncts() {
+        use crate::types::keywords::KeywordKind;
+
+        let assert_chain = |text: &str, card: &str, expected: &[CounterType]| {
+            let def = parse_replacement_line(text, card)
+                .unwrap_or_else(|| panic!("{card}: elided-count conjunct list must parse"));
+            let mut cursor = Some(def.execute.as_deref().expect("execute ability"));
+            for (index, counter) in expected.iter().enumerate() {
+                let ability = cursor.unwrap_or_else(|| {
+                    panic!("{card}: conjunct {index} ({counter:?}) was dropped from the chain")
+                });
+                assert!(
+                    matches!(
+                        &*ability.effect,
+                        // CR 122.1: an elided count is exactly one counter.
+                        Effect::PutCounter {
+                            counter_type,
+                            count: QuantityExpr::Fixed { value: 1 },
+                            ..
+                        } if counter_type == counter
+                    ),
+                    "{card}: conjunct {index} expected {counter:?} x1, got {:?}",
+                    ability.effect
+                );
+                cursor = ability.sub_ability.as_deref();
+            }
+            assert!(
+                cursor.is_none(),
+                "{card}: trailing text was swallowed as an extra PutCounter"
+            );
+        };
+
+        assert_chain(
+            "When you cast a Phyrexian creature spell, that creature enters with an additional \
+             +1/+1 counter and deathtouch counter on it.",
+            "March Toward Perfection",
+            &[
+                CounterType::Plus1Plus1,
+                CounterType::Keyword(KeywordKind::Deathtouch),
+            ],
+        );
+
+        assert_chain(
+            "When you cast a creature spell, that creature enters with an additional +1/+1 \
+             counter, reach counter, and trample counter on it.",
+            "Arcane Archery",
+            &[
+                CounterType::Plus1Plus1,
+                CounterType::Keyword(KeywordKind::Reach),
+                CounterType::Keyword(KeywordKind::Trample),
+            ],
+        );
+
+        assert_chain(
+            "When you cast a creature spell, that creature enters the battlefield with an \
+             additional +1/+1 counter, trample counter, and vigilance counter on it.",
+            "Tenacious Pup",
+            &[
+                CounterType::Plus1Plus1,
+                CounterType::Keyword(KeywordKind::Trample),
+                CounterType::Keyword(KeywordKind::Vigilance),
+            ],
+        );
+    }
+
+    /// The elided-count element is unanchored (no leading number), so it must not
+    /// widen what the list as a whole claims. Each case below stays on the
+    /// single-counter path — one `PutCounter`, no chain — rather than growing a
+    /// bogus second entry:
+    ///
+    ///   * a non-counter conjunct after the list ("and you draw a card")
+    ///   * a conjunct naming something that is not a counter type — the guard
+    ///     against `parse_strict_counter_type`'s absent `Generic` fallback
+    ///   * a PLURAL elided conjunct, which is ambiguous about whether the head
+    ///     count distributes and so fails closed rather than guessing
+    #[test]
+    fn elided_count_conjunct_does_not_over_claim() {
+        for text in [
+            "This creature enters with an additional +1/+1 counter and you draw a card.",
+            "This creature enters with an additional +1/+1 counter and haste on it.",
+            "This creature enters with two +1/+1 counters and trample counters on it.",
+        ] {
+            let Some(def) = parse_replacement_line(text, "Test Enterer") else {
+                continue;
+            };
+            let execute = def.execute.as_deref().expect("execute ability");
+            assert!(
+                execute.sub_ability.is_none(),
+                "elided-count element over-claimed on {text:?}: {:?}",
+                execute.sub_ability
+            );
         }
     }
 
