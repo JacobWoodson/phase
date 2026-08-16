@@ -165,6 +165,27 @@ pub enum EscapeCost {
     NonMana(AbilityCost),
 }
 
+/// CR 702.1: whether a [`Keyword`]'s [`KeywordKind`] names that keyword ability
+/// uniquely, decided in the same arm that assigns the kind
+/// (`Keyword::kind_binding`).
+///
+/// Not public: callers ask the question through
+/// [`Keyword::kind_identifies_ability`], which is the only thing they need. This
+/// type exists so the answer travels WITH the mapping instead of being re-derived
+/// from it — see `kind_binding` for why a second, separate classification is
+/// unsafe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KindIdentity {
+    /// The kind names this keyword ability and no other, so a kind-level
+    /// presence test asks exactly the question the Oracle text asks.
+    Exact,
+    /// The kind is shared — either it is the catch-all `KeywordKind::Unknown`
+    /// bucket, or the printed keyword name varies with the parameter so several
+    /// distinct abilities collapse onto one kind (protection, hexproof from,
+    /// landwalk, typecycling, partner). No exact presence test exists.
+    Shared,
+}
+
 /// Discriminant-level keyword identity used when the Oracle text refers to a keyword class
 /// without caring about its parameter payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -1456,154 +1477,169 @@ impl Keyword {
         })
     }
 
-    pub fn kind(&self) -> KeywordKind {
+    /// The `KeywordKind` this keyword maps onto, together with whether that
+    /// mapping NAMES this keyword ability uniquely.
+    ///
+    /// One exhaustive match answers both questions on purpose. The injectivity
+    /// answer is a property OF this mapping, so deriving it separately — from a
+    /// second census, or from an `other => kind() != Unknown` fallback — lets the
+    /// two drift: a new variant that aliases an existing non-`Unknown` kind (the
+    /// `Hexproof`/`HexproofFrom` shape) would be reported as identifying and ship
+    /// a wrong guard. Deciding both in one arm makes that unrepresentable, and
+    /// makes adding a `Keyword` variant a compile error until the author supplies
+    /// the kind AND the identity.
+    ///
+    /// Read [`KindIdentity`] for what `Exact` and `Shared` mean, and
+    /// [`Keyword::kind_identifies_ability`] for why callers care.
+    fn kind_binding(&self) -> (KeywordKind, KindIdentity) {
+        use KindIdentity::{Exact, Shared};
         match self {
-            Keyword::Flying => KeywordKind::Flying,
-            Keyword::FirstStrike => KeywordKind::FirstStrike,
-            Keyword::DoubleStrike => KeywordKind::DoubleStrike,
-            Keyword::Trample => KeywordKind::Trample,
-            Keyword::TrampleOverPlaneswalkers => KeywordKind::TrampleOverPlaneswalkers,
-            Keyword::Deathtouch => KeywordKind::Deathtouch,
-            Keyword::Lifelink => KeywordKind::Lifelink,
-            Keyword::Vigilance => KeywordKind::Vigilance,
-            Keyword::Haste => KeywordKind::Haste,
-            Keyword::Reach => KeywordKind::Reach,
-            Keyword::Defender => KeywordKind::Defender,
-            Keyword::Menace => KeywordKind::Menace,
-            Keyword::Indestructible => KeywordKind::Indestructible,
-            Keyword::Hexproof | Keyword::HexproofFrom(_) => KeywordKind::Hexproof,
-            Keyword::Shroud => KeywordKind::Shroud,
-            Keyword::Flash => KeywordKind::Flash,
-            Keyword::Fear => KeywordKind::Fear,
-            Keyword::Intimidate => KeywordKind::Intimidate,
-            Keyword::Skulk => KeywordKind::Skulk,
-            Keyword::Shadow => KeywordKind::Shadow,
-            Keyword::Horsemanship => KeywordKind::Horsemanship,
-            Keyword::Wither => KeywordKind::Wither,
-            Keyword::Infect => KeywordKind::Infect,
-            Keyword::Afflict(_) => KeywordKind::Afflict,
-            Keyword::StartingIntensity(_) => KeywordKind::Unknown,
-            Keyword::Prowess => KeywordKind::Prowess,
-            Keyword::Undying => KeywordKind::Undying,
-            Keyword::Persist => KeywordKind::Persist,
-            Keyword::Cascade => KeywordKind::Cascade,
-            Keyword::Exalted => KeywordKind::Exalted,
-            Keyword::Flanking => KeywordKind::Flanking,
-            Keyword::Evolve => KeywordKind::Evolve,
-            Keyword::Extort => KeywordKind::Extort,
-            Keyword::Exploit => KeywordKind::Exploit,
-            Keyword::Explore => KeywordKind::Explore,
-            Keyword::Ascend => KeywordKind::Ascend,
-            Keyword::Storied => KeywordKind::Storied,
-            Keyword::StartYourEngines => KeywordKind::StartYourEngines,
-            Keyword::Dredge(_) => KeywordKind::Dredge,
-            Keyword::Modular(_) => KeywordKind::Modular,
-            Keyword::Renown(_) => KeywordKind::Renown,
-            Keyword::Graft(_) => KeywordKind::Graft,
-            Keyword::Fabricate(_) => KeywordKind::Fabricate,
-            Keyword::Annihilator(_) => KeywordKind::Annihilator,
-            Keyword::Bushido(_) => KeywordKind::Bushido,
-            Keyword::Frenzy(_) => KeywordKind::Frenzy,
-            Keyword::Tribute(_) => KeywordKind::Tribute,
-            Keyword::Soulbond => KeywordKind::Soulbond,
-            Keyword::BandsWithOther(_) => KeywordKind::BandsWithOther,
-            Keyword::Unearth(_) => KeywordKind::Unearth,
-            Keyword::Convoke => KeywordKind::Convoke,
-            Keyword::Waterbend => KeywordKind::Waterbend,
-            Keyword::Delve => KeywordKind::Delve,
-            Keyword::Devoid => KeywordKind::Devoid,
-            Keyword::Changeling => KeywordKind::Changeling,
-            Keyword::Phasing => KeywordKind::Phasing,
-            Keyword::Battlecry => KeywordKind::Battlecry,
-            Keyword::Decayed => KeywordKind::Decayed,
-            Keyword::Unleash => KeywordKind::Unleash,
-            Keyword::Riot => KeywordKind::Riot,
-            Keyword::Afterlife(_) => KeywordKind::Afterlife,
-            Keyword::Enchant(_) => KeywordKind::Enchant,
-            Keyword::EtbCounter { .. } => KeywordKind::EtbCounter,
-            Keyword::Reconfigure(_) => KeywordKind::Reconfigure,
-            Keyword::LivingWeapon => KeywordKind::LivingWeapon,
-            Keyword::JobSelect => KeywordKind::JobSelect,
-            Keyword::TotemArmor => KeywordKind::TotemArmor,
-            Keyword::Bestow(_) => KeywordKind::Bestow,
-            Keyword::Embalm(_) => KeywordKind::Embalm,
-            Keyword::Eternalize(_) => KeywordKind::Eternalize,
-            Keyword::Fading(_) => KeywordKind::Fading,
-            Keyword::Vanishing(_) => KeywordKind::Vanishing,
-            Keyword::Protection(_) => KeywordKind::Protection,
-            Keyword::Kicker(_) => KeywordKind::Kicker,
-            Keyword::Cycling(_) => KeywordKind::Cycling,
-            Keyword::Typecycling { .. } => KeywordKind::Typecycling,
-            Keyword::Flashback(_) => KeywordKind::Flashback,
-            Keyword::Retrace => KeywordKind::Retrace,
-            Keyword::Ward(_) => KeywordKind::Ward,
-            Keyword::Equip(_) => KeywordKind::Equip,
-            Keyword::Landwalk(_) => KeywordKind::Landwalk,
-            Keyword::Rampage(_) => KeywordKind::Rampage,
-            Keyword::Absorb(_) => KeywordKind::Absorb,
-            Keyword::Crew { .. } => KeywordKind::Crew,
-            Keyword::Partner(PartnerType::DoctorsCompanion) => KeywordKind::Doctor,
-            Keyword::Partner(PartnerType::ChooseABackground) => KeywordKind::Background,
-            Keyword::Partner(_) => KeywordKind::Partner,
-            Keyword::Companion(_) => KeywordKind::Companion,
-            Keyword::CommanderNinjutsu(_) => KeywordKind::CommanderNinjutsu,
-            Keyword::Ninjutsu(_) => KeywordKind::Ninjutsu,
-            Keyword::Sneak(_) => KeywordKind::Sneak,
-            Keyword::Mutate(_) => KeywordKind::Mutate,
-            Keyword::Escape(_) => KeywordKind::Escape,
-            Keyword::Morph(_) => KeywordKind::Morph,
-            Keyword::Megamorph(_) => KeywordKind::Megamorph,
-            Keyword::Madness(_) => KeywordKind::Madness,
+            Keyword::Flying => (KeywordKind::Flying, Exact),
+            Keyword::FirstStrike => (KeywordKind::FirstStrike, Exact),
+            Keyword::DoubleStrike => (KeywordKind::DoubleStrike, Exact),
+            Keyword::Trample => (KeywordKind::Trample, Exact),
+            Keyword::TrampleOverPlaneswalkers => (KeywordKind::TrampleOverPlaneswalkers, Exact),
+            Keyword::Deathtouch => (KeywordKind::Deathtouch, Exact),
+            Keyword::Lifelink => (KeywordKind::Lifelink, Exact),
+            Keyword::Vigilance => (KeywordKind::Vigilance, Exact),
+            Keyword::Haste => (KeywordKind::Haste, Exact),
+            Keyword::Reach => (KeywordKind::Reach, Exact),
+            Keyword::Defender => (KeywordKind::Defender, Exact),
+            Keyword::Menace => (KeywordKind::Menace, Exact),
+            Keyword::Indestructible => (KeywordKind::Indestructible, Exact),
+            Keyword::Hexproof | Keyword::HexproofFrom(_) => (KeywordKind::Hexproof, Shared),
+            Keyword::Shroud => (KeywordKind::Shroud, Exact),
+            Keyword::Flash => (KeywordKind::Flash, Exact),
+            Keyword::Fear => (KeywordKind::Fear, Exact),
+            Keyword::Intimidate => (KeywordKind::Intimidate, Exact),
+            Keyword::Skulk => (KeywordKind::Skulk, Exact),
+            Keyword::Shadow => (KeywordKind::Shadow, Exact),
+            Keyword::Horsemanship => (KeywordKind::Horsemanship, Exact),
+            Keyword::Wither => (KeywordKind::Wither, Exact),
+            Keyword::Infect => (KeywordKind::Infect, Exact),
+            Keyword::Afflict(_) => (KeywordKind::Afflict, Exact),
+            Keyword::StartingIntensity(_) => (KeywordKind::Unknown, Shared),
+            Keyword::Prowess => (KeywordKind::Prowess, Exact),
+            Keyword::Undying => (KeywordKind::Undying, Exact),
+            Keyword::Persist => (KeywordKind::Persist, Exact),
+            Keyword::Cascade => (KeywordKind::Cascade, Exact),
+            Keyword::Exalted => (KeywordKind::Exalted, Exact),
+            Keyword::Flanking => (KeywordKind::Flanking, Exact),
+            Keyword::Evolve => (KeywordKind::Evolve, Exact),
+            Keyword::Extort => (KeywordKind::Extort, Exact),
+            Keyword::Exploit => (KeywordKind::Exploit, Exact),
+            Keyword::Explore => (KeywordKind::Explore, Exact),
+            Keyword::Ascend => (KeywordKind::Ascend, Exact),
+            Keyword::Storied => (KeywordKind::Storied, Exact),
+            Keyword::StartYourEngines => (KeywordKind::StartYourEngines, Exact),
+            Keyword::Dredge(_) => (KeywordKind::Dredge, Exact),
+            Keyword::Modular(_) => (KeywordKind::Modular, Exact),
+            Keyword::Renown(_) => (KeywordKind::Renown, Exact),
+            Keyword::Graft(_) => (KeywordKind::Graft, Exact),
+            Keyword::Fabricate(_) => (KeywordKind::Fabricate, Exact),
+            Keyword::Annihilator(_) => (KeywordKind::Annihilator, Exact),
+            Keyword::Bushido(_) => (KeywordKind::Bushido, Exact),
+            Keyword::Frenzy(_) => (KeywordKind::Frenzy, Exact),
+            Keyword::Tribute(_) => (KeywordKind::Tribute, Exact),
+            Keyword::Soulbond => (KeywordKind::Soulbond, Exact),
+            Keyword::BandsWithOther(_) => (KeywordKind::BandsWithOther, Exact),
+            Keyword::Unearth(_) => (KeywordKind::Unearth, Exact),
+            Keyword::Convoke => (KeywordKind::Convoke, Exact),
+            Keyword::Waterbend => (KeywordKind::Waterbend, Exact),
+            Keyword::Delve => (KeywordKind::Delve, Exact),
+            Keyword::Devoid => (KeywordKind::Devoid, Exact),
+            Keyword::Changeling => (KeywordKind::Changeling, Exact),
+            Keyword::Phasing => (KeywordKind::Phasing, Exact),
+            Keyword::Battlecry => (KeywordKind::Battlecry, Exact),
+            Keyword::Decayed => (KeywordKind::Decayed, Exact),
+            Keyword::Unleash => (KeywordKind::Unleash, Exact),
+            Keyword::Riot => (KeywordKind::Riot, Exact),
+            Keyword::Afterlife(_) => (KeywordKind::Afterlife, Exact),
+            Keyword::Enchant(_) => (KeywordKind::Enchant, Exact),
+            Keyword::EtbCounter { .. } => (KeywordKind::EtbCounter, Exact),
+            Keyword::Reconfigure(_) => (KeywordKind::Reconfigure, Exact),
+            Keyword::LivingWeapon => (KeywordKind::LivingWeapon, Exact),
+            Keyword::JobSelect => (KeywordKind::JobSelect, Exact),
+            Keyword::TotemArmor => (KeywordKind::TotemArmor, Exact),
+            Keyword::Bestow(_) => (KeywordKind::Bestow, Exact),
+            Keyword::Embalm(_) => (KeywordKind::Embalm, Exact),
+            Keyword::Eternalize(_) => (KeywordKind::Eternalize, Exact),
+            Keyword::Fading(_) => (KeywordKind::Fading, Exact),
+            Keyword::Vanishing(_) => (KeywordKind::Vanishing, Exact),
+            Keyword::Protection(_) => (KeywordKind::Protection, Shared),
+            Keyword::Kicker(_) => (KeywordKind::Kicker, Exact),
+            Keyword::Cycling(_) => (KeywordKind::Cycling, Exact),
+            Keyword::Typecycling { .. } => (KeywordKind::Typecycling, Shared),
+            Keyword::Flashback(_) => (KeywordKind::Flashback, Exact),
+            Keyword::Retrace => (KeywordKind::Retrace, Exact),
+            Keyword::Ward(_) => (KeywordKind::Ward, Exact),
+            Keyword::Equip(_) => (KeywordKind::Equip, Exact),
+            Keyword::Landwalk(_) => (KeywordKind::Landwalk, Shared),
+            Keyword::Rampage(_) => (KeywordKind::Rampage, Exact),
+            Keyword::Absorb(_) => (KeywordKind::Absorb, Exact),
+            Keyword::Crew { .. } => (KeywordKind::Crew, Exact),
+            Keyword::Partner(PartnerType::DoctorsCompanion) => (KeywordKind::Doctor, Shared),
+            Keyword::Partner(PartnerType::ChooseABackground) => (KeywordKind::Background, Shared),
+            Keyword::Partner(_) => (KeywordKind::Partner, Shared),
+            Keyword::Companion(_) => (KeywordKind::Companion, Exact),
+            Keyword::CommanderNinjutsu(_) => (KeywordKind::CommanderNinjutsu, Exact),
+            Keyword::Ninjutsu(_) => (KeywordKind::Ninjutsu, Exact),
+            Keyword::Sneak(_) => (KeywordKind::Sneak, Exact),
+            Keyword::Mutate(_) => (KeywordKind::Mutate, Exact),
+            Keyword::Escape(_) => (KeywordKind::Escape, Exact),
+            Keyword::Morph(_) => (KeywordKind::Morph, Exact),
+            Keyword::Megamorph(_) => (KeywordKind::Megamorph, Exact),
+            Keyword::Madness(_) => (KeywordKind::Madness, Exact),
             // CR 702.168: Disguise — its own discriminant kind (mirrors Morph)
             // so `HasKeywordKind { Disguise }` selects face-up disguise creatures
             // rather than being folded into the shared `Unknown` catch-all.
-            Keyword::Disguise(_) => KeywordKind::Disguise,
-            Keyword::Mayhem(_) => KeywordKind::Mayhem,
-            Keyword::Suspend { .. } => KeywordKind::Suspend,
-            Keyword::Blitz(_) => KeywordKind::Blitz,
-            Keyword::Disturb(_) => KeywordKind::Disturb,
-            Keyword::Foretell(_) => KeywordKind::Foretell,
-            Keyword::Miracle(_) => KeywordKind::Miracle,
-            Keyword::Plot(_) => KeywordKind::Plot,
-            Keyword::Gift(_) => KeywordKind::Gift,
-            Keyword::Outlast(_) => KeywordKind::Outlast,
-            Keyword::Dash(_) => KeywordKind::Dash,
-            Keyword::Craft { .. } => KeywordKind::Craft,
-            Keyword::Harmonize(_) => KeywordKind::Harmonize,
-            Keyword::Warp(_) => KeywordKind::Warp,
-            Keyword::Devour { .. } => KeywordKind::Devour,
-            Keyword::Offspring(_) => KeywordKind::Offspring,
-            Keyword::Splice { .. } => KeywordKind::Splice,
-            Keyword::Bargain => KeywordKind::Bargain,
-            Keyword::Sunburst => KeywordKind::Sunburst,
-            Keyword::Champion(_) => KeywordKind::Champion,
-            Keyword::Training => KeywordKind::Training,
-            Keyword::Assist => KeywordKind::Assist,
-            Keyword::Augment => KeywordKind::Augment,
-            Keyword::Aftermath => KeywordKind::Aftermath,
-            Keyword::JumpStart => KeywordKind::JumpStart,
-            Keyword::Cipher => KeywordKind::Cipher,
-            Keyword::Transmute(_) => KeywordKind::Transmute,
-            Keyword::Transfigure(_) => KeywordKind::Transfigure,
-            Keyword::Cleave(_) => KeywordKind::Cleave,
-            Keyword::Undaunted => KeywordKind::Undaunted,
-            Keyword::Station => KeywordKind::Station,
-            Keyword::Paradigm => KeywordKind::Paradigm,
-            Keyword::Replicate(_) => KeywordKind::Replicate,
-            Keyword::Awaken { .. } => KeywordKind::Awaken,
-            Keyword::ForMirrodin => KeywordKind::ForMirrodin,
-            Keyword::MoreThanMeetsTheEye(_) => KeywordKind::MoreThanMeetsTheEye,
-            Keyword::Freerunning(_) => KeywordKind::Freerunning,
-            Keyword::Increment => KeywordKind::Increment,
-            Keyword::Firebending(_) => KeywordKind::Firebending,
-            Keyword::Specialize(_) => KeywordKind::Specialize,
-            Keyword::Offering(_) => KeywordKind::Offering,
-            Keyword::Escalate(_) => KeywordKind::Escalate,
-            Keyword::Recover(_) => KeywordKind::Recover,
+            Keyword::Disguise(_) => (KeywordKind::Disguise, Exact),
+            Keyword::Mayhem(_) => (KeywordKind::Mayhem, Exact),
+            Keyword::Suspend { .. } => (KeywordKind::Suspend, Exact),
+            Keyword::Blitz(_) => (KeywordKind::Blitz, Exact),
+            Keyword::Disturb(_) => (KeywordKind::Disturb, Exact),
+            Keyword::Foretell(_) => (KeywordKind::Foretell, Exact),
+            Keyword::Miracle(_) => (KeywordKind::Miracle, Exact),
+            Keyword::Plot(_) => (KeywordKind::Plot, Exact),
+            Keyword::Gift(_) => (KeywordKind::Gift, Exact),
+            Keyword::Outlast(_) => (KeywordKind::Outlast, Exact),
+            Keyword::Dash(_) => (KeywordKind::Dash, Exact),
+            Keyword::Craft { .. } => (KeywordKind::Craft, Exact),
+            Keyword::Harmonize(_) => (KeywordKind::Harmonize, Exact),
+            Keyword::Warp(_) => (KeywordKind::Warp, Exact),
+            Keyword::Devour { .. } => (KeywordKind::Devour, Exact),
+            Keyword::Offspring(_) => (KeywordKind::Offspring, Exact),
+            Keyword::Splice { .. } => (KeywordKind::Splice, Exact),
+            Keyword::Bargain => (KeywordKind::Bargain, Exact),
+            Keyword::Sunburst => (KeywordKind::Sunburst, Exact),
+            Keyword::Champion(_) => (KeywordKind::Champion, Exact),
+            Keyword::Training => (KeywordKind::Training, Exact),
+            Keyword::Assist => (KeywordKind::Assist, Exact),
+            Keyword::Augment => (KeywordKind::Augment, Exact),
+            Keyword::Aftermath => (KeywordKind::Aftermath, Exact),
+            Keyword::JumpStart => (KeywordKind::JumpStart, Exact),
+            Keyword::Cipher => (KeywordKind::Cipher, Exact),
+            Keyword::Transmute(_) => (KeywordKind::Transmute, Exact),
+            Keyword::Transfigure(_) => (KeywordKind::Transfigure, Exact),
+            Keyword::Cleave(_) => (KeywordKind::Cleave, Exact),
+            Keyword::Undaunted => (KeywordKind::Undaunted, Exact),
+            Keyword::Station => (KeywordKind::Station, Exact),
+            Keyword::Paradigm => (KeywordKind::Paradigm, Exact),
+            Keyword::Replicate(_) => (KeywordKind::Replicate, Exact),
+            Keyword::Awaken { .. } => (KeywordKind::Awaken, Exact),
+            Keyword::ForMirrodin => (KeywordKind::ForMirrodin, Exact),
+            Keyword::MoreThanMeetsTheEye(_) => (KeywordKind::MoreThanMeetsTheEye, Exact),
+            Keyword::Freerunning(_) => (KeywordKind::Freerunning, Exact),
+            Keyword::Increment => (KeywordKind::Increment, Exact),
+            Keyword::Firebending(_) => (KeywordKind::Firebending, Exact),
+            Keyword::Specialize(_) => (KeywordKind::Specialize, Exact),
+            Keyword::Offering(_) => (KeywordKind::Offering, Exact),
+            Keyword::Escalate(_) => (KeywordKind::Escalate, Exact),
+            Keyword::Recover(_) => (KeywordKind::Recover, Exact),
             // CR 702.102: Fuse — the runtime cast layer reads this kind to offer
             // the fuse casting variant for split cards in hand.
-            Keyword::Fuse => KeywordKind::Fuse,
-            Keyword::Unknown(_) => KeywordKind::Unknown,
+            Keyword::Fuse => (KeywordKind::Fuse, Exact),
+            Keyword::Unknown(_) => (KeywordKind::Unknown, Shared),
             // Variants whose KeywordKind axis is currently the catch-all `Unknown`
             // because the AI/coverage layer that consumes `KeywordKind` does not
             // need to distinguish them yet. Listed exhaustively so that adding a
@@ -1669,8 +1705,13 @@ impl Keyword {
             | Keyword::Surge(_)
             | Keyword::Totem
             | Keyword::Toxic(_)
-            | Keyword::WebSlinging(_) => KeywordKind::Unknown,
+            | Keyword::WebSlinging(_) => (KeywordKind::Unknown, Shared),
         }
+    }
+
+    /// CR 702.1: the keyword-class discriminant, ignoring any parameter payload.
+    pub fn kind(&self) -> KeywordKind {
+        self.kind_binding().0
     }
 
     /// True when [`Keyword::kind`] IDENTIFIES this keyword ability — the
@@ -1681,8 +1722,8 @@ impl Keyword {
     /// False in exactly two situations, each of which makes a kind-level test
     /// answer a DIFFERENT question than the printed text:
     ///
-    ///   * `KeywordKind::Unknown` — the catch-all bucket the `kind()` match
-    ///     above assigns to ~60 unrelated keywords (`Banding`, `Melee`,
+    ///   * `KeywordKind::Unknown` — the catch-all bucket the `kind_binding()`
+    ///     match above assigns to ~60 unrelated keywords (`Banding`, `Melee`,
     ///     `Storm`, `Toxic`, `Echo`, `StartingIntensity`, …). "Has an
     ///     Unknown-kind keyword" is TRUE for a creature with banding when the
     ///     text asked about storm. The off-zone keyword ledger
@@ -1709,249 +1750,8 @@ impl Keyword {
     /// `Partner(ChooseABackground)` do get their own kinds, but the whole
     /// partner family answers `false` because under-reporting injectivity only
     /// costs a strict failure, while over-reporting it ships a wrong guard.
-    ///
-    /// Maintenance: this is a hand-derived property of the `kind()` match above,
-    /// so the census below is exhaustive for the same reason that one is — adding
-    /// a `Keyword` variant fails compilation here until the author makes the
-    /// injectivity call.
-    ///
-    /// Do NOT collapse the `true` arm back into an `other => other.kind() !=
-    /// KeywordKind::Unknown` fallback. That derivation is only sound while every
-    /// non-`Unknown` kind has exactly one `Keyword` variant producing it, which is
-    /// a property of the *current* `kind()` match rather than a guarantee: a new
-    /// variant that aliases an existing non-`Unknown` kind (the
-    /// `Hexproof`/`HexproofFrom` shape) would silently answer `true` and ship the
-    /// wrong guard. A new parameterized family whose parameter renames the printed
-    /// keyword belongs in the first `false` arm.
     pub fn kind_identifies_ability(&self) -> bool {
-        match self {
-            // CR 702.11d + CR 702.14a + CR 702.16a + CR 702.29e + CR 702.124a:
-            // the PRINTED keyword ability name varies with the parameter, so a
-            // single kind spans several distinct abilities and no kind-level test
-            // can separate them.
-            Keyword::Hexproof
-            | Keyword::HexproofFrom(_)
-            | Keyword::Landwalk(_)
-            | Keyword::Partner(_)
-            | Keyword::Protection(_)
-            | Keyword::Typecycling { .. } => false,
-
-            // The `KeywordKind::Unknown` catch-all bucket — "has an Unknown-kind
-            // keyword" is true for a creature with banding when the text asked
-            // about storm, and the kind-indexed off-zone ledger has no per-ability
-            // answer for these at all.
-            Keyword::Affinity(_)
-            | Keyword::Amplify(_)
-            | Keyword::Backup(_)
-            | Keyword::Banding
-            | Keyword::Bloodthirst(_)
-            | Keyword::Buyback(_)
-            | Keyword::Casualty(_)
-            | Keyword::Compleated
-            | Keyword::Conspire
-            | Keyword::CumulativeUpkeep(_)
-            | Keyword::Daybound
-            | Keyword::Demonstrate
-            | Keyword::Dethrone
-            | Keyword::Discover(_)
-            | Keyword::DoubleTeam
-            | Keyword::Echo(_)
-            | Keyword::Emerge(_)
-            | Keyword::Encore(_)
-            | Keyword::Enlist
-            | Keyword::Entwine(_)
-            | Keyword::Epic
-            | Keyword::Evoke(_)
-            | Keyword::Fortify(_)
-            | Keyword::Gravestorm
-            | Keyword::Haunt
-            | Keyword::Hideaway(_)
-            | Keyword::Impending { .. }
-            | Keyword::Improvise
-            | Keyword::Ingest
-            | Keyword::LevelUp(_)
-            | Keyword::LivingMetal
-            | Keyword::Melee
-            | Keyword::Mentor
-            | Keyword::Mobilize(_)
-            | Keyword::Myriad
-            | Keyword::Nightbound
-            | Keyword::Overload(_)
-            | Keyword::Poisonous(_)
-            | Keyword::Prototype { .. }
-            | Keyword::Provoke
-            | Keyword::Prowl(_)
-            | Keyword::Ravenous
-            | Keyword::ReadAhead
-            | Keyword::Rebound
-            | Keyword::Reinforce { .. }
-            | Keyword::Ripple(_)
-            | Keyword::Saddle(_)
-            | Keyword::Scavenge(_)
-            | Keyword::Soulshift(_)
-            | Keyword::Spectacle(_)
-            | Keyword::SplitSecond
-            | Keyword::Spree
-            | Keyword::Squad(_)
-            | Keyword::StartingIntensity(_)
-            | Keyword::Storm
-            | Keyword::Surge(_)
-            | Keyword::Teamwork(_)
-            | Keyword::Totem
-            | Keyword::Toxic(_)
-            | Keyword::Unknown(_)
-            | Keyword::WebSlinging(_) => false,
-
-            // 1:1 with their kind: the kind names this ability and no other, so a
-            // kind-level presence test asks exactly what the Oracle text asks.
-            Keyword::Absorb(_)
-            | Keyword::Afflict(_)
-            | Keyword::Afterlife(_)
-            | Keyword::Aftermath
-            | Keyword::Annihilator(_)
-            | Keyword::Ascend
-            | Keyword::Assist
-            | Keyword::Augment
-            | Keyword::Awaken { .. }
-            | Keyword::BandsWithOther(_)
-            | Keyword::Bargain
-            | Keyword::Battlecry
-            | Keyword::Bestow(_)
-            | Keyword::Blitz(_)
-            | Keyword::Bushido(_)
-            | Keyword::Cascade
-            | Keyword::Champion(_)
-            | Keyword::Changeling
-            | Keyword::Cipher
-            | Keyword::Cleave(_)
-            | Keyword::CommanderNinjutsu(_)
-            | Keyword::Companion(_)
-            | Keyword::Convoke
-            | Keyword::Craft { .. }
-            | Keyword::Crew { .. }
-            | Keyword::Cycling(_)
-            | Keyword::Dash(_)
-            | Keyword::Deathtouch
-            | Keyword::Decayed
-            | Keyword::Defender
-            | Keyword::Delve
-            | Keyword::Devoid
-            | Keyword::Devour { .. }
-            | Keyword::Disguise(_)
-            | Keyword::Disturb(_)
-            | Keyword::DoubleStrike
-            | Keyword::Dredge(_)
-            | Keyword::Embalm(_)
-            | Keyword::Enchant(_)
-            | Keyword::Equip(_)
-            | Keyword::Escalate(_)
-            | Keyword::Escape(_)
-            | Keyword::EtbCounter { .. }
-            | Keyword::Eternalize(_)
-            | Keyword::Evolve
-            | Keyword::Exalted
-            | Keyword::Exploit
-            | Keyword::Explore
-            | Keyword::Extort
-            | Keyword::Fabricate(_)
-            | Keyword::Fading(_)
-            | Keyword::Fear
-            | Keyword::Firebending(_)
-            | Keyword::FirstStrike
-            | Keyword::Flanking
-            | Keyword::Flash
-            | Keyword::Flashback(_)
-            | Keyword::Flying
-            | Keyword::ForMirrodin
-            | Keyword::Foretell(_)
-            | Keyword::Freerunning(_)
-            | Keyword::Frenzy(_)
-            | Keyword::Fuse
-            | Keyword::Gift(_)
-            | Keyword::Graft(_)
-            | Keyword::Harmonize(_)
-            | Keyword::Haste
-            | Keyword::Horsemanship
-            | Keyword::Increment
-            | Keyword::Indestructible
-            | Keyword::Infect
-            | Keyword::Intimidate
-            | Keyword::JobSelect
-            | Keyword::JumpStart
-            | Keyword::Kicker(_)
-            | Keyword::Lifelink
-            | Keyword::LivingWeapon
-            | Keyword::Madness(_)
-            | Keyword::Mayhem(_)
-            | Keyword::Megamorph(_)
-            | Keyword::Menace
-            | Keyword::Miracle(_)
-            | Keyword::Modular(_)
-            | Keyword::MoreThanMeetsTheEye(_)
-            | Keyword::Morph(_)
-            | Keyword::Mutate(_)
-            | Keyword::Ninjutsu(_)
-            | Keyword::Offering(_)
-            | Keyword::Offspring(_)
-            | Keyword::Outlast(_)
-            | Keyword::Paradigm
-            | Keyword::Persist
-            | Keyword::Phasing
-            | Keyword::Plot(_)
-            | Keyword::Prowess
-            | Keyword::Rampage(_)
-            | Keyword::Reach
-            | Keyword::Reconfigure(_)
-            | Keyword::Recover(_)
-            | Keyword::Renown(_)
-            | Keyword::Replicate(_)
-            | Keyword::Retrace
-            | Keyword::Riot
-            | Keyword::Shadow
-            | Keyword::Shroud
-            | Keyword::Skulk
-            | Keyword::Sneak(_)
-            | Keyword::Soulbond
-            | Keyword::Specialize(_)
-            | Keyword::Splice { .. }
-            | Keyword::StartYourEngines
-            | Keyword::Station
-            | Keyword::Storied
-            | Keyword::Sunburst
-            | Keyword::Suspend { .. }
-            | Keyword::TotemArmor
-            | Keyword::Training
-            | Keyword::Trample
-            | Keyword::TrampleOverPlaneswalkers
-            | Keyword::Transfigure(_)
-            | Keyword::Transmute(_)
-            | Keyword::Tribute(_)
-            | Keyword::Undaunted
-            | Keyword::Undying
-            | Keyword::Unearth(_)
-            | Keyword::Unleash
-            | Keyword::Vanishing(_)
-            | Keyword::Vigilance
-            | Keyword::Ward(_)
-            | Keyword::Warp(_)
-            | Keyword::Waterbend
-            | Keyword::Wither => {
-                // The census above is hand-derived, so it can disagree with
-                // `kind()` in a way the compiler cannot see: a variant listed
-                // here but mapped to the catch-all would hand a kind-level
-                // presence test the shared `Unknown` bucket — the exact
-                // over-report this predicate exists to prevent. Only this arm
-                // can be wrong that way (the other two answer `false`, which is
-                // always safe), and the predicate runs at parse time, so pin the
-                // invariant rather than deriving it.
-                debug_assert_ne!(
-                    self.kind(),
-                    KeywordKind::Unknown,
-                    "{self:?} is censused as kind-identifying but maps to the Unknown bucket",
-                );
-                true
-            }
-        }
+        matches!(self.kind_binding().1, KindIdentity::Exact)
     }
 
     /// CR 601.2f + CR 707.2: Keywords that only function while a player is
