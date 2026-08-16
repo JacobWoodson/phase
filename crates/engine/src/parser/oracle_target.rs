@@ -4274,15 +4274,21 @@ fn stack_spell_filter(mut typed: TypedFilter) -> TargetFilter {
 /// order in which the controller/type backfills and the two property
 /// distributors must run.
 ///
-/// ORDER IS LOAD-BEARING, and it is stated here once so the two property
-/// distributors cannot disagree about it. Both `distribute_shared_properties`
-/// (the left-to-right path) and `distribute_properties_to_or` (the
-/// trailing-suffix path) consult the CR 208.3 gate `prop_distributes_to_leg`,
-/// which reads each leg's `type_filters`. A leg assembled as `[TypeFilter::Any]`
-/// (its type noun appeared only in a later disjunct) or one that has not yet
-/// inherited a leading `Non(Creature)` does not yet know its own card type, so
-/// BOTH backfills must complete first — otherwise the "with power N" binding
-/// silently goes wrong on exactly those legs.
+/// ORDER IS LOAD-BEARING FOR PRECISION, and it is stated here once so the two
+/// property distributors cannot disagree about it. Both
+/// `distribute_shared_properties` (the left-to-right path) and
+/// `distribute_properties_to_or` (the trailing-suffix path) consult the CR 208.3
+/// gate `prop_distributes_to_leg`, which reads each leg's `type_filters`. A leg
+/// assembled as `[TypeFilter::Any]` (its type noun appeared only in a later
+/// disjunct) or one that has not yet inherited a leading `Non(Creature)` does
+/// not yet know its own card type, so both backfills run first — otherwise the
+/// "with power N" binding is decided on a leg that cannot yet answer.
+///
+/// Running them first is what makes the binding PRECISE, not what makes it SAFE:
+/// `leg_admits_creature_pt` fails closed on a leg that names no card type, so a
+/// caller that skips the backfills gets a leg left unrestricted rather than one
+/// wrongly restricted. Every caller should still use this function; the
+/// fail-closed behavior is the floor, not the target.
 ///
 /// The backfills only add `TypeFilter`s and never read `properties`, so ordering
 /// the shared-prop push after them is inert for every non-P/T prop and strictly
@@ -4736,6 +4742,101 @@ fn leg_pins_noncreature_core_type(type_filters: &[TypeFilter]) -> bool {
     type_filters.iter().any(is_noncreature_core_type_pin)
 }
 
+/// Returns true when this single `TypeFilter` names a card-type SCOPE at all, as
+/// opposed to one of the three type-open universals.
+///
+/// CR 205.2a enumerates the card types; `Permanent` (CR 110.1: a permanent is a
+/// card or token on the battlefield, whatever its type), `Card` (CR 108.2: a
+/// reference to a "card" means only a Magic card or an object represented by
+/// one, again whatever its type), and `Any` are not among them — each is a
+/// "whatever its type" quantifier that names no card type. Every other variant
+/// names a card type (CR 205.2a) or a subtype pool (CR 205.3) and therefore
+/// scopes the leg to something.
+///
+/// EXHAUSTIVE BY CONSTRUCTION, for the same reason as its two sibling
+/// authorities `type_filter_guarantees_creature` and
+/// `is_noncreature_core_type_pin`: a new `TypeFilter` variant must be classified
+/// here rather than defaulting into a silent behavior.
+fn type_filter_names_a_card_type_scope(tf: &TypeFilter) -> bool {
+    match tf {
+        // CR 110.1 / CR 108.2: "a permanent" / "a card" name no card type — they
+        // are the quantifiers a type noun would otherwise narrow. `Any` is the
+        // parser's own not-yet-known placeholder and is likewise type-open.
+        TypeFilter::Permanent | TypeFilter::Card | TypeFilter::Any => false,
+        // A type disjunction scopes the leg only when EVERY alternative does: a
+        // single type-open alternative reopens the whole disjunction. Plain
+        // logic on the AST, not a rules decision.
+        TypeFilter::AnyOf(inner) => {
+            !inner.is_empty() && inner.iter().all(type_filter_names_a_card_type_scope)
+        }
+        // CR 205.2a card types, CR 205.3 subtype pools, and CR 205.4b negations
+        // all name a scope. `Non(_)` scopes by exclusion, which is still a scope.
+        TypeFilter::Creature
+        | TypeFilter::Land
+        | TypeFilter::Artifact
+        | TypeFilter::Enchantment
+        | TypeFilter::Instant
+        | TypeFilter::Sorcery
+        | TypeFilter::Planeswalker
+        | TypeFilter::Battle
+        | TypeFilter::Kindred
+        | TypeFilter::Non(_)
+        | TypeFilter::Subtype(_) => true,
+    }
+}
+
+/// Three-valued CR 208.3 verdict for an `Or` leg: may a power/toughness
+/// restriction be DISTRIBUTED onto it from a sibling disjunct?
+///
+/// 1. CR 205.2b — a leg that guarantees creature ("artifact creature") accepts,
+///    even though it also pins a noncreature type.
+/// 2. CR 208.3 — a leg pinned to a noncreature card type has no power or
+///    toughness, so the restriction would be vacuous. Reject.
+/// 3. TYPE-OPEN — a leg naming no card type at all ("a card named X", "a green
+///    card", "a permanent card", or an `[Any]` leg whose type noun was never
+///    backfilled). Reject.
+///
+/// Case 3 is the CR 208.1 postnominal-binding reading, and it is the half that
+/// `leg_pins_noncreature_core_type` alone cannot decide. "Search your library
+/// for a green card or a creature card with power 4 or greater" prints the
+/// restriction on the *creature* noun; the green-card disjunct is unrestricted,
+/// exactly as the artifact disjunct of Make Your Move is. A `[Card]` leg is not
+/// vacuous the way an `[Artifact]` leg is — `game::filter::pt_value_from_pair`
+/// would still match creature cards through it — so the defect is quieter, but
+/// it is the same defect: a restriction bound to the wrong disjunct.
+///
+/// FAILS CLOSED, WHICH IS WHY ORDERING IS NO LONGER LOAD-BEARING FOR SAFETY. A
+/// leg still holding `[TypeFilter::Any]` because `distribute_core_type_to_or`
+/// could not resolve it now lands in case 3 and is left unrestricted. That is
+/// the same "preserve the looser behavior" policy that function already applies
+/// to an ambiguous disjunction, and it means a caller that distributes before
+/// backfilling gets a LOOSER leg, never a vacuous one. `finalize_or_disjunction`
+/// still backfills first so resolvable `[Any]` legs are decided on their real
+/// type rather than falling into case 3; grammars that compose their own `Or`
+/// without the backfills (`oracle_effect::search`) are merely less precise, not
+/// wrong.
+///
+/// Note the deliberate asymmetry with `pt_hosting_leg_props`, which keys on
+/// `leg_pins_noncreature_core_type` and NOT on this function. That sweep
+/// relocates a restriction off a leg where it is VACUOUS; this gate refuses to
+/// place one on a leg where it does not BELONG. A type-open leg is ineligible
+/// under this gate but is not vacuous, so it is neither stripped nor used as a
+/// relocation witness — see `pt_hosting_leg_props` for why the two predicates
+/// are now intentionally different.
+fn leg_admits_creature_pt(type_filters: &[TypeFilter]) -> bool {
+    // CR 205.2b: "artifact creature" satisfies both, and keeps the restriction.
+    if type_filters.iter().any(type_filter_guarantees_creature) {
+        return true;
+    }
+    // CR 208.3: pinned to a card type that has no power or toughness.
+    if type_filters.iter().any(is_noncreature_core_type_pin) {
+        return false;
+    }
+    // CR 208.1: the restriction binds to a type noun. A leg that names no card
+    // type scope was never the noun it was printed on.
+    type_filters.iter().any(type_filter_names_a_card_type_scope)
+}
+
 /// Type-conditional leg-locality gate: may `prop` be distributed onto `typed`?
 ///
 /// CR 208.3: a noncreature permanent has no power or toughness. A postnominal
@@ -4767,29 +4868,46 @@ fn leg_pins_noncreature_core_type(type_filters: &[TypeFilter]) -> bool {
 /// `distribute_shared_properties`, so the search-filter disjunction grammar
 /// (`oracle_effect::search`, CR 701.23a) inherits it with no extra code.
 ///
-/// ORDERING DEPENDENCY: `parse_type_phrase_with_ctx` calls
-/// `distribute_core_type_to_or` and `distribute_neg_type_filters_to_or` BEFORE
-/// BOTH distributors that consult this gate, so a leg that receives its core
-/// type (or an inherited `Non(Creature)`) by backfill already carries it when
-/// this gate inspects `type_filters`. Reordering those calls would break this
-/// gate. `distribute_shared_properties` was originally sequenced ahead of the
-/// backfills, where it inspected legs still holding `[TypeFilter::Any]`; it is
-/// now sequenced with `distribute_properties_to_or` so this invariant holds at
-/// BOTH call sites rather than only one.
+/// ORDERING DEPENDENCY — PRECISION, NOT SAFETY. `parse_type_phrase_with_ctx`
+/// calls `distribute_core_type_to_or` and `distribute_neg_type_filters_to_or`
+/// BEFORE both distributors that consult this gate, so a leg that receives its
+/// core type (or an inherited `Non(Creature)`) by backfill already carries it
+/// when this gate inspects `type_filters`. `distribute_shared_properties` was
+/// originally sequenced ahead of the backfills, where it inspected legs still
+/// holding `[TypeFilter::Any]`; it is now sequenced with
+/// `distribute_properties_to_or` so this holds at BOTH call sites.
+///
+/// Reordering those calls no longer produces a WRONG binding, only a coarser
+/// one: `leg_admits_creature_pt` fails closed on a leg that still names no card
+/// type, so an un-backfilled leg is left unrestricted rather than silently
+/// acquiring a restriction printed on a different disjunct. That is what lets
+/// `oracle_effect::search` — which composes its own `Or` from independently
+/// parsed segments and runs no backfill — share this gate safely.
 fn prop_distributes_to_leg(prop: &FilterProp, typed: &TypedFilter) -> bool {
-    !(prop_reads_creature_pt(prop) && leg_pins_noncreature_core_type(&typed.type_filters))
+    !prop_reads_creature_pt(prop) || leg_admits_creature_pt(&typed.type_filters)
 }
 
 /// Collect the P/T-family props that depth-1 `Typed` legs the CR 208.3 gate
 /// ACCEPTS actually carry. This is the rehoming witness set consumed by
 /// `strip_misplaced_pt_props_from_or_legs`.
 ///
-/// The host predicate is the exact complement of `prop_distributes_to_leg`'s
-/// type test, not the stricter `type_filter_guarantees_creature`. That makes the
-/// two sides of the relocation structurally inseparable: a prop may be stripped
-/// off a rejected leg only when a leg the same gate ACCEPTED is carrying it, so
-/// "never delete a printed restriction" (invariant 5) cannot drift apart from
-/// the gate.
+/// The host predicate is the exact complement of `leg_pins_noncreature_core_type`
+/// — the VACUITY test — not the stricter `type_filter_guarantees_creature` and
+/// deliberately not the full `leg_admits_creature_pt` distribution gate. The two
+/// answer different questions and must not be unified:
+/// * This sweep relocates a restriction off a leg where CR 208.3 makes it
+///   VACUOUS (an `[Artifact]` leg can never have power). Vacuity is exactly
+///   `leg_pins_noncreature_core_type`.
+/// * `leg_admits_creature_pt` additionally rejects TYPE-OPEN legs (`[Card]`,
+///   `[Permanent]`, `[Any]`, no types at all). Those legs are ineligible to
+///   RECEIVE a restriction printed on a sibling noun, but a restriction sitting
+///   on one is not vacuous — `[Card]` with power ≥ 4 still matches creature
+///   cards. Widening the sweep to them would DELETE a live predicate from the
+///   leg that syntactically parsed it, which is precisely what invariant 5
+///   forbids.
+///
+/// The relocation therefore stays paired with vacuity: a prop is stripped off a
+/// vacuous leg only when a non-vacuous leg carries an exactly-equal one.
 ///
 /// Using `type_filter_guarantees_creature` here instead would silently fail the
 /// class the gate exists for: CR 205.3m creature subtypes name no card type, so
@@ -15406,6 +15524,129 @@ mod tests {
         };
         assert!(has_prop(typed_or_leg(&filters, 0), cmc.clone()));
         assert!(has_prop(typed_or_leg(&filters, 1), cmc));
+    }
+
+    /// Matrix row 13 — the THIRD value of the CR 208.3 verdict, asserted on the
+    /// gate itself rather than through any one grammar.
+    ///
+    /// `leg_pins_noncreature_core_type` answers "is a P/T restriction VACUOUS
+    /// here?", which is only half the binding question. A leg that names no card
+    /// type at all — `[Card]` ("a green card"), `[Permanent]` ("a permanent
+    /// card"), `[Any]` (a type noun that was never backfilled), or no filters at
+    /// all ("a card named X") — is not vacuous, but it is not the noun the
+    /// restriction was printed on either (CR 208.1). `leg_admits_creature_pt`
+    /// rejects all four, which is what lets `oracle_effect::search` compose an
+    /// `Or` with no type backfill and still bind correctly.
+    ///
+    /// The accept rows are the discriminator: a gate that simply rejected
+    /// everything it could not prove to be a creature would fail the
+    /// `Subtype("Goblin")` row (CR 205.3m creature subtypes name no card type,
+    /// so `type_filter_guarantees_creature` is false there) and the CR 205.2b
+    /// artifact-creature row.
+    #[test]
+    fn leg_admits_creature_pt_rejects_type_open_legs_but_keeps_creature_scopes() {
+        for types in [
+            vec![TypeFilter::Card],
+            vec![TypeFilter::Permanent],
+            vec![TypeFilter::Any],
+            vec![],
+            // A disjunction is only as scoped as its loosest alternative.
+            vec![TypeFilter::AnyOf(vec![
+                TypeFilter::Creature,
+                TypeFilter::Card,
+            ])],
+        ] {
+            assert!(
+                !leg_admits_creature_pt(&types),
+                "CR 208.1: a leg naming no card type must not receive a P/T \
+                 restriction printed on a sibling noun: {types:?}"
+            );
+        }
+
+        for types in [
+            vec![TypeFilter::Creature],
+            // CR 205.2b: an object with more than one card type satisfies either.
+            vec![TypeFilter::Artifact, TypeFilter::Creature],
+            // CR 205.3m: a creature subtype names a scope that can be a creature.
+            vec![TypeFilter::Subtype("Goblin".to_string())],
+            // CR 205.4b: scoping by exclusion is still scoping.
+            vec![TypeFilter::Non(Box::new(TypeFilter::Artifact))],
+            // CR 308.1: a kindred card has another card type, possibly creature.
+            vec![TypeFilter::Kindred],
+        ] {
+            assert!(
+                leg_admits_creature_pt(&types),
+                "a creature-compatible scope must keep receiving the restriction: \
+                 {types:?}"
+            );
+        }
+
+        for types in [
+            vec![TypeFilter::Artifact],
+            vec![TypeFilter::Enchantment],
+            // CR 205.3g: an artifact subtype pins the artifact card type.
+            vec![
+                TypeFilter::Artifact,
+                TypeFilter::Subtype("Vehicle".to_string()),
+            ],
+            vec![TypeFilter::Non(Box::new(TypeFilter::Creature))],
+        ] {
+            assert!(
+                !leg_admits_creature_pt(&types),
+                "CR 208.3: a leg pinned to a noncreature card type has no power: \
+                 {types:?}"
+            );
+        }
+    }
+
+    /// Matrix row 14 — the gate composed with a real distributor, proving the
+    /// type-open rejection is P/T-SPECIFIC. A `[Card]` leg must lose the power
+    /// suffix (CR 208.1) while still inheriting the mana-value suffix (CR 202.3:
+    /// every object has a mana value, so nothing about a type-open leg blocks
+    /// it). Without the second half, a blanket "never distribute to a typeless
+    /// leg" rule would pass the first assertion and silently regress #2892.
+    #[test]
+    fn distribute_skips_pt_on_a_type_open_leg_but_still_distributes_cmc() {
+        let merged = |trailing: FilterProp| TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Card],
+                    ..Default::default()
+                }),
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    properties: vec![trailing],
+                    ..Default::default()
+                }),
+            ],
+        };
+
+        let TargetFilter::Or { filters } = distribute_properties_to_or(merged(power_ge_4())) else {
+            panic!("expected Or");
+        };
+        assert!(
+            !has_pt_prop(typed_or_leg(&filters, 0)),
+            "CR 208.1: the type-open `Card` leg must not acquire the power \
+             restriction: {filters:?}"
+        );
+        assert!(
+            has_pt_prop(typed_or_leg(&filters, 1)),
+            "the creature leg must keep its own printed restriction — otherwise \
+             the assertion above passes vacuously: {filters:?}"
+        );
+
+        let cmc = FilterProp::Cmc {
+            comparator: Comparator::LE,
+            value: QuantityExpr::Fixed { value: 3 },
+        };
+        let TargetFilter::Or { filters } = distribute_properties_to_or(merged(cmc.clone())) else {
+            panic!("expected Or");
+        };
+        assert!(
+            has_prop(typed_or_leg(&filters, 0), cmc),
+            "CR 202.3: a mana value suffix must still reach the type-open leg: \
+             {filters:?}"
+        );
     }
 
     #[test]
