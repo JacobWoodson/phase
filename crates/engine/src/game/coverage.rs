@@ -633,6 +633,11 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::SpecificObject { id } => format!("object #{}", id.0),
         TargetFilter::SpecificPlayer { id } => format!("player #{}", id.0),
         TargetFilter::PlayerWhoChoseLabel { label } => format!("player who last chose {label}"),
+        // CR 102.1: render the nested player predicate through the existing
+        // PlayerFilter formatter rather than emitting an opaque placeholder.
+        TargetFilter::PlayerMatching { player } => {
+            format!("player matching {}", fmt_player_filter(player))
+        }
         TargetFilter::Neighbor { direction } => match direction {
             SeatDirection::Left => "player to your left".into(),
             SeatDirection::Right => "player to your right".into(),
@@ -682,6 +687,14 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 None => parts.push("attacking".into()),
                 Some(ControllerRef::You) => parts.push("attacking you".into()),
                 Some(ControllerRef::Opponent) => parts.push("attacking your opponents".into()),
+                // CR 508.5: the defending-player anaphor ("attacking that
+                // player"). Rendering it through the `scoped player` catch-all
+                // below would name a DIFFERENT concept — `ControllerRef::
+                // ScopedPlayer` is the resolution-iteration player, not the
+                // player this creature is attacking.
+                Some(ControllerRef::DefendingPlayer) => {
+                    parts.push("attacking defending player".into())
+                }
                 Some(_) => parts.push("attacking scoped player".into()),
             },
             FilterProp::Blocking => parts.push("blocking".into()),

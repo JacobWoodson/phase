@@ -5424,6 +5424,7 @@ fn damage_record_target_matches(
                 remainder,
                 player_id,
                 filter_ctx.source_controller,
+                Some(filter_ctx.source_id),
             )
         }
     }

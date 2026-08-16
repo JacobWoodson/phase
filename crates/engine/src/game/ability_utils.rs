@@ -3365,6 +3365,101 @@ fn target_filter_needs_ability_context(filter: &TargetFilter) -> bool {
     target_filter_contains_chosen_x_ref(filter)
         || target_filter_contains_amassed_army_ref(filter)
         || target_filter_contains_scoped_player_ref(filter)
+        || filter_needs_trigger_source(filter)
+}
+
+/// CR 508.5 + CR 508.5a + CR 603.3d: a filter whose evaluation asks
+/// `combat::defending_player_cr508_5` for the attacked-player anaphor needs the
+/// resolving ability's `trigger_source`, because that authority's binding rule is
+/// `trigger_source.and_then(|_| detection.or(state.current_trigger_event))` — with
+/// no `trigger_source` the binding is `DefenderBinding::None`, which skips the
+/// attack-entry tiers entirely and leaves only `resolve_defending_player`. That
+/// tail resolves a non-attacking source through `extract_source_from_event`,
+/// whose `AttackersDeclared` arm is gated on `attacker_ids.len() == 1`, so ANY
+/// declaration with two or more attackers yields `None`,
+/// `filter::attacking_defender_matches`'s `is_some_and` is false for every
+/// candidate, the target slot is empty, and CR 603.3d removes the triggered
+/// ability from the stack ("If a choice is required when the triggered ability
+/// goes on the stack but no legal choices can be made for it ... the ability is
+/// simply removed from the stack").
+///
+/// Routing these filters to `find_legal_targets_for_ability`
+/// (`FilterContext::from_ability`) supplies the `trigger_source` that
+/// `set_trigger_source_recursive` already put on every instantiated triggered
+/// ability, making SLOT-BUILD agree with the CR 608.2b re-validation door
+/// (`targeting::validate_targets_for_ability`), which has always used
+/// `from_ability`. The disagreement between those two doors is what made this
+/// failure silent.
+///
+/// SCOPE — exactly the refs that consume `trigger_source`, and no others.
+/// `filter::source_controller_ref_player` special-cases three refs:
+/// `DefendingPlayer` (reads `trigger_source`), `SourceChosenPlayer` (reads the
+/// source), and `EnchantedPlayer` (reads `source.attached_to`); everything else
+/// routes to `controller_ref_player`. Only `DefendingPlayer` needs the ability
+/// context, so only `DefendingPlayer` is matched here — leaving the existing
+/// corpus producers of `Attacking { defender: Some(You | Opponent |
+/// SourceChosenPlayer | EnchantedPlayer) }` on their existing door, unchanged.
+///
+/// `FilterProp::CombatRelation` is deliberately EXCLUDED: it is evaluated by
+/// `filter::matches_combat_relation`, which reads `source.id` and
+/// `source.ability` and never calls `source_defending_player`.
+///
+/// `TypedFilter { controller: Some(ControllerRef::DefendingPlayer) }` is ALSO
+/// deliberately excluded despite having the identical door bug (Greatsword of
+/// Tyr class). The deferral is SCOPED AND MEASURED, not open-ended — measured
+/// against `data/card-data.json`, the exported engine corpus:
+///
+/// | population | cards |
+/// |---|---|
+/// | reference `ControllerRef::DefendingPlayer` anywhere | 116 |
+/// | …of those, inside a TRIGGER's definition chain | 104 |
+/// | …of those, inside a trigger's TARGET slot (the door this predicate gates) | 97 |
+/// | the `FilterProp::Attacking { defender: DefendingPlayer }` shape fixed here | 3 |
+///
+/// So the follow-up's exact enumeration delta is 97 cards (Greatsword of Tyr,
+/// Thraximundar, Kogla, Warkite Marauder, …) moving from the bare
+/// `find_legal_targets` door to `find_legal_targets_for_ability`. It is a
+/// separate change because 97 re-routed target enumerations need their own
+/// multi-attacker fixtures and their own blast-radius measurement — not because
+/// the size is unknown. The tripwire test
+/// `filter_needs_trigger_source_does_not_widen_to_defending_player_controller`
+/// keeps the omission a decision rather than an oversight.
+///
+/// STRUCTURAL TRAVERSAL IS NOT RE-IMPLEMENTED HERE. The "does this filter
+/// mention X anywhere" question has exactly one authority — `filter::
+/// filter_contains` and its `filter_prop_contains` / `player_filter_contains`
+/// halves, whose matches are exhaustive (no `_` arm) precisely so a future
+/// nesting variant cannot be silently classified as a leaf. A hand-rolled
+/// `Typed` / `And` / `Or` / `Not` walk with a `_ => false` tail would miss the
+/// prop under `TrackedSetFiltered`, `ChosenDamageSource`, `PlayerMatching {
+/// ControlsCount { filter } }`, or any of the six `TargetFilter`-boxing props
+/// (`Targets`, `TargetsOnly`, `SharesQuality`, `DistinctFrom`,
+/// `DifferentNameFrom`, `CanEnchant`) — each of which would keep the bare
+/// `find_legal_targets` door and reproduce the CR 603.3d removal above.
+///
+/// What remains local is a pure LEAF-VALUE test ("is this prop the
+/// defending-player anaphor?"), including the two prop-level combinators
+/// (`AnyOf` / `Not`) that can wrap it. Its `_ => false` is a value verdict on a
+/// prop that carries no `defender` axis, not a containment claim about nesting.
+fn filter_needs_trigger_source(filter: &TargetFilter) -> bool {
+    fn prop_needs(prop: &FilterProp) -> bool {
+        match prop {
+            FilterProp::Attacking {
+                defender: Some(ControllerRef::DefendingPlayer),
+            }
+            | FilterProp::AttackedThisTurn {
+                defender: Some(ControllerRef::DefendingPlayer),
+            } => true,
+            FilterProp::AnyOf { props } => props.iter().any(prop_needs),
+            FilterProp::Not { prop } => prop_needs(prop),
+            _ => false,
+        }
+    }
+
+    crate::game::filter::filter_contains(
+        filter,
+        &|inner| matches!(inner, TargetFilter::Typed(typed) if typed.properties.iter().any(prop_needs)),
+    )
 }
 
 // CR 102.1 + CR 608.2c: "that player controls" filters lowered to
@@ -5658,6 +5753,7 @@ fn legal_targets_for_selected_slot(
                 &enchant_filter,
                 *pid,
                 Some(aura_controller),
+                Some(aura_id),
             ),
         });
     }
@@ -7788,6 +7884,199 @@ fn build_mode_sequences(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::{CombatRelation, CombatRelationSubject};
+
+    fn typed_with(props: Vec<FilterProp>) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            properties: props,
+            ..Default::default()
+        })
+    }
+
+    fn attacking(defender: ControllerRef) -> FilterProp {
+        FilterProp::Attacking {
+            defender: Some(defender),
+        }
+    }
+
+    /// V18 — `filter_needs_trigger_source` is PRECISE: it routes the CR 508.5
+    /// defending-player anaphor to the context-carrying enumeration door and
+    /// leaves every other value on the existing bare door.
+    ///
+    /// This is the zero-blast-radius proof. `filter::source_controller_ref_player`
+    /// resolves `Opponent` via `source.controller`, `EnchantedPlayer` via
+    /// `source.attached_to`, and `SourceChosenPlayer` via the source object —
+    /// none of them reads `trigger_source` — so leaving the existing corpus
+    /// producers on the bare door is behaviour-preserving by construction, not
+    /// by luck. Only `DefendingPlayer` reaches
+    /// `combat::defending_player_cr508_5`, whose binding rule requires a
+    /// `trigger_source` to consult the attack entries at all.
+    #[test]
+    fn filter_needs_trigger_source_routes_only_the_defending_player_anaphor() {
+        // Positive: the new value, bare and under every recursive shape.
+        let bare = typed_with(vec![attacking(ControllerRef::DefendingPlayer)]);
+        assert!(filter_needs_trigger_source(&bare));
+        assert!(filter_needs_trigger_source(&TargetFilter::Or {
+            filters: vec![typed_with(vec![]), bare.clone()],
+        }));
+        assert!(filter_needs_trigger_source(&TargetFilter::And {
+            filters: vec![typed_with(vec![]), bare.clone()],
+        }));
+        assert!(filter_needs_trigger_source(&TargetFilter::Not {
+            filter: Box::new(bare.clone()),
+        }));
+        assert!(filter_needs_trigger_source(&typed_with(vec![
+            FilterProp::AnyOf {
+                props: vec![FilterProp::Token, attacking(ControllerRef::DefendingPlayer)],
+            }
+        ])));
+        assert!(filter_needs_trigger_source(&typed_with(vec![
+            FilterProp::Not {
+                prop: Box::new(attacking(ControllerRef::DefendingPlayer)),
+            }
+        ])));
+        // Sibling prop that shares the same `attacking_defender_matches` door.
+        assert!(filter_needs_trigger_source(&typed_with(vec![
+            FilterProp::AttackedThisTurn {
+                defender: Some(ControllerRef::DefendingPlayer),
+            }
+        ])));
+
+        // Negative: every `Attacking`/`AttackedThisTurn` value that exists in the
+        // corpus today must stay on the bare door, unchanged.
+        for prop in [
+            FilterProp::Attacking { defender: None },
+            attacking(ControllerRef::You),
+            attacking(ControllerRef::Opponent),
+            attacking(ControllerRef::SourceChosenPlayer),
+            attacking(ControllerRef::EnchantedPlayer),
+            FilterProp::AttackedThisTurn { defender: None },
+            FilterProp::AttackedThisTurn {
+                defender: Some(ControllerRef::You),
+            },
+            FilterProp::CombatRelation {
+                relation: CombatRelation::BlockingOrBlockedBy,
+                subject: CombatRelationSubject::Source,
+            },
+        ] {
+            assert!(
+                !filter_needs_trigger_source(&typed_with(vec![prop.clone()])),
+                "{prop:?} does not consume trigger_source and must stay on the bare door"
+            );
+        }
+
+        // And the predicate composes into the existing routing disjunction.
+        assert!(target_filter_needs_ability_context(&bare));
+    }
+
+    /// V18b — the traversal is DELEGATED, so the anaphor is found at every
+    /// nesting depth `filter::filter_contains` knows about, not only at the top
+    /// level where the three unlocked cards happen to put it today.
+    ///
+    /// Revert-failing: restore the hand-rolled `Typed`/`And`/`Or`/`Not` match
+    /// with a `_ => false` tail and every row below flips to `false` — each one
+    /// then keeps the bare `find_legal_targets` door with `trigger_source:
+    /// None`, which is the empty-slot / CR 603.3d removal this predicate exists
+    /// to prevent.
+    #[test]
+    fn filter_needs_trigger_source_descends_every_nesting_variant() {
+        use crate::types::ability::PlayerRelation;
+
+        let bare = typed_with(vec![attacking(ControllerRef::DefendingPlayer)]);
+        let controls_bare = PlayerFilter::ControlsCount {
+            relation: PlayerRelation::All,
+            filter: bare.clone(),
+            comparator: Comparator::GE,
+            count: Box::new(QuantityExpr::Fixed { value: 1 }),
+        };
+
+        // The six `TargetFilter`-boxing props, plus the two player-axis
+        // crossings. Each is a nesting site `filter_prop_contains` /
+        // `player_filter_contains` enumerate exhaustively and the hand-rolled
+        // walk skipped entirely.
+        for prop in [
+            FilterProp::Targets {
+                filter: Box::new(bare.clone()),
+            },
+            FilterProp::TargetsOnly {
+                filter: Box::new(bare.clone()),
+            },
+            FilterProp::CanEnchant {
+                target: Box::new(bare.clone()),
+            },
+            FilterProp::DistinctFrom {
+                reference: Box::new(bare.clone()),
+            },
+            FilterProp::DifferentNameFrom {
+                filter: Box::new(bare.clone()),
+            },
+            FilterProp::SharesQuality {
+                quality: SharedQuality::CreatureType,
+                reference: Some(Box::new(bare.clone())),
+                relation: SharedQualityRelation::default(),
+            },
+            FilterProp::ControllerMatches {
+                player: Box::new(controls_bare.clone()),
+            },
+        ] {
+            assert!(
+                filter_needs_trigger_source(&typed_with(vec![prop.clone()])),
+                "{prop:?} nests a defending-player anaphor and must route to the \
+                 ability-context door"
+            );
+        }
+
+        // Filter-level nesting variants outside `Typed`/`And`/`Or`/`Not`.
+        assert!(filter_needs_trigger_source(
+            &TargetFilter::TrackedSetFiltered {
+                id: TrackedSetId(1),
+                filter: Box::new(bare.clone()),
+                caused_by: None,
+            }
+        ));
+        assert!(filter_needs_trigger_source(
+            &TargetFilter::ChosenDamageSource {
+                filter: Some(Box::new(bare.clone())),
+            }
+        ));
+        assert!(filter_needs_trigger_source(&TargetFilter::PlayerMatching {
+            player: Box::new(controls_bare),
+        }));
+
+        // Negative control at the same depths: nesting alone does not route.
+        assert!(!filter_needs_trigger_source(
+            &TargetFilter::ChosenDamageSource {
+                filter: Some(Box::new(typed_with(vec![attacking(
+                    ControllerRef::Opponent
+                )]))),
+            }
+        ));
+    }
+
+    /// V19 — TRIPWIRE. `TypedFilter { controller: Some(DefendingPlayer) }`
+    /// (Greatsword of Tyr class) has the IDENTICAL slot-build door bug, and is
+    /// deliberately NOT covered here. The deferral is measured, not open-ended:
+    /// 97 corpus cards put that shape in a triggered ability's TARGET slot
+    /// (versus 3 for the shape fixed here) — see the table on
+    /// `filter_needs_trigger_source`. Widening the predicate re-routes all 97
+    /// enumerations at once and needs its own multi-attacker fixtures.
+    ///
+    /// A future pass that widens the predicate must delete this assertion on
+    /// purpose — that is the point. It exists so the omission reads as a
+    /// decision, not an oversight.
+    #[test]
+    fn filter_needs_trigger_source_does_not_widen_to_defending_player_controller() {
+        let controller_scoped = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: Some(ControllerRef::DefendingPlayer),
+            ..Default::default()
+        });
+        assert!(
+            !filter_needs_trigger_source(&controller_scoped),
+            "deliberately out of scope; see the doc comment on filter_needs_trigger_source"
+        );
+    }
 
     /// CR 700.2a / CR 700.2e: `modal_chooser_candidates` is the one authority
     /// both spell announcement and trigger construction read.

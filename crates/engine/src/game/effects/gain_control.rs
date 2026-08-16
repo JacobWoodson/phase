@@ -425,6 +425,7 @@ fn unique_recipient_from_filter(
                     filter,
                     p.id,
                     Some(source_controller),
+                    Some(ability.source_id),
                 )
         })
         .map(|p| p.id);

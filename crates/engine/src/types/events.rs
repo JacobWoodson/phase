@@ -510,6 +510,7 @@ impl EventObjectSnapshot {
             | TargetFilter::ScopedPlayer
             | TargetFilter::SpecificPlayer { .. }
             | TargetFilter::PlayerWhoChoseLabel { .. }
+            | TargetFilter::PlayerMatching { .. }
             | TargetFilter::Neighbor { .. }
             | TargetFilter::DefendingPlayer
             | TargetFilter::SourceChosenPlayer

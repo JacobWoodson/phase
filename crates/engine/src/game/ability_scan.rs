@@ -3112,6 +3112,11 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
         },
         TargetFilter::SourceChosenPlayer => Axes::NONE,
         TargetFilter::PlayerWhoChoseLabel { label: _ } => Axes::NONE,
+        // CR 102.1: the nested player predicate can itself read projected state
+        // (`ControlsCount` over a whole `TargetFilter`, `PlayerAttribute` over a
+        // `QuantityExpr`), so RECURSE rather than reporting `Axes::NONE` —
+        // mirroring the object-axis `FilterProp::ControllerMatches` arm.
+        TargetFilter::PlayerMatching { player } => scan_player_filter(player, mode),
         TargetFilter::OriginalController => Axes::NONE,
         TargetFilter::PostReplacementSourceController => Axes {
             event: true,
@@ -8038,5 +8043,51 @@ mod tests {
         assert!(axes.event);
         assert!(!axes.sibling);
         assert!(!axes.projected);
+    }
+
+    /// V13 — `TargetFilter::PlayerMatching` recursion is CLASSIFIED, not
+    /// blind-defaulted to `Axes::NONE`.
+    ///
+    /// CR 102.1: the nested `PlayerFilter` can read projected per-player state
+    /// (`PlayerAttribute` over a life total) and can box a whole `TargetFilter`
+    /// (`ControlsCount`). Reporting `Axes::NONE` for it would let trigger
+    /// ordering auto-resolve a group whose members really do read
+    /// order-relevant state.
+    ///
+    /// Revert-failing: replace the recursive arm with `Axes::NONE` and the
+    /// `projected` assertion below flips.
+    #[test]
+    fn player_matching_scan_recurses_into_the_nested_player_filter() {
+        let payload = PlayerFilter::PlayerAttribute {
+            relation: crate::types::ability::PlayerRelation::All,
+            attr: Box::new(QuantityRef::LifeTotal {
+                player: PlayerScope::ScopedPlayer,
+            }),
+            comparator: Comparator::GT,
+            value: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::Controller,
+                },
+            }),
+        };
+        let scanned = scan_target_filter(
+            &TargetFilter::PlayerMatching {
+                player: Box::new(payload.clone()),
+            },
+            FilterReadContext::SnapshotOrEvent,
+            ScanMode::Conservative,
+        );
+        let direct = scan_player_filter(&payload, ScanMode::Conservative);
+
+        // The carrier must report exactly what its payload reports, on every axis.
+        assert_eq!(scanned.event, direct.event);
+        assert_eq!(scanned.sibling, direct.sibling);
+        assert_eq!(scanned.projected, direct.projected);
+        // …and that report must be non-empty: a life-total predicate reads
+        // projected per-player state, so `Axes::NONE` would be a blind default.
+        assert!(
+            scanned.event || scanned.sibling || scanned.projected,
+            "PlayerMatching over a life-total predicate must not scan as NONE"
+        );
     }
 }

@@ -1966,6 +1966,7 @@ fn legal_aura_attachment_targets(
             enchant_filter,
             player.id,
             Some(controller),
+            Some(aura_id),
         ) {
             Some(TargetRef::Player(player.id))
         } else {

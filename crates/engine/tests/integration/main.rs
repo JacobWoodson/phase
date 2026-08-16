@@ -870,6 +870,7 @@ mod mycoloth_upkeep_trigger;
 mod myrkul_crew_phase1_incarnation;
 mod mystic_forge_regression;
 mod named_choice_free_entry_contract;
+mod namor_attacking_that_player;
 mod narci_fable_singer_final_chapter_drain;
 mod narset_jeskai_waymaster_draw_spells_cast;
 mod natural_balance;
