@@ -5484,4 +5484,125 @@ mod tests {
             "Cmc<=N must distribute to the earlier (Creature) leg, got {first:?}"
         );
     }
+
+    /// Assert the CR 208.3 binding on a filter produced by the REAL search
+    /// grammar: every leg is named, the P/T-bearing leg is identified by its
+    /// type filter, and every other leg must be P/T-free.
+    fn assert_pt_binds_to_creature_leg_only(filter: &TargetFilter, label: &str) {
+        let TargetFilter::Or { filters } = filter else {
+            panic!("{label}: expected an Or filter, got {filter:?}");
+        };
+        for leg in filters {
+            let TargetFilter::Typed(typed) = leg else {
+                panic!("{label}: expected every leg Typed, got {leg:?}");
+            };
+            let has_pt = typed
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::PtComparison { .. }));
+            let is_creature_leg = typed.type_filters.contains(&TypeFilter::Creature);
+            assert_eq!(
+                has_pt, is_creature_leg,
+                "{label}: CR 208.3 — only the creature leg may carry the power \
+                 restriction, got {typed:?}"
+            );
+        }
+        assert!(
+            filters.iter().any(|leg| matches!(
+                leg,
+                TargetFilter::Typed(typed) if typed.type_filters.contains(&TypeFilter::Creature)
+            )),
+            "{label}: reach-guard — a creature leg must exist, else the \
+             assertion above is vacuous: {filters:?}"
+        );
+    }
+
+    /// CR 208.1 + CR 208.3 + CR 701.23a: the search-filter disjunction grammar
+    /// inherits the type-conditional power/toughness gate with no code of its
+    /// own, because `parse_search_filter_disjunction` finishes every multi-
+    /// segment filter through the shared `distribute_properties_to_or`.
+    ///
+    /// Driven end to end from Oracle-shaped text through `parse_search_filter`
+    /// and `parse_search_library_details` — NOT by calling the shared
+    /// distributor on a hand-built filter, which would only re-test
+    /// `oracle_target`'s own unit rows and would leave this grammar's segment
+    /// splitting (`split_filter_disjunctions`) unexercised.
+    ///
+    /// Both control axes are present so the test cannot pass on a grammar that
+    /// simply stopped distributing:
+    /// * CR 202.3 (every object has a mana value): the `Cmc` shape must still
+    ///   reach every leg.
+    /// * CR 205.3d/205.3g: the `Vehicle` leg is a noncreature subtype leg, which
+    ///   the search grammar resolves to `[Artifact, Subtype("Vehicle")]`; it must
+    ///   be gated like the spelled-out artifact leg.
+    ///
+    /// The one search path that pushes props onto every `Or` branch WITHOUT the
+    /// gate — `apply_search_suffix_constraints` via
+    /// `apply_shared_leading_search_properties` — cannot carry a P/T prop:
+    /// its props come from `parse_search_leading_filter_property`, whose whole
+    /// output set is `HasSupertype`/`NotSupertype`/`HasColor`, and it is reached
+    /// only when `search_filter_all_land_subtype_branches` holds.
+    #[test]
+    fn search_disjunction_binds_pt_suffix_to_creature_leg_only() {
+        let mut ctx = ParseContext::default();
+        let filter = parse_search_filter(
+            "an artifact, enchantment, or creature card with power 4 or greater",
+            &mut ctx,
+        );
+        assert_pt_binds_to_creature_leg_only(&filter, "three-segment comma list");
+
+        // Same grammar reached through the full effect entry point, so the
+        // binding is proven where card text actually enters the parser.
+        let mut ctx = ParseContext::default();
+        let details = parse_search_library_details(
+            "search your library for an artifact, enchantment, or creature card with power 4 \
+             or greater, put it onto the battlefield, then shuffle",
+            &mut ctx,
+        );
+        assert_pt_binds_to_creature_leg_only(&details.filter, "parse_search_library_details");
+
+        // CR 205.3d + CR 205.3g: a leg named by an artifact subtype is gated too.
+        let mut ctx = ParseContext::default();
+        let filter = parse_search_filter(
+            "a creature or Vehicle card with power 4 or greater",
+            &mut ctx,
+        );
+        assert_pt_binds_to_creature_leg_only(&filter, "Vehicle subtype leg");
+        let TargetFilter::Or { filters } = &filter else {
+            panic!("expected an Or filter, got {filter:?}");
+        };
+        assert!(
+            filters.iter().any(|leg| matches!(
+                leg,
+                TargetFilter::Typed(typed)
+                    if typed.type_filters.contains(&TypeFilter::Subtype("Vehicle".to_string()))
+            )),
+            "reach-guard: the Vehicle leg must actually be present: {filters:?}"
+        );
+
+        // CR 202.3 positive control, same grammar and same text shape.
+        let mut ctx = ParseContext::default();
+        let filter = parse_search_filter(
+            "an artifact, enchantment, or creature card with mana value 3 or less",
+            &mut ctx,
+        );
+        let TargetFilter::Or { filters } = &filter else {
+            panic!("expected an Or filter, got {filter:?}");
+        };
+        for leg in filters {
+            let TargetFilter::Typed(typed) = leg else {
+                panic!("expected every leg Typed, got {leg:?}");
+            };
+            assert!(
+                typed.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Cmc {
+                        comparator: Comparator::LE,
+                        ..
+                    }
+                )),
+                "CR 202.3: mana value must distribute to EVERY leg, got {typed:?}"
+            );
+        }
+    }
 }
