@@ -796,6 +796,174 @@ fn rewrite_cost_paid_exiled_reflexive_for_effect_exile_parent(
     condition
 }
 
+/// True for exactly the filter shape the keyword anaphor's context-free lowering
+/// emits: a bare, controller-agnostic, type-agnostic typed filter carrying one
+/// kind-level keyword predicate. Both polarities are in scope on purpose —
+/// `conditions::keyword_presence_kind` lowers "it has <kw>" and "it doesn't have
+/// <kw>" to `HasKeywordKind` / `WithoutKeywordKind` respectively, and both need
+/// the same clause-context re-anchoring. Still narrow: it is the guard that
+/// keeps `rewrite_keyword_anaphor_for_cost_paid_parent` and
+/// `keyword_anaphor_referent_is_unpublished_resolution_pick` off every other
+/// `TargetMatchesFilter` (the "it's a [type]" arm, the anaphoric-status arm, and
+/// any object-level `WithKeyword` gate parsed elsewhere).
+fn filter_is_bare_keyword_kind_predicate(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller: None,
+            properties,
+        }) if type_filters.is_empty()
+            && matches!(
+                properties.as_slice(),
+                [FilterProp::HasKeywordKind { .. } | FilterProp::WithoutKeywordKind { .. }]
+            )
+    )
+}
+
+/// CR 608.2k + CR 608.2c + CR 702.62a: re-anchor a keyword-presence anaphor
+/// ("if it doesn't have suspend") to the COST-PAID object when the
+/// immediately-preceding non-continuation clause binds its own subject through
+/// the ability's cost (Jhoira of the Ghitu: "{2}, Exile a nonland card from your
+/// hand: Put four time counters on the exiled card. If it doesn't have suspend,
+/// it gains suspend.").
+///
+/// CR 608.2k names three sources for an untargeted back-reference — the effect's
+/// own earlier instruction, the ability's COST, and the trigger condition — and
+/// the engine reads each from a DIFFERENT runtime slot:
+///
+///   * effect instruction / declared target → `ResolvedAbility.targets`
+///     (`AbilityCondition::TargetMatchesFilter`)
+///   * ability cost                         → `ResolvedAbility.cost_paid_object`
+///     (`AbilityCondition::CostPaidObjectMatchesFilter`)
+///   * trigger condition                    → `GameState.current_trigger_event`
+///     (`TargetMatchesFilter`'s `TriggeringSource` fallback)
+///
+/// `TargetFilter::CostPaidObject` is resolved at effect-apply time out of the
+/// documented `cost_paid_object → effect_context_object` ladder
+/// (`game::targeting`, CR 608.2k) and is NEVER written into `targets`, so a
+/// cost-paid parent leaves `targets` EMPTY. For an ACTIVATED ability there is
+/// also no `current_trigger_event` (the stack lifts one only for a triggered
+/// ability), so the context-free `TargetMatchesFilter` reading would fail closed
+/// and the grant would never fire.
+///
+/// Only the clause context can disambiguate, exactly as
+/// `rewrite_cost_paid_exiled_reflexive_for_effect_exile_parent` above states for
+/// its own pair. Fire ONLY when the previous non-continuation clause's effect
+/// filter references the cost-paid object. Three of the four other parent shapes
+/// keep the context-free target-scoped reading, which binds correctly for each:
+/// injected target (Kang Prime), declared stack target (Suspend, Delay), and
+/// trigger source (Momentum Rumbler). The fourth — the resolution-time pick
+/// (The Eleventh Doctor, Amy's Home) — binds to NOTHING, and is strict-failed by
+/// `keyword_anaphor_referent_is_unpublished_resolution_pick` below rather than
+/// left to the misleading `TriggeringSource` fallback.
+///
+/// Both readings are LIVE for the keyword-kind props, and deliberately so.
+/// CR 608.2k keeps a cost-introduced reference pointing at its object "even if
+/// the object has changed characteristics" — it does NOT freeze the object's
+/// characteristics at payment time. CR 608.2h then supplies the timing: a
+/// reference to an object still in the public zone it was expected to be in
+/// reads that object's CURRENT information. `CostPaidObjectMatchesFilter` is
+/// evaluated through `filter::matches_target_filter_on_cost_paid_reference`,
+/// which preserves the payment snapshot's look-back facts while reading the
+/// keyword set off the live object, so an off-zone Layer-6 grant applied after
+/// payment (CR 613.1f) is visible to the gate.
+fn rewrite_keyword_anaphor_for_cost_paid_parent(
+    condition: Option<AbilityCondition>,
+    clauses: &[ClauseIr],
+) -> Option<AbilityCondition> {
+    let Some(AbilityCondition::TargetMatchesFilter {
+        filter,
+        use_lki: false,
+        subject_slot: None,
+    }) = &condition
+    else {
+        return condition;
+    };
+    if !filter_is_bare_keyword_kind_predicate(filter) {
+        return condition;
+    }
+    let prev_binds_cost_paid_object = clauses
+        .iter()
+        .rev()
+        .find(|clause| !matches!(clause.disposition, ClauseDisposition::Continue { .. }))
+        .and_then(|clause| clause.parsed.effect.target_filter())
+        .is_some_and(TargetFilter::references_cost_paid_object);
+    if prev_binds_cost_paid_object {
+        return Some(AbilityCondition::CostPaidObjectMatchesFilter {
+            filter: filter.clone(),
+        });
+    }
+    condition
+}
+
+/// CR 608.2k + CR 608.2d + CR 115.10a: True when the keyword-presence anaphor
+/// ("if it doesn't have suspend") has NO runtime slot to bind to, because the
+/// preceding clause introduces its subject through a RESOLUTION-TIME PICK
+/// (The Eleventh Doctor: "you may exile a card from your hand …"; Amy's Home).
+///
+/// CR 608.2d makes that pick an untargeted choice made while the ability
+/// resolves, so — unlike a declared target (CR 115.10a) — it is never written
+/// into `ResolvedAbility.targets`, which is what
+/// `AbilityCondition::TargetMatchesFilter` reads. The condition therefore finds
+/// no object target and silently falls through to its `TriggeringSource`
+/// fallback: for a combat-damage trigger that is the ability's own source, i.e.
+/// exactly the always-wrong-guard reading the kind-level lowering exists to
+/// remove. The grant's RECIPIENT still binds (`TargetFilter::ParentTarget` is
+/// resolved at effect-apply time), so the misread is invisible at runtime — a
+/// card that already has the keyword is re-granted and its printed parameters
+/// are clobbered, while coverage reports the card fully supported.
+///
+/// Rather than ship a knowingly-misbinding gate, strict-fail the clause to
+/// `Effect::Unimplemented` so `cargo coverage` reports the gap (the same
+/// discipline `try_parse_exiled_this_way_keyword_grant` applies to the plural
+/// "cards exiled this way that don't have <kw>" form). Repairing it means
+/// publishing the resolution-time pick into the sub-chain's `targets`; this
+/// predicate is where that fix removes the strict failure.
+///
+/// Deliberately narrow, in three independent ways:
+///   * the condition must be the bare keyword-kind anaphor shape
+///     (`filter_is_bare_keyword_kind_predicate`);
+///   * the parent must actually be resolution-timed
+///     (`lower::target_choice_timing_for_clause`);
+///   * the parent's own target filter must be a real player pick, not a
+///     context reference. Delay's "exile it with three time counters" is
+///     `TargetChoiceTiming::Resolution` too (off-battlefield origin, no printed
+///     "target"), but its filter is `TargetFilter::ParentTarget`, which the
+///     resolver binds deterministically from the countered spell — nothing is
+///     picked, and the anaphor binds through the propagated target. `Suspend`
+///     (declared stack target) and Kang Prime / Jhoira of the Ghitu (context
+///     refs) are excluded by the same test.
+fn keyword_anaphor_referent_is_unpublished_resolution_pick(
+    condition: Option<&AbilityCondition>,
+    clauses: &[ClauseIr],
+) -> bool {
+    let Some(AbilityCondition::TargetMatchesFilter {
+        filter,
+        use_lki: false,
+        subject_slot: None,
+    }) = condition
+    else {
+        return false;
+    };
+    if !filter_is_bare_keyword_kind_predicate(filter) {
+        return false;
+    }
+    clauses
+        .iter()
+        .rev()
+        .find(|clause| !matches!(clause.disposition, ClauseDisposition::Continue { .. }))
+        .is_some_and(|clause| {
+            lower::target_choice_timing_for_clause(clause)
+                == crate::types::ability::TargetChoiceTiming::Resolution
+                && clause
+                    .parsed
+                    .effect
+                    .target_filter()
+                    .is_some_and(|target| !target.is_context_ref())
+        })
+}
+
 fn merge_clause_conditions(
     outer: AbilityCondition,
     inner: Option<AbilityCondition>,
@@ -24774,15 +24942,35 @@ fn attach_mana_retention_to_prior_mana(defs: &mut [AbilityDefinition], expiry: M
     false
 }
 
-/// Swap every `Keyword` inside a `TargetFilter`'s `WithKeyword` properties to
+/// Swap every `Keyword` inside a `TargetFilter`'s keyword-presence properties to
 /// `new_keyword`. Recurses through `Or`/`And` filter trees so a compound
 /// affected filter is handled uniformly.
 fn rewrite_filter_keyword(filter: &mut TargetFilter, new_keyword: &Keyword) {
     match filter {
         TargetFilter::Typed(typed) => {
             for prop in &mut typed.properties {
-                if let FilterProp::WithKeyword { value } = prop {
-                    *value = new_keyword.clone();
+                match prop {
+                    FilterProp::WithKeyword { value } => {
+                        *value = new_keyword.clone();
+                    }
+                    // CR 702.1c: the kind-level siblings carry a `KeywordKind`, so
+                    // a replicated "the same is true for <kw list>" gate swaps to
+                    // the new keyword's kind. Added for the subject-scoped keyword
+                    // anaphor, whose two polarities lower to `WithoutKeywordKind`
+                    // and `HasKeywordKind` (`conditions::keyword_presence_kind`).
+                    //
+                    // `FilterProp::WithoutKeyword` is deliberately NOT handled
+                    // here: no card routes it through this walker today, and
+                    // adding it would change behavior for pre-existing conditions
+                    // reachable via the `ZoneChangeObjectMatchesFilter` arm in
+                    // `rewrite_ability_condition_keyword` — outside this change's
+                    // scope. `rewrite_filter_keyword_leaves_object_level_without_keyword_alone`
+                    // pins the omission so a future widening is a conscious act.
+                    FilterProp::HasKeywordKind { value }
+                    | FilterProp::WithoutKeywordKind { value } => {
+                        *value = new_keyword.kind();
+                    }
+                    _ => {}
                 }
             }
         }
@@ -25080,6 +25268,9 @@ fn attach_perpetual_keyword_grants(
 ///     your graveyard has <keyword>" (Kathril, Aspect Warper).
 ///   - `TargetHasKeywordInstead` / `SourceLacksKeyword` — "if that creature has
 ///     <keyword> and ~ doesn't" (Super-Adaptoid).
+///   - `TargetMatchesFilter` / `CostPaidObjectMatchesFilter` — the subject-scoped
+///     keyword anaphor, "if it doesn't have <keyword>" (Kang Prime, Jhoira of the
+///     Ghitu), whose keyword lives in a typed filter prop.
 ///   - `And`/`Or`/`Not` — recurse into each compound conjunct so the
 ///     Super-Adaptoid conjunction has BOTH the target-has and the source-lacks
 ///     keyword swapped together.
@@ -25098,6 +25289,18 @@ fn rewrite_ability_condition_keyword(condition: &mut AbilityCondition, new_keywo
         // typed filter (`FilterProp::WithKeyword`), swapped via the shared
         // `rewrite_filter_keyword` walker.
         AbilityCondition::ZoneChangeObjectMatchesFilter { filter, .. } => {
+            rewrite_filter_keyword(filter, new_keyword);
+        }
+        // CR 702.1c + CR 608.2c: the subject-scoped keyword anaphor gates ("if it
+        // doesn't have <kw>") carry their keyword inside a typed filter — the same
+        // shape the Mutable Pupa `ZoneChangeObjectMatchesFilter` arm above handles.
+        // Both subject seams the anaphor can lower to are covered, so a replicated
+        // "the same is true for <kw list>" continuation swaps the gate regardless
+        // of which seam clause context selected. Without these arms the class would
+        // fall into `_ => {}` — a silent regression from the `SourceLacksKeyword`
+        // handling above, which this change moves the class out of.
+        AbilityCondition::TargetMatchesFilter { filter, .. }
+        | AbilityCondition::CostPaidObjectMatchesFilter { filter } => {
             rewrite_filter_keyword(filter, new_keyword);
         }
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
@@ -25130,7 +25333,63 @@ fn parse_imperative_effect(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     parse_imperative_effect_inner(tp, ctx)
 }
 
+/// CR 610.3 + CR 610.3b: This duration marks a zone-change effect that returns
+/// its object immediately after an opponent becomes the monarch. The
+/// `Duration::UntilOpponentBecomesMonarch` link also prevents the initial move
+/// when that event occurred after the ability triggered but before it resolves.
+fn try_parse_exile_until_opponent_becomes_monarch_clause(
+    tp: TextPair<'_>,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let (_, (body_lower, suffix)) = (
+        take_until::<_, _, OracleError<'_>>(" until "),
+        preceded(tag(" until "), rest),
+    )
+        .parse(tp.lower)
+        .ok()?;
+    let body = tp.slice(0, body_lower.len()).trim_end();
+    let ast = parse_imperative_family_ast(body.original, body.lower, ctx)?;
+    let mut clause = lower_imperative_family_ast(ast);
+    if !matches!(
+        clause.effect,
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            ..
+        }
+    ) {
+        return None;
+    }
+
+    let supported_suffix = all_consuming(tag::<_, _, OracleError<'_>>(
+        "an opponent becomes the monarch",
+    ))
+    .parse(suffix)
+    .is_ok();
+    let monarch_suffix = all_consuming(terminated(
+        take_until::<_, _, OracleError<'_>>(" becomes the monarch"),
+        tag(" becomes the monarch"),
+    ))
+    .parse(suffix)
+    .is_ok();
+    if !supported_suffix {
+        if monarch_suffix {
+            return Some(parsed_clause(Effect::unimplemented(
+                "unsupported_monarch_bounded_exile",
+                tp.original,
+            )));
+        }
+        return None;
+    }
+
+    clause.duration = Some(Duration::UntilOpponentBecomesMonarch);
+    Some(clause)
+}
+
 fn parse_imperative_effect_inner(tp: TextPair, ctx: &mut ParseContext) -> ParsedEffectClause {
+    if let Some(clause) = try_parse_exile_until_opponent_becomes_monarch_clause(tp, ctx) {
+        return clause;
+    }
+
     if let Some(ast) = parse_imperative_family_ast(tp.original, tp.lower, ctx) {
         return lower_imperative_family_ast(ast);
     }
@@ -31855,6 +32114,31 @@ pub(crate) fn parse_effect_chain_ir(
             condition,
             builder.clauses(),
         );
+        // CR 608.2k: "if it doesn't have <kw>" after a cost-paid parent reads the
+        // cost-paid object, not the (empty) target slot — see the helper for the
+        // three-slot rationale (Jhoira of the Ghitu). Input shapes are disjoint
+        // from the two rewrites above, so the order within this family is only a
+        // reading convention.
+        let condition = rewrite_keyword_anaphor_for_cost_paid_parent(condition, builder.clauses());
+        // CR 608.2k + CR 608.2d: the same anaphor after a RESOLUTION-TIME PICK
+        // parent has no slot to bind to at all — the pick never reaches
+        // `targets`, so the gate would silently read the trigger source. Runs
+        // after the cost-paid rewrite so a re-anchored (cost-paid) condition is
+        // already out of this shape. Strict-fail to `Unimplemented` instead of
+        // shipping a misbinding gate, so coverage reports the gap (The Eleventh
+        // Doctor, Amy's Home) — see the predicate for the full rationale.
+        if keyword_anaphor_referent_is_unpublished_resolution_pick(
+            condition.as_ref(),
+            builder.clauses(),
+        ) {
+            unimplemented_clause(
+                &mut builder,
+                "keyword_anaphor_resolution_time_pick",
+                normalized_text,
+                chunk.boundary_after,
+            );
+            continue;
+        }
         // CR 608.2c: "[effect] a number of times equal to the difference" — when
         // a leading comparison condition was just stripped, a trailing
         // difference-repeat suffix repeats the effect by the unsigned magnitude

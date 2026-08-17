@@ -11,12 +11,12 @@ use crate::game::speed::has_max_speed;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CardPlayMode, CardTypeSetSource,
     ChosenAttribute, CommanderOwnership, ControllerRef, CopyRetargetPermission,
-    CostPaidObjectSnapshot, EachDamageRecipient, Effect, EffectError, EffectKind,
-    EffectOutcomeSignal, EffectResolutionResult, EffectScope, FilterProp, ManaProduction,
-    OpponentMayScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation,
-    ResolvedAbility, RevealUntilDisposition, SacrificeCost, SacrificeRequirement, SharedQuality,
-    SharedQualityRelation, SiblingCondition, SubAbilityLink, TapStateChange, TargetChoiceTiming,
-    TargetFilter, TargetRef, ThisWayCause,
+    CostPaidObjectSnapshot, DetachedRemainder, EachDamageRecipient, Effect, EffectError,
+    EffectKind, EffectOutcomeSignal, EffectResolutionResult, EffectScope, FilterProp,
+    ManaProduction, OpponentMayScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
+    RepeatContinuation, ResolvedAbility, RevealUntilDisposition, SacrificeCost,
+    SacrificeRequirement, SharedQuality, SharedQualityRelation, SiblingCondition, SubAbilityLink,
+    TapStateChange, TargetChoiceTiming, TargetFilter, TargetRef, ThisWayCause,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -889,6 +889,84 @@ fn clear_post_replacement_token_choice_seed_if_resolution_drained(state: &mut Ga
     }
 }
 
+/// CR 603.3 + CR 603.3b + CR 608.2c: retire every ownerless `Dispatching`
+/// post-replacement resident on the active frame.
+///
+/// `Dispatching` means "taken and running". The sole production dispatcher —
+/// `engine_replacement::apply_pending_post_replacement_effect` — is synchronous,
+/// and `engine_replacement::post_replacement_dispatch_is_live` reports whether
+/// any such dispatch is on this thread's call stack. When that predicate is
+/// false, a `Dispatching` entry has no owner AT ALL: `begin_dispatch` refuses
+/// it, `finish_paused_dispatch` pops only `Paused`, and `finish_dispatch` needs
+/// a handle that died with its call frame. Left behind it keeps
+/// `resolution_stack` non-empty forever, which makes
+/// `triggers::resolution_completion_can_settle` false forever: deferred
+/// triggered abilities can then never be put on the stack the next time a
+/// player would receive priority (CR 603.3 + CR 603.3b) and the resolving
+/// carrier can never settle (CR 608.2c).
+///
+/// The predicate is sound only because the dispatcher's cleanup leaves every
+/// returned dispatch either `Paused` (parked awaiting a player answer, CR
+/// 614.12a) or removed. A parked continuation therefore never presents as
+/// `Dispatching`, which is what the `h1_devour_...` row witnesses at an action
+/// boundary.
+///
+/// TWO CALL SITES, answering two different questions — this is deliberate, and
+/// neither is redundant:
+///   * `resume_resolution_frames` (below), at a priority boundary, for a strand
+///     THIS action just created. CR 603.3 requires the abilities it blocks to
+///     reach the stack the next time a player would receive priority in this
+///     same action, not one action later.
+///   * `engine::apply_action_boundary_core`, at the ENTRY of the outer action
+///     boundary, for a strand the engine FOUND rather than made — above all one
+///     that arrived through `PersistedGameState::into_game_state()`, which no
+///     in-action seam can observe because no engine write produced it.
+///
+/// Because the ownerless predicate is call-stack state rather than game state,
+/// it is equally valid at both, at any frame depth and any drain depth.
+///
+/// The loop handles a multi-entry strand (both drains in the turn-20 capture);
+/// it stops at the first `Ready` or `Paused` resident, which is live parked work.
+///
+/// RECOVERY LIMIT, stated rather than overclaimed: this reaches only the frame
+/// the two-deep positional accessor can see. A wedge whose `PostReplacement`
+/// frame is buried under a child frame that itself never drains is NOT
+/// recovered here; only identity-addressed dispatch prevents that shape.
+///
+/// This emits no `GameEvent`: removing an impossible state is not a game event.
+pub(crate) fn sweep_ownerless_post_replacement_strand(state: &mut GameState) {
+    if crate::game::engine_replacement::post_replacement_dispatch_is_live() {
+        // A live dispatch legitimately suppresses the sweep. In healthy play
+        // this branch is unreachable: this policy is entered only from
+        // `resume_resolution_frames` at a priority boundary and from
+        // `engine::apply_action_boundary_core` at an outer action boundary,
+        // never from inside a dispatch. It fires on every boundary forever if
+        // the guard flag has leaked, which is the WASM `panic='abort'` residual
+        // documented on `POST_REPLACEMENT_DISPATCH_LIVE` — this warn is what
+        // makes that observable instead of silent. It is visible only in the
+        // server-hosted native build; `engine-wasm` installs no `tracing`
+        // subscriber, and this does NOT close that gap.
+        if state
+            .active_post_replacement_drains()
+            .and_then(crate::types::game_state::PostReplacementDrainStack::resident)
+            .is_some_and(|drain| {
+                matches!(
+                    drain.status,
+                    crate::types::game_state::DrainStatus::Dispatching
+                )
+            })
+        {
+            tracing::warn!("post-replacement sweep suppressed by a live dispatch");
+        }
+    } else if let Some(drains) = state.active_post_replacement_drains_mut() {
+        while drains.finish_ownerless_dispatching_resident().is_some() {
+            tracing::warn!(
+                "retired an ownerless Dispatching post-replacement drain at a rest boundary"
+            );
+        }
+    }
+}
+
 /// Resume the active typed resolution frame through its runtime stack authority.
 ///
 /// The dispatcher reads only the stack top. The one shipped coupled shape is
@@ -910,6 +988,12 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
             drain_pending_continuation(state, events)
         }
         ResolutionFrame::Discard(_) => {}
+        // CR 702.99a: a Cipher encode offer parked under the spell's own prompt
+        // arms here — i.e. only once that prompt's owner is consumed, which is
+        // what puts the encode after the spell's other effects (issue #7470).
+        ResolutionFrame::CipherEncode(_) => {
+            crate::game::cipher::arm_parked_encode_offer(state, events);
+        }
         ResolutionFrame::RepeatFor(_) => drain_active_repeat_for(state, events),
         ResolutionFrame::RepeatUntil(_) => drain_active_repeat_until(state),
         ResolutionFrame::RepeatedOptionalPayment(_) => {
@@ -1009,6 +1093,7 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
                 let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
                     state, None, None, None, events,
                 );
+                sweep_ownerless_post_replacement_strand(state);
                 if state
                     .active_post_replacement_drains()
                     .is_some_and(crate::types::game_state::PostReplacementDrainStack::is_empty)
@@ -3330,6 +3415,7 @@ fn quantity_ref_counts_population_matching(
         | QuantityRef::TrackedSetAggregate { .. }
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::PreviousEffectCount
         | QuantityRef::LifeLostThisTurn { .. }
         | QuantityRef::PartySize { .. }
         | QuantityRef::UnspentMana { .. }
@@ -4325,7 +4411,19 @@ fn split_player_scope_chain(
     let mut scoped = ability.clone();
     scoped.player_scope = None;
     let tail = detach_after_player_scope_local_chain(&mut scoped, scope, false);
+    scoped.detached_remainder = detached_remainder_verdict(tail.as_deref());
     (scoped, tail)
+}
+
+/// CR 608.2c: classify a detached chain remainder for the publish gate. The walk
+/// is the same one leg 2 uses, applied to the detached node itself.
+fn detached_remainder_verdict(tail: Option<&ResolvedAbility>) -> DetachedRemainder {
+    match tail {
+        Some(node) if node_or_later_is_publisher_position(node) => {
+            DetachedRemainder::HoldsPublisher
+        }
+        _ => DetachedRemainder::NoProducer,
+    }
 }
 
 /// CR 608.2c: A multi-target player subject owns only its same-sentence
@@ -4338,6 +4436,9 @@ fn split_multi_target_player_chain(
 ) -> (ResolvedAbility, Option<Box<ResolvedAbility>>) {
     let mut per_target = ability.clone();
     let tail = detach_after_multi_target_player_local_chain(&mut per_target);
+    // Same hazard, same primitive: the per-target template loses sight of a
+    // producer left in the detached remainder.
+    per_target.detached_remainder = detached_remainder_verdict(tail.as_deref());
     (per_target, tail)
 }
 
@@ -5250,11 +5351,43 @@ pub fn is_known_effect(effect: &Effect) -> bool {
 /// what makes compound exile (Suspend Aggression's
 /// "Exile target nonland permanent and the top card of your library ...
 /// for each of those cards") expose both exiled objects to the grant.
+///
+/// The walk STOPS at a mode boundary — see [`crosses_modal_boundary`].
 pub(crate) fn next_sub_needs_tracked_set(ability: &ResolvedAbility) -> bool {
-    ability
-        .sub_ability
-        .as_deref()
-        .is_some_and(ability_or_branch_references_tracked_set)
+    branch_references_tracked_set(ability.sub_ability.as_deref())
+}
+
+/// CR 700.2 + CR 608.2c: does ENTERING `node` cross into a different modal
+/// instruction?
+///
+/// CR 700.2 makes each bulleted option a mode, and `build_chained_resolved`
+/// linearizes the selected modes into one `sub_ability` chain — so "is the next
+/// node part of my instruction or the start of the next one?" is not answerable
+/// from the chain's shape. It is answerable from `modal_instruction_ordinal`,
+/// which is stamped on exactly the mode roots.
+///
+/// CR 608.2c ("apply the rules of English") is why this matters: a walk asking
+/// "does anything after me consume the set I would publish?" is looking for an
+/// ANTECEDENT relationship, and a later mode's "those cards" never names an
+/// earlier mode's population. A node's OWN consumption is never a crossing —
+/// only entering a child, or being handed a parked continuation, is.
+///
+/// Deliberately NOT keyed on `sub_link`: a `SequentialSibling` marks a sentence
+/// boundary, which is a different thing from a mode boundary (measured — Random
+/// Encounter's sentence boundary parses to `ContinuationStep`, while Epic
+/// Experiment's non-modal chain puts a live tracked-set consumer two
+/// `SequentialSibling` hops below its producer). See the `SubAbilityLink` doc:
+/// "Do not add a consumer that infers a sentence boundary from this field."
+fn crosses_modal_boundary(node: &ResolvedAbility) -> bool {
+    node.modal_instruction_ordinal.is_some()
+}
+
+/// [`ability_or_branch_references_tracked_set`] applied to a branch that the
+/// caller is about to ENTER, with the mode-boundary stop of
+/// [`crosses_modal_boundary`]. Every descent in this family goes through here,
+/// so the stop cannot be applied at some entry points and forgotten at others.
+fn branch_references_tracked_set(node: Option<&ResolvedAbility>) -> bool {
+    node.is_some_and(|n| !crosses_modal_boundary(n) && ability_or_branch_references_tracked_set(n))
 }
 
 /// CR 608.2c: Does `ability` (or any of its continuation branches) consume the
@@ -5264,8 +5397,139 @@ pub(crate) fn next_sub_needs_tracked_set(ability: &ResolvedAbility) -> bool {
 /// whether the chosen cards must be published as the fresh tracked set the
 /// continuation reads (End-Blaze Epiphany: "choose a card exiled this way …
 /// you may play that card").
+///
+/// CR 700.2: the mode-boundary stop applies to THE ARGUMENT ITSELF here, unlike
+/// [`next_sub_needs_tracked_set`] where the caller IS the node. Both live
+/// callers hold the producer and pass the PARKED CONTINUATION, so for them
+/// entering the argument is already a crossing: an interactive choose made in
+/// mode N must not publish for mode N+1's anaphor. Within-mode continuations
+/// carry no ordinal and are unaffected — that is every corpus row these two
+/// sites serve today.
 pub(crate) fn chain_references_tracked_set(ability: &ResolvedAbility) -> bool {
-    ability_or_branch_references_tracked_set(ability)
+    branch_references_tracked_set(Some(ability))
+}
+
+/// CR 608.2c + CR 611.2c: An event-less producer publishes the population its
+/// continuous effect froze ONLY when it is the resolution chain's sole
+/// EFFECTIVE producer.
+///
+/// [`publish_tracked_set`] unifies every publisher in a chain into one set,
+/// which is right for same-verb compounds (Suspend Aggression's two exiles) and
+/// wrong for a mixed chain: in "Creatures you control get +2/+0 … exile the top
+/// card of your library. … you may play that card" (Outlaws' Fury) the anaphor
+/// names ONLY the exile. CR 608.2c's "apply the rules of English" is
+/// nearest-antecedent binding: a head that is followed by another producer in
+/// the same chain is not the antecedent.
+///
+/// Two conditions, both cheap and exact:
+///  * no EARLIER producer contributed — an ancestor that published an EMPTY set
+///    (an `Unimplemented` root) is not a producer, so test contents, not the id;
+///  * no LATER node in this chain is itself in publisher position — the same
+///    `next_sub_needs_tracked_set` predicate the publish site is gated on.
+///
+/// CR 700.2 + CR 608.2c: leg 2 stops at a mode boundary
+/// ([`crosses_modal_boundary`]). A later MODE's producer is a different
+/// instruction, not a competing antecedent for this one, so it must not veto
+/// this mode's publish. Leg 1 is the mode's own responsibility and is made true
+/// at every mode root by the boundary reset in `resolve_ability_chain`.
+///
+/// When the guard declines, the arm falls through to the `_ =>` `ZoneChanged`
+/// harvest, which yields `[]` for every head in this class (they emit no
+/// `ZoneChanged`) — i.e. byte-identical to the pre-#6857 engine.
+///
+/// CLOSED by leg 3 (was a documented gap): under a `player_scope` fan-out the
+/// publish site hands `affected_objects_with_causes` the `scoped_template`,
+/// whose tail `split_player_scope_chain` has already DETACHED, while the
+/// surrounding gate reads the full `ability`. Leg 2 alone therefore cannot see a
+/// later producer living in the detached tail, and would let the head publish
+/// where the undetached chain declines. It was measured unreachable when first
+/// written (0 of the 627 event-less heads in the corpus carried a
+/// `player_scope`), but "unreachable today" is not a fix: the splitter now
+/// records the remainder's publisher-position verdict on the template
+/// (`DetachedRemainder`), and leg 3 reads it, so the gate judges the PRE-SPLIT
+/// chain without the per-iteration resolution losing its scoped template.
+/// The mode-boundary stop is neither wider nor narrower than that gap: it is the
+/// same walk over the same pre-split ability. On the fan-out path itself the stop
+/// is REDUNDANT rather than load-bearing — `split_player_scope_chain` has already
+/// detached the tail that would hold the next mode's root — so it can only narrow
+/// the gate/leg-2 disagreement above, never widen it. (A mode root CAN be the
+/// fan-out head: `build_resolved_from_def` copies `player_scope` onto every mode
+/// root, pinned by `build_resolved_from_def_preserves_player_scope`, and 17
+/// corpus cards carry a mode-level `player_scope` — Rankle's Prank on all three
+/// modes.)
+fn is_sole_chain_producer(state: &GameState, ability: &ResolvedAbility) -> bool {
+    let no_earlier_producer = state.chain_tracked_set_id.is_none_or(|id| {
+        state
+            .tracked_object_sets
+            .get(&id)
+            .is_none_or(|set| set.is_empty())
+    });
+    // CR 608.2c: leg 3 — a producer that survives in a remainder DETACHED by a
+    // chain split still competes for the anaphor, and the template handed to the
+    // per-iteration resolution cannot see it. The splitter records that verdict
+    // structurally; without this leg the head publishes where the undetached
+    // chain declines. Closes the fan-out gap the leg-2 doc describes.
+    no_earlier_producer
+        && !later_node_is_publisher_position(ability)
+        && ability.detached_remainder == DetachedRemainder::NoProducer
+}
+
+/// Any strictly-later node of this chain that the publish site would itself
+/// gate on. Walks `sub_ability` AND `else_ability` (conservative: only one
+/// branch executes, so counting both can only DECLINE a publish, never cause a
+/// wrong one).
+///
+/// CHAIN-WIDE, NOT NEAREST-ANTECEDENT — and that is the sharp edge. Any later
+/// publisher position anywhere below this node declines the head, including the
+/// shape `head -> consumer{TrackedSet} -> consumer2{TrackedSet}`, where BOTH
+/// consumers wanted this head's population and both get nothing. No corpus row
+/// hits it today, but the loaded gun is named: **Motivated Pony**'s third node
+/// is `Unimplemented { name: "they" }` ("and they get an additional +2/+2").
+/// The day that clause parses into any tracked-set consumer, this leg declines
+/// the head, the untap regresses, and
+/// `motivated_pony_untaps_only_the_attacking_creatures_it_pumped` goes red. The
+/// fix at that point is to scope the leg to the nearest antecedent (CR 608.2c's
+/// actual rule) rather than to relax the test.
+///
+/// CR 700.2: chain-wide, but NOT past a mode boundary. Without that stop, two
+/// publishing modes A → B make leg 2 walk past A's own consumer into B's root,
+/// find B's consumer, and DECLINE A's publish — so A's within-mode consumer
+/// binds nothing. The stop is applied inside `walk`, which covers the seed and
+/// both recursions uniformly.
+fn later_node_is_publisher_position(ability: &ResolvedAbility) -> bool {
+    ability
+        .sub_ability
+        .as_deref()
+        .is_some_and(node_or_later_is_publisher_position)
+}
+
+/// CR 603.7 + CR 700.2: is THIS node, or any strictly-later node of its chain,
+/// in publisher position? Stops at a mode boundary, exactly like its caller.
+///
+/// Split out of [`later_node_is_publisher_position`] so that a chain remainder a
+/// splitter DETACHED can be judged by the same predicate: there the detached
+/// node ITSELF is a candidate, not merely its descendants.
+fn node_or_later_is_publisher_position(node: &ResolvedAbility) -> bool {
+    if crosses_modal_boundary(node) {
+        return false;
+    }
+    // CR 603.7: production's own predicate, unmodified — a node whose
+    // consumer merely DEFERS (a `CreateDelayedTrigger
+    // { uses_tracked_set: true }`, which acts at a later time) still
+    // counts as a publisher position here. Excluding deferring consumers
+    // from this leg would let a head publish across a `CopyTokenOf` +
+    // delayed-exile chain (Twinflame, Myra the Magnificent), putting the
+    // ORIGINAL creature into the set the delayed "exile those tokens"
+    // then binds — measured, not predicted.
+    next_sub_needs_tracked_set(node)
+        || node
+            .sub_ability
+            .as_deref()
+            .is_some_and(node_or_later_is_publisher_position)
+        || node
+            .else_ability
+            .as_deref()
+            .is_some_and(node_or_later_is_publisher_position)
 }
 
 fn ability_or_branch_references_tracked_set(ability: &ResolvedAbility) -> bool {
@@ -5287,15 +5551,26 @@ fn ability_or_branch_references_tracked_set(ability: &ResolvedAbility) -> bool {
             .as_ref()
             .is_some_and(quantity_expr_references_tracked_set);
 
+    // CR 700.2 + CR 608.2c: both descents stop at a mode boundary. Guarding only
+    // the entry hop in `next_sub_needs_tracked_set` is INSUFFICIENT whenever a
+    // mode has more than one node: `append_to_sub_chain` hangs the next mode's
+    // root off the TAIL of the current mode's own sub-chain, so the entry hop
+    // lands on a within-mode node (no ordinal, so it passes) and an unguarded
+    // recursion then descends into the next mode's root and finds ITS consumer.
+    //
+    // NO CORPUS CARRIER — disclosed, and the discriminating row
+    // (`modal_two_node_mode_does_not_publish_for_a_later_modes_anaphor`) is
+    // SYNTHESIZED from two shapes this engine already parses separately. A scan
+    // of `data/card-data.json` funnels 179 modal cards with >= 2 selectable modes
+    // -> 69 with a multi-node mode -> 10 with a tracked-set-consuming mode -> 0
+    // with a multi-node mode ORDERED BEFORE a consuming one, because
+    // `ordered_selected_mode_indices` sorts and every multi-node mode found sits
+    // at the highest index of its card. That corpus is a generated artifact and
+    // its consumer side may be undercounted relative to this branch's parser;
+    // regenerate `card-data.json` to close it.
     consumes
-        || ability
-            .sub_ability
-            .as_deref()
-            .is_some_and(ability_or_branch_references_tracked_set)
-        || ability
-            .else_ability
-            .as_deref()
-            .is_some_and(ability_or_branch_references_tracked_set)
+        || branch_references_tracked_set(ability.sub_ability.as_deref())
+        || branch_references_tracked_set(ability.else_ability.as_deref())
 }
 
 /// Returns true if the effect references the most recent tracked set through
@@ -5765,28 +6040,25 @@ fn affected_objects_from_events(
         // (oracle_effect/mod.rs), which still gates only the MustAttack/
         // MustAttackDefender coercion pair for its own (unrelated)
         // ParentTarget-rewrite purpose.
+        // CR 608.2c: gated on `is_sole_chain_producer` exactly as the three
+        // event-less sibling arms below (`PumpAll` / `GoadAll` / `GiveControl`)
+        // are. This head is the same class the gate's doc describes — it moves
+        // nothing and emits no object-affecting event — so a mixed chain whose
+        // LATER node is the real antecedent must not have its anaphor bound by
+        // this broadcast coercion/grant. When the gate declines, the arm falls
+        // through to the `_ =>` `ZoneChanged` harvest, which is `[]` for this
+        // head (it emits none), leaving the later producer to publish.
         Effect::GenericEffect {
             static_abilities,
             target,
             ..
-        } => {
-            // Select the first static whose population is meant to be frozen
-            // at resolution rather than re-evaluated live at each future
-            // check — a coercion requirement or a Continuous grant.
-            let Some(static_def) = static_abilities.iter().find(|sd| {
-                matches!(
-                    sd.mode,
-                    crate::types::statics::StaticMode::MustAttack
-                        | crate::types::statics::StaticMode::MustAttackDefender { .. }
-                        | crate::types::statics::StaticMode::Continuous
-                )
-            }) else {
-                return Vec::new();
-            };
-            let Some(governing) = effect::generic_effect_application_filter(
-                target.as_ref(),
-                static_def.affected.as_ref(),
-            ) else {
+        } if is_sole_chain_producer(state, ability) => {
+            // Which static names the frozen population is decided by ONE
+            // authority shared with the parser's routing predicate, so lowering
+            // cannot mark a head a publisher that this arm then declines.
+            let Some(governing) =
+                effect::generic_effect_population_filter(target.as_ref(), static_abilities)
+            else {
                 return Vec::new();
             };
             // CR 608.2c: an inherited-reference affected filter (ParentTarget /
@@ -5806,6 +6078,52 @@ fn affected_objects_from_events(
                 .filter(|obj_id| filter::matches_target_filter(state, **obj_id, &filter, &ctx))
                 .copied()
                 .collect()
+        }
+        // CR 611.2c (issue #6857): the set of objects a resolution-generated
+        // continuous effect modifies is determined when that effect BEGINS and
+        // never changes afterwards, so the population these heads froze is the
+        // antecedent a following "those creatures" names (CR 608.2c). Unlike
+        // every other producer here they move nothing and emit no per-object
+        // event, so without their own arm the `_ =>` `ZoneChanged` harvest
+        // publishes an EMPTY set — the WRONG set, not merely an unhelpful one —
+        // and "Untap those creatures" (CR 701.26b) binds nothing.
+        //
+        // The published population is the PRODUCING RESOLVER'S OWN enumeration,
+        // never a re-enumeration of the head filter and never the emitted
+        // events. A re-enumeration is a second authority that can disagree with
+        // the first (a mass pump whose head filter is `Any` would name the whole
+        // battlefield), and the event stream is incomplete by construction (a
+        // `GiveControl` target the recipient already controls emits no
+        // `ControllerChanged`).
+        //
+        // IMPLEMENTATION NOTE — why reading the post-resolution board here is
+        // still the resolution-time population, and why no CR is cited for it:
+        // CR 613.1 says continuous effects apply in layers CONTINUOUSLY, which
+        // would predict that a filter reading CURRENT power sees the pumped
+        // values. It does not, for a purely mechanical reason —
+        // `GameState::add_transient_continuous_effect` only INSTALLS the effect
+        // and marks the layer cache dirty; `layers::flush_layers` materialises,
+        // and nothing flushes between this node's resolve and this publish. The
+        // same holds for a controller change (`ContinuousModification::
+        // ChangeController` goes through the identical install path), so this is
+        // uniform rather than a P/T special case.
+        //
+        // CR 704.4 + CR 704.3 cover the SEPARATE point that no state-based
+        // action and no priority intervene between the resolver and this
+        // publish.
+        Effect::PumpAll { target, .. } if is_sole_chain_producer(state, ability) => {
+            pump::pump_all_affected_objects(state, ability, target)
+        }
+        // CR 701.15a: the creatures actually goaded.
+        Effect::GoadAll { .. } if is_sole_chain_producer(state, ability) => {
+            goad::goad_targets(state, ability)
+        }
+        // CR 611.2c covers a controller change in the same sentence it covers a
+        // characteristic change, so `GiveControl` publishes on the identical
+        // rule — Domineering Will's "up to three target nonattacking creatures
+        // … Untap those creatures" (CR 608.2c) names the declared targets.
+        Effect::GiveControl { target, .. } if is_sole_chain_producer(state, ability) => {
+            gain_control::give_control_object_targets(state, ability, target)
         }
         Effect::GainControl { .. } => fallback_targets
             .iter()
@@ -6180,6 +6498,32 @@ fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameEvent]) -> b
     }
 }
 
+/// THE ORDERING ARGUMENT for the global-max sentinel readers.
+///
+/// Eight consumers bind `TrackedSetId(0)` with a raw
+/// `state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0)` instead of the
+/// documented id authority `targeting::resolve_tracked_set_id`, and they are
+/// DELIBERATELY not unified — their empty-set semantics are individually
+/// load-bearing and two are pinned by name in their own doc comments. What makes
+/// "the highest tracked-set id" the right answer under CR 608.2c is ordering,
+/// not selection:
+///
+/// > [`publish_tracked_set`]'s else-branch allocates
+/// > `TrackedSetId(next_tracked_set_id)` and increments; `next_tracked_set_id` is
+/// > monotone (seeded at 1, never decremented). `resolve_ability_chain` sets
+/// > `chain_tracked_set_id = None` at every CR 700.2 mode boundary, so the first
+/// > publish inside each mode takes that else-branch and allocates a STRICTLY
+/// > GREATER id than any preceding mode's set. "The highest tracked-set id" is
+/// > therefore "the set the currently-resolving instruction published" — exactly
+/// > CR 608.2c's nearest antecedent.
+///
+/// The eight readers cross-reference this paragraph rather than restating it.
+/// NOTE the polarity difference that keeps them un-unified: the authority skips
+/// EMPTY sets (`latest_tracked_set_id`), while these readers do not. Under mode
+/// scoping, not skipping is the CORRECT behaviour — a mode whose producer
+/// affected nothing publishes a fresh EMPTY set at the highest id, and its own
+/// consumer must bind that empty set rather than fall back to a preceding mode's
+/// non-empty one.
 pub(crate) fn publish_tracked_set(state: &mut GameState, affected_ids: Vec<ObjectId>) {
     // CR 603.7 + CR 608.2c: Chain unification. If an ancestor in this
     // resolution chain already published a tracked set, extend that set with
@@ -9067,10 +9411,52 @@ pub fn resolve_ability_chain(
         // coalesce into a single tracked set, while unrelated resolutions
         // stay isolated.
         state.chain_tracked_set_id = None;
+        // CR 700.2: the edge latch for the mode boundary below. It is cleared
+        // HERE, in the same line group as `chain_tracked_set_id`, and that
+        // ADJACENCY IS LOAD-BEARING: the latch means "the chain set has already
+        // been cleared for this mode", so a prelude that cleared one without the
+        // other would either suppress the first mode's reset (stale `Some(0)`
+        // from a previous resolution) or fire it against a set the previous
+        // resolution owned. Keep them together.
+        state.resolving_modal_instruction = None;
         // CR 608.2c + CR 109.5: Player-action accumulator resets per
         // top-level chain so "each opponent who searched this way" only sees
         // players who acted in the current resolution.
         state.player_actions_this_way.clear();
+    }
+
+    // CR 700.2 ("each of those options is a mode") + CR 608.2c (instructions in
+    // the order written; apply the rules of English): a preceding mode's
+    // published population is not this mode's antecedent, so a mode root starts
+    // with no inherited chain tracked set. This is the FOURTH narrowing of
+    // `chain_tracked_set_id`, and its closest analogue is the
+    // `RepeatContinuation::WhileCondition` arm below — "each repeated process is
+    // a FRESH execution of the instructions, so its 'that card'/'those cards'
+    // tracked set must not extend the prior iteration's". Substitute "mode" for
+    // "iteration" and that is this reset.
+    //
+    // EDGE-triggered on the ORDINAL, never on `sub_link`: a sentence boundary
+    // and a mode boundary are different things (see the `SubAbilityLink` doc:
+    // "Do not add a consumer that infers a sentence boundary from this field").
+    // MEASURED, not derived: keying this reset on
+    // `sub_link == SubAbilityLink::SequentialSibling` instead reddens 8
+    // integration rows of 5131 — Random Encounter, Suicidal Charge, Taunt from
+    // the Rampart, both Witness rows, Emperor of Bones (#1515), Sanar Vivid
+    // (#4253) and Winding Way (#2931). Which rows those are was predicted wrong
+    // twice before the probe was run; re-run it rather than re-deriving it.
+    //
+    // The edge is what keeps a `player_scope` fan-out — which re-enters this
+    // function once per player with a clone that RETAINS the ordinal — from
+    // resetting once per player and fragmenting the mode's population.
+    //
+    // Deliberately NOT mirrored into `resolve_chain_body`, the second entry
+    // point (`drive_repeat_for_outermost` calls it directly): a `repeat_for`
+    // iteration of ONE mode must not re-fire its own mode boundary.
+    if ability.modal_instruction_ordinal.is_some()
+        && ability.modal_instruction_ordinal != state.resolving_modal_instruction
+    {
+        state.resolving_modal_instruction = ability.modal_instruction_ordinal;
+        state.chain_tracked_set_id = None;
     }
 
     // BeginGame abilities are handled by mulligan setup, not normal stack resolution.
@@ -13175,9 +13561,14 @@ pub(crate) fn evaluate_condition(
                 .iter()
                 .any(|&id| crate::game::filter::matches_target_filter(state, id, filter, &ctx))
         }
+        // CR 608.2k + CR 608.2h: the cost-paid object is a persistent untargeted
+        // reference, so it reads CURRENT information while it is still in a
+        // public zone — not the payment-time snapshot. See
+        // `matches_target_filter_on_cost_paid_reference` for why only the
+        // keyword set is refreshed.
         AbilityCondition::CostPaidObjectMatchesFilter { filter } => {
             if let Some(snapshot) = &ability.cost_paid_object {
-                crate::game::filter::matches_target_filter_on_lki_snapshot(
+                crate::game::filter::matches_target_filter_on_cost_paid_reference(
                     state,
                     snapshot.object_id,
                     &snapshot.lki,
@@ -16263,6 +16654,75 @@ mod tests {
             }
             other => panic!("expected WaitingFor::UnlessPayment, got {other:?}"),
         }
+    }
+
+    /// CR 700.2: the mode boundary is EDGE-triggered, and this is the only
+    /// instrument in the suite with a nameable flip for "it must not re-fire on
+    /// re-entry into the SAME mode".
+    ///
+    /// The hazard is real and not hypothetical: `split_player_scope_chain` does
+    /// `let mut scoped = ability.clone()`, so the per-player clone RETAINS
+    /// `modal_instruction_ordinal`, and the fan-out loop re-enters
+    /// `resolve_ability_chain` once per matching player at `depth + 1` — past the
+    /// depth-0 prelude. A level trigger (reset whenever an ordinal is present)
+    /// would clear `chain_tracked_set_id` on every one of those entries and
+    /// fragment ONE mode's population into one set per player. The paused-chain
+    /// resume takes the same shape: its remaining scoped nodes also carry the
+    /// ordinal and also re-enter at depth 1.
+    ///
+    /// DISCRIMINATION: drop the `!= state.resolving_modal_instruction` conjunct
+    /// (the edge → level change) and the seeded id is gone after the second
+    /// entry, so `assert_eq!(.., Some(seeded))` fails.
+    #[test]
+    fn mode_boundary_reset_is_edge_triggered_and_survives_re_entry() {
+        let mut state = GameState::new_two_player(42);
+        let mut mode_root = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: Vec::new(),
+                duration: None,
+                target: None,
+                end_cost: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        mode_root.modal_instruction_ordinal = Some(0);
+        let mut events = Vec::new();
+
+        // First entry: the depth-0 prelude clears both fields, then the edge
+        // fires because `Some(0) != None`.
+        resolve_ability_chain(&mut state, &mode_root, &mut events, 0).expect("first entry");
+        assert_eq!(
+            state.resolving_modal_instruction,
+            Some(0),
+            "reach-guard: the edge must have fired on the first entry, or the \
+             second entry below is not testing re-entry at all"
+        );
+
+        // This mode then publishes. `split_player_scope_chain`'s loop re-enters
+        // with the SAME ordinal-bearing node at depth 1, which skips the prelude.
+        let seeded = TrackedSetId(7);
+        state.chain_tracked_set_id = Some(seeded);
+        resolve_ability_chain(&mut state, &mode_root, &mut events, 1).expect("re-entry");
+
+        assert_eq!(
+            state.chain_tracked_set_id,
+            Some(seeded),
+            "CR 700.2: re-entering the SAME modal instruction is not a new \
+             instruction, so its published set must survive"
+        );
+
+        // And the edge DOES fire for the next mode, which is what keeps this row
+        // from passing by simply never resetting anything.
+        let mut next_mode = mode_root.clone();
+        next_mode.modal_instruction_ordinal = Some(1);
+        resolve_ability_chain(&mut state, &next_mode, &mut events, 1).expect("next mode");
+        assert_eq!(
+            state.chain_tracked_set_id, None,
+            "CR 608.2c: a DIFFERENT mode is a new instruction and does start \
+             with no inherited antecedent"
+        );
     }
 
     #[test]
@@ -22886,6 +23346,230 @@ mod tests {
                 WaitingFor::UnlessPayment { .. } | WaitingFor::DiscardChoice { .. }
             ),
             "no extra unless/discard prompts after both iterations"
+        );
+    }
+
+    /// CR 608.2c (maintainer review, #7484): the publish gate must judge the
+    /// PRE-SPLIT chain. A `player_scope` fan-out hands the per-player resolution
+    /// a template whose remainder has been DETACHED, so a walk over that
+    /// template alone cannot see a producer surviving in the tail — and the head
+    /// would publish where the undetached chain declines, binding a later
+    /// `TrackedSet` consumer to the wrong population.
+    ///
+    /// MATCHED PAIR, so the assertion is discriminating rather than decorative:
+    /// the two chains differ ONLY in whether the detached tail is in publisher
+    /// position. Delete the `detached_remainder` leg from
+    /// `is_sole_chain_producer` and the first case flips to `true` (wrongly
+    /// publishing) while the second stays `true` — i.e. the leg is what
+    /// separates them.
+    #[test]
+    fn player_scope_split_carries_a_detached_publisher_into_the_gate() {
+        let state = GameState::new_two_player(7);
+        let pump = |scope: Option<PlayerFilter>| {
+            let mut a = ResolvedAbility::new(
+                Effect::PumpAll {
+                    power: PtValue::Fixed(1),
+                    toughness: PtValue::Fixed(1),
+                    target: TargetFilter::Any,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            );
+            a.player_scope = scope;
+            a
+        };
+
+        // Tail that IS a publisher position: its own sub consumes the set.
+        let mut publishing_tail = pump(None);
+        publishing_tail.sub_link = SubAbilityLink::SequentialSibling;
+        publishing_tail.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::SetTapState {
+                target: TargetFilter::TrackedSet {
+                    id: crate::types::identifiers::TrackedSetId(0),
+                },
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )));
+        let mut head = pump(Some(PlayerFilter::All));
+        head.sub_ability = Some(Box::new(publishing_tail));
+
+        let (scoped, tail) = split_player_scope_chain(&head, &PlayerFilter::All);
+        assert!(
+            tail.is_some(),
+            "precondition: the sibling tail must actually be detached, else this \
+             test proves nothing about the detached case"
+        );
+        assert_eq!(
+            scoped.detached_remainder,
+            DetachedRemainder::HoldsPublisher,
+            "the splitter must record that the detached remainder still holds a producer"
+        );
+        assert!(
+            !is_sole_chain_producer(&state, &scoped),
+            "CR 608.2c: the head is NOT the sole producer of its pre-split chain, so it \
+             must not publish — the detached tail's consumer owns that population"
+        );
+
+        // Same shape, tail NOT a publisher position (its sub consumes nothing).
+        let mut inert_tail = pump(None);
+        inert_tail.sub_link = SubAbilityLink::SequentialSibling;
+        let mut head2 = pump(Some(PlayerFilter::All));
+        head2.sub_ability = Some(Box::new(inert_tail));
+
+        let (scoped2, tail2) = split_player_scope_chain(&head2, &PlayerFilter::All);
+        assert!(
+            tail2.is_some(),
+            "precondition: same detachment as the case above"
+        );
+        assert_eq!(
+            scoped2.detached_remainder,
+            DetachedRemainder::NoProducer,
+            "a detached remainder with no consumer must not veto the head"
+        );
+        assert!(
+            is_sole_chain_producer(&state, &scoped2),
+            "non-vacuity: with nothing consuming downstream the head DOES publish, so the \
+             veto above is caused by the publisher position and not by the split itself"
+        );
+    }
+
+    /// CR 608.2c (maintainer review, #7484): the event-less `GenericEffect`
+    /// broadcast head is gated on `is_sole_chain_producer` exactly as its three
+    /// sibling arms are. Before this gate the head published unconditionally, so
+    /// a mixed chain whose LATER node owns the anaphor had its `TrackedSet`
+    /// consumer bound to the coercion/grant population instead.
+    ///
+    /// MATCHED PAIR through the production publish function
+    /// (`affected_objects_from_events`), not the predicate: the two chains differ
+    /// ONLY in whether a later producer occupies publisher position. Remove the
+    /// `if is_sole_chain_producer(state, ability)` guard from the `GenericEffect`
+    /// arm and the first case flips from `[]` to `[creature]`; the second case is
+    /// the paired non-vacuity witness that the empty result is caused by the gate
+    /// and not by the head failing to enumerate at all.
+    #[test]
+    fn generic_effect_publish_defers_to_a_later_producer_in_the_chain() {
+        let mut state = GameState::new_two_player(7);
+        let creature = reflexive_test_creature(&mut state, PlayerId(0), "Bear");
+
+        let broadcast_head = || {
+            ResolvedAbility::new(
+                Effect::GenericEffect {
+                    static_abilities: vec![
+                        StaticDefinition::continuous().affected(TargetFilter::Any)
+                    ],
+                    duration: None,
+                    target: None,
+                    end_cost: None,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )
+        };
+
+        // Later node in publisher position: a producer whose own sub consumes the
+        // published set, i.e. the real antecedent of "those creatures".
+        let mut later_producer = ResolvedAbility::new(
+            Effect::PumpAll {
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
+                target: TargetFilter::Any,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        later_producer.sub_link = SubAbilityLink::SequentialSibling;
+        later_producer.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::SetTapState {
+                target: TargetFilter::TrackedSet {
+                    id: crate::types::identifiers::TrackedSetId(0),
+                },
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )));
+
+        let mut mixed = broadcast_head();
+        mixed.sub_ability = Some(Box::new(later_producer));
+        assert_eq!(
+            affected_objects_from_events(&state, &mixed, &mixed.effect, &[]),
+            Vec::<ObjectId>::new(),
+            "CR 608.2c: a later producer in the same chain owns the anaphor, so this \
+             broadcast head must not publish its own population"
+        );
+
+        let alone = broadcast_head();
+        assert_eq!(
+            affected_objects_from_events(&state, &alone, &alone.effect, &[]),
+            vec![creature],
+            "non-vacuity: as the chain's sole producer the same head DOES publish, so \
+             the empty result above is the gate and not a failure to enumerate"
+        );
+    }
+
+    /// CR 608.2c (maintainer review, #7484): which static names the frozen
+    /// population is decided by `generic_effect_population_filter`, the ONE
+    /// authority the parser's routing predicate and this publish arm now share.
+    ///
+    /// The selection must be `find_map`, not `find`-then-ask: an earlier eligible
+    /// static carrying no application filter (a bare `Continuous` with neither an
+    /// outer `target` nor an `affected`) would otherwise be taken and returned as
+    /// `None`, suppressing the later broadcast static that actually names the
+    /// population — so neither routing nor publishing would see it.
+    ///
+    /// DISCRIMINATING: restore `.find(eligible).and_then(application_filter)` and
+    /// BOTH assertions fail (`None` / `[]`). The single-static case is the paired
+    /// witness that the multi-static result is not an artifact of the fixture.
+    #[test]
+    fn generic_effect_population_filter_skips_an_earlier_static_with_no_application_filter() {
+        let mut state = GameState::new_two_player(7);
+        let creature = reflexive_test_creature(&mut state, PlayerId(0), "Bear");
+
+        let statics = || {
+            vec![
+                // Earlier, eligible, but names no population.
+                StaticDefinition::continuous(),
+                // Later, and the one that actually broadcasts.
+                StaticDefinition::continuous().affected(TargetFilter::Any),
+            ]
+        };
+
+        assert_eq!(
+            effect::generic_effect_population_filter(None, &statics()),
+            Some(&TargetFilter::Any),
+            "selection must skip the filterless earlier static and reach the broadcast one"
+        );
+        assert_eq!(
+            effect::generic_effect_population_filter(None, &[StaticDefinition::continuous()]),
+            None,
+            "non-vacuity: a chain of ONLY filterless statics still names no population"
+        );
+
+        // The runtime arm must honour that selection end-to-end.
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: statics(),
+                duration: None,
+                target: None,
+                end_cost: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        assert_eq!(
+            affected_objects_from_events(&state, &ability, &ability.effect, &[]),
+            vec![creature],
+            "CR 611.2c: the published population is the later static's broadcast set"
         );
     }
 

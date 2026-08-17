@@ -4262,15 +4262,23 @@ fn build_continuous_clause(
 /// byte-for-byte the Jhoira/Tenth suspend-grant shape.
 ///
 /// The optional "that don't have <kw>" restrictive clause (CR 702.62a) is
-/// recognised by the parser but results in a strict-failure (`None`) because
-/// `evaluate_condition` resolves `SourceLacksKeyword` against the ability's
-/// `source_id` (the spell, which never carries the keyword), not each individual
-/// exiled card. Attaching the condition therefore produces an unconditional
-/// overgrant — already-<kw> cards would still receive a redundant grant. A
-/// correct per-card exclusion requires an object-scoped condition variant (e.g.
-/// `CostPaidObjectLacksKeyword`) that does not yet exist in the engine. Until
-/// that building block is added, "cards exiled this way that don't have <kw>
-/// gain <kw>" is a documented strict-failure deferred to `Unimplemented`.
+/// recognised by the parser but results in a strict-failure (`None`), because it
+/// is a PER-MEMBER predicate over a whole tracked set and no existing condition
+/// variant expresses that. The SINGULAR anaphor ("if it doesn't have <kw>") is
+/// covered — it lowers to `AbilityCondition::TargetMatchesFilter` with
+/// `FilterProp::WithoutKeywordKind`, re-anchored to
+/// `CostPaidObjectMatchesFilter` by clause context (see
+/// `rewrite_keyword_anaphor_for_cost_paid_parent`) — but both of those test ONE
+/// subject: the ability's first object target, or the single cost-paid snapshot.
+/// `AbilityCondition::ZoneChangedThisWay` covers the set, yet only as an
+/// EXISTENTIAL ("some card exiled this way matches"), which answers a different
+/// question than "exclude each member that already has the keyword".
+///
+/// Attaching any of the three therefore produces an unconditional overgrant for
+/// the plural form — already-<kw> cards would still receive a redundant grant,
+/// clobbering their printed parameters. Until a per-member predicate over a
+/// tracked set exists, "cards exiled this way that don't have <kw> gain <kw>"
+/// stays a documented strict-failure deferred to `Unimplemented`.
 ///
 /// Returns `None` (strict-failure to `Unimplemented`) when the restrictive
 /// clause is present or when the predicate is not a recognised "gain <kw>"
@@ -4295,10 +4303,11 @@ pub(super) fn try_parse_exiled_this_way_keyword_grant(
     })?;
 
     // Detect the restrictive "that don't have <kw>" clause (CR 702.62a).
-    // When present, strict-fail: the correct object-scoped condition
-    // (`evaluate_condition` per exiled card, not per spell source) is not
-    // yet implemented. Attaching `SourceLacksKeyword` here would silently
-    // overgrant — see the fn doc for the full explanation.
+    // When present, strict-fail: a PER-MEMBER predicate over the exiled tracked
+    // set is not yet expressible. The singular anaphor's two lowerings each test
+    // one subject and `ZoneChangedThisWay` is a set existential, so attaching any
+    // of them here would silently overgrant — see the fn doc for the full
+    // explanation.
     let after_head_lower = after_head.to_lowercase();
     let has_restrictive = nom_on_lower(after_head, &after_head_lower, |i| {
         let (i, _) = tag(" that do").parse(i)?;

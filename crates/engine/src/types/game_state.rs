@@ -85,6 +85,10 @@ fn initial_delayed_trigger_instance_id() -> u64 {
     1
 }
 
+fn initial_resolve_all_consent_epoch() -> u64 {
+    1
+}
+
 fn default_interaction_serial() -> String {
     "1".to_string()
 }
@@ -1904,6 +1908,58 @@ pub struct PriorityYield {
     pub target: YieldTarget,
 }
 
+/// Exact priority state restored if a Resolve All consent run is declined,
+/// revoked, or invalidated before it becomes actionable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolveAllPrioritySnapshot {
+    pub waiting_player: PlayerId,
+    pub priority_player: PlayerId,
+    pub priority_pass_count: u8,
+    pub priority_passes: BTreeSet<PlayerId>,
+}
+
+/// One canonical priority representative and the submitter authorized for that
+/// representative when a Resolve All consent run began.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolveAllConsentParticipant {
+    pub representative: PlayerId,
+    pub authorized_submitter: PlayerId,
+    pub granted: bool,
+}
+
+/// Server-authoritative state behind the public Resolve All consent prompts.
+/// The frozen submitters prevent turn-control changes from rebinding a queued
+/// response or a later revocation to a different person.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolveAllConsentRun {
+    pub epoch: u64,
+    pub max_resolutions: u32,
+    pub priority_snapshot: ResolveAllPrioritySnapshot,
+    pub participants: Vec<ResolveAllConsentParticipant>,
+}
+
+impl ResolveAllConsentRun {
+    pub fn authorized_submitter_for(&self, representative: PlayerId) -> Option<PlayerId> {
+        self.participants
+            .iter()
+            .find(|participant| participant.representative == representative)
+            .map(|participant| participant.authorized_submitter)
+    }
+
+    pub fn is_granted(&self, representative: PlayerId) -> bool {
+        self.participants
+            .iter()
+            .any(|participant| participant.representative == representative && participant.granted)
+    }
+
+    pub fn next_pending_representative(&self) -> Option<PlayerId> {
+        self.participants
+            .iter()
+            .find(|participant| !participant.granted)
+            .map(|participant| participant.representative)
+    }
+}
+
 /// CR 609.7a: A source of damage chosen while creating a prevention or
 /// replacement effect. The original filter is retained so property-based
 /// choices such as "red source of your choice" recheck source qualities when
@@ -2058,6 +2114,12 @@ pub struct CounterAddedRecord {
 pub enum ExileLinkKind {
     /// CR 610.3a: Return the exiled object when the source leaves the battlefield.
     UntilSourceLeaves { return_zone: Zone },
+    /// CR 610.3: Return the exiled object immediately after an opponent of
+    /// `controller` becomes the monarch.
+    UntilOpponentBecomesMonarch {
+        return_zone: Zone,
+        controller: PlayerId,
+    },
     /// Track cards "exiled with" a source without creating an automatic return.
     TrackedBySource,
     /// CR 702.xxx: Paradigm (Strixhaven) — this exile entry marks the card as a
@@ -4827,6 +4889,8 @@ pub struct PendingBatchZoneMoveRequest {
     pub library_placement: Option<LibraryPosition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exile_duration: Option<Duration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exile_controller: Option<PlayerId>,
     #[serde(default)]
     pub exile_tracking: ZoneDeliveryExileTracking,
     #[serde(
@@ -5521,6 +5585,8 @@ pub enum PendingCounterPostAction {
         cause: Option<ObjectId>,
         source_id: Option<ObjectId>,
         duration: Option<Duration>,
+        #[serde(default)]
+        exile_controller: Option<PlayerId>,
         exile_tracking: ZoneDeliveryExileTracking,
         /// CR 508.4: The completed battlefield entry joins combat after any
         /// as-enters replacement choice has settled.
@@ -10624,6 +10690,17 @@ pub enum WaitingFor {
     Priority {
         player: PlayerId,
     },
+    /// Public Resolve All consent prompt. The protocol details and frozen
+    /// submitter ledger remain in `GameState::resolve_all_consent_run`.
+    ResolveAllConsent {
+        epoch: u64,
+        representative: PlayerId,
+    },
+    /// Every canonical representative granted the same Resolve All epoch.
+    /// Phase 1 deliberately keeps this state inert; a later phase consumes it.
+    ResolveAllReady {
+        epoch: u64,
+    },
     /// CR 608.2d + CR 701.42: choose the exact pair of current battlefield
     /// referents the meld instruction will exile. Candidate identity is frozen
     /// in the tuples; the physical meld-card check intentionally happens later.
@@ -12954,6 +13031,8 @@ impl WaitingFor {
     pub fn variant_name(&self) -> &'static str {
         match self {
             WaitingFor::Priority { .. } => "Priority",
+            WaitingFor::ResolveAllConsent { .. } => "ResolveAllConsent",
+            WaitingFor::ResolveAllReady { .. } => "ResolveAllReady",
             WaitingFor::MeldPairChoice { .. } => "MeldPairChoice",
             WaitingFor::MeldAttackTargetChoice { .. } => "MeldAttackTargetChoice",
             WaitingFor::EntryAttackTargetChoice { .. } => "EntryAttackTargetChoice",
@@ -13108,7 +13187,12 @@ impl WaitingFor {
                     None
                 }
             }
+            WaitingFor::ResolveAllReady { .. } => None,
             WaitingFor::Priority { player }
+            | WaitingFor::ResolveAllConsent {
+                representative: player,
+                ..
+            }
             | WaitingFor::MeldPairChoice { player, .. }
             | WaitingFor::MeldAttackTargetChoice { player, .. }
             | WaitingFor::EntryAttackTargetChoice { player, .. }
@@ -15103,6 +15187,13 @@ declare_game_state! {
 
     // Game flow
     pub waiting_for: WaitingFor,
+    /// Persisted allocation source for Resolve All consent epochs. Starts at
+    /// one for legacy saves and is minted only by `BeginResolveAll`.
+    #[serde(default = "initial_resolve_all_consent_epoch")]
+    pub next_resolve_all_consent_epoch: u64,
+    /// Private protocol ledger behind the public consent/ready waiting states.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolve_all_consent_run: Option<ResolveAllConsentRun>,
     /// Trusted interaction capability scope. Viewer-filtered copies always
     /// redact this field; only the engine uses it to mint opaque decision IDs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -15557,9 +15648,29 @@ declare_game_state! {
     /// effects (e.g., "Exile target permanent and the top card of your library
     /// ... For each of those cards") merge their results into a single set
     /// before downstream "those cards" references resolve. Cleared at the
-    /// top-level chain entry (depth == 0) in `resolve_ability_chain`.
+    /// top-level chain entry (depth == 0) in `resolve_ability_chain`, and — when
+    /// the chain is modal — again at each CR 700.2 mode boundary, keyed on
+    /// [`Self::resolving_modal_instruction`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chain_tracked_set_id: Option<TrackedSetId>,
+
+    /// CR 700.2 + CR 608.2c: The `modal_instruction_ordinal` of the modal
+    /// instruction currently resolving. It EDGE-TRIGGERS the mode boundary in
+    /// `resolve_ability_chain`; `None` outside a modal resolution.
+    ///
+    /// Paired with [`Self::chain_tracked_set_id`] and cleared in the SAME depth-0
+    /// prelude block: this field's only job is to record whether
+    /// `chain_tracked_set_id` has already been cleared for the mode now entering,
+    /// so the two must never be reset at different times.
+    ///
+    /// EDGE, not level. A level trigger (reset whenever an ordinal is present)
+    /// would re-fire on every re-entry into the SAME mode:
+    /// `split_player_scope_chain` clones the ordinal-bearing node once per
+    /// fanned-out player and re-enters `resolve_ability_chain` with each, and a
+    /// paused chain resumes its remaining scoped nodes at depth 1. Either would
+    /// fragment one mode's population into one set per player.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolving_modal_instruction: Option<usize>,
 
     /// CR 608.2c + CR 614.6: Per-member producer-action provenance for tracked
     /// sets. When a producer publishes (or extends) a chain tracked set, each
@@ -17501,6 +17612,15 @@ pub enum DrainStatus {
 /// the synchronous dispatcher finish or pause the entry it took after a nested
 /// replacement has pushed another drain above it. It is never serialized and
 /// introduces no cross-carrier reference.
+///
+/// It addresses an entry *within* one drain stack, and says nothing about WHICH
+/// frame that stack belongs to. `types::resolution::IdentifiedPostReplacementDispatch`
+/// is what pairs it with the identity of that frame, so a cleanup can find the
+/// frame wherever the stack has since moved it. This type is deliberately left
+/// unchanged by that pairing: widening it would change
+/// [`PostReplacementDrainStack::begin_dispatch`]'s signature, which every
+/// existing call site — including two bare-path `Option::and_then` uses in
+/// `game/elimination.rs` — depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PostReplacementDrainDispatch {
     depth: usize,
@@ -17640,6 +17760,14 @@ pub enum ResidentDrainPolicy {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PostReplacementDrainStack {
     drains: Vec<PostReplacementDrain>,
+    /// This frame's stable identity, bound at its first dispatch and never
+    /// rebound. Private, and reached only through [`Self::frame_id`] /
+    /// [`Self::stamp_frame_id`], so "assigned at most once" is a property of the
+    /// type rather than of any call site. `skip_serializing_if` keeps an
+    /// unstamped frame's wire shape byte-identical to what it was before this
+    /// field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    id: Option<PostReplacementFrameId>,
 }
 
 impl PostReplacementDrain {
@@ -17815,9 +17943,74 @@ impl PostReplacementDrainStack {
         None
     }
 
+    /// CR 603.3b + CR 608.2c: retire a resident whose dispatch is over.
+    ///
+    /// `Dispatching` means "taken and running" (see [`DrainStatus`]). The sole
+    /// production dispatcher — `engine_replacement::apply_pending_post_replacement_effect`
+    /// — is synchronous, and `engine_replacement::post_replacement_dispatch_is_live`
+    /// reports whether any such dispatch is on this thread's call stack. The
+    /// sweeper calls this ONLY when that predicate is false, so a `Dispatching`
+    /// entry reaching here has no owner at all: `begin_dispatch` refuses it,
+    /// `finish_paused_dispatch` pops only `Paused`, and `finish_dispatch` needs a
+    /// handle that died with its call frame. Left behind, it keeps
+    /// `resolution_stack` non-empty forever, which makes
+    /// `triggers::resolution_completion_can_settle` false forever: deferred
+    /// triggered abilities can then never be put on the stack (CR 603.3b) and the
+    /// resolving carrier can never settle (CR 608.2c).
+    ///
+    /// Scope is the RESIDENT only, and that is exact rather than conservative. A
+    /// `Dispatching` entry sitting BELOW a nested `Paused` one is never the
+    /// resident, so it is never reached here; it is retired later, after the
+    /// `Paused` entry above it retires and it becomes the resident at a boundary
+    /// where — again — no dispatch is live. A `Dispatching` entry below another
+    /// `Dispatching` one is reachable only after the caller's loop has popped the
+    /// one above it, and the ownerless predicate is stack-wide rather than
+    /// per-entry, so it is equally ownerless. A `Ready` or `Paused` resident is
+    /// live parked work and is returned untouched.
+    pub fn finish_ownerless_dispatching_resident(&mut self) -> Option<PostReplacementDrain> {
+        match self.drains.last()?.status {
+            DrainStatus::Dispatching => self.drains.pop(),
+            DrainStatus::Ready(_) | DrainStatus::Paused => None,
+        }
+    }
+
     /// CR 800.4a: abandon every pending continuation (player departure).
     pub fn abandon_all(&mut self) {
         self.drains.clear();
+    }
+
+    /// This frame's identity, or `None` if it has never been dispatched.
+    ///
+    /// "Unstamped" is carried by the type, not by a reserved value: a legacy
+    /// payload, a freshly minted sibling frame, and a journal-replayed frame are
+    /// all `None`, and `None` can never equal a handle's `Some(id)`.
+    pub(super) fn frame_id(&self) -> Option<PostReplacementFrameId> {
+        self.id
+    }
+
+    /// Bind identity exactly once, and return the EFFECTIVE id.
+    ///
+    /// If this frame is already stamped, `candidate` is discarded and the
+    /// existing id is returned. That is not an optimisation — it is the
+    /// invariant. A nested same-frame dispatch is the shipped CR 616.1g shape (a
+    /// running continuation draws, the draw is replaced, and the replacement
+    /// carries a mandatory post-effect — Jace, Wielder of Mysteries' win; see
+    /// [`Self::install`]'s doc). Re-stamping there would invalidate the OUTER
+    /// dispatch's still-live handle and strand its entry `Dispatching` forever —
+    /// the exact failure this identity exists to close. Keeping the rule inside
+    /// the type means no call site can violate it. The caller detects "was my
+    /// candidate consumed?" by comparing the returned id against the candidate,
+    /// and only then commits its allocator, so no id is burned.
+    ///
+    /// This writes ONLY the frame's own id. It deliberately does not touch
+    /// `ResolutionStack::last_post_replacement_frame_id`, which is the mint's
+    /// business — that asymmetry is what lets a test build a payload whose
+    /// frames carry ids while its allocator is still 0.
+    pub(super) fn stamp_frame_id(
+        &mut self,
+        candidate: PostReplacementFrameId,
+    ) -> PostReplacementFrameId {
+        *self.id.get_or_insert(candidate)
     }
 }
 
@@ -17839,6 +18032,25 @@ pub struct PendingMultiDraw {
 /// may have been pushed and popped above it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct DrawSequenceFrameId(pub u64);
+
+/// Identifies one `PostReplacement` frame within a [`ResolutionStack`].
+///
+/// Frames are addressed by ID, never by position, for the same reason
+/// [`DrawSequenceFrameId`] is: between a dispatch's mint and its cleanup the
+/// frame may have left the two-deep positional window the accessor can see —
+/// because a nested instruction (CR 616.1g) raised child frames above it, or
+/// because a parent-of-active continuation insert slid a frame in between. In
+/// neither case did the frame itself move; only its distance from the stack top
+/// changed, and that is the only thing positional addressing can observe.
+///
+/// Deliberately no `Default`: the field that holds one is
+/// `Option<PostReplacementFrameId>`, whose `Default` is `None` regardless of
+/// `T`, so "unstamped" is carried by the type rather than by a reserved zero id
+/// that could alias a real frame.
+///
+/// [`ResolutionStack`]: crate::types::resolution::ResolutionStack
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct PostReplacementFrameId(pub u64);
 
 /// The unbookkept suffix of one individual draw whose Library → Hand delivery
 /// parked on a replacement choice.
@@ -18132,6 +18344,16 @@ pub struct PendingReplacement {
     /// away. `None` for every other parked event (the common case).
     #[serde(default)]
     pub library_placement: Option<crate::types::ability::LibraryPosition>,
+    /// CR 603.3a + CR 109.5: preserve the controller that resolved a
+    /// monarch-bounded exile while its zone change waits on CR 616.1.
+    #[serde(default)]
+    pub exile_controller: Option<PlayerId>,
+    #[serde(default)]
+    pub exile_duration: Option<crate::types::ability::Duration>,
+    /// Preserve source-linked exile bookkeeping while a zone change waits on
+    /// a CR 616.1 replacement choice.
+    #[serde(default)]
+    pub exile_tracking: ZoneDeliveryExileTracking,
     /// CR 120.4a: carries the excess-redirect rider ("Excess damage is dealt to
     /// that creature's controller instead") across a damage replacement *choice*
     /// pause. The resume in `handle_replacement_choice` rebuilds the
@@ -19254,6 +19476,44 @@ impl GameState {
         self.resolution_stack.push_mutate_merge(pending);
     }
 
+    /// CR 702.99a: Park a Cipher encode offer as the active prompt owner.
+    pub fn push_cipher_encode_frame(&mut self, pending: super::resolution::PendingCipherEncode) {
+        self.resolution_stack.push_cipher_encode(pending);
+    }
+
+    /// CR 702.99a: Park a Cipher encode offer beneath the frame that owns the
+    /// spell's own prompt, so the encode arms only after that owner is
+    /// consumed.
+    ///
+    /// The position is the stack's decision, not this caller's: a parked offer
+    /// owns no prompt while `Parked`, and where such a frame may sit is a
+    /// property of the stack's current shape — see
+    /// [`ParkedFramePlacement`](super::resolution::ParkedFramePlacement). This
+    /// deliberately does NOT go through `InsertParentOfActive`: inserting below
+    /// the top is a structural guess that lands inside a paused
+    /// post-replacement/draw pair, and by the time the resulting `Err` came
+    /// back the caller had already retained its card off the normal resolution
+    /// route.
+    pub fn park_cipher_encode_beneath_live_prompt(
+        &mut self,
+        pending: super::resolution::PendingCipherEncode,
+    ) -> Result<(), ResolutionStackError> {
+        self.resolve_and_apply_frame_transition(ResolvedFrameTransition::ParkBeneathLivePrompt {
+            frame: super::resolution::ResolutionFrame::CipherEncode(pending),
+        })
+        .map(|_| ())
+        .map_err(|error| match error {
+            ResolvedFrameTransitionReplayInvariantError::Stack(error) => error,
+        })
+    }
+
+    /// CR 702.99a: Consume the active Cipher encode offer once answered.
+    pub fn take_active_cipher_encode_frame(
+        &mut self,
+    ) -> Result<Option<super::resolution::PendingCipherEncode>, ResolutionStackError> {
+        self.resolution_stack.take_active_cipher_encode()
+    }
+
     /// Re-parks the active mutate-merge owner without exposing an empty-stack
     /// interval.
     pub fn replace_active_mutate_merge_frame(
@@ -19518,6 +19778,54 @@ impl GameState {
                 .promote_ability_continuation_after_post_replacement_draw()?;
         }
         Ok(completed)
+    }
+
+    /// CR 614.12a + CR 616.1g: take the active frame's resident continuation and
+    /// return it paired with the identity of the frame it came from.
+    ///
+    /// Pure delegation to [`ResolutionStack::begin_active_post_replacement_dispatch`],
+    /// which is where the frame index, the id stamp and the allocator commit all
+    /// live. This exists so the dispatcher keeps talking to `GameState`.
+    ///
+    /// [`ResolutionStack::begin_active_post_replacement_dispatch`]: super::resolution::ResolutionStack::begin_active_post_replacement_dispatch
+    pub(crate) fn begin_post_replacement_dispatch(
+        &mut self,
+    ) -> Option<(
+        crate::types::ability::PostReplacementContinuation,
+        super::resolution::IdentifiedPostReplacementDispatch,
+    )> {
+        self.resolution_stack
+            .begin_active_post_replacement_dispatch()
+    }
+
+    /// Whether `dispatch` still owns the resident top of its OWN frame, found by
+    /// identity rather than by position. Pure delegation.
+    pub(crate) fn post_replacement_dispatch_is_resident_top(
+        &self,
+        dispatch: super::resolution::IdentifiedPostReplacementDispatch,
+    ) -> bool {
+        self.resolution_stack
+            .post_replacement_dispatch_is_resident_top(dispatch)
+    }
+
+    /// Park `dispatch`'s exact entry in its own frame. Pure delegation.
+    pub(crate) fn pause_post_replacement_dispatch(
+        &mut self,
+        dispatch: super::resolution::IdentifiedPostReplacementDispatch,
+    ) -> bool {
+        self.resolution_stack
+            .pause_post_replacement_dispatch(dispatch)
+    }
+
+    /// Retire `dispatch`'s exact entry in its own frame. Pure delegation — it
+    /// removes no frame; `remove_empty_active_post_replacement_frame` keeps that
+    /// job, and keeps its wider "any empty frame that is now the top" scope.
+    pub(crate) fn finish_post_replacement_dispatch(
+        &mut self,
+        dispatch: super::resolution::IdentifiedPostReplacementDispatch,
+    ) -> Option<PostReplacementDrain> {
+        self.resolution_stack
+            .finish_post_replacement_dispatch(dispatch)
     }
 
     /// Retires only the exact top general drain whose continuation paused and
@@ -20051,6 +20359,9 @@ impl GameState {
             ResolvedFrameTransition::Push { frame } => resolution_stack.push_inner(frame.clone()),
             ResolvedFrameTransition::InsertParentOfActive { frame } => {
                 resolution_stack.insert_parent_of_active(frame.clone())?;
+            }
+            ResolvedFrameTransition::ParkBeneathLivePrompt { frame } => {
+                let _ = resolution_stack.park_beneath_live_prompt(frame.clone());
             }
             ResolvedFrameTransition::PopExpected { kind } => {
                 let _ = resolution_stack.pop_expected(*kind)?;
@@ -20884,6 +21195,8 @@ impl GameState {
             waiting_for: WaitingFor::Priority {
                 player: starting_player,
             },
+            next_resolve_all_consent_epoch: initial_resolve_all_consent_epoch(),
+            resolve_all_consent_run: None,
             interaction_session_id: None,
             interaction_generation: 0,
             next_interaction_serial: default_interaction_serial(),
@@ -20937,6 +21250,7 @@ impl GameState {
             tracked_object_sets: HashMap::new(),
             next_tracked_set_id: 1,
             chain_tracked_set_id: None,
+            resolving_modal_instruction: None,
             tracked_set_member_causes: HashMap::new(),
             commander_cast_count: HashMap::new(),
             commander_cast_owners: HashMap::new(),
@@ -21794,6 +22108,9 @@ impl GameState {
         // CR 104.4b: pip-id counter is a volatile monotonic field; zero it (like
         // next_object_id) so two otherwise-identical loop states compare equal.
         clone.next_pip_id = 0;
+        // CR 104.4b: consent epochs are monotonic authorization receipts, not
+        // recurring game-position state.
+        clone.next_resolve_all_consent_epoch = 0;
         // P1 provenance is append-only historical evidence, not live rules
         // state. Clear it with the other monotonic identity carriers so it
         // cannot hide a genuine CR 104.4b repeated position.
@@ -21816,6 +22133,17 @@ impl GameState {
         // Private shortcut capabilities are live interaction state, never part
         // of a CR 104.4b position sample.
         clone.precast_shortcut_runtime = PrecastShortcutRuntime::default();
+        // CR 700.2 + CR 104.4b: the mode-boundary edge latch is resolution-scoped
+        // and is cleared only at depth-0 chain ENTRY, so between resolutions it
+        // holds the LAST resolved mode's ordinal as pure residue. Two otherwise
+        // identical positions reached via different last-resolved modes would
+        // then differ here alone and never confirm a repeated position. It is
+        // eq-compared (AI-search dedup legitimately reads it), so it is
+        // normalized away HERE rather than excluded from `PartialEq`.
+        // NOTE: its lockstep partner `chain_tracked_set_id` carries the same
+        // residue and is deliberately NOT cleared here — that is pre-existing
+        // behavior with its own follow-up, not something this line may widen.
+        clone.resolving_modal_instruction = None;
         // CR 104.4b + CR 400.7: the all-zone incarnation bump advances a source's
         // epoch on every zone change, so a mandatory loop that cycles its source's
         // zones would otherwise carry a growing `TriggerSourceContext` into loop
@@ -22715,6 +23043,8 @@ fn _gamestate_partition_is_total(s: &GameState) {
         rng: _,
         combat: _,
         waiting_for: _,
+        next_resolve_all_consent_epoch: _,
+        resolve_all_consent_run: _,
         interaction_session_id: _,
         interaction_generation: _,
         next_interaction_serial: _,
@@ -22771,6 +23101,10 @@ fn _gamestate_partition_is_total(s: &GameState) {
         tracked_object_sets: _,
         next_tracked_set_id: _,
         chain_tracked_set_id: _,
+        // CR 700.2: mode-boundary edge latch, cleared in the same depth-0 prelude
+        // block as `chain_tracked_set_id` above and meaningful only inside one
+        // resolution — the same reason that field is projected out here.
+        resolving_modal_instruction: _,
         tracked_set_member_causes: _,
         commander_cast_count: _,
         commander_cast_owners: _,
@@ -23061,6 +23395,8 @@ impl PartialEq for GameState {
             && self.rng_seed == other.rng_seed
             && self.combat == other.combat
             && self.waiting_for == other.waiting_for
+            && self.next_resolve_all_consent_epoch == other.next_resolve_all_consent_epoch
+            && self.resolve_all_consent_run == other.resolve_all_consent_run
             && self.lands_played_this_turn == other.lands_played_this_turn
             && self.max_lands_per_turn == other.max_lands_per_turn
             && self.priority_pass_count == other.priority_pass_count
@@ -23096,6 +23432,7 @@ impl PartialEq for GameState {
             && self.tracked_object_sets == other.tracked_object_sets
             && self.next_tracked_set_id == other.next_tracked_set_id
             && self.chain_tracked_set_id == other.chain_tracked_set_id
+            && self.resolving_modal_instruction == other.resolving_modal_instruction
             && self.tracked_set_member_causes == other.tracked_set_member_causes
             && self.commander_cast_count == other.commander_cast_count
             && self.commander_cast_owners == other.commander_cast_owners
@@ -24080,6 +24417,308 @@ mod drain_stack_reentrancy_tests {
             "the incoming continuation still installs — it is nested above the \
              dispatching drain (CR 616.1g), not dropped"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Identity-addressed dispatch rows.
+    // -----------------------------------------------------------------------
+
+    fn resident_status(state: &GameState) -> Option<&DrainStatus> {
+        match state.resolution_stack.last() {
+            Some(crate::types::resolution::ResolutionFrame::PostReplacement(drains)) => {
+                drains.drains.first().map(|drain| &drain.status)
+            }
+            _ => None,
+        }
+        .or_else(|| {
+            state.resolution_stack.iter().find_map(|frame| match frame {
+                crate::types::resolution::ResolutionFrame::PostReplacement(drains) => {
+                    drains.drains.first().map(|drain| &drain.status)
+                }
+                _ => None,
+            })
+        })
+    }
+
+    /// **B1 — discriminating(U2).** CR 614.12a + CR 616.1g: a dispatch whose own
+    /// continuation BURIED its frame still addresses its exact entry.
+    ///
+    /// The continuation is an `Effect::Discard` carrying a sub-ability. Parking
+    /// on `DiscardChoice` raises a direct-choice frame, and the sub-ability then
+    /// takes `append_to_pending_continuation`'s parent-of-active branch, which
+    /// inserts an `AbilityContinuation` BETWEEN the `PostReplacement` frame and
+    /// the active child. The frame's absolute index never changes; its distance
+    /// from the top goes from 1 to 2, which is the only thing the two-deep
+    /// positional accessor can see.
+    ///
+    /// Revert-failing assertion: the entry reads `Paused`. With the cleanup
+    /// resolved positionally the accessor misses, both arms degrade to no-ops,
+    /// and the entry is left `Dispatching` — the strand.
+    #[test]
+    fn b1_a_dispatch_whose_continuation_buried_its_frame_still_parks_its_own_entry() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.priority_player = PlayerId(0);
+        for index in 0..3u64 {
+            let id = crate::game::zones::create_object(
+                &mut state,
+                crate::types::identifiers::CardId(500 + index),
+                PlayerId(0),
+                format!("Hand Card {index}"),
+                crate::types::zones::Zone::Hand,
+            );
+            let _ = id;
+        }
+
+        let mut discard_with_tail = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Discard {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: crate::types::ability::TargetFilter::Controller,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                unless_filter: None,
+                filter: None,
+            },
+        );
+        discard_with_tail = discard_with_tail.sub_ability(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                    player: crate::types::ability::TargetFilter::Controller,
+                },
+            )
+            // CR 701.9a + CR 608.2c: a discard whose tail is gated on what was
+            // discarded raises a real `ResolutionFrame::Discard` for the operation
+            // (`effects/discard.rs::resolve` mints it on the PRESENCE of this
+            // condition variant, not on its contents). The parked tail then becomes a
+            // second frame above it, so the `PostReplacement` frame sits two deep and
+            // the two-deep positional accessor can no longer see it — which is the
+            // burial this row exists to measure.
+            .condition(
+                crate::types::ability::AbilityCondition::DiscardedCardMatchesFilter {
+                    filter: crate::types::ability::TargetFilter::Any,
+                },
+            ),
+        );
+
+        let mut drains = PostReplacementDrainStack::default();
+        assert!(drains.install(
+            PostReplacementDrain::ready(PostReplacementContinuation::Template(Box::new(
+                discard_with_tail
+            ))),
+            ResidentDrainPolicy::KeepResident,
+        ));
+        state.resolution_stack.push_post_replacement(drains);
+
+        // Reach-guard: the mint really handed out a pair — this row is not
+        // passing because no dispatch ever started.
+        assert!(
+            state
+                .active_post_replacement_drains()
+                .is_some_and(PostReplacementDrainStack::has_ready),
+            "the fixture parks a Ready drain reachable by the mint"
+        );
+
+        let mut events = Vec::new();
+        let waiting = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+            &mut state,
+            None,
+            None,
+            None,
+            &mut events,
+        );
+
+        // Reach-guard: the continuation ran AND buried its own frame.
+        assert!(
+            waiting.is_some(),
+            "the continuation must park on a prompt, got {:?}",
+            state.waiting_for
+        );
+        assert!(
+            state.resolution_stack.len() >= 3,
+            "the continuation must have raised two frames above its own, got {}",
+            state.resolution_stack.len()
+        );
+        assert!(
+            state.active_post_replacement_drains().is_none(),
+            "reach-guard: the two-deep positional accessor can no longer see the frame — \
+             without this the row measures nothing"
+        );
+
+        assert!(
+            matches!(resident_status(&state), Some(DrainStatus::Paused)),
+            "CR 614.12a: the dispatch parks its OWN entry wherever its frame now sits; \
+             a positional cleanup no-ops and leaves it Dispatching. got {:?}",
+            resident_status(&state)
+        );
+    }
+
+    /// **H2 — guard.** *Hostile: the negative sibling status.* A resident
+    /// `Ready` drain reached at a priority boundary must still be DISPATCHED,
+    /// never swept.
+    ///
+    /// This is `main`'s behaviour with no sweep at all, so it stays green under
+    /// a sweep revert — that is why it is a guard. Its assertion is
+    /// mutation-failing: a sweep written with a wildcard arm, or scoped to
+    /// `!Paused` rather than to `Dispatching` alone, swallows the `Ready`
+    /// continuation and turns this red.
+    ///
+    /// Positive control: the drain's effect is observed to have executed, so
+    /// "the drain is gone" cannot be satisfied by a sweep that discarded it.
+    #[test]
+    fn h2_a_ready_resident_is_dispatched_at_a_priority_boundary_never_swept() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.priority_player = PlayerId(0);
+        let life_before = state.players[0].life;
+
+        let mut drains = PostReplacementDrainStack::default();
+        assert!(drains.install(
+            PostReplacementDrain::ready(PostReplacementContinuation::Template(Box::new(
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
+                        player: crate::types::ability::TargetFilter::Controller,
+                    },
+                )
+            ))),
+            ResidentDrainPolicy::KeepResident,
+        ));
+        state.resolution_stack.push_post_replacement(drains);
+
+        let mut events = Vec::new();
+        crate::game::effects::resume_resolution_frames(&mut state, &mut events);
+
+        assert_eq!(
+            state.players[0].life,
+            life_before + 3,
+            "positive control: the Ready continuation actually RAN — without this, \
+             'the drain is gone' would also be satisfied by a sweep that ate it"
+        );
+        assert!(
+            state.resolution_stack.is_empty(),
+            "the dispatched-and-finished drain leaves no frame behind"
+        );
+    }
+
+    /// **H3 — discriminating(U2).** *Hostile: multi-authority CR 616.1g
+    /// nesting.* One frame, an outer `Dispatching` entry below an inner `Paused`
+    /// one, with the frame buried two deep.
+    ///
+    /// Three claims:
+    ///  (i) the second (inner) mint against the same frame returns a pair whose
+    ///      `frame()` EQUALS the outer's — red under an overwriting stamp;
+    ///  (ii) the outer dispatch's finish removes ONLY depth 0; the inner `Paused`
+    ///      entry survives with its own `event_source` intact and the frame's id
+    ///      unchanged — red under a positional lookup;
+    ///  (iii) the ownerless sweep does not fire here, because the resident is
+    ///      `Paused`, which is live parked work.
+    #[test]
+    fn h3_nested_same_frame_dispatches_share_one_identity_and_retire_lifo() {
+        let mut stack = crate::types::resolution::ResolutionStack::default();
+        stack.push_post_replacement(PostReplacementDrainStack::default());
+
+        let mut outer = ready_drain("outer");
+        outer.event_source = Some(ObjectId(7));
+        assert!(stack
+            .active_post_replacement_or_paired_parent_mut()
+            .expect("frame is active")
+            .install(outer, ResidentDrainPolicy::KeepResident));
+        let (_, handle_outer) = stack
+            .begin_active_post_replacement_dispatch()
+            .expect("the outer ready drain begins dispatching");
+
+        let mut inner = ready_drain("inner");
+        inner.event_source = Some(ObjectId(9));
+        assert!(stack
+            .active_post_replacement_or_paired_parent_mut()
+            .expect("frame is active")
+            .install(inner, ResidentDrainPolicy::KeepResident));
+
+        // Positive control: two entries with DISTINCT event contexts exist.
+        match stack.last() {
+            Some(crate::types::resolution::ResolutionFrame::PostReplacement(drains)) => {
+                assert_eq!(drains.drains.len(), 2, "outer + inner both resident");
+                assert_eq!(drains.drains[0].event_source, Some(ObjectId(7)));
+                assert_eq!(drains.drains[1].event_source, Some(ObjectId(9)));
+                assert!(
+                    drains.frame_id().is_some(),
+                    "the outer mint stamped the frame"
+                );
+            }
+            other => panic!("expected the post-replacement frame, got {other:?}"),
+        }
+
+        let (_, handle_inner) = stack
+            .begin_active_post_replacement_dispatch()
+            .expect("the inner ready drain begins dispatching");
+
+        // (i) The re-stamp regression witness.
+        assert_eq!(
+            handle_inner.frame(),
+            handle_outer.frame(),
+            "CR 616.1g: a nested same-frame dispatch reuses the frame's identity; \
+             re-stamping invalidates the outer dispatch's still-live handle"
+        );
+        assert!(stack.pause_post_replacement_dispatch(handle_inner));
+
+        // Bury the frame two deep, out of the two-deep positional window.
+        stack.push_inner(crate::types::resolution::ResolutionFrame::PostReplacement(
+            PostReplacementDrainStack::default(),
+        ));
+        stack.push_inner(crate::types::resolution::ResolutionFrame::PostReplacement(
+            PostReplacementDrainStack::default(),
+        ));
+        let frames_before = stack.len();
+
+        // (ii) The outer finish retires exactly depth 0.
+        let retired = stack.finish_post_replacement_dispatch(handle_outer);
+        assert!(
+            retired.is_some_and(|drain| drain.event_source == Some(ObjectId(7))),
+            "the outer dispatch retires its OWN entry, identified by event context"
+        );
+        assert_eq!(
+            stack.len(),
+            frames_before,
+            "a buried frame is never removed by a finish — that would reorder the stack"
+        );
+        // Bound out as a statement so the `iter()` temporary (which holds the borrow
+        // of `stack`) drops here rather than after `stack` itself — a tail-expression
+        // `match stack.iter().next()` outlives its own receiver.
+        let bottom_frame = stack.iter().next();
+        match bottom_frame {
+            Some(crate::types::resolution::ResolutionFrame::PostReplacement(drains)) => {
+                assert_eq!(drains.drains.len(), 1, "only the inner entry survives");
+                assert_eq!(
+                    drains.drains[0].event_source,
+                    Some(ObjectId(9)),
+                    "CR 615.5: the surviving inner entry keeps its own prevented-event context"
+                );
+                assert!(
+                    matches!(drains.drains[0].status, DrainStatus::Paused),
+                    "the inner entry is still parked"
+                );
+                assert_eq!(
+                    drains.frame_id(),
+                    Some(handle_outer.frame()),
+                    "the frame's identity is unchanged by either dispatch"
+                );
+
+                // (iii) The ownerless sweep does not fire on a Paused resident.
+                let mut probe = drains.clone();
+                assert!(
+                    probe.finish_ownerless_dispatching_resident().is_none(),
+                    "a Paused resident is live parked work, never an ownerless strand"
+                );
+            }
+            other => panic!("expected the original post-replacement frame, got {other:?}"),
+        }
     }
 }
 
@@ -26765,6 +27404,18 @@ mod tests {
     /// intentionally outside the state-equality key just as it was before the
     /// ChangeZone frame migration. Replacing `game_state_eq` with derived stack
     /// equality makes this assertion fail.
+    ///
+    /// Exposure note for the per-frame `PostReplacementFrameId`: it DOES
+    /// participate in `GameState` equality, through `ResolutionStack::game_state_eq`'s
+    /// derived fall-through arm for `PostReplacement` — exactly the treatment
+    /// `DiscardFrame.id` already receives, and the direction that function's own
+    /// comment calls fail-safe (COMPARED is fail-safe; EXCLUSION is the
+    /// fail-DANGEROUS direction). Worst case: a repeating position that mints a
+    /// new frame id each iteration stops comparing equal, so the CR 104.4b
+    /// auto-pass window terminates on its iteration cap instead of on loop
+    /// detection. The ALLOCATOR is not exposed here at all — `game_state_eq`
+    /// compares `frames` only, the same treatment `next_draw_sequence_frame_id`
+    /// and `next_discard_frame_id` already get.
     #[test]
     fn game_state_equality_excludes_devour_only_change_zone_frame() {
         let state = GameState::new_two_player(7);
@@ -27827,6 +28478,39 @@ mod tests {
         );
     }
 
+    /// CR 700.2 + CR 104.4b: the mode-boundary edge latch
+    /// (`resolving_modal_instruction`) is resolution-scoped and is cleared only at
+    /// depth-0 chain ENTRY, so between resolutions it holds the last resolved
+    /// mode's ordinal as pure residue. Two identical positions reached via
+    /// different last-resolved modes must still confirm as a repeated position.
+    ///
+    /// DISCRIMINATION: delete `clone.resolving_modal_instruction = None;` from
+    /// `normalize_for_loop` and this test FAILS — the field is eq-compared, so the
+    /// residue alone defeats the CR 104.4b repeat. The `a != b` assertion is the
+    /// paired non-vacuity witness: it proves the two inputs really do differ
+    /// BEFORE normalization, so the positive assertion cannot pass by the two
+    /// sides being trivially identical.
+    #[test]
+    fn normalize_for_loop_clears_the_modal_boundary_latch_residue() {
+        let mut first = GameState::new_two_player(7);
+        let mut second = first.clone();
+        // The ONLY difference: which mode resolved last. Same board, same stack.
+        first.resolving_modal_instruction = Some(0);
+        second.resolving_modal_instruction = Some(2);
+
+        assert!(
+            first != second,
+            "non-vacuity: the two states must differ before normalization, else the \
+             equality assertion below proves nothing"
+        );
+
+        assert!(
+            loop_states_equal(&first.normalize_for_loop(), &second.normalize_for_loop()),
+            "CR 104.4b: positions differing only in the resolution-scoped mode-boundary \
+             latch must confirm as a repeat"
+        );
+    }
+
     /// CR 104.4b: deferred-trigger timestamps are CR 603.3b scheduling history,
     /// not a changed recurring position. Their live values must remain distinct
     /// for ordering, while loop snapshots compare the same pending trigger
@@ -28640,6 +29324,11 @@ mod tests {
         variants.push(Box::new(WaitingFor::Priority {
             player: PlayerId(0),
         }));
+        variants.push(Box::new(WaitingFor::ResolveAllConsent {
+            epoch: 1,
+            representative: PlayerId(0),
+        }));
+        variants.push(Box::new(WaitingFor::ResolveAllReady { epoch: 1 }));
         variants.push(Box::new(WaitingFor::MulliganDecision {
             pending: vec![MulliganDecisionEntry {
                 player: PlayerId(0),
@@ -28974,7 +29663,7 @@ mod tests {
             mana_reduction: ManaCost::zero(),
             pending_cast: dummy_pending(),
         }));
-        assert_eq!(variants.len(), 37);
+        assert_eq!(variants.len(), 39);
     }
 
     #[test]

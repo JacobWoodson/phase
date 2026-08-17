@@ -1339,10 +1339,11 @@ pub enum PreventionAmount {
     AllBut(u32),
 }
 
-/// CR 614.9: Recipient of a one-shot damage-redirection effect — the
+/// CR 614.9: Recipient of a damage-redirection effect — the
 /// battle/creature/planeswalker/player the replaced damage is dealt to instead.
-/// Resolved to a concrete object/player at effect-resolution time (see
-/// `effects::create_damage_replacement::resolve`).
+/// Each variant is a distinct IDENTITY SOURCE for that recipient, resolved
+/// against live game state at damage-apply time by
+/// `effects::create_damage_replacement::resolve_redirect_recipient`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum DamageRedirectTarget {
@@ -1355,6 +1356,15 @@ pub enum DamageRedirectTarget {
     /// "...to target creature instead" — an object chosen as a target of the
     /// creating ability (Soltari Guerrillas).
     ChosenObjectTarget,
+    /// CR 303.4b + CR 301.5a: "...to enchanted creature instead" / "...to
+    /// equipped creature instead" — the permanent this replacement's source is
+    /// attached to (Pariah, Pariah's Shield, With Great Power . . .).
+    ///
+    /// Resolved LIVE from the source's `attached_to` at apply time, never latched
+    /// at install: if the attachment moves, the redirect follows it; if it falls
+    /// off, CR 614.9 makes the redirection do nothing and the damage stays on its
+    /// original recipient.
+    AttachedToSource,
 }
 
 /// Shield type for one-shot replacement effects that expire at cleanup.
@@ -1373,14 +1383,65 @@ pub enum ShieldKind {
     /// a continuous static `damage_modification` (Furnace of Rath), which keeps
     /// `ShieldKind::None` and re-applies to every damage event.
     DamageReplacementOneShot,
-    /// CR 614.9: One-shot redirection shield — replaces all or part of a damage
-    /// event's recipient with `recipient`. `All` covers "the next time ... would
-    /// deal damage"; `Next(n)` covers "the next N damage ... is dealt to ..."
-    /// redirections. Consumed on use, expires at cleanup.
+    /// CR 614.9: Redirection shield — replaces all or part of a damage event's
+    /// recipient with `recipient`. `All` covers "the next time ... would deal
+    /// damage"; `Next(n)` covers "the next N damage ... is dealt to ..."
+    /// redirections. Expires at cleanup.
+    ///
+    /// `lifetime` is the CR 614.5-vs-CR 611.2a axis: whether the shield spends a
+    /// single opportunity (Desperate Gambit, the en-Kor cycle) or applies
+    /// continuously to every matching event in its window (Heroic Sacrifice,
+    /// Gideon's Sacrifice). See [`RedirectionLifetime`].
     Redirection {
         recipient: DamageRedirectTarget,
         amount: PreventionAmount,
+        #[serde(default)]
+        lifetime: RedirectionLifetime,
     },
+    /// CR 614.1a + CR 615.1a + CR 615.3 + CR 514.2: one-shot prevention shield —
+    /// "the next time [source] would deal damage this turn, prevent that damage"
+    /// (Awe Strike). The single opportunity is bounded by the "the next time"
+    /// qualifier (CR 615.3: prevention effects "last until they're used up or
+    /// their duration has expired"); the shield is consumed via
+    /// `consume_on_apply` when the prevention applies, and expires at cleanup
+    /// (CR 514.2). Distinct from the duration-bound continuous
+    /// `Prevention { All }` (Fog), which stays active for every matching damage
+    /// event in its lifetime.
+    PreventionOneShot,
+}
+
+/// CR 614.5 vs CR 611.2a: how many damage events one `ShieldKind::Redirection`
+/// applies to.
+///
+/// This is a genuine grammar-borne axis, NOT derivable from the shield's other
+/// fields: "the next time … would deal damage … instead" and "until end of turn,
+/// all damage … is dealt to X instead" both carry `PreventionAmount::All`, yet
+/// the first is spent by one event and the second is not.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum RedirectionLifetime {
+    /// CR 614.5: "a replacement effect gets only one opportunity to affect an
+    /// event" — this shield is consumed after the single event it applies to
+    /// (whether or not the redirection itself did anything, per CR 614.9).
+    /// "The next time …" / "the next N damage …" (Desperate Gambit, Soltari
+    /// Guerrillas, Jade Monolith, the en-Kor cycle).
+    #[default]
+    OneOpportunity,
+    /// CR 611.2a: a continuous effect created by a resolving spell or ability
+    /// with a stated duration — it re-applies to EVERY matching damage event
+    /// until the shield is pruned at cleanup (CR 514.2). "Until end of turn, all
+    /// damage that would be dealt to you and creatures you control is dealt to
+    /// the chosen creature instead" (Heroic Sacrifice, Gideon's Sacrifice,
+    /// Saving Grace).
+    Continuous,
+}
+
+impl RedirectionLifetime {
+    /// True for the CR 614.5 single-opportunity lifetime (the serde default, so
+    /// this doubles as the `skip_serializing_if` predicate).
+    pub fn is_one_opportunity(&self) -> bool {
+        matches!(self, RedirectionLifetime::OneOpportunity)
+    }
 }
 
 impl ShieldKind {
@@ -1390,6 +1451,37 @@ impl ShieldKind {
 
     pub fn is_shield(&self) -> bool {
         !self.is_none()
+    }
+}
+
+/// CR 615.1a + CR 609.7a + CR 609.7b: EXACT source-filter shape of the
+/// one-shot target-source prevention ("the next time target creature would
+/// deal damage this turn, prevent that damage" — Awe Strike): an `And` of
+/// exactly two legs — a `ParentTargetSlot { 0 }` capture (the chosen target
+/// creature, CR 609.7a) and a `Typed` leaf whose type list is exactly
+/// `[Creature]` with no zone/color properties (the CR 609.7b recheck).
+///
+/// Single authority shared by the parser-side bare-rider gate
+/// (`oracle_effect::assembly::is_oneshot_target_source_prevent_chain`) and the
+/// resolver-side one-shot discriminator (`prevent_damage::resolve`), so the
+/// two cannot drift. Deliberately strict: a `Typed` leaf carrying extra
+/// constraints (e.g. "target creature spell" — `InZone(Stack)` + Creature, or
+/// a controller clause) does NOT match, so a hypothetical future source-scoped
+/// prevent with a qualified creature leaf keeps its continuous
+/// `Prevention { All }` semantics instead of silently becoming one-shot.
+pub fn is_oneshot_target_source_prevent_shape(source_filter: &TargetFilter) -> bool {
+    match source_filter {
+        TargetFilter::And { filters } if filters.len() == 2 => {
+            matches!(&filters[0], TargetFilter::ParentTargetSlot { index: 0 })
+                && matches!(
+                    &filters[1],
+                    TargetFilter::Typed(tf)
+                        if tf.type_filters.as_slice() == [TypeFilter::Creature]
+                            && tf.properties.is_empty()
+                            && tf.controller.is_none()
+                )
+        }
+        _ => false,
     }
 }
 
@@ -3003,7 +3095,35 @@ pub enum Duration {
     /// source exiles another card. Used by "you may play that card until you
     /// exile another card with [this object]" source-linked exile grants.
     UntilSourceExilesAnotherCard,
+    /// CR 610.3: The exiled object returns to its previous zone immediately
+    /// after an opponent of the source's controller becomes the monarch.
+    UntilOpponentBecomesMonarch,
     Permanent,
+}
+
+/// A specified event that can end a CR 610.3 zone-change duration before the
+/// initial one-shot effect occurs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DurationEvent {
+    SourceLeftBattlefield,
+    OpponentBecameMonarch,
+}
+
+impl Duration {
+    pub const fn zone_change_event(&self) -> Option<DurationEvent> {
+        match self {
+            Self::UntilHostLeavesPlay => Some(DurationEvent::SourceLeftBattlefield),
+            Self::UntilOpponentBecomesMonarch => Some(DurationEvent::OpponentBecameMonarch),
+            Self::UntilEndOfTurn
+            | Self::UntilEndOfCombat
+            | Self::UntilNextTurnOf { .. }
+            | Self::UntilEndOfNextTurnOf { .. }
+            | Self::UntilNextStepOf { .. }
+            | Self::ForAsLongAs { .. }
+            | Self::UntilSourceExilesAnotherCard
+            | Self::Permanent => None,
+        }
+    }
 }
 
 /// The attacker named by a force-block instruction.
@@ -5467,9 +5587,13 @@ pub enum TargetFilter {
     /// dropped) — `typed_recipient_valid_card_filter` returns `None` for it and
     /// `untargeted_damage_filter` always yields `Some`. `permanent_type` restricts
     /// the permanent leg (`Some(Planeswalker)` for Comeuppance; `None` = any
-    /// permanent you control).
+    /// permanent you control), and `source_scope` carries the "OTHER" article
+    /// (The Wanderer's "you and other permanents you control") so the permanent
+    /// leg can exclude the ability's own source.
     ControllerAndControlledPermanents {
         permanent_type: Option<CoreType>,
+        #[serde(default, skip_serializing_if = "SourceExclusion::is_include")]
+        source_scope: SourceExclusion,
     },
     /// CR 102.2 + CR 102.3 + CR 601.2c: A player reference to an opponent of the
     /// ability's controller, used as the announcing player (`target_chooser`) for
@@ -6872,6 +6996,12 @@ pub enum QuantityRef {
         #[serde(default, skip_serializing_if = "is_total_damage_channel")]
         channel: DamageChannel,
     },
+    /// Engine bookkeeping for the immediately preceding resolution-local effect
+    /// count. This reads `GameState::last_effect_count` directly, defaults an
+    /// unavailable count to zero, and is not limited to object choices.
+    /// It preserves the immediate-predecessor relationship while instructions
+    /// resolve in order (CR 608.2c), so an enclosing event cannot shadow it.
+    PreviousEffectCount,
     /// CR 118.4 + CR 119.3: Amount of life lost this turn, scoped by `player`
     /// per the workspace "Parameterize, don't proliferate" principle (Round Π-3).
     ///
@@ -7399,6 +7529,7 @@ impl QuantityRef {
             | QuantityRef::TrackedSetAggregate { .. }
             | QuantityRef::ExiledFromHandThisResolution
             | QuantityRef::PreviousEffectAmount { .. }
+            | QuantityRef::PreviousEffectCount
             | QuantityRef::UnspentMana { .. }
             | QuantityRef::EventContextAmount
             | QuantityRef::EventContextPlayerCount { .. }
@@ -14007,6 +14138,18 @@ pub enum Effect {
         /// Soltari) or implicit ("you" — Beacon).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         recipient_object_filter: Option<TargetFilter>,
+        /// CR 614.5 vs CR 611.2a: whether the created redirection shield spends a
+        /// single opportunity or applies continuously until cleanup. Carried from
+        /// the Oracle grammar — "the next time / the next N damage" is
+        /// `OneOpportunity`, "\[until end of turn,\] all damage that would be
+        /// dealt … is dealt to `<recipient>` instead" is `Continuous` — because
+        /// the two forms are indistinguishable from the shield's other fields.
+        /// Meaningless for the `modification` form, which is always one-shot.
+        #[serde(
+            default,
+            skip_serializing_if = "RedirectionLifetime::is_one_opportunity"
+        )]
+        redirect_lifetime: RedirectionLifetime,
     },
     /// CR 614.1a + CR 614.6 + CR 514.2 + CR 121.1: install a one-shot, this-turn
     /// "the next time you would draw a card this turn, [effect] instead" draw
@@ -16136,6 +16279,32 @@ impl TargetFilter {
                 .any(TargetFilter::references_cost_paid_object),
             TargetFilter::Not { filter } => filter.references_cost_paid_object(),
             TargetFilter::TrackedSetFiltered { filter, .. } => filter.references_cost_paid_object(),
+            _ => false,
+        }
+    }
+
+    /// CR 613.1f + CR 702.1: True when this filter tree asks a KIND-level keyword
+    /// question (`HasKeywordKind` / `WithoutKeywordKind`) at any structural
+    /// position. Mirrors [`Self::references_cost_paid_object`]'s recursion.
+    ///
+    /// Those two props are the only ones that must be answered from an object's
+    /// LIVE effective keyword set rather than a snapshot, because they route
+    /// through the off-zone Layer-6 ledger. Evaluators that would otherwise pay
+    /// to recompute that ledger use this as a cheap early-out — see
+    /// `game::filter::matches_target_filter_on_cost_paid_reference`.
+    pub fn queries_keyword_kind(&self) -> bool {
+        match self {
+            TargetFilter::Typed(TypedFilter { properties, .. }) => properties.iter().any(|prop| {
+                matches!(
+                    prop,
+                    FilterProp::HasKeywordKind { .. } | FilterProp::WithoutKeywordKind { .. }
+                )
+            }),
+            TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+                filters.iter().any(TargetFilter::queries_keyword_kind)
+            }
+            TargetFilter::Not { filter } => filter.queries_keyword_kind(),
+            TargetFilter::TrackedSetFiltered { filter, .. } => filter.queries_keyword_kind(),
             _ => false,
         }
     }
@@ -21861,6 +22030,10 @@ pub struct EffectResolutionResult {
 /// Conditions in the sub_ability chain are evaluated against this context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SpellContext {
+    /// CR 610.3b: specified duration events observed after a triggered ability
+    /// triggered but before this initial zone-change effect occurred.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub duration_events: Vec<DurationEvent>,
     /// CR 118.1 + CR 119.4b: A completed resolution-time `PayCost` that paid
     /// life reports this amount to the immediate following "that much" clause.
     /// `Some(0)` is distinct from no life-payment channel at all, and the value
@@ -24515,9 +24688,33 @@ pub enum DamageTargetFilter {
     /// planeswalkers you control"), `None` for the unrestricted "you/that player
     /// and permanents they control" (Channel Harm, the opponent-redirect cycle).
     /// The player leg is always matched regardless of this restriction.
+    ///
+    /// CR 109.1: `source_scope` carries the "OTHER" article — Palisade Giant's
+    /// "you and OTHER permanents you control" excludes the shield host itself
+    /// from the permanent leg, while Comeuppance, Channel Harm, Blessed Sanctuary
+    /// and Heroic Sacrifice state no exclusion.
+    ///
+    /// The CR has no dedicated "other"/"another" entry; CR 109.1 (object
+    /// identity) is cited as the foundation for the same-object comparison the
+    /// article implies, matching how the rest of the engine annotates `another`
+    /// exclusions (`FilterProp::Another`, `with_own_cast_exclusion`,
+    /// `restrictions.rs`, `trigger_matchers.rs`). It is a convention, not a
+    /// verbatim rule — do not read it as "CR 109.1 defines `other`".
+    ///
+    /// It is a genuine rules axis, not a cosmetic one. CR 614.5 ("a replacement
+    /// effect gets only one opportunity to affect an event") makes the
+    /// distinction invisible for a LONE self-recipient shield, but not once a
+    /// second applicable replacement exists: under CR 616.1 the affected player
+    /// is offered every applicable replacement, and offering a self-no-op burns
+    /// the CR 614.5 opportunity on the wrong shield.
+    ///
+    /// Reuses [`SourceExclusion`] — the existing "does this predicate include the
+    /// ability's own source object" axis — rather than a parallel vocabulary.
     PlayerOrPermanentsControlledBy {
         player: DamageTargetPlayerScope,
         permanent_type: Option<CoreType>,
+        #[serde(default, skip_serializing_if = "SourceExclusion::is_include")]
+        source_scope: SourceExclusion,
     },
 }
 
@@ -25018,6 +25215,15 @@ impl ReplacementDefinition {
         self
     }
 
+    /// CR 615.1a + CR 615.3 + CR 514.2: Mark this replacement as a one-shot
+    /// prevention shield ("the next time [source] would deal damage this turn,
+    /// prevent that damage" — Awe Strike). Single opportunity per CR 615.3;
+    /// consumed on use, expires at cleanup per CR 514.2.
+    pub fn prevention_oneshot_shield(mut self) -> Self {
+        self.shield_kind = ShieldKind::PreventionOneShot;
+        self
+    }
+
     /// CR 614.5 + CR 614.1a: Mark this replacement as a one-shot damage-amount
     /// shield (Desperate Gambit). Pair with `.damage_modification(...)` to set
     /// the amount formula; the shield is consumed after its single use and
@@ -25028,14 +25234,21 @@ impl ReplacementDefinition {
         self
     }
 
-    /// CR 614.9: Mark this replacement as a one-shot redirection shield that
-    /// re-targets the damage recipient. Consumed on use, expires at cleanup.
+    /// CR 614.9: Mark this replacement as a redirection shield that re-targets
+    /// the damage recipient. Expires at cleanup; `lifetime` decides whether it is
+    /// also consumed by its first event (CR 614.5) or re-applies to every
+    /// matching event in its window (CR 611.2a).
     pub fn redirection_shield(
         mut self,
         recipient: DamageRedirectTarget,
         amount: PreventionAmount,
+        lifetime: RedirectionLifetime,
     ) -> Self {
-        self.shield_kind = ShieldKind::Redirection { recipient, amount };
+        self.shield_kind = ShieldKind::Redirection {
+            recipient,
+            amount,
+            lifetime,
+        };
         self
     }
 
@@ -25753,6 +25966,29 @@ pub enum ParentTargetMissingReason {
     RevealHandChoice,
 }
 
+/// CR 608.2c: what a chain split — a `player_scope` fan-out, or a multi-target
+/// player subject — DETACHED from this node's chain.
+///
+/// Why this exists: the publish gate for a tracked-set producer must judge the
+/// PRE-SPLIT chain. A splitter hands the per-iteration resolution a template
+/// whose remainder has been detached, so a structural walk over that template
+/// cannot see a producer surviving in the detached tail — the head would publish
+/// where the undetached chain declines, binding a later `TrackedSet` consumer to
+/// the wrong population. The verdict is purely structural, so it is computed
+/// once at split time and carried on the template rather than re-derived.
+///
+/// SOLE WRITERS: `split_player_scope_chain`, `split_multi_target_player_chain`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DetachedRemainder {
+    /// Nothing was detached, or the detached remainder holds no producer in
+    /// publisher position. The template's own walk is the whole truth.
+    #[default]
+    NoProducer,
+    /// The detached remainder holds a node in publisher position, so this node
+    /// is NOT the sole producer of its pre-split chain and must not publish.
+    HoldsPublisher,
+}
+
 /// Runtime ability data passed to effect handlers at resolution time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedAbility {
@@ -25871,6 +26107,37 @@ pub struct ResolvedAbility {
     /// individual instructions selected from those modes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub selected_mode_labels: Vec<String>,
+    /// CR 700.2 + CR 608.2c: Marks this node as the ROOT of one selected mode's
+    /// instructions, and gives its position in the resolution order.
+    ///
+    /// CR 700.2: "Each of those options is a mode" — distinct modes are distinct
+    /// instructions, not continuations of each other. CR 608.2c ("follows its
+    /// instructions in the order written … apply the rules of English") makes an
+    /// anaphor like "those cards" / "it" bind to its NEAREST antecedent, which
+    /// can never be a sibling mode's population. `build_chained_resolved`
+    /// linearizes every selected mode into ONE `sub_ability` chain, erasing that
+    /// boundary from the chain shape; this field restores it.
+    ///
+    /// CR 700.2d: the value is the OCCURRENCE ORDINAL (0-based position within
+    /// the ordered selection), NOT the printed mode index — "if a particular
+    /// mode is chosen multiple times, the spell is treated as if that mode
+    /// appeared that many times in sequence", so Eldrazi Confluence's `[1, 1]`
+    /// yields ordinals `0` and `1` at the same printed index. Index-keying would
+    /// collide the two occurrences into one instruction.
+    ///
+    /// `None` on every non-mode-root node, including within-mode continuation
+    /// steps and every ability of a non-modal spell.
+    ///
+    /// SOLE WRITER: `game::ability_utils::build_chained_resolved`. Do not stamp
+    /// it anywhere else — consumers rely on "is a mode root" being decidable
+    /// from this field alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modal_instruction_ordinal: Option<usize>,
+    /// CR 608.2c: the publisher-position verdict of the chain remainder a
+    /// splitter detached from this node. See [`DetachedRemainder`]. Default
+    /// (`NoProducer`) on every node that was never split.
+    #[serde(default)]
+    pub detached_remainder: DetachedRemainder,
     /// CR 608.2c: Repeat this ability N times (from "for each [X], [effect]").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeat_for: Option<QuantityExpr>,
@@ -26068,6 +26335,35 @@ pub struct ResolvedAbility {
 }
 
 impl ResolvedAbility {
+    /// Whether this ability chain contains a zone change bounded by `event`.
+    pub(crate) fn contains_duration_event(&self, event: DurationEvent) -> bool {
+        (matches!(self.effect, Effect::ChangeZone { .. })
+            && self.duration.as_ref().and_then(Duration::zone_change_event) == Some(event))
+            || self
+                .sub_ability
+                .as_ref()
+                .is_some_and(|sub| sub.contains_duration_event(event))
+            || self
+                .else_ability
+                .as_ref()
+                .is_some_and(|branch| branch.contains_duration_event(event))
+    }
+
+    pub(crate) fn record_duration_event_recursive(&mut self, event: DurationEvent) {
+        if matches!(self.effect, Effect::ChangeZone { .. })
+            && self.duration.as_ref().and_then(Duration::zone_change_event) == Some(event)
+            && !self.context.duration_events.contains(&event)
+        {
+            self.context.duration_events.push(event);
+        }
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.record_duration_event_recursive(event);
+        }
+        if let Some(branch) = self.else_ability.as_mut() {
+            branch.record_duration_event_recursive(event);
+        }
+    }
+
     /// Build from a typed Effect. Simply stores the fields.
     pub fn new(
         effect: Effect,
@@ -26097,6 +26393,8 @@ impl ResolvedAbility {
             target_choice_timing: TargetChoiceTiming::Stack,
             description: None,
             selected_mode_labels: Vec::new(),
+            modal_instruction_ordinal: None,
+            detached_remainder: DetachedRemainder::NoProducer,
             repeat_for: None,
             min_x_value: 0,
             announced_x: None,
@@ -29513,6 +29811,7 @@ mod tests {
             },
             Duration::UntilHostLeavesPlay,
             Duration::UntilSourceExilesAnotherCard,
+            Duration::UntilOpponentBecomesMonarch,
             Duration::Permanent,
         ];
         let json = serde_json::to_string(&durations).unwrap();

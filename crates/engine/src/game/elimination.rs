@@ -827,6 +827,11 @@ fn do_eliminate(
         super::turn_control::recompute_active_player_control(state);
     }
 
+    // A consent run freezes canonical representatives and submitters. Player
+    // elimination changes that topology, so discard the run rather than
+    // allowing a stale prompt or Ready state to authorize anyone.
+    super::turn_control::invalidate_resolve_all_consent(state);
+
     // CR 800.4a + CR 800.4b: a departing searcher/zone owner invalidates its
     // live session, while a departing latched controller ends only that
     // controller's decision/knowledge role and falls back to the searcher.
@@ -1497,6 +1502,9 @@ mod tests {
             depth: 0,
             is_optional: false,
             library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
             may_cost_paid: false,
@@ -1609,6 +1617,7 @@ mod tests {
                     attach_to: None,
                     library_placement: None,
                     exile_duration: None,
+                    exile_controller: None,
                     exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
                     replacement_applied: HashSet::new(),
                     face_down_in_exile: false,
@@ -1626,6 +1635,7 @@ mod tests {
                     attach_to: None,
                     library_placement: None,
                     exile_duration: None,
+                    exile_controller: None,
                     exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
                     replacement_applied: HashSet::new(),
                     face_down_in_exile: false,
@@ -2599,6 +2609,9 @@ mod tests {
             depth: 0,
             is_optional: false,
             library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
             may_cost_paid: false,
@@ -2734,6 +2747,9 @@ mod tests {
             depth: 0,
             is_optional: false,
             library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
             may_cost_paid: false,
@@ -2782,6 +2798,9 @@ mod tests {
             depth: 0,
             is_optional: false,
             library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
             may_cost_paid: false,
@@ -2821,6 +2840,9 @@ mod tests {
             depth: 0,
             is_optional: false,
             library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
             may_cost_paid: false,
@@ -2890,6 +2912,9 @@ mod tests {
             depth: 0,
             is_optional: false,
             library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
             may_cost_paid: false,

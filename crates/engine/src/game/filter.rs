@@ -2239,6 +2239,16 @@ pub fn context_free_prop_matches_face(face: &CardFace, prop: &FilterProp) -> Opt
         FilterProp::WithKeyword { value } => Some(face.keywords.contains(value)),
         // allow-raw-authority: bare CardFace has no object, so no keyword grant can exist to miss
         FilterProp::WithoutKeyword { value } => Some(!face.keywords.contains(value)),
+        // The kind-level siblings (`HasKeywordKind` / `WithoutKeywordKind`) are
+        // intentionally ABSENT and fall to the `None` arm below. They exist to
+        // consult off-zone Layer-6 grants, which a bare face by definition cannot
+        // have, so a face reading would answer a strictly narrower question than
+        // the prop asks. Every production caller of this function evaluates an
+        // effect target filter or a static's `spell_filter` — never an
+        // `AbilityCondition` filter, which is the only place those props appear
+        // today — so the `None` default is unreachable rather than lossy. A future
+        // caller that needs them must add explicit arms here instead of relying on
+        // the fail-closed default.
         // CR 111.1 + CR 108.2: a bare face is a card definition, never a token.
         FilterProp::Token => Some(false),
         FilterProp::NonToken | FilterProp::RepresentedByCard => Some(true),
@@ -2757,6 +2767,63 @@ pub fn matches_target_filter_on_lki_snapshot(
         is_suspected: lki.is_suspected,
     };
     matches_target_filter_on_zone_change_record(state, &record, filter, ctx)
+}
+
+/// CR 608.2k + CR 608.2h: Evaluate a target filter against an ability's
+/// PERSISTENT untargeted reference — today, its cost-paid object.
+///
+/// This is NOT the same question as [`matches_target_filter_on_lki_snapshot`].
+/// A zone-change subject is gone, so its snapshot IS the answer. A cost-paid
+/// referent is a live reference the ability keeps pointing at (CR 608.2k), and
+/// CR 608.2h says such a reference reads the object's CURRENT information while
+/// it is in the public zone it was expected to be in — only a departed or
+/// hidden-zone object falls back to last known information.
+///
+/// The refresh is deliberately scoped to `keywords`. That is the one field the
+/// payment-time snapshot cannot answer honestly: the kind-level keyword props
+/// exist to consult Layer-6 grants recorded in the off-zone ledger
+/// (CR 613.1f), which by construction are applied to the LIVE object and are
+/// absent from any snapshot. A card discarded to Jhoira of the Ghitu's cost and
+/// then granted (or stripped of) suspend in the graveyard or in exile before the
+/// ability resolves must be read as it is at resolution, or the gate answers a
+/// question about a game state that no longer exists. Every other LKI field stays
+/// on the snapshot: type, name, P/T, colors and controller are look-back facts
+/// about the payment itself. (A filter that pairs a kind-level prop with an
+/// object-level `WithKeyword`/`WithoutKeyword` would see the refreshed list for
+/// both, since they read the same field — no card does that today, and CR 608.2h
+/// makes the live reading the correct one either way.)
+///
+/// Guarded by `TargetFilter::queries_keyword_kind` so the common cost-paid filter
+/// — a plain type/name look-back with no keyword question — costs one recursive
+/// predicate walk and skips both the ledger recomputation
+/// (`effective_off_zone_keywords` collects every applicable continuous effect)
+/// and the snapshot clone.
+pub fn matches_target_filter_on_cost_paid_reference(
+    state: &GameState,
+    object_id: ObjectId,
+    lki: &LKISnapshot,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    let refreshed = filter
+        .queries_keyword_kind()
+        .then(|| state.objects.get(&object_id))
+        .flatten()
+        .filter(|object| object.zone.is_public())
+        .map(|_| {
+            crate::game::off_zone_characteristics::effective_off_zone_keywords(state, object_id)
+        });
+
+    match refreshed {
+        Some(keywords) => {
+            let mut lki = lki.clone();
+            lki.keywords = keywords;
+            matches_target_filter_on_lki_snapshot(state, object_id, &lki, filter, ctx)
+        }
+        // Gone, or moved to a hidden zone: CR 608.2h mandates last known
+        // information, which is exactly what the payment snapshot holds.
+        None => matches_target_filter_on_lki_snapshot(state, object_id, lki, filter, ctx),
+    }
 }
 
 /// CR 400.7 + CR 603.10a: Match an event subject from its captured facts,
@@ -5828,11 +5895,13 @@ fn matches_filter_prop(
         // legs; the combat-damage-source leg of that authority injects a source
         // constraint rather than a set id and does not apply to a set-membership
         // predicate. Composes with `FilterProp::Not` for "all other <type>".
+        //
+        // The two-rung ladder is `targeting::resolve_tracked_set_id`'s body
+        // verbatim, so it is a CALL rather than a copy — an open-coded duplicate
+        // of a documented single authority is a divergence waiting to happen.
         FilterProp::InTrackedSet { id } => {
             let resolved = if id.0 == 0 {
-                state
-                    .chain_tracked_set_id
-                    .or_else(|| crate::game::targeting::latest_tracked_set_id(state))
+                crate::game::targeting::resolve_tracked_set_id(state)
             } else {
                 Some(*id)
             };

@@ -2,18 +2,20 @@ use rand::Rng;
 use std::collections::{HashSet, VecDeque};
 use thiserror::Error;
 
-use crate::types::ability::{EffectKind, KeywordAction, TargetRef};
+use crate::types::ability::{DurationEvent, EffectKind, KeywordAction, TargetRef};
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::actions::{
-    DebugAction, GameAction, MayTriggerAutoChoiceOp, PriorityYieldOp, TriggerOrderTemplateOp,
+    DebugAction, GameAction, MayTriggerAutoChoiceOp, PriorityYieldOp, ResolveAllConsentDecision,
+    TriggerOrderTemplateOp,
 };
 use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState};
 use crate::types::game_state::{
     ActionResult, AssistState, AutoMayChoice, AutoPassMode, AutoPassRequest, CastOfferKind,
     CastingVariant, ConvokeMode, CostResume, GameState, LandPlayRecord, LoopDetectionMode,
     ManaAbilityResume, MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveResume,
-    PendingCounterPostAction, PendingEffectResolved, RetargetScope, StackEntry, StackEntryKind,
+    PendingCounterPostAction, PendingEffectResolved, ResolveAllConsentParticipant,
+    ResolveAllConsentRun, ResolveAllPrioritySnapshot, RetargetScope, StackEntry, StackEntryKind,
     WaitingFor,
 };
 use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId, ObjectIncarnationRef};
@@ -74,7 +76,8 @@ use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 use super::zones;
 
 pub use super::engine_resolve_batch::{
-    resolve_all_fast_forward, ResolveAllCallbackDecision, ResolveAllFastForwardResult,
+    resolve_all_fast_forward, resolve_all_ready_is_authorized, resolve_all_ready_prefix,
+    ResolveAllCallbackDecision, ResolveAllFastForwardResult,
 };
 
 #[derive(Debug, Clone, Error)]
@@ -1063,6 +1066,62 @@ fn apply_action_boundary_core(
         lifecycle.discard();
         return Err(error);
     }
+    // CR 603.3 + CR 603.3b + CR 608.2c: recover an ownerless post-replacement
+    // strand on the state AS FOUND, before this action touches it.
+    //
+    // A `Dispatching` drain whose dispatcher is not on this thread's call stack
+    // has no owner and no retirement path: `begin_dispatch` refuses it,
+    // `finish_paused_dispatch` pops only `Paused`, and `finish_dispatch` needs a
+    // handle that died with its call frame. It keeps `resolution_stack`
+    // non-empty forever, so `triggers::resolution_completion_can_settle` is
+    // false forever — deferred triggered abilities can never be put on the stack
+    // the next time a player would receive priority (CR 603.3 + CR 603.3b) and
+    // the resolving carrier can never settle (CR 608.2c).
+    //
+    // WHY HERE, and not only at the priority boundary. The sweeper inside
+    // `resume_pending_continuation_if_priority` is evaluated AFTER a reducer arm
+    // has run, and only when the RESULTING state is `Priority`. It therefore
+    // repairs a strand this engine just created, and can never repair one it
+    // merely FOUND — including the reporter's saves, whose strand arrives
+    // through `PersistedGameState::into_game_state()` and is never produced by
+    // any engine write. Measured: the turn-20 capture rests at `Priority`, and
+    // its `PassPriority` advances the phase into the declare-attackers
+    // turn-based action (CR 117.3a + CR 703.1: a turn-based action doesn't use
+    // the stack, and the active player receives priority only AFTER it has been
+    // dealt with — so no player has priority during it), so the post-action
+    // sweep is not entered on that action. This is the only seam
+    // that observes the rest state the engine was parked at, and it is
+    // boundary-type agnostic: an ownerless `Dispatching` resident is not a rules
+    // state at any boundary.
+    //
+    // Live parked work is NOT ownerless and is not touched here: a continuation
+    // awaiting a player's answer (CR 614.12a) is left `Paused` by the
+    // dispatcher's cleanup, and the sweep's exhaustive match pops only
+    // `Dispatching`.
+    //
+    // This is the OUTER action funnel — `apply_action_boundary_core` has exactly
+    // three call sites: two public/simulation entry points and one internal
+    // clone-local life-safety preview. Deliberately NOT `apply_action`, which
+    // the auto-pass and shortcut loops re-enter twelve further ways.
+    //
+    // BEFORE `boundary_snapshot`, deliberately: every failure path restores that
+    // same snapshot, and removing an impossible state is not part of the action
+    // and must not be rolled back with it. CONSEQUENCE, stated so it is not
+    // later read as a bug: an action this boundary REJECTS still leaves
+    // `resolution_stack` repaired, with no `bump_state_revision` and no events,
+    // because the error paths return before `finish_action_boundary` runs. That
+    // is intended — a client that submitted one bad action before its pass must
+    // not stay wedged because of it.
+    //
+    // Re-entrancy is handled by the same live-dispatch guard the priority-
+    // boundary sweep uses: `SimulationFilter`'s clone-and-apply probe re-enters
+    // this function from inside an outer `apply`, and when that outer apply is
+    // inside a dispatch the flag is set, the sweep is suppressed, and recovery
+    // defers to the next boundary at which the flag is clear. No "outermost"
+    // depth test is added: gating on it would leave AI-probe clones unrepaired
+    // while the real state is repaired.
+    effects::sweep_ownerless_post_replacement_strand(state);
+    state.remove_empty_active_post_replacement_frame();
     let boundary_snapshot = state.clone();
     let journal_start = state.resolved_rules_journal.entries().len();
     let is_actor_scoped_preference = action.is_actor_scoped_preference();
@@ -6335,6 +6394,16 @@ fn check_actor_authorization(
     {
         return Ok(());
     }
+    if let GameAction::RevokeResolveAllConsent {
+        epoch,
+        representative,
+    } = action
+    {
+        return (turn_control::resolve_all_granted_submitter(state, *epoch, *representative)
+            == Some(actor))
+        .then_some(())
+        .ok_or(EngineError::WrongPlayer);
+    }
     // CR 103.5: For simultaneous-decision states (MulliganDecision,
     // OpeningHandBottomCards), authorize against the full pending set so any
     // pending player may submit in any order. Falls back to single-player
@@ -7516,6 +7585,161 @@ fn finalize_copy_retarget(
     Ok(())
 }
 
+fn begin_resolve_all_consent(
+    state: &mut GameState,
+    priority_player: PlayerId,
+    max_resolutions: u32,
+) -> Result<WaitingFor, EngineError> {
+    if state.priority_player
+        != turn_control::authorized_submitter_for_player(state, priority_player)
+    {
+        return Err(EngineError::NotYourPriority);
+    }
+    let current_representative =
+        super::topology::priority_pass_representative(state, priority_player);
+    let mut representatives = super::topology::priority_pass_participants(state);
+    let Some(current_index) = representatives
+        .iter()
+        .position(|representative| *representative == current_representative)
+    else {
+        return Err(EngineError::ActionNotAllowed(
+            "Resolve All requires a live priority representative".to_string(),
+        ));
+    };
+    representatives.rotate_left(current_index);
+
+    let epoch = state.next_resolve_all_consent_epoch;
+    let next_epoch = epoch.checked_add(1).ok_or_else(|| {
+        EngineError::ActionNotAllowed("Resolve All consent epoch space exhausted".to_string())
+    })?;
+    state.next_resolve_all_consent_epoch = next_epoch;
+    // CR 117.4: a stack object resolves only after every player passes in
+    // succession. Preserve the exact current pass cycle if consent is declined
+    // or revoked before its authorized one-entry materialization begins.
+    state.resolve_all_consent_run = Some(ResolveAllConsentRun {
+        epoch,
+        max_resolutions,
+        priority_snapshot: ResolveAllPrioritySnapshot {
+            waiting_player: priority_player,
+            priority_player: state.priority_player,
+            priority_pass_count: state.priority_pass_count,
+            priority_passes: state.priority_passes.clone(),
+        },
+        participants: representatives
+            .into_iter()
+            .map(|representative| ResolveAllConsentParticipant {
+                representative,
+                authorized_submitter: turn_control::authorized_submitter_for_player(
+                    state,
+                    representative,
+                ),
+                granted: representative == current_representative,
+            })
+            .collect(),
+    });
+
+    resolve_all_consent_waiting_for(state).ok_or_else(|| {
+        EngineError::ActionNotAllowed(
+            "Resolve All requires at least one representative".to_string(),
+        )
+    })
+}
+
+fn resolve_all_consent_waiting_for(state: &GameState) -> Option<WaitingFor> {
+    let run = state.resolve_all_consent_run.as_ref()?;
+    Some(
+        run.next_pending_representative()
+            .map(|representative| WaitingFor::ResolveAllConsent {
+                epoch: run.epoch,
+                representative,
+            })
+            .unwrap_or(WaitingFor::ResolveAllReady { epoch: run.epoch }),
+    )
+}
+
+// CR 117.3d + CR 117.4: A declined shortcut resumes the exact ordinary
+// priority-pass sequence it interrupted; no spell or ability has resolved.
+fn restore_resolve_all_priority_snapshot(state: &mut GameState) -> Result<WaitingFor, EngineError> {
+    let run = state.resolve_all_consent_run.take().ok_or_else(|| {
+        EngineError::InvalidAction("Resolve All consent is not active".to_string())
+    })?;
+    let snapshot = run.priority_snapshot;
+    state.priority_player = snapshot.priority_player;
+    state.priority_pass_count = snapshot.priority_pass_count;
+    state.priority_passes = snapshot.priority_passes;
+    Ok(WaitingFor::Priority {
+        player: snapshot.waiting_player,
+    })
+}
+
+fn respond_resolve_all_consent(
+    state: &mut GameState,
+    epoch: u64,
+    representative: PlayerId,
+    response_epoch: u64,
+    decision: ResolveAllConsentDecision,
+) -> Result<WaitingFor, EngineError> {
+    if epoch != response_epoch {
+        return Err(EngineError::InvalidAction(
+            "Resolve All consent epoch is stale".to_string(),
+        ));
+    }
+    {
+        let run = state.resolve_all_consent_run.as_mut().ok_or_else(|| {
+            EngineError::InvalidAction("Resolve All consent is not active".to_string())
+        })?;
+        if run.epoch != epoch || run.next_pending_representative() != Some(representative) {
+            return Err(EngineError::InvalidAction(
+                "Resolve All consent response is no longer pending".to_string(),
+            ));
+        }
+        if matches!(decision, ResolveAllConsentDecision::Grant) {
+            let participant = run
+                .participants
+                .iter_mut()
+                .find(|participant| participant.representative == representative)
+                .expect("pending Resolve All representative must be a participant");
+            participant.granted = true;
+        }
+    }
+    if matches!(decision, ResolveAllConsentDecision::Decline) {
+        return restore_resolve_all_priority_snapshot(state);
+    }
+    let waiting_for = resolve_all_consent_waiting_for(state).ok_or_else(|| {
+        EngineError::InvalidAction("Resolve All consent is not active".to_string())
+    })?;
+    // ResolveAllReady has no current actor, so the ordinary waiting-state sync
+    // deliberately leaves `priority_player` alone. Restore the saved priority
+    // cursor now; the Ready consumer validates this exact snapshot before it
+    // begins its first materialized CR 117.4 pass cycle.
+    if matches!(waiting_for, WaitingFor::ResolveAllReady { .. }) {
+        state.priority_player = state
+            .resolve_all_consent_run
+            .as_ref()
+            .expect("an active consent run produced ResolveAllReady")
+            .priority_snapshot
+            .priority_player;
+    }
+    Ok(waiting_for)
+}
+
+fn revoke_resolve_all_consent(
+    state: &mut GameState,
+    epoch: u64,
+    representative: PlayerId,
+) -> Result<WaitingFor, EngineError> {
+    let active = state
+        .resolve_all_consent_run
+        .as_ref()
+        .is_some_and(|run| run.epoch == epoch && run.is_granted(representative));
+    if !active {
+        return Err(EngineError::InvalidAction(
+            "Resolve All consent revocation is stale".to_string(),
+        ));
+    }
+    restore_resolve_all_priority_snapshot(state)
+}
+
 fn apply_action(
     state: &mut GameState,
     actor: PlayerId,
@@ -7877,7 +8101,11 @@ fn apply_action(
     let stack_len_before_action = state.stack.len();
     if !matches!(
         action,
-        GameAction::PassPriority | GameAction::OrderTriggers { .. }
+        GameAction::PassPriority
+            | GameAction::OrderTriggers { .. }
+            | GameAction::BeginResolveAll { .. }
+            | GameAction::RespondResolveAllConsent { .. }
+            | GameAction::RevokeResolveAllConsent { .. }
     ) && !answering_forced_window
     {
         state.loop_detect_ring.clear();
@@ -7898,7 +8126,10 @@ fn apply_action(
     match &action {
         GameAction::SetAutoPass { .. }
         | GameAction::PassPriority
-        | GameAction::ReorderHand { .. } => {}
+        | GameAction::ReorderHand { .. }
+        | GameAction::BeginResolveAll { .. }
+        | GameAction::RespondResolveAllConsent { .. }
+        | GameAction::RevokeResolveAllConsent { .. } => {}
         _ => {
             state.auto_pass.remove(&actor);
         }
@@ -7940,6 +8171,32 @@ fn apply_action(
                 log_entries: vec![],
             });
         }
+        (WaitingFor::Priority { player }, GameAction::BeginResolveAll { max_resolutions }) => {
+            begin_resolve_all_consent(state, *player, max_resolutions)?
+        }
+        (
+            WaitingFor::ResolveAllConsent {
+                epoch,
+                representative,
+            },
+            GameAction::RespondResolveAllConsent {
+                epoch: response_epoch,
+                decision,
+            },
+        ) => respond_resolve_all_consent(
+            state,
+            *epoch,
+            *representative,
+            response_epoch,
+            decision,
+        )?,
+        (
+            WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. },
+            GameAction::RevokeResolveAllConsent {
+                epoch,
+                representative,
+            },
+        ) => revoke_resolve_all_consent(state, epoch, representative)?,
         (WaitingFor::Priority { player }, GameAction::PlayLand { object_id, card_id }) => {
             if state.priority_player
                 != turn_control::authorized_submitter_for_player(state, *player)
@@ -14767,30 +15024,264 @@ pub fn start_game_skip_mulligan(state: &mut GameState) -> ActionResult {
     }
 }
 
-/// CR 607.2a + CR 406.6: Check if any exile-return sources have left the battlefield.
-/// If so, move the exiled cards back — linked abilities track which cards were exiled by the source.
+/// CR 607.2a + CR 406.6 + CR 610.3: Check for event-bounded exile returns.
+/// Move linked exiled cards back through the replacement-aware zone pipeline.
+pub(crate) fn duration_event_matches(
+    state: &GameState,
+    source_id: ObjectId,
+    source_incarnation: Option<ObjectIncarnationRef>,
+    controller: PlayerId,
+    duration_event: DurationEvent,
+    event: &GameEvent,
+) -> bool {
+    match (duration_event, event) {
+        (
+            DurationEvent::SourceLeftBattlefield,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                record,
+                ..
+            },
+        ) => {
+            *object_id == source_id
+                && source_incarnation.is_none_or(|expected| {
+                    record
+                        .trigger_source_context
+                        .as_ref()
+                        .is_none_or(|observed| observed.identity.reference == expected)
+                })
+        }
+        (DurationEvent::OpponentBecameMonarch, GameEvent::MonarchChanged { player_id }) => {
+            super::players::is_opponent(state, controller, *player_id)
+        }
+        _ => false,
+    }
+}
+
 pub(super) fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let mut to_return: Vec<crate::types::game_state::ExileLink> = Vec::new();
+    let mut stack_latches = Vec::new();
+    let mut resolving_latches = Vec::new();
+    let mut deferred_latches = Vec::new();
+    let mut ordered_latches = Vec::new();
 
-    for event in events.iter() {
-        if let GameEvent::ZoneChanged {
-            object_id,
-            from: Some(Zone::Battlefield),
-            ..
-        } = event
-        {
-            // Find exile links where this object was the source and the exile
-            // effect specified an automatic return when that source leaves.
-            for link in &state.exile_links {
-                if link.source_id == *object_id
-                    && matches!(
-                        &link.kind,
-                        crate::types::game_state::ExileLinkKind::UntilSourceLeaves { .. }
+    for (event_index, event) in events.iter().enumerate() {
+        for entry in &state.stack {
+            let StackEntryKind::TriggeredAbility {
+                ability,
+                trigger_event,
+                ..
+            } = &entry.kind
+            else {
+                continue;
+            };
+            let event_follows_trigger = trigger_event
+                .as_ref()
+                .and_then(|trigger| events.iter().position(|candidate| candidate == trigger))
+                .is_none_or(|trigger_index| event_index > trigger_index);
+            if !event_follows_trigger {
+                continue;
+            }
+            for duration_event in [
+                DurationEvent::SourceLeftBattlefield,
+                DurationEvent::OpponentBecameMonarch,
+            ] {
+                if ability.contains_duration_event(duration_event)
+                    && duration_event_matches(
+                        state,
+                        entry.source_id,
+                        ability
+                            .trigger_source
+                            .as_ref()
+                            .map(|source| source.identity.reference),
+                        entry.controller,
+                        duration_event,
+                        event,
                     )
                 {
-                    to_return.push(link.clone());
+                    stack_latches.push((entry.id, duration_event));
                 }
             }
+        }
+
+        if let Some(entry) = state.resolving_stack_entry.as_ref() {
+            if matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }) {
+                if let Some(ability) = entry.ability() {
+                    for duration_event in [
+                        DurationEvent::SourceLeftBattlefield,
+                        DurationEvent::OpponentBecameMonarch,
+                    ] {
+                        if ability.contains_duration_event(duration_event)
+                            && duration_event_matches(
+                                state,
+                                entry.source_id,
+                                ability
+                                    .trigger_source
+                                    .as_ref()
+                                    .map(|source| source.identity.reference),
+                                entry.controller,
+                                duration_event,
+                                event,
+                            )
+                        {
+                            resolving_latches.push(duration_event);
+                        }
+                    }
+                }
+            }
+        }
+
+        for (index, context) in state.deferred_triggers.iter().enumerate() {
+            let event_follows_trigger = context
+                .pending
+                .trigger_event
+                .as_ref()
+                .and_then(|trigger| events.iter().position(|candidate| candidate == trigger))
+                .is_none_or(|trigger_index| event_index > trigger_index);
+            if !event_follows_trigger {
+                continue;
+            }
+            for duration_event in [
+                DurationEvent::SourceLeftBattlefield,
+                DurationEvent::OpponentBecameMonarch,
+            ] {
+                if context
+                    .pending
+                    .ability
+                    .contains_duration_event(duration_event)
+                    && duration_event_matches(
+                        state,
+                        context.pending.source_id,
+                        context
+                            .pending
+                            .ability
+                            .trigger_source
+                            .as_ref()
+                            .map(|source| source.identity.reference),
+                        context.pending.controller,
+                        duration_event,
+                        event,
+                    )
+                {
+                    deferred_latches.push((index, duration_event));
+                }
+            }
+        }
+
+        if let Some(order) = state.pending_trigger_order.as_ref() {
+            for (group_index, group) in order.groups.iter().enumerate() {
+                for (trigger_index, context) in group.triggers.iter().enumerate() {
+                    let event_follows_trigger = context
+                        .pending
+                        .trigger_event
+                        .as_ref()
+                        .and_then(|trigger| {
+                            events.iter().position(|candidate| candidate == trigger)
+                        })
+                        .is_none_or(|origin_index| event_index > origin_index);
+                    if !event_follows_trigger {
+                        continue;
+                    }
+                    for duration_event in [
+                        DurationEvent::SourceLeftBattlefield,
+                        DurationEvent::OpponentBecameMonarch,
+                    ] {
+                        if context
+                            .pending
+                            .ability
+                            .contains_duration_event(duration_event)
+                            && duration_event_matches(
+                                state,
+                                context.pending.source_id,
+                                context
+                                    .pending
+                                    .ability
+                                    .trigger_source
+                                    .as_ref()
+                                    .map(|source| source.identity.reference),
+                                context.pending.controller,
+                                duration_event,
+                                event,
+                            )
+                        {
+                            ordered_latches.push((group_index, trigger_index, duration_event));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for (entry_id, duration_event) in stack_latches {
+        if let Some(ability) = state
+            .stack
+            .iter_mut()
+            .find(|entry| entry.id == entry_id)
+            .and_then(StackEntry::ability_mut)
+        {
+            ability.record_duration_event_recursive(duration_event);
+        }
+    }
+    for duration_event in resolving_latches {
+        if let Some(ability) = state
+            .resolving_stack_entry
+            .as_mut()
+            .and_then(StackEntry::ability_mut)
+        {
+            ability.record_duration_event_recursive(duration_event);
+        }
+    }
+    for (index, duration_event) in deferred_latches {
+        if let Some(context) = state.deferred_triggers.get_mut(index) {
+            context.record_duration_event(duration_event);
+        }
+    }
+    for (group_index, trigger_index, duration_event) in ordered_latches {
+        if let Some(context) = state
+            .pending_trigger_order
+            .as_mut()
+            .and_then(|order| order.groups.get_mut(group_index))
+            .and_then(|group| group.triggers.get_mut(trigger_index))
+        {
+            context.record_duration_event(duration_event);
+        }
+    }
+
+    for event in events.iter() {
+        match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                ..
+            } => {
+                // Find exile links where this object was the source and the exile
+                // effect specified an automatic return when that source leaves.
+                for link in &state.exile_links {
+                    if link.source_id == *object_id
+                        && matches!(
+                            &link.kind,
+                            crate::types::game_state::ExileLinkKind::UntilSourceLeaves { .. }
+                        )
+                    {
+                        to_return.push(link.clone());
+                    }
+                }
+            }
+            GameEvent::MonarchChanged { player_id } => {
+                for link in &state.exile_links {
+                    if let crate::types::game_state::ExileLinkKind::UntilOpponentBecomesMonarch {
+                        controller,
+                        ..
+                    } = &link.kind
+                    {
+                        if super::players::is_opponent(state, *controller, *player_id) {
+                            to_return.push(link.clone());
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -14823,11 +15314,14 @@ pub(super) fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEv
         if !still_in_exile {
             continue;
         }
-        let crate::types::game_state::ExileLinkKind::UntilSourceLeaves { return_zone } = &link.kind
-        else {
-            continue;
+        let return_zone = match &link.kind {
+            crate::types::game_state::ExileLinkKind::UntilSourceLeaves { return_zone }
+            | crate::types::game_state::ExileLinkKind::UntilOpponentBecomesMonarch {
+                return_zone,
+                ..
+            } => *return_zone,
+            _ => continue,
         };
-        let return_zone = *return_zone;
         let gi = match groups.iter().position(|(zone, _)| *zone == return_zone) {
             Some(i) => i,
             None => {
@@ -14969,6 +15463,7 @@ mod priority_reducer_census_tests {
             "ActivateManaSource",
             "ActivateNinjutsu",
             "ActivateStation",
+            "BeginResolveAll",
             "CastPreparedCopy",
             "CastSpell",
             "CastSpellAsSneak",
@@ -15002,7 +15497,12 @@ mod priority_reducer_census_tests {
             .collect::<BTreeSet<_>>();
         let expected_preflight_families = expected
             .iter()
-            .filter(|family| *family != "PassPriority" && *family != "SetAutoPass")
+            .filter(|family| {
+                !matches!(
+                    family.as_str(),
+                    "BeginResolveAll" | "PassPriority" | "SetAutoPass"
+                )
+            })
             .map(|family| (*family).to_owned())
             .collect::<BTreeSet<_>>();
         assert_eq!(preflight_families, expected_preflight_families);
@@ -18678,9 +19178,135 @@ mod stage2_injector_tests {
                 // trust looks like — and it is why the two prose entries are BOTH kept
                 // rather than one overwriting the other: they are separate witnesses, not
                 // duplicates.
-                "game/effects/mod.rs:6923".to_string(),
-                "game/effects/mod.rs:7000".to_string(),
-                "game/effects/mod.rs:10238".to_string(),
+                // Mycoloth devour/drain freeze (Discord 1537641754298290226), measured at
+                // upstream `66b2cbf5a1`: `:6774/:6851/:10089 ⇒ :6852/:6929/:10167`, a UNIFORM
+                // `+78` on all three. LOCAL, not upstream, so the CI-vs-local diagnosis in the
+                // header does not apply — the `+78` is this change's own `effects/mod.rs` delta
+                // (`git diff --stat` on that file against `76751548f` is `+78/-0`), namely the
+                // ADDITION of the new `sweep_ownerless_post_replacement_strand` function and its
+                // doc block, inserted immediately above `resume_resolution_frames` and therefore
+                // above all three producers.
+                //
+                // Stated as an ADDITION because that is what the committed diff contains: the
+                // hunk is `+78/-0` with no deletion anywhere, and
+                // `git grep -c ownerless 76751548f -- crates/engine/src` finds nothing, so there
+                // was no already-shipped sweep for a relocation to have moved. An earlier draft
+                // of this entry called it a relocation; the block was indeed moved, but only
+                // within this branch's own uncommitted history, which is invisible to every
+                // future reader of the committed diff. This log speaks in terms of the committed
+                // diff or it is not evidence.
+                //
+                // The conclusion is unchanged and still correct: the new function mints nothing,
+                // because it only retires a `DrainStatus::Dispatching` resident and creates no
+                // recipient, so it is correctly absent from this census.
+                // The `engine.rs` entry moved TOO this round (`:12796 ⇒ :12850`, `+54`) — see the
+                // note on that entry below. That is the first time a non-`effects/mod.rs` pin has
+                // drifted here, and the cause is this change's OWN second authorized edit in this
+                // file, not a set change.
+                // Identity re-established, not assumed: each producer at its new coordinate is
+                // sha256-identical to `66b2cbf5a1:effects/mod.rs` at its old one
+                // (`9869a19f28c791ee`, `2bc316e3aa0297f8`, `8df98486627bfe15`).
+                // Set preservation: the two asserts above this one ran FIRST and both fired
+                // GREEN on the run that caught this — total still **38**, partition still
+                // **5/8/25** — so no producer was added or lost, and this change's added lines
+                // contain zero occurrences of the assembled needle.
+                // `scoped_library_search.rs:452` did NOT move, re-read and confirmed in place.
+                //
+                // C1 FIX ROUND (clippy `doc_lazy_continuation` on that same new sweep's doc):
+                // `:6852/:6929/:10167 ⇒ :6853/:6930/:10168`, a UNIFORM `+1`. LOCAL, not
+                // upstream, so the CI-vs-local diagnosis in the header does not apply. The whole
+                // cause is ONE blank `///` line added to `sweep_ownerless_post_replacement_strand`'s
+                // doc block, separating its two closing prose lines from the bullet list above
+                // them so they read as their own paragraph rather than as an unindented
+                // continuation of the last bullet. That doc block sits above all three producers
+                // and is `effects/mod.rs`'s only change this round, taking the whole-file delta
+                // against `76751548f` from the `+78/-0` measured above to `+79/-0`. A doc line
+                // cannot mint a prompt.
+                //
+                // Set preservation: this row's OWN failure output named all five entries, and
+                // only the three `effects/mod.rs` ones shifted — `scoped_library_search.rs:452`
+                // was reported unmoved, which a census that had gained or lost a producer could
+                // not do.
+                // The `engine.rs` entry is deliberately NOT offered as a second unmoved control.
+                // It did read `:12850` when this row failed, but the L1 entry below moves it to
+                // `:12852` in this same commit, so a future reader of the committed diff cannot
+                // reproduce the `:12850` reading at all. The two readings reconcile only as
+                // separate uncommitted sub-rounds — exactly the within-branch history the
+                // ADDITION-vs-relocation note above rules inadmissible. One reproducible control
+                // is worth more than two that need the branch's private history to agree.
+                // Identity re-established rather than assumed:
+                // each producer at its new coordinate is sha256-identical to
+                // `2264d4aa3:effects/mod.rs` at its old one (`9869a19f28c791ee`,
+                // `2bc316e3aa0297f8`, `8df98486627bfe15` — the SAME three prefixes the entry
+                // above records, so this is pure line movement).
+                //
+                // REBASE ONTO `b2071a7f41`, the PR base. The local base this change was
+                // authored on (`76751548f`) never reached the remote; its companion
+                // phase-boundary drain landed upstream as #7475 instead. The header's rule
+                // applies yet again: this branch carried `:6853/:6930/:10168` and main
+                // carries `:6923/:7000/:10238`; NEITHER is correct for the rebased tree, and
+                // neither was taken — it measures `:7002/:7079/:10317`.
+                //
+                // Predicted with the cumulative offset, which is what makes this a
+                // measurement rather than a fixup: main's `:6923/:7000/:10238` plus this
+                // branch's CUMULATIVE net insertion into `effects/mod.rs` — `git diff
+                // --numstat` against the rebase base reads `79 0`, the `+78` sweep relocation
+                // plus the `+1` doc-continuation blank, and every hunk sits above the first
+                // producer — gives `6923+79`/`7000+79`/`10238+79` =
+                // `:7002`/`:7079`/`:10317`, equal to the observation on all three.
+                //
+                // Set preservation, measured on BOTH sides rather than assumed: the census
+                // reads total **41**, partition **5/8/28**, identically at the rebase base and
+                // in the rebased tree. Additivity holding on every pin while the partition is
+                // unchanged is the evidence the rebase minted and displaced nothing — a rebase
+                // that had gained or lost a producer would break the additivity, not merely
+                // shift a coordinate. Note the totals themselves moved upstream since this
+                // change was authored (**38**, `5/8/25` ⇒ **41**, `5/8/28`); that drift is
+                // main's and is adjudicated in the asserts above, which this branch does not
+                // touch.
+                //
+                // Identity re-established, not assumed: `9869a19f28c791ee`,
+                // `2bc316e3aa0297f8`, `8df98486627bfe15` at the new coordinates — the same
+                // three digests this log has carried since the first merge.
+                // `PreviousEffectCount` classification adds one line above all three
+                // producers, so main's move uniformly to `:7003/:7080/:10318`; no prompt
+                // site changes.
+                //
+                // #6857 (this branch, re-measured after the rebase onto `4c987f92a`):
+                // main's `:7003/:7080/:10318` => `:7225/:7302/:10582`. LOCATED BY DIGEST,
+                // not by arithmetic: each upstream pin's 10-line producer block was hashed
+                // at `upstream/main` and that digest searched for in this tree --
+                // `817ae852`/`43c05331`/`37d51f60`, each found at exactly ONE coordinate.
+                // Those three digests measure IDENTICALLY at `a8244e734` and at
+                // `4c987f92a`, so #7503 moved the producers without modifying them, and
+                // this branch displaced none of them.
+                //
+                // The deltas are AGAIN NOT uniform: `+222`/`+222`/`+264`. The additivity
+                // argument used above does not apply to this branch, because its
+                // insertions are not all above the first producer -- the mode-boundary
+                // reset lands in `resolve_ability_chain`, between the second and third.
+                // Uniformity is therefore the WRONG evidence here; digest identity is the
+                // right one, and it is what establishes the set was preserved. This
+                // branch writes `state.waiting_for` nowhere: the publish arms return
+                // `Vec<ObjectId>` and prompt for nothing, so it adds no producer here.
+                //
+                // #7484 maintainer review round 4 (same branch, no rebase):
+                // `:7225/:7302/:10582` => `:7261/:7338/:10618`, UNIFORM `+36`, and this
+                // time uniformity IS available as corroboration because every insertion
+                // sits above all three: the `GenericEffect` publish arm's
+                // `is_sole_chain_producer` gate at `:6037` and its comment block. Still
+                // located by digest rather than by arithmetic — each producer's 9-line
+                // block was hashed at this branch's committed tip and re-found at exactly
+                // one coordinate in the working tree (`cffb4348`/`0c3bdd6d`/`393bb75a`,
+                // all MATCH). The round's other edits are the two new `#[cfg(test)]`
+                // tests, which are below all three and mint no prompt, so the `in_test`
+                // total is unchanged.
+                // #7496's parked Cipher frame extends the exhaustive resume dispatch above
+                // all three producers. It adds six lines without assigning an optional-effect
+                // prompt, so the measured production producers move uniformly by `+6`.
+                "game/effects/mod.rs:7267".to_string(),
+                "game/effects/mod.rs:7344".to_string(),
+                "game/effects/mod.rs:10624".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
@@ -19366,44 +19992,71 @@ mod stage2_injector_tests {
                 //   `origin/main:crates/engine/src/game/engine.rs:12773`, and its offset from
                 //   `begin_pending_trigger_target_selection` (`:12662`) is STILL 134 — the
                 //   control that caught this row's one historical SILENT drift.
-                // CR 115.7 retarget-softlock fix (phase 1), MEASURED in the rebased tree
-                //   after the cherry-pick onto `origin/main` `1098f1b2ee`:
-                //   `:12851 ⇒ :12856`, +5, and ONLY this engine.rs entry moved — the four
-                //   `effects/mod.rs` + `scoped_library_search` entries are untouched by
-                //   this change. `git diff -U0 origin/main` on this file has exactly TWO
-                //   hunks above this producer, both inside `apply_retarget`:
-                //   `@@ -12594,2 +12594,4 @@` (+2 — the CR 115.7d clause added to the
-                //   per-slot re-check's comment) and `@@ -12608,3 +12610,6 @@` (+3 — the
-                //   `retarget_slot_violation` call gaining its `current_targets` argument
-                //   and wrapping across lines). `+2 +3 = +5`.
-                //   The coordinate below was MEASURED, never carried and never computed
-                //   from the pre-rebase value: this literal raised a CONFLICT on the
-                //   cherry-pick, which is exactly the anchor-rot class the note above
-                //   documents. `12851+5` agreeing with the measurement is a check on the
-                //   measurement, not a substitute for it. Identity re-established on BOTH
-                //   controls: the line at `:12856` is sha256-identical
-                //   (`8a544e87…5cc7d63`) to the producer at
-                //   `origin/main:crates/engine/src/game/engine.rs:12851`, and its offset
-                //   from `begin_pending_trigger_target_selection` (now `:12722`, was
-                //   `:12717` upstream) is STILL 134 — this change adds nothing inside that
-                //   function, and the offset is what discriminates when the same mint text
-                //   occurs at several coordinates in this crate.
-                //   Stated WITHOUT a whole-file delta, per the note above: THIS drift entry
-                //   is a further hunk in the same file, it is self-referential, and any
-                //   whole-file figure would be falsified by the next wording edit. It is
-                //   identified by POSITION instead — it sits BELOW the producer, so it
-                //   cannot move it. (It also cannot be counted: `code_of` strips comments,
-                //   and the needle is assembled.)
-                //   Neither above-producer hunk mints a prompt: both sit in the
-                //   VALIDATION half of `apply_retarget` — the half that consumes an
-                //   already-minted `RetargetChoice`, and it is THAT HALF which never writes
-                //   `state.waiting_for`. Scoped deliberately: `apply_retarget` as a whole
-                //   DOES write it, at its tail (`:12664`, `WaitingFor::Priority`), so the
-                //   claim is about the two hunks' half of the function and not about the
-                //   function. That tail write is below both hunks and is not a `*Choice`
-                //   producer, so it is not the needle either way. The census set is still
-                //   exactly 5.
-                "game/engine.rs:12856".to_string(),
+                //   Mycoloth devour/drain freeze, measured at upstream `66b2cbf5a1`:
+                //   `:12796 ⇒ :12850`, `+54`, and this is the FIRST time this entry has moved
+                //   for a LOCAL reason. The cause is this change's other authorized edit in this
+                //   same file: the ownerless-strand recovery call at the ENTRY of
+                //   `apply_action_boundary_core`, inserted immediately before
+                //   `let boundary_snapshot = state.clone();` at `:1066`. `git diff --stat` on
+                //   this file is `+54/-0`, the insertion is a comment block plus exactly two
+                //   call lines, and it sits ~11.7k lines ABOVE this producer, so predicted
+                //   `12796+54` equals the observed coordinate exactly. The inserted code mints
+                //   NOTHING: it calls `effects::sweep_ownerless_post_replacement_strand` and
+                //   `GameState::remove_empty_active_post_replacement_frame`, which retire a
+                //   corrupt `Dispatching` drain and drop an emptied frame — no recipient is
+                //   created, so the census set is still exactly 5.
+                //   Identity re-established, not assumed, on BOTH controls this row uses: the
+                //   line at `:12850` is sha256-identical (`a6d7f2f9d1e15de5`) to
+                //   `66b2cbf5a1:crates/engine/src/game/engine.rs:12796`, and it is still the
+                //   announcement-time modal mint inside `begin_pending_trigger_target_selection`
+                //   that this row NAMES.
+                //   L1 FIX ROUND (the CR-citation correction on that same recovery call's doc):
+                //   `:12850 ⇒ :12852`, `+2`. LOCAL, not upstream. This file has FOUR hunks this
+                //   round, and only ONE is above this producer — `@@ -1086,2 +1086,4 @@`, which
+                //   replaces the wrong `CR 508.1` gloss on the declare-attackers turn-based
+                //   action with `CR 117.3a + CR 703.1` and costs two lines. Predicted `12850+2`
+                //   equals the observed coordinate exactly.
+                //   The other THREE all sit in this `stage2_injector_tests` module BELOW the
+                //   producer: the two census edits ~5.8k lines below it, and — the one an
+                //   earlier revision of this row miscounted away — THIS ENTRY ITSELF, ~6.5k
+                //   lines below it. That revision said "exactly three hunks" because it counted
+                //   the file before writing itself into it. A self-referential census must count
+                //   the hunk it is being written as.
+                //   Position is the whole load-bearing claim and position alone settles it:
+                //   everything below `:12852` cannot move `:12852`, so the miscount never
+                //   threatened the conclusion. Those three are deliberately NOT pinned by `@@`
+                //   coordinate or line count — each is self-referential, and any rewording of
+                //   this log falsifies such a pin by exactly the size of the edit, the same trap
+                //   recorded in the row above. A comment cannot mint a prompt, so the census set
+                //   is still exactly 5.
+                //   Identity re-established, not assumed, on BOTH controls this row uses: the
+                //   line at `:12852` is sha256-identical (`a6d7f2f9d1e15de5`, the SAME prefix
+                //   the entry above records) to `2264d4aa3:crates/engine/src/game/engine.rs:12850`,
+                //   and its offset from `begin_pending_trigger_target_selection` is STILL 134
+                //   (the function opens `:12716 ⇒ :12718`, moving by the same `+2`) — the
+                //   control that caught this row's one historical SILENT drift.
+                //
+                //   REBASE ONTO `b2071a7f41`. Same rule, same composition: main carries
+                //   `:12856`, this branch carried `:12852`, and the rebased tree measures
+                //   `:12912`. Predicted as `12856+56`. This file's diff against the rebase
+                //   base is `+211/-41`, but only ONE hunk (`old@1065`, `+56`) lies above this
+                //   producer — the entry hook described above, plus the doc-continuation
+                //   blank; the other two hunks (`old@18681`, `+90`; `old@19369`, `+24`) are
+                //   THIS census array's own prose, ~5.8k lines BELOW the pin, which is why the
+                //   file's net `+170` is the wrong figure to compose and `+56` is the right
+                //   one. Those two figures include the two entries you are reading: this log
+                //   grows inside the region it measures, so they were re-measured AFTER being
+                //   written rather than quoted from the pre-edit tree.
+                //   Identity re-established, not assumed, on BOTH controls: the line at
+                //   `:12912` is sha256-identical (`a6d7f2f9d1e15de5`) to the same producer at
+                //   main's `:12856`, and its offset from
+                //   `begin_pending_trigger_target_selection` is STILL 134 — the function opens
+                //   `:12722 ⇒ :12778`, moving by the same `+56` as the pin, so the control
+                //   that caught this row's one historical silent drift is intact.
+                //   Resolve All consent adds its frozen-authority protocol above this producer:
+                //   `:12912 ⇒ :13113`. It does not create a CR 603.5 prompt, and the pinned
+                //   line remains the same `OptionalEffectChoice` construction.
+                "game/engine.rs:13113".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \

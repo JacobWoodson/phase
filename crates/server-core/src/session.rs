@@ -2,14 +2,12 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use engine::ai_support::{
-    auto_pass_recommended, legal_actions_full as engine_legal_actions_full, AiDecisionContract,
-};
+use engine::ai_support::{auto_pass_recommended, legal_actions_full as engine_legal_actions_full};
 use engine::database::legality::{validate_cedh_bracket, CedhBracketError};
 use engine::database::CardDatabase;
 use engine::game::deck_loading::{DeckPayload, PlayerDeckPayload};
 use engine::game::engine::{
-    apply, resolve_all_fast_forward, start_game, ResolveAllCallbackDecision,
+    apply, resolve_all_ready_is_authorized, resolve_all_ready_prefix, start_game,
 };
 use engine::game::interaction::{bind_interaction_authority, submit_interaction};
 use engine::game::layers::flush_layers;
@@ -33,7 +31,6 @@ use engine::types::mana::ManaCost;
 use engine::types::match_config::MatchConfig;
 use engine::types::match_config::MatchForfeitCause;
 use engine::types::player::PlayerId;
-use phase_ai::choose_action_with_session;
 use phase_ai::config::{AiConfig, AiDifficulty, Platform};
 use phase_ai::session::AiSession;
 use rand::{Rng, SeedableRng};
@@ -100,8 +97,8 @@ pub type ActionResult = (
 pub type RevisionedActionResult = (u64, ActionResult);
 
 /// Maximum server-authorized stack entries in one remote Resolve All request.
-/// The wire request is untrusted; `0` is intentionally not the engine's
-/// unlimited sentinel on this transport.
+/// The wire request is untrusted, but `0` remains the engine-defined uncapped
+/// sentinel; the active consent run, not this transport value, owns the cap.
 pub const MAX_RESOLVE_ALL_RESOLUTIONS: u32 = 5_000;
 
 #[derive(Debug, Clone)]
@@ -1574,17 +1571,20 @@ impl SessionManager {
         ))
     }
 
-    /// Fast-forwards stack resolution for an authenticated player while every
-    /// non-requester priority holder is a server-configured AI seat.
+    /// Consumes an engine-issued unanimous Resolve All consent run for an
+    /// authenticated player. AI seats do not authorize future priority passes;
+    /// each representative grants through the engine's consent protocol first.
+    /// `max_resolutions` remains range-checked for wire compatibility, while
+    /// the already-issued consent run owns the resolution cap.
     pub fn resolve_all_for_player(
         &mut self,
         game_code: &str,
         player_token: &str,
         max_resolutions: u32,
     ) -> Result<ResolveAllActionResult, String> {
-        if max_resolutions == 0 || max_resolutions > MAX_RESOLVE_ALL_RESOLUTIONS {
+        if max_resolutions > MAX_RESOLVE_ALL_RESOLUTIONS {
             return Err(format!(
-                "Resolve All maximum must be between 1 and {MAX_RESOLVE_ALL_RESOLUTIONS}"
+                "Resolve All maximum must not exceed {MAX_RESOLVE_ALL_RESOLUTIONS}"
             ));
         }
 
@@ -1603,64 +1603,22 @@ impl SessionManager {
             );
         }
 
-        // This is a priority shortcut, never an authorization bypass. A human
-        // may start it only while they currently hold the engine's priority.
-        if acting_player(&session.state) != Some(requester) {
-            return Err("Resolve All requires your priority".to_string());
+        if !resolve_all_ready_is_authorized(&session.state, requester) {
+            return Err("Resolve All consent is not ready".to_string());
         }
 
         session.state.log_player_names = session.display_names.clone();
         flush_layers(&mut session.state);
-        let ai_seats = session.ai_seats.clone();
-        let ai_configs = session.ai_configs.clone();
-        let ai_session = Arc::clone(
-            session
-                .ai_session
-                .get_or_insert_with(|| AiSession::arc_from_game(&session.state)),
-        );
         let pre_action_state = session.state.clone();
-        let mut rng = rand::rng();
-        let batch = resolve_all_fast_forward(
-            &mut session.state,
-            requester,
-            max_resolutions,
-            |state, actor| {
-                if !ai_seats.contains(&actor) {
-                    return ResolveAllCallbackDecision::Stop;
-                }
-                let Some(config) = ai_configs.get(&actor) else {
-                    return ResolveAllCallbackDecision::Stop;
-                };
-                let Some(semantic_owner) = state
-                    .waiting_for
-                    .acting_player()
-                    .or_else(|| state.waiting_for.acting_players().first().copied())
-                else {
-                    return ResolveAllCallbackDecision::Stop;
-                };
-                let contract = AiDecisionContract::issue(state, semantic_owner);
-                match choose_action_with_session(
-                    state,
-                    semantic_owner,
-                    config,
-                    &mut rng,
-                    &ai_session,
-                ) {
-                    Some(action) if contract.permits(state, actor, &action) => {
-                        ResolveAllCallbackDecision::Proposal { contract, action }
-                    }
-                    Some(_) | None => ResolveAllCallbackDecision::Stop,
-                }
-            },
-        );
+        // The cap is frozen into the consent run by BeginResolveAll. The wire
+        // argument remains range-checked above for transport compatibility but
+        // cannot enlarge or replace that explicit authorization.
+        let _ = max_resolutions;
+        let batch = resolve_all_ready_prefix(&mut session.state, requester);
         let summary = ResolveAllSummary {
             items_resolved: batch.items_resolved,
             total: batch.total,
         };
-
-        if batch.recorded_actions.is_empty() {
-            return Ok((None, summary));
-        }
 
         session.push_takeback_state(requester, pre_action_state);
         let (legal_actions, spell_costs, by_object) = engine_legal_actions_full(&session.state);

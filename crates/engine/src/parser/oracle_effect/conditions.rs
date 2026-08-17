@@ -5387,6 +5387,31 @@ fn parse_or_if_disjunction(text: &str, ctx: &mut ParseContext) -> Option<Ability
     Some(AbilityCondition::Or { conditions })
 }
 
+/// CR 613.1f + CR 702.1: single authority for lowering a keyword-presence
+/// ANAPHOR ("if it has <kw>" / "if it doesn't have <kw>") onto a
+/// `KeywordKind`-level `FilterProp`.
+///
+/// Both polarities must answer the same question at the same seam, and both
+/// must survive the subject being OFF the battlefield — the whole class exiles
+/// its subject first (suspend, foretell, time counters). Only the kind-level
+/// props (`HasKeywordKind` / `WithoutKeywordKind`) do that: they route through
+/// `object_has_effective_keyword_kind`, which consults the off-zone Layer-6
+/// ledger, while the object-level props read `obj.keywords`, which the layer
+/// system never refreshes in exile.
+///
+/// Returns `None` — a deliberate strict failure, leaving the clause to the
+/// swallowed-clause / `Unimplemented` path so coverage stays honest — when
+/// `Keyword::kind()` does NOT identify the parsed ability
+/// ([`Keyword::kind_identifies_ability`] documents both families). Falling back
+/// to `FilterProp::WithKeyword`/`WithoutKeyword` there is NOT an option: those
+/// are discriminant-matched on the live path, so they cannot separate
+/// protection from red from protection from blue, and they read the stale
+/// off-zone keyword vec besides — i.e. they would reintroduce the
+/// always-wrong-guard failure mode this lowering exists to remove.
+fn keyword_presence_kind(keyword: &Keyword) -> Option<crate::types::keywords::KeywordKind> {
+    keyword.kind_identifies_ability().then(|| keyword.kind())
+}
+
 pub(super) fn try_nom_condition_as_ability_condition(
     text: &str,
     ctx: &mut ParseContext,
@@ -5557,9 +5582,40 @@ pub(super) fn try_nom_condition_as_ability_condition(
         return Some(condition);
     }
 
-    // CR 702.62a: "it doesn't have [keyword]" / "it does not have [keyword]" — pronoun
-    // subject lacks-keyword check (e.g., "If it doesn't have suspend, it gains suspend").
-    // Mirrors the "~ doesn't have" / "this creature doesn't have" handler in oracle_condition.rs.
+    // CR 702.62a + CR 608.2c + CR 608.2k + CR 400.7: "it doesn't have [keyword]" /
+    // "it does not have [keyword]" — the negative-polarity twin of the "it has
+    // [keyword]" arm later in this same function.
+    //
+    // `it` is an ANAPHOR to the object introduced by the preceding instruction,
+    // by the ability's COST, or by the trigger condition — CR 608.2k enumerates
+    // all three — and NOT to the ability's source. This arm emits the
+    // CONTEXT-FREE (target / trigger-subject) reading;
+    // `rewrite_keyword_anaphor_for_cost_paid_parent` (oracle_effect/mod.rs)
+    // re-anchors it to `CostPaidObjectMatchesFilter` when the preceding clause
+    // binds its subject through the cost. That split mirrors
+    // `rewrite_cost_paid_exiled_reflexive_for_effect_exile_parent`, whose doc
+    // states the governing principle: only the clause context can disambiguate
+    // these subject classes.
+    //
+    // This arm previously emitted `SourceLacksKeyword`, whose evaluator reads
+    // `ability.source_id` — making the guard unconditionally true for every card
+    // whose `it` is not the source (Kang Prime, Jhoira of the Ghitu, Suspend,
+    // Delay, …), so an exiled card that already had the keyword was re-granted
+    // and its printed parameters clobbered.
+    //
+    // CR 613.1f + CR 702.62b: the prop is the KIND-level, off-zone-aware
+    // `WithoutKeywordKind`, not `WithoutKeyword`. `WithoutKeyword` reads
+    // `obj.keywords`, which the layer system refreshes only for battlefield,
+    // hand, and stack objects — never exile, where most of this class evaluates.
+    // `WithoutKeywordKind` routes through `object_has_effective_keyword_kind` on
+    // the live path and through the zone-change record's keywords on the snapshot
+    // path, so BOTH lowering targets read it correctly. It is also the CR-correct
+    // reading: CR 702.62a defines suspend as "Suspend N—[cost]", so "it doesn't
+    // have suspend" is a keyword-ABILITY presence test, parameters aside.
+    //
+    // The kind-level prop is only sound where `Keyword::kind()` IDENTIFIES the
+    // ability, which is NOT every keyword — `keyword_presence_kind` below is the
+    // single authority for that test and strict-fails the rest.
     if let Ok((keyword_text, _)) = alt((
         tag::<_, _, OracleError<'_>>("it doesn't have "),
         tag("it does not have "),
@@ -5570,8 +5626,15 @@ pub(super) fn try_nom_condition_as_ability_condition(
             .trim()
             .parse()
             .unwrap_or(Keyword::Unknown(String::new()));
-        if !matches!(keyword, Keyword::Unknown(_)) {
-            return Some(AbilityCondition::SourceLacksKeyword { keyword });
+        if let Some(value) = keyword_presence_kind(&keyword) {
+            return Some(AbilityCondition::TargetMatchesFilter {
+                filter: TargetFilter::Typed(TypedFilter {
+                    properties: vec![FilterProp::WithoutKeywordKind { value }],
+                    ..Default::default()
+                }),
+                use_lki: false,
+                subject_slot: None,
+            });
         }
     }
 
@@ -5972,19 +6035,32 @@ pub(super) fn try_nom_condition_as_ability_condition(
     }
 
     // CR 608.2c + CR 702.1: "it has [keyword]" — affirmative pronoun keyword check
-    // (e.g. "If it has flying, ..."). Routed through TargetMatchesFilter +
-    // FilterProp::WithKeyword, the same abstraction the "it's a [type]" arm uses
-    // (no SourceHasKeyword sibling to SourceLacksKeyword). Disjoint prefix from the
-    // "it doesn't have" arm above, so ordering is irrelevant.
+    // (e.g. "If it has flying, ..."). Routed through TargetMatchesFilter, the
+    // same abstraction the "it's a [type]" arm uses.
+    //
+    // CR 613.1f: shares `keyword_presence_kind` with its negative twin — the
+    // "it doesn't have [keyword]" arm above — so both polarities emit the same
+    // kind-level, off-zone-aware prop and strict-fail on the same keywords. The
+    // affirmative arm previously emitted the object-level
+    // `FilterProp::WithKeyword`, a shape `filter_is_bare_keyword_kind_predicate`
+    // does not accept, so `rewrite_keyword_anaphor_for_cost_paid_parent` could
+    // never re-anchor this polarity: an "if it has <kw>" clause after a
+    // cost-paid parent found neither an object target nor (for an activated
+    // ability) a trigger event and failed closed. Both polarities now reach that
+    // rewrite, and `rewrite_filter_keyword` (oracle_effect/mod.rs) already swaps
+    // `HasKeywordKind` for "the same is true for <kw list>" replication.
+    //
+    // Disjoint prefix from the negative arm, so ordering between them is
+    // irrelevant.
     if let Ok((keyword_text, _)) = tag::<_, _, OracleError<'_>>("it has ").parse(lower.as_str()) {
         let keyword: Keyword = keyword_text
             .trim()
             .parse()
             .unwrap_or(Keyword::Unknown(String::new()));
-        if !matches!(keyword, Keyword::Unknown(_)) {
+        if let Some(value) = keyword_presence_kind(&keyword) {
             return Some(AbilityCondition::TargetMatchesFilter {
                 filter: TargetFilter::Typed(TypedFilter {
-                    properties: vec![FilterProp::WithKeyword { value: keyword }],
+                    properties: vec![FilterProp::HasKeywordKind { value }],
                     ..Default::default()
                 }),
                 use_lki: false,
@@ -9866,7 +9942,9 @@ mod tests {
         );
     }
 
-    /// CR 608.2c + CR 702.1: "If it has [keyword]" gates on FilterProp::WithKeyword.
+    /// CR 608.2c + CR 702.1 + CR 613.1f: "If it has [keyword]" gates on the
+    /// kind-level `FilterProp::HasKeywordKind` — the same off-zone-aware prop its
+    /// negative twin uses (`keyword_presence_kind` is the shared authority).
     /// Pre-fix this dropped to `None` (only the negative "it doesn't have" arm
     /// existed), dropping the else-branch.
     #[test]
@@ -9887,10 +9965,10 @@ mod tests {
             panic!("expected Typed filter for keyword");
         };
         assert!(
-            tf.properties.contains(&FilterProp::WithKeyword {
-                value: Keyword::Flying
+            tf.properties.contains(&FilterProp::HasKeywordKind {
+                value: crate::types::keywords::KeywordKind::Flying
             }),
-            "expected WithKeyword(Flying) property, got {:?}",
+            "expected HasKeywordKind(Flying) property, got {:?}",
             tf.properties
         );
     }
