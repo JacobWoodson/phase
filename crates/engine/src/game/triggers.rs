@@ -10876,10 +10876,15 @@ fn filter_binding_diverges(filter: &TargetFilter) -> bool {
 /// makes it the widest door into the hoist decision.
 fn controller_ref_binding_diverges(controller: &ControllerRef) -> bool {
     match controller {
-        // CR 115.1: reads the resolving ability's declared targets. At fire time
-        // `ability.targets` is empty and both arms silently fall back to the
-        // TRIGGERING player instead — a different player, with no gate rejection
-        // to catch it.
+        // CR 115.1: reads the resolving ability's declared targets, and at fire
+        // time `ability` is `None`. The two resolution sites answer that
+        // absence DIFFERENTLY, and BOTH diverge from the target-bound reading:
+        // `filter_inner_for_object`'s `Typed` arm falls back to the TRIGGERING
+        // player (`filter.rs`, the `.or_else(triggering_event_player)` after the
+        // `TargetRef::Player` scan) — a different player, scoping the same
+        // printed population to the wrong board with no gate rejection to catch
+        // it — while `filter::controller_ref_player` has no such fallback and
+        // answers `None`. Declining covers both.
         ControllerRef::TargetPlayer
         | ControllerRef::TargetOpponent
         // CR 109.4 + CR 108.3: the parent target's controller / owner, read off
@@ -21946,7 +21951,7 @@ pub mod tests {
     /// counts whatever an unrelated earlier resolution left behind — here,
     /// nothing — exactly as `TrackedSetSize` does one axis over.
     ///
-    /// The second pair is the CONTROLLER axis of that same filter. CR 115.1
+    /// The second half is the CONTROLLER axis of that same filter. CR 115.1
     /// `ControllerRef::TargetPlayer` scopes the population to the RESOLVING
     /// ability's player target; the fire-time `FilterContext` is built with
     /// `ability = None` and `targets = &[]`, so it silently re-scopes the same
@@ -21954,16 +21959,26 @@ pub mod tests {
     /// reachable through `TargetFilter::Typed` — the widest door in the engine —
     /// while the arm read only `FilterProp::Another`.
     ///
-    /// MINIMAL PAIRS: every half is `ObjectCount{F} >= 2` and differs from the
-    /// reach-guard only in `F`. The reach-guard proves an `ObjectCount`
+    /// MINIMAL PAIRS: every `run` half is `ObjectCount{F} >= 2` and differs from
+    /// the reach-guard only in `F`. The reach-guard proves an `ObjectCount`
     /// comparison really does bridge and really is evaluated at fire time, so the
     /// declined halves' `stack == 1` is the decline and nothing else.
     ///
+    /// The target-bound half needs its OWN fixture (`run_target_bound`) rather
+    /// than another `run` row, because `run` builds the ability with
+    /// `targets: vec![]` — under which BOTH legs fall through to the same
+    /// triggering-player reading, so it could show the decline but never that the
+    /// decline is load-bearing. `run_target_bound` binds a real
+    /// `TargetRef::Player` and splits the boards so the two legs genuinely
+    /// disagree, then resolves the survivor to prove the resolution-time gate was
+    /// TRUE — i.e. that a hoist would have DELETED a live ability, not merely
+    /// re-checked one.
+    ///
     /// REVERT-TO-RED: restore the `_ => false` tail of `filter_binding_diverges`
-    /// (and drop the `controller` leg of its `Typed` arm) and both declined
-    /// halves report `stack == 0` with `delayed_triggers` emptied — the one-shot
-    /// deleted by `false_gate_consumes_one_shot` on a population the resolver
-    /// never counted.
+    /// (and drop the `controller` leg of its `Typed` arm) and every declined half
+    /// reports `stack == 0` with `delayed_triggers` emptied — the one-shot deleted
+    /// by `false_gate_consumes_one_shot` on a population the resolver never
+    /// counted. The target-bound half additionally reports `monarch == None`.
     #[test]
     fn resolution_published_population_gate_declines_the_fire_time_hoist() {
         // Unit pins for the adjudications the production pairs below drive, one
@@ -22112,12 +22127,118 @@ pub mod tests {
              resolution-only reading and the ability must reach the stack"
         );
 
-        let (target_scoped_stack, _) = run(typed_creature(ControllerRef::TargetPlayer));
+        // ---- CR 115.1: the TARGET-BOUND half, on a board where the two legs
+        // ---- genuinely read DIFFERENT populations.
+        //
+        // The `run` fixture above cannot prove this one: it builds the delayed
+        // ability with `targets: vec![]`, so `ability.targets` is empty at
+        // RESOLUTION too and both legs fall through to the same triggering-player
+        // reading. It shows the decline happening but not that the decline is
+        // load-bearing. This fixture binds a real `TargetRef::Player` and splits
+        // the two players' boards so the readings actually disagree:
+        //
+        //   * TARGET (P1) controls two creatures  → resolution-time gate TRUE;
+        //   * TRIGGERING player / controller (P0) controls none → fire-time gate
+        //     FALSE, because `ability` is `None` and the `Typed` arm falls back
+        //     to `triggering_event_player` (P0, from `ZoneChangeRecord.controller`).
+        //
+        // So a hoist here does not merely re-check — it DELETES a one-shot whose
+        // resolution-time gate was true. That is the whole cost of a wrong
+        // `false`, demonstrated end to end.
+        fn run_target_bound() -> (usize, usize, Option<PlayerId>) {
+            let mut state = setup();
+            let controller = PlayerId(0);
+            let target_player = PlayerId(1);
+            state.active_player = controller;
+            state.priority_player = controller;
+
+            let source = create_object(
+                &mut state,
+                CardId(0x0603_040D),
+                controller,
+                "Target-Bound Rider".to_string(),
+                Zone::Battlefield,
+            );
+            // The TARGET's board — the only creatures in the game. The
+            // controller (and therefore the triggering player, which
+            // `ZoneChangeRecord::test_minimal` pins to `PlayerId(0)`) controls
+            // none, so the two legs cannot agree.
+            make_creature(&mut state, target_player, "Target's Squire", 1, 1);
+            make_creature(&mut state, target_player, "Target's Knight", 2, 2);
+            let victim = create_object(
+                &mut state,
+                CardId(0x0603_040E),
+                controller,
+                "Doomed Bystander".to_string(),
+                Zone::Battlefield,
+            );
+
+            let mut ability = ResolvedAbility::new(
+                Effect::BecomeMonarch {
+                    target: TargetFilter::Controller,
+                },
+                vec![TargetRef::Player(target_player)],
+                source,
+                controller,
+            );
+            ability.condition = Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(
+                            TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+                        ),
+                    },
+                },
+                comparator: crate::types::ability::Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 2 },
+            });
+            state.delayed_triggers.push(DelayedTrigger {
+                condition: DelayedTriggerCondition::WhenDies {
+                    filter: TargetFilter::SpecificObject { id: victim },
+                },
+                ability: Box::new(ability),
+                controller,
+                source_id: source,
+                one_shot: true,
+                provenance: DelayedInstallIdentity::LegacyDelayed,
+            });
+
+            let death = zone_changed_event(
+                victim,
+                Zone::Battlefield,
+                Zone::Graveyard,
+                vec![CoreType::Creature],
+                Vec::new(),
+            );
+            check_delayed_triggers(&mut state, &[death]);
+            let stack_len = state.stack.len();
+            let remaining = state.delayed_triggers.len();
+            if stack_len == 1 {
+                let mut events = Vec::new();
+                crate::game::stack::resolve_top(&mut state, &mut events);
+            }
+            (stack_len, remaining, state.monarch)
+        }
+
+        let (target_stack, target_remaining, target_monarch) = run_target_bound();
         assert_eq!(
-            target_scoped_stack, 1,
+            target_stack, 1,
             "CR 115.1: a target-player-scoped population reads `ability.targets`, which the \
-             fire-time context does not carry — it would count the TRIGGERING player's \
-             creatures instead of the target's"
+             fire-time context does not carry. 0 here means the hoist counted the TRIGGERING \
+             player's creatures (none) instead of the TARGET's (two) and gated the ability \
+             off the stack"
+        );
+        assert_eq!(
+            target_remaining, 0,
+            "CR 603.7b: the bound-object one-shot left the delayed list by FIRING, not by \
+             being consumed by a false gate — see the stack assertion above"
+        );
+        assert_eq!(
+            target_monarch,
+            Some(PlayerId(0)),
+            "divergence proof: the RESOLUTION-time leg reads the same gate as TRUE (the \
+             TARGET controls two creatures), so a fire-time deletion would have destroyed \
+             an ability that was supposed to resolve"
         );
     }
 
