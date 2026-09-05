@@ -245,8 +245,9 @@ const DESCRIPTION_KEY: &str = "description";
 ///   Effect::BecomeCopy.duration                       ┐
 ///   Effect::GainActivatedAbilitiesOfTarget.duration   │
 ///   Effect::GenericEffect.duration                    │
-///   Effect::ForceAttack.duration                      ├ the 7 Effect carriers
-///   Effect::CastFromZone.duration                     │
+///   Effect::ForceAttack.duration                      │ <- bare `Duration`
+///   Effect::ForceBlock.duration                       ├ <- bare `Duration`
+///   Effect::CastFromZone.duration                     │   the 8 Effect carriers
 ///   Effect::CreateEmblem.duration                     │ <- always `None` today
 ///   Effect::PreventDamage.prevention_duration         ┘ <- NOT named `duration`
 ///   CastingPermission::ExileWithAltCost.duration      ┐ CastingPermission
@@ -258,6 +259,13 @@ const DESCRIPTION_KEY: &str = "description";
 /// other direction: `"prevention_duration":"UntilEndOfTurn"` does NOT contain the
 /// substring `"duration":"UntilEndOfTurn"` (the character before `duration` is `_`, not
 /// `"`), so the marker was blind to every damage-prevention shield's duration.
+///
+/// `Effect::ForceBlock.duration` was absent from this list before `CreateEmblem`
+/// was added, so the list read 6 where the command returned 7. Re-derived from the
+/// command rather than incremented by hand — the same eye-enumeration hazard the
+/// `duration_governs` doc in `oracle_ir/ast.rs` records. Neither omission changed
+/// `DURATION_KEYS` itself: both fields are literally named `duration`, so the key
+/// set was correct while the inventory justifying it was not.
 const DURATION_KEYS: &[&str] = &["duration", "prevention_duration"];
 
 /// The JSON key at which a `WheneverEventExpiry`-typed field is serialized
