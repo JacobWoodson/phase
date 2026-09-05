@@ -8988,10 +8988,133 @@ pub enum UntilCondition {
 /// CR 117.1 + CR 400.7j + CR 608.2k: Public characteristics of an object paid
 /// as a cost for the resolving spell or ability. Effects can later refer to
 /// that object even after the cost moved it to a public zone.
+///
+/// CR 400.7 + CR 608.2k: `incarnation` is the referent's
+/// `GameObject::incarnation` at binding time. CR 608.2k keeps the reference
+/// alive across *characteristic* changes, but an object that changes zones
+/// becomes a new object (CR 400.7) that the reference must no longer name.
+/// Because the engine reuses `ObjectId` as stable storage identity, the id
+/// alone cannot distinguish "still the bound object" from "a new object at the
+/// same id"; the incarnation epoch is what separates them. Consumers that act
+/// on the *live* object (identity reads) must gate on
+/// [`CostPaidObjectSnapshot::is_current`]. Consumers that read the frozen
+/// `lki` are unaffected — LKI is the departed object's recorded state and is
+/// incarnation-safe by construction (CR 608.2h).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CostPaidObjectSnapshot {
     pub object_id: ObjectId,
     pub lki: LKISnapshot,
+    /// CR 400.7: incarnation epoch captured at binding time. Legacy saves that
+    /// predate this field deserialize to [`LEGACY_INCARNATION`], which can
+    /// never equal a live object's incarnation, so such records are treated as
+    /// stale (fail-closed) rather than silently naming a new object.
+    #[serde(default = "legacy_incarnation")]
+    pub incarnation: u64,
+}
+
+/// Serde default for [`CostPaidObjectSnapshot::incarnation`] on pre-migration
+/// saves. Mirrors `ObjectIncarnationRefCompat`'s legacy arm
+/// (`types/identifiers.rs`): a record written before the incarnation was
+/// captured cannot prove which incarnation it bound, so it is pinned to a
+/// sentinel that never matches a live object.
+fn legacy_incarnation() -> u64 {
+    crate::types::identifiers::LEGACY_INCARNATION
+}
+
+impl CostPaidObjectSnapshot {
+    /// CR 400.7j + CR 608.2k: Capture the cost-paid referent from a
+    /// live object, pinning its current incarnation. The single construction
+    /// seam for production binding sites, so no seam can forget the epoch.
+    pub fn capture(object: &crate::game::game_object::GameObject, lki: LKISnapshot) -> Self {
+        Self {
+            object_id: object.id,
+            lki,
+            incarnation: object.incarnation,
+        }
+    }
+
+    /// CR 608.2c + CR 608.2h + CR 400.7: Bind a referent whose object has
+    /// already left the zone the parent instruction moved it from, so its
+    /// characteristics come from last known information rather than a live
+    /// read. The object row survives the move with its incarnation already
+    /// bumped (`game/zones.rs`), so `state_incarnation` is that post-move
+    /// epoch: the reference names the object as the parent instruction left
+    /// it, and goes stale if it moves again.
+    ///
+    /// Returns a snapshot pinned to [`LEGACY_INCARNATION`] when the row is
+    /// gone entirely (ceased to exist), which no live object can match.
+    pub fn capture_departed(
+        state: &crate::types::game_state::GameState,
+        object_id: ObjectId,
+        lki: LKISnapshot,
+    ) -> Self {
+        let incarnation = state
+            .objects
+            .get(&object_id)
+            .map_or(crate::types::identifiers::LEGACY_INCARNATION, |object| {
+                object.incarnation
+            });
+        Self {
+            object_id,
+            lki,
+            incarnation,
+        }
+    }
+
+    /// CR 400.7: True when this snapshot still names the live object it was
+    /// bound to. False when the referent left and returned (a new object at the
+    /// same storage id), when it is gone entirely, or when the record is a
+    /// pre-migration save with no captured incarnation.
+    ///
+    /// This is a strict full-pair compare and is deliberately NOT
+    /// `ResolvedAbility::target_pin_is_current`, which fails *open* when no pin
+    /// is recorded — a `CostPaidObject` referent never has an ordinary target
+    /// pin, so that check would pass for free.
+    pub fn is_current(&self, state: &crate::types::game_state::GameState) -> bool {
+        crate::types::identifiers::ObjectIncarnationRef::of(self.object_id, self.incarnation)
+            .is_current(state)
+    }
+
+    /// CR 400.7 + CR 608.2k: Re-pin this snapshot to the referent's CURRENT
+    /// incarnation, keeping the characteristics captured at binding time.
+    ///
+    /// Cost-payment seams necessarily capture the referent BEFORE the cost moves
+    /// it (the `lki` must record its pre-move characteristics — CR 608.2h), but
+    /// that move is the cost's own and must NOT invalidate the reference: CR
+    /// 608.2k exists so an effect can still refer to the object its cost moved.
+    /// Re-pinning once the cost's moves are complete makes the pin mean "this
+    /// object, as the cost left it", so only a LATER zone change reads as stale.
+    ///
+    /// Deliberately re-reads the live incarnation rather than assuming a fixed
+    /// increment: a cost move may be redirected by a replacement effect or pass
+    /// through more than one zone, so the delta is not reliably one.
+    ///
+    /// Leaves the pin untouched when the object no longer exists — the recorded
+    /// epoch then still cannot match any live object, which is the correct
+    /// fail-closed reading.
+    pub fn repin_to_current_incarnation(&mut self, state: &crate::types::game_state::GameState) {
+        if let Some(object) = state.objects.get(&self.object_id) {
+            self.incarnation = object.incarnation;
+        }
+    }
+
+    /// CR 400.7 + CR 608.2k: The single authority for resolving this snapshot to
+    /// a LIVE object id. Yields the id only while the snapshot still names the
+    /// object it was bound to; a referent that left (with or without returning
+    /// under the same storage id) yields `None`, and there is deliberately NO
+    /// fallback to a same-id object.
+    ///
+    /// Every live-object consumer of a `CostPaidObject` / `AmassedArmy`
+    /// referent must resolve through here rather than reading `object_id`
+    /// directly, so the identity rule has one implementation instead of one per
+    /// call site.
+    ///
+    /// This is NOT for readers of the frozen `lki`: CR 608.2h requires those to
+    /// keep reporting the departed object's recorded characteristics, so they
+    /// read `self.lki` and never call this.
+    pub fn live_object_id(&self, state: &crate::types::game_state::GameState) -> Option<ObjectId> {
+        self.is_current(state).then_some(self.object_id)
+    }
 }
 
 /// CR 106.1b + CR 400.7 + CR 602.2b (issue #6504): The mana type(s) spent to
@@ -29959,6 +30082,27 @@ impl ResolvedAbility {
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_cost_paid_object_recursive(snapshot);
+        }
+    }
+
+    /// CR 400.7 + CR 608.2k: Re-pin this ability's (and every sub/else branch's)
+    /// cost-paid referent to its current incarnation, once the cost's own object
+    /// moves are complete. Mirrors `set_cost_paid_object_recursive`'s traversal.
+    ///
+    /// See `CostPaidObjectSnapshot::repin_to_current_incarnation`: the cost's own
+    /// move must not make the reference stale, only a later one.
+    pub fn repin_cost_paid_object_recursive(
+        &mut self,
+        state: &crate::types::game_state::GameState,
+    ) {
+        if let Some(snapshot) = self.cost_paid_object.as_mut() {
+            snapshot.repin_to_current_incarnation(state);
+        }
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.repin_cost_paid_object_recursive(state);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.repin_cost_paid_object_recursive(state);
         }
     }
 
