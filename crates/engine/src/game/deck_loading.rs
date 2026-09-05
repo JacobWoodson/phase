@@ -788,8 +788,9 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
         netted
     };
     // The netted slots must mirror the command-zone placement loops below
-    // EXACTLY: commanders only when the format has a command zone, signature
-    // spells only under Oathbreaker. Netting a slot that is not placed would
+    // EXACTLY: commanders only when the format's command zone is filled from
+    // the decklist's `commander` slot, signature spells only under
+    // Oathbreaker. Netting a slot that is not placed would
     // silently delete a library card; placing a slot that is not netted is the
     // 101-card bug this guards. `place_commanders` is therefore read by BOTH
     // this closure and the placement loop — the single predicate is what keeps
@@ -804,7 +805,31 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     // `CommandZoneNetting::CountVerbatim` precisely so a command-zone entry
     // does NOT discount a main-deck copy. Netting it here would start the game
     // one library card short of the decklist the validator approved.
-    let place_commanders = state.format_config.uses_commander;
+    //
+    // The predicate is `command_zone_holds_decklist_commander`, NOT
+    // `uses_commander`. `uses_commander` is `command_zone &&
+    // commander_damage_threshold.is_some()` — it answers "does CR 903.10a
+    // commander damage apply", not "does the command zone hold a decklist
+    // card". Tiny Leaders and Oathbreaker seat a real commander card in the
+    // command zone with no damage threshold, so `uses_commander` is `false`
+    // for both while `deck_validation.rs` nets them with
+    // `CommandZoneNetting::NetAgainstMainDeck`. Gating on `uses_commander`
+    // therefore left a legal Oathbreaker or Tiny Leaders deck's commander in
+    // the library AND unplaced in the command zone, while the validator had
+    // already netted it out of the deck-size check — the two disagreed about
+    // the same card. `FormatConfig::command_zone` is not the predicate either:
+    // Archenemy (CR 904.2) and Momir have a command zone that holds no
+    // decklist card at all, so netting on it would delete a library card.
+    //
+    // `GameFormat::Custom` cannot answer this from a bare format (it carries no
+    // `CustomFormatRules`), so it falls back to the resolved config's
+    // Custom-aware `uses_commander` field — the value this line used before,
+    // leaving Custom behavior exactly as it was.
+    let place_commanders = state
+        .format_config
+        .format
+        .command_zone_holds_decklist_commander()
+        .unwrap_or(state.format_config.uses_commander);
     let oathbreaker = state.format_config.format == crate::types::format::GameFormat::Oathbreaker;
     let main_deck_for = |deck: &PlayerDeckPayload| -> Vec<DeckEntry> {
         let mut command: Vec<&[DeckEntry]> = Vec::new();
@@ -942,10 +967,10 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
 
     // CR 903.6 + CR 408.1: Place commanders in the command zone at game start.
     // Gated on the same `place_commanders` predicate `main_deck_for` nets with:
-    // a format with no command zone (CR 903.1 scopes the zone to the Commander
-    // variant) must neither place a command-zone object nor net the slot out of
-    // the library, or a populated-but-inert `commander` slot would add a 61st
-    // card to a constructed game.
+    // a format whose command zone is not filled from the decklist's
+    // `commander` slot must neither place a command-zone object nor net the
+    // slot out of the library, or a populated-but-inert `commander` slot would
+    // add a 61st card to a constructed game.
     let commander_decks: Vec<(PlayerId, &[DeckEntry])> = if !place_commanders {
         Vec::new()
     } else {
@@ -1930,6 +1955,123 @@ mod tests {
                 ["signature_spell"],
             serde_json::json!({}),
             "the wire marker must be non-null so clients recognize the signature spell"
+        );
+    }
+
+    /// CR 903.5a: Oathbreaker's command zone holds a decklist card, so its
+    /// commander must be placed in the command zone AND netted out of the
+    /// library. Regression: `place_commanders` was gated on
+    /// `FormatConfig::uses_commander`, which is `false` for Oathbreaker
+    /// (it declares no commander-damage threshold), so a legal deck loaded
+    /// with the Oathbreaker still in the library and no command-zone object —
+    /// while `deck_validation` had already netted it out of the deck-size
+    /// check.
+    #[test]
+    fn load_deck_places_the_oathbreaker_in_the_command_zone() {
+        let mut state = GameState::new_two_player(42);
+        state.format_config = crate::types::format::FormatConfig::oathbreaker();
+        let commander = make_creature_face();
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: vec![DeckEntry {
+                    card: commander.clone(),
+                    count: 1,
+                }],
+                commander: vec![DeckEntry {
+                    card: commander.clone(),
+                    count: 1,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        load_deck_into_state(&mut state, &payload);
+
+        assert_eq!(
+            state.command_zone.len(),
+            1,
+            "the Oathbreaker must occupy the command zone"
+        );
+        assert!(state.objects[&state.command_zone[0]].is_commander);
+        // CR 903.5a: netted out of the library, so the same physical card is
+        // not in two zones at once.
+        assert!(
+            state.deck_pools[0].current_main.is_empty(),
+            "the command-zone copy must be netted out of the main deck"
+        );
+        assert_eq!(
+            state.players[0].library.len(),
+            0,
+            "the netted copy must not also be shuffled into the library"
+        );
+    }
+
+    /// Tiny Leaders has the same shape as Oathbreaker: a decklist card in the
+    /// command zone with no commander-damage threshold, so `uses_commander` is
+    /// `false` while `deck_validation` nets with `NetAgainstMainDeck`.
+    #[test]
+    fn load_deck_places_the_tiny_leaders_commander_in_the_command_zone() {
+        let mut state = GameState::new_two_player(42);
+        state.format_config = crate::types::format::FormatConfig::tiny_leaders();
+        let commander = make_creature_face();
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: vec![DeckEntry {
+                    card: commander.clone(),
+                    count: 1,
+                }],
+                commander: vec![DeckEntry {
+                    card: commander.clone(),
+                    count: 1,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        load_deck_into_state(&mut state, &payload);
+
+        assert_eq!(state.command_zone.len(), 1);
+        assert!(state.objects[&state.command_zone[0]].is_commander);
+        assert!(state.deck_pools[0].current_main.is_empty());
+    }
+
+    /// Control for the two tests above: Archenemy has `command_zone: true`
+    /// (CR 904.2, the scheme deck) but its zone holds no decklist card, so a
+    /// populated-but-inert `commander` slot must be neither placed nor netted.
+    /// Widening the predicate to `FormatConfig::command_zone` instead of
+    /// `command_zone_holds_decklist_commander` would delete this library card.
+    #[test]
+    fn load_deck_neither_places_nor_nets_a_commander_slot_without_a_decklist_command_zone() {
+        let mut state = GameState::new_two_player(42);
+        state.format_config = crate::types::format::FormatConfig::archenemy();
+        let card = make_creature_face();
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: vec![DeckEntry {
+                    card: card.clone(),
+                    count: 1,
+                }],
+                commander: vec![DeckEntry {
+                    card: card.clone(),
+                    count: 1,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        load_deck_into_state(&mut state, &payload);
+
+        assert!(
+            state.command_zone.is_empty(),
+            "Archenemy's command zone holds schemes, not a decklist commander"
+        );
+        assert_eq!(
+            state.deck_pools[0].current_main.len(),
+            1,
+            "an inert commander slot must not discount a real main-deck card"
         );
     }
 

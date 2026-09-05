@@ -3115,6 +3115,17 @@ fn canonical_deck_count_key(db: &CardDatabase, name: &str) -> String {
 /// appears in a (rejected, but still populated) commander slot and turn a real
 /// CR 100.2a violation into a pass, from a rule that has no commander concept.
 ///
+/// The set of formats whose `evaluate_*`/`quick_*` function passes
+/// `NetAgainstMainDeck` is exactly the set for which
+/// `GameFormat::command_zone_holds_decklist_commander()` returns `true`, and
+/// `game::deck_loading` reads that predicate to decide both what it nets out of
+/// the library and what it places in the command zone. The two must agree: a
+/// format netted here but not placed there starts the game a card short, and
+/// one placed but not netted starts it a card long.
+/// `types::format`'s
+/// `command_zone_holds_decklist_commander_matches_the_validator_netting_set`
+/// locks that agreement — update it when adding a format to either side.
+///
 /// Typed rather than a `bool` so each call site states which rule it is under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CommandZoneNetting {

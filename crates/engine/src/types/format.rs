@@ -847,6 +847,76 @@ impl GameFormat {
         }
     }
 
+    /// Whether this format's command zone is filled from the decklist's
+    /// `commander` slot — i.e. the zone holds a card that is part of the deck
+    /// proper and is therefore netted against the main deck.
+    ///
+    /// This is deliberately NOT `uses_commander`, and NOT
+    /// `FormatConfig::command_zone`. The three predicates answer different
+    /// questions and their answers genuinely differ:
+    ///
+    /// - `uses_commander` is `command_zone && commander_damage_threshold`, so
+    ///   it means "CR 903.10a commander damage applies". Tiny Leaders and
+    ///   Oathbreaker put a real card in the command zone but declare no
+    ///   damage threshold, so they answer `false` there while answering
+    ///   `true` here.
+    /// - `command_zone` is true for Archenemy (CR 904.2, scheme deck) and
+    ///   Momir (its emblem), whose zones hold no decklist card at all, so
+    ///   they answer `true` there while answering `false` here.
+    ///
+    /// CR 903.5a is what makes this the netting axis: the commander is one of
+    /// the 100, so a decklist naming it in both the command zone and the main
+    /// deck describes ONE physical card. `deck_validation`'s
+    /// `CommandZoneNetting::NetAgainstMainDeck` call sites are exactly the
+    /// formats that answer `true` here, and `deck_loading` reads this same
+    /// predicate for both netting and command-zone placement — a format that
+    /// netted without placing would start the game a card short, and one that
+    /// placed without netting would start it a card long.
+    ///
+    /// Returns `Err` for `GameFormat::Custom` for the same reason
+    /// `uses_commander` does: a bare `GameFormat` carries no
+    /// `CustomFormatRules` to answer from, and `false` would be silently
+    /// wrong rather than a safe default.
+    pub fn command_zone_holds_decklist_commander(self) -> Result<bool, FormatConfigError> {
+        match self {
+            GameFormat::Commander
+            | GameFormat::DuelCommander
+            | GameFormat::PauperCommander
+            | GameFormat::Brawl
+            | GameFormat::HistoricBrawl
+            | GameFormat::CommanderDraft
+            // Tiny Leaders and Oathbreaker seat a decklist card in the command
+            // zone without a commander-damage threshold, which is precisely the
+            // case `uses_commander` cannot express.
+            | GameFormat::TinyLeaders
+            | GameFormat::Oathbreaker => Ok(true),
+            // Archenemy's scheme deck (CR 904.2) and Momir's emblem occupy a
+            // command zone that holds no decklist card, so there is nothing to
+            // net and nothing to place from the `commander` slot.
+            GameFormat::Archenemy
+            | GameFormat::Momir
+            | GameFormat::Standard
+            | GameFormat::Limited
+            | GameFormat::Pioneer
+            | GameFormat::Modern
+            | GameFormat::Premodern
+            | GameFormat::Legacy
+            | GameFormat::Vintage
+            | GameFormat::Historic
+            | GameFormat::Timeless
+            | GameFormat::Pauper
+            | GameFormat::FreeForAll
+            | GameFormat::TwoHeadedGiant
+            | GameFormat::Planechase => Ok(false),
+            GameFormat::Custom(id) => Err(FormatConfigError(format!(
+                "command_zone_holds_decklist_commander cannot resolve ad-hoc Custom format {} — \
+                 a bare GameFormat carries no CustomFormatRules; decide from the resolved \
+                 FormatConfig (its command_zone and uses_commander fields) instead",
+                id.0
+            ))),
+        }
+    }
+
     /// Whether this format's deck is fixed by the format rules and supplied
     /// automatically by the engine — the player never builds or selects one.
     /// True only for Momir's Madness, whose deck is the fixed 60-card snow-basic
@@ -2294,6 +2364,73 @@ mod tests {
             FormatConfig::for_format(GameFormat::Premodern).unwrap(),
             FormatConfig::premodern()
         );
+    }
+
+    /// `command_zone_holds_decklist_commander` is a strictly weaker condition
+    /// than `uses_commander` (commander damage implies a decklist commander,
+    /// never the reverse) and strictly stronger than `command_zone` (a zone
+    /// can hold schemes or an emblem instead). Pinning both directions is what
+    /// keeps a future variant from being added to only one of the three.
+    #[test]
+    fn command_zone_holds_decklist_commander_sits_between_uses_commander_and_command_zone() {
+        for meta in GameFormat::registry() {
+            let holds = meta.format.command_zone_holds_decklist_commander().unwrap();
+            let config = &meta.default_config;
+
+            if config.uses_commander {
+                assert!(
+                    holds,
+                    "{:?}: commander damage (CR 903.10a) requires a decklist commander",
+                    meta.format
+                );
+            }
+            if holds {
+                assert!(
+                    config.command_zone,
+                    "{:?}: a decklist commander needs a command zone to sit in",
+                    meta.format
+                );
+            }
+        }
+    }
+
+    /// CR 903.5a: the formats that place a commander from the decklist are
+    /// exactly the formats that net that copy out of the main deck. This is the
+    /// list `game::deck_loading` gates BOTH netting and command-zone placement
+    /// on, and the list `game::deck_validation` passes
+    /// `CommandZoneNetting::NetAgainstMainDeck` for. Spelled out literally so
+    /// adding a variant to one side without the other fails here rather than
+    /// silently starting a game one card short or one card long.
+    #[test]
+    fn command_zone_holds_decklist_commander_matches_the_validator_netting_set() {
+        let netted = [
+            GameFormat::Commander,
+            GameFormat::DuelCommander,
+            GameFormat::PauperCommander,
+            GameFormat::Brawl,
+            GameFormat::HistoricBrawl,
+            GameFormat::CommanderDraft,
+            GameFormat::TinyLeaders,
+            GameFormat::Oathbreaker,
+        ];
+        for format in netted {
+            assert!(
+                format.command_zone_holds_decklist_commander().unwrap(),
+                "{format:?} is netted by deck_validation and must be placed by deck_loading"
+            );
+        }
+        // Archenemy (CR 904.2) and Momir have a command zone that holds no
+        // decklist card, and are counted verbatim by the validator.
+        for format in [GameFormat::Archenemy, GameFormat::Momir] {
+            assert!(
+                FormatConfig::for_format(format).unwrap().command_zone,
+                "{format:?} is expected to have a command zone for this control to mean anything"
+            );
+            assert!(
+                !format.command_zone_holds_decklist_commander().unwrap(),
+                "{format:?}'s command zone holds no decklist card, so nothing may be netted"
+            );
+        }
     }
 
     #[test]
