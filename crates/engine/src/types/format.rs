@@ -864,14 +864,30 @@ impl GameFormat {
     ///   Momir (its emblem), whose zones hold no decklist card at all, so
     ///   they answer `true` there while answering `false` here.
     ///
-    /// CR 903.5a is what makes this the netting axis: the commander is one of
-    /// the 100, so a decklist naming it in both the command zone and the main
-    /// deck describes ONE physical card. `deck_validation`'s
-    /// `CommandZoneNetting::NetAgainstMainDeck` call sites are exactly the
-    /// formats that answer `true` here, and `deck_loading` reads this same
-    /// predicate for both netting and command-zone placement — a format that
-    /// netted without placing would start the game a card short, and one that
-    /// placed without netting would start it a card long.
+    /// The netting invariant is format-neutral: wherever a format designates a
+    /// decklist card for the command zone, that card is COUNTED IN that
+    /// format's deck, so a decklist naming it in both the command zone and the
+    /// main deck describes ONE physical card, not two. Only the deck size
+    /// differs per format, which is why this predicate cannot be phrased in
+    /// terms of any single count:
+    ///
+    /// - CR 903.5a — Commander: exactly 100 cards, INCLUDING its commander.
+    /// - CR 903.12d — Brawl: exactly 60 cards, including its commander
+    ///   (CR 903.12a makes Brawl a Commander variant, so CR 903.5's identity
+    ///   carries over with this size modification).
+    /// - CR 903.13f — Commander Draft: at least 60 with no maximum, otherwise
+    ///   following CR 903.5 deck construction.
+    /// - Tiny Leaders and Oathbreaker appear NOWHERE in the Comprehensive
+    ///   Rules — both are community/WPN formats, so their command-zone
+    ///   identity comes from their own rules documents (Oathbreaker RC: 60
+    ///   cards including the Oathbreaker and signature spell), not from
+    ///   CR 903. Do not annotate them with a CR number.
+    ///
+    /// `deck_validation`'s `CommandZoneNetting::NetAgainstMainDeck` call sites
+    /// are exactly the formats that answer `true` here, and `deck_loading`
+    /// reads this same predicate for both netting and command-zone placement —
+    /// a format that netted without placing would start the game a card short,
+    /// and one that placed without netting would start it a card long.
     ///
     /// Returns `Err` for `GameFormat::Custom` for the same reason
     /// `uses_commander` does: a bare `GameFormat` carries no
@@ -1749,6 +1765,44 @@ impl FormatConfig {
         }
     }
 
+    /// Whether this RESOLVED config's command zone is filled from the
+    /// decklist's `commander` slot — the netting/placement axis described on
+    /// [`GameFormat::command_zone_holds_decklist_commander`].
+    ///
+    /// This is the method consumers should call. The bare `GameFormat`
+    /// predicate cannot answer for `GameFormat::Custom`, because a bare format
+    /// carries no `CustomFormatRules`; this one resolves Custom from the rules
+    /// the config was actually built with.
+    ///
+    /// Custom is answered from `CommandZoneMode`, NOT from `uses_commander`.
+    /// `for_custom_rules` derives `uses_commander` from the declared
+    /// `commander_damage_threshold` alone, so a custom format shaped like
+    /// Oathbreaker or Tiny Leaders — `CommandZoneMode::Enabled` with a
+    /// `CommanderEligibilityRule` and NO damage threshold — has
+    /// `uses_commander: false` while still designating a decklist commander.
+    /// Falling back to `uses_commander` would strand that commander in the
+    /// library exactly the way the built-in formats did before this predicate
+    /// existed. Every `CommandZoneMode::Enabled` carries an
+    /// `eligibility_rule`, so an enabled custom command zone always designates
+    /// a decklist commander; `Disabled` never does.
+    pub fn command_zone_holds_decklist_commander(&self) -> bool {
+        match self.format {
+            GameFormat::Custom(_) => match self.custom_rules.as_deref() {
+                Some(rules) => matches!(
+                    rules.structural.command_zone_mode,
+                    CommandZoneMode::Enabled { .. }
+                ),
+                // A Custom config with no attached rules cannot be resolved;
+                // `command_zone` is the closest structural fact it still
+                // carries, and it is what `for_custom_rules` would have set.
+                None => self.command_zone,
+            },
+            format => format
+                .command_zone_holds_decklist_commander()
+                .expect("non-Custom formats always resolve"),
+        }
+    }
+
     /// Return a copy of this config with the sandbox capability enabled.
     /// Pure data transform; the resulting config is otherwise identical and
     /// keeps the same `GameFormat`, deck/seat/life rules, etc. Idempotent.
@@ -2401,6 +2455,74 @@ mod tests {
     /// `CommandZoneNetting::NetAgainstMainDeck` for. Spelled out literally so
     /// adding a variant to one side without the other fails here rather than
     /// silently starting a game one card short or one card long.
+    /// A custom format shaped like Oathbreaker or Tiny Leaders — an enabled
+    /// command zone with an eligibility rule but NO commander-damage threshold
+    /// — still designates a decklist commander. `for_custom_rules` derives
+    /// `uses_commander` from the threshold alone, so reading that field would
+    /// answer `false` here and strand the commander in the library, which is
+    /// the same class of bug this predicate exists to prevent for the built-in
+    /// formats. Resolve Custom from `CommandZoneMode` instead.
+    #[test]
+    fn custom_command_zone_without_a_damage_threshold_still_holds_a_decklist_commander() {
+        use crate::types::custom_format::{
+            CommanderEligibilityRule, CustomFormatId, CustomFormatRules, LegacyRuleSet,
+            LegalityRules, StructuralRules,
+        };
+
+        let build = |command_zone_mode| {
+            let rules = CustomFormatRules {
+                id: CustomFormatId(4242),
+                structural: StructuralRules {
+                    starting_life: 20,
+                    min_players: 2,
+                    max_players: 4,
+                    deck_size: DeckSizeRule::Exactly(60),
+                    singleton: true,
+                    command_zone_mode,
+                    range_of_influence: None,
+                    team_based: false,
+                    sideboard_policy: SideboardPolicy::Forbidden,
+                    default_deck_copy_limit: DeckCopyLimit::UpTo(1),
+                },
+                legality: LegalityRules {
+                    legal_sets: None,
+                    banned: Vec::new(),
+                    restricted: Vec::new(),
+                    legacy: LegacyRuleSet::default(),
+                },
+            };
+            FormatConfig::for_custom_rules(&rules)
+        };
+
+        let oathbreaker_shaped = build(CommandZoneMode::Enabled {
+            commander_damage_threshold: None,
+            eligibility_rule: CommanderEligibilityRule::OathbreakerSignatureSpell,
+        });
+        // PREMISE: this is genuinely the threshold-less shape, so the assertion
+        // below is about the predicate rather than a trivially true case.
+        assert!(!oathbreaker_shaped.uses_commander);
+        assert!(oathbreaker_shaped.command_zone);
+        assert!(
+            oathbreaker_shaped.command_zone_holds_decklist_commander(),
+            "an enabled custom command zone designates a decklist commander              regardless of the commander-damage threshold"
+        );
+
+        // Control: a threshold-bearing custom command zone answers the same,
+        // so the predicate is not merely inverting `uses_commander`.
+        let commander_shaped = build(CommandZoneMode::Enabled {
+            commander_damage_threshold: Some(21),
+            eligibility_rule: CommanderEligibilityRule::Standard,
+        });
+        assert!(commander_shaped.uses_commander);
+        assert!(commander_shaped.command_zone_holds_decklist_commander());
+
+        // Control: a disabled custom command zone holds nothing, so nothing may
+        // be netted or placed.
+        let no_zone = build(CommandZoneMode::Disabled);
+        assert!(!no_zone.command_zone);
+        assert!(!no_zone.command_zone_holds_decklist_commander());
+    }
+
     #[test]
     fn command_zone_holds_decklist_commander_matches_the_validator_netting_set() {
         let netted = [

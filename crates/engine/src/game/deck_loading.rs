@@ -821,15 +821,14 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     // Archenemy (CR 904.2) and Momir have a command zone that holds no
     // decklist card at all, so netting on it would delete a library card.
     //
-    // `GameFormat::Custom` cannot answer this from a bare format (it carries no
-    // `CustomFormatRules`), so it falls back to the resolved config's
-    // Custom-aware `uses_commander` field — the value this line used before,
-    // leaving Custom behavior exactly as it was.
-    let place_commanders = state
-        .format_config
-        .format
-        .command_zone_holds_decklist_commander()
-        .unwrap_or(state.format_config.uses_commander);
+    // Called on the RESOLVED config, not the bare `GameFormat`: a Custom
+    // format is answered from its own `CommandZoneMode`. Deriving Custom from
+    // `uses_commander` would reintroduce this very bug there, since
+    // `for_custom_rules` sets `uses_commander` from the declared
+    // commander-damage threshold alone — a custom format shaped like
+    // Oathbreaker (enabled command zone, an eligibility rule, no threshold)
+    // would strand its commander in the library.
+    let place_commanders = state.format_config.command_zone_holds_decklist_commander();
     let oathbreaker = state.format_config.format == crate::types::format::GameFormat::Oathbreaker;
     let main_deck_for = |deck: &PlayerDeckPayload| -> Vec<DeckEntry> {
         let mut command: Vec<&[DeckEntry]> = Vec::new();
