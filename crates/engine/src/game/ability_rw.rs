@@ -5701,10 +5701,25 @@ fn rw_effect(
         | Effect::AddRestriction { .. }
         | Effect::ReduceNextSpellCost { .. }
         | Effect::GrantNextSpellAbility { .. }
-        | Effect::CreateEmblem { .. }
         | Effect::CreateDamageReplacement { .. }
         | Effect::Regenerate { .. }
         | Effect::GrantCastingPermission { .. } => (RwProfile::empty(), None),
+        // CR 114.4: the emblem's own abilities are the EMBLEM's, not this
+        // ability's, so its statics/triggers contribute no read/write facts
+        // here (the boundary-carrier rule `ability_visit` states). The stated
+        // window is the exception: `Duration::ForAsLongAs { condition }` reads
+        // game state, and `rw_duration` descends it. Merged rather than elided
+        // for the same reason `legacy_effect` above feeds this field to `odur`
+        // — `{ .. }` would drop a populated condition's read profile with no
+        // compile error, understating this effect for the CR 603.3b
+        // same-event ordering-parity system this file serves.
+        Effect::CreateEmblem { duration, .. } => {
+            let mut p = RwProfile::empty();
+            if let Some(d) = duration {
+                p.merge(rw_duration(d));
+            }
+            (p, None)
+        }
 
         // ---- Choice wrappers (union descent, §2) ----
         Effect::ChooseOneOf { chooser, branches } => {
