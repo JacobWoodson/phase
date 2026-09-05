@@ -625,6 +625,10 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("scratch dir");
         let real = dir.join("baseline.json");
         std::fs::write(&real, "{}").expect("write");
+        // Only the `#[cfg(unix)]` arms below consume this path, so the binding is
+        // cfg-gated alongside them; an unconditional `let` is an unused variable on
+        // Windows, which `-D warnings` rejects.
+        #[cfg(unix)]
         let link = dir.join("link.json");
         #[cfg(unix)]
         std::os::unix::fs::symlink(&real, &link).expect("symlink");
