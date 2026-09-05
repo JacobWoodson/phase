@@ -6115,6 +6115,7 @@ mod tests {
                 Effect::CreateEmblem {
                     statics: vec![granting_static(draw_one())],
                     triggers: vec![],
+                    duration: None,
                 },
             ),
             (

@@ -16010,7 +16010,12 @@ mod tests {
         let effect = crate::parser::oracle_effect::parse_effect(
             "You get an emblem with \"Mountains you control have '{T}: This land deals 1 damage to any target.'\"",
         );
-        let crate::types::ability::Effect::CreateEmblem { statics, triggers } = effect else {
+        let crate::types::ability::Effect::CreateEmblem {
+            statics,
+            triggers,
+            duration: _,
+        } = effect
+        else {
             panic!("expected CreateEmblem effect from Koth's emblem text");
         };
         assert!(triggers.is_empty(), "Koth emblem is a static grant");

@@ -1358,7 +1358,9 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
             }
         }
         Effect::CreateEmblem {
-            statics, triggers, ..
+            statics,
+            triggers,
+            duration: _,
         } => {
             for sd in statics {
                 stamp_static_printed_slot(sd, slot, kind);

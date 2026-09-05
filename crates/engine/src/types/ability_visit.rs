@@ -780,7 +780,11 @@ where
         }
         // BOUNDARY CARRIER (CR 114.1): an emblem is a distinct object in the
         // command zone; its abilities are the emblem's, not this ability's.
-        Effect::CreateEmblem { statics, triggers } => {
+        Effect::CreateEmblem {
+            statics,
+            triggers,
+            duration: _,
+        } => {
             if scope == ResolutionScope::IncludeRegisteredLater {
                 for static_def in statics {
                     visit_static_scoped(static_def, scope, visit)?;

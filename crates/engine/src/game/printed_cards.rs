@@ -3515,6 +3515,7 @@ mod tests {
         let emblem = Effect::CreateEmblem {
             statics: vec![emblem_static],
             triggers: vec![emblem_trigger],
+            duration: None,
         };
         walk_effect(&emblem, &mut names);
 

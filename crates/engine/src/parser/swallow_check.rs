@@ -952,7 +952,11 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
         } => end_cost.is_some() || static_abilities.iter().any(static_definition_has_optional),
         Effect::ChooseOneOf { branches, .. } => branches.iter().any(def_tree_has_optional),
         Effect::CreateDelayedTrigger { effect, .. } => def_tree_has_optional(effect),
-        Effect::CreateEmblem { statics, triggers } => {
+        Effect::CreateEmblem {
+            statics,
+            triggers,
+            duration: _,
+        } => {
             statics.iter().any(static_definition_has_optional)
                 || triggers.iter().any(trigger_tree_has_optional)
         }

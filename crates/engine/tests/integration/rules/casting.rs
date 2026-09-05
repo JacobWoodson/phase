@@ -1974,6 +1974,7 @@ fn tamiyo_emblem_allows_free_cast_from_hand() {
         Effect::CreateEmblem {
             statics: vec![emblem_static],
             triggers: Vec::new(),
+            duration: None,
         },
         vec![],
         source_id,

@@ -940,6 +940,7 @@ pub fn room_effects(
                         room_door: None,
                     }],
                     triggers: Vec::new(),
+                    duration: None,
                 },
                 source_id,
                 controller,

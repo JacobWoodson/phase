@@ -3410,8 +3410,13 @@ fn legacy_effect(x: &Effect) -> bool {
             // so the termination permission contributes nothing to this walk.
             end_cost: _,
         } => odur(duration) || otf(target) || static_abilities.iter().any(legacy_static_definition),
-        Effect::CreateEmblem { statics, triggers } => {
-            statics.iter().any(legacy_static_definition)
+        Effect::CreateEmblem {
+            statics,
+            triggers,
+            duration,
+        } => {
+            odur(duration)
+                || statics.iter().any(legacy_static_definition)
                 || triggers.iter().any(legacy_trigger_definition)
         }
         Effect::ForceAttack {

@@ -16037,6 +16037,21 @@ pub enum Effect {
         /// `collect_matching_triggers` admits them.
         #[serde(default)]
         triggers: Vec<TriggerDefinition>,
+        /// CR 611.2a: the stated window on the emblem's granted abilities.
+        ///
+        /// `None` is not "missing": CR 611.2a makes an unstated duration last
+        /// until the end of the game. That coincides with an emblem's own
+        /// lifetime — CR 114.1 defines the emblem and CR 114.2 puts it in the
+        /// command zone, and no rule provides a way to remove it — so every
+        /// emblem the engine produces today is correctly `None`, not a
+        /// placeholder. (The persistence is an argument from the ABSENCE of a
+        /// removal rule; CR 114 nowhere states it, so do not cite 114.1 for it.)
+        ///
+        /// No producer sets this yet. It is written where a card states a window
+        /// on the emblem it creates; the consumer is `create_emblem::resolve`,
+        /// which must read it before an emblem can expire (CR 514.2).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration: Option<Duration>,
     },
     /// CR 118.1: Pay a cost during effect resolution. Carries the unified
     /// `AbilityCost` taxonomy directly (no parallel `PaymentCost` hierarchy) so
@@ -35231,6 +35246,85 @@ mod monarch_subject_axis_tests {
             "a non-default subject must be serialized: {json}"
         );
         assert_eq!(serde_json::from_str::<Effect>(&json).unwrap(), targeted);
+    }
+
+    /// CR 611.2a + CR 114.1: `Effect::CreateEmblem` gained a `duration` slot.
+    /// Every pre-existing `{"type":"CreateEmblem","statics":[...],"triggers":[...]}`
+    /// row in `card-data.json` (and in persisted saved-game state) predates that
+    /// field, so it must keep deserializing — to `None`, which CR 611.2a already
+    /// defines as "until the end of the game", which coincides with an emblem's
+    /// own lifetime — and must re-serialize byte-identically.
+    ///
+    /// Revert-failing on `skip_serializing_if`, MEASURED: dropping it makes the
+    /// re-serialize emit `"duration":null` and assertion (a) fails, so every
+    /// existing emblem row would churn on the next export.
+    ///
+    /// `#[serde(default)]` is NOT independently revert-failing here, and this
+    /// says so rather than claiming a guard it does not have: serde already
+    /// treats an absent key for an `Option<T>` field as `None`, so removing the
+    /// attribute leaves this test green (verified by removing it and re-running).
+    /// It is kept for consistency with the six of ten sibling `Option<Duration>`
+    /// fields that carry the pair — chiefly `CastFromZone.duration`, the governing
+    /// analogue — and because it keeps the load contract explicit at the declaration.
+    ///
+    /// The `Some(..)` assertion is the paired POSITIVE reach-guard: an absence
+    /// assertion alone is also satisfied by a serializer that never emits the
+    /// field at all, so it would pass against a dead predicate.
+    #[test]
+    fn create_emblem_round_trips_without_a_duration_key() {
+        // (a) The empty row — the shape `parse_emblem`'s trigger branch emits.
+        const EMPTY_ROW: &str = r#"{"type":"CreateEmblem","statics":[],"triggers":[]}"#;
+        let empty: Effect = serde_json::from_str(EMPTY_ROW).unwrap();
+        assert_eq!(
+            empty,
+            Effect::CreateEmblem {
+                statics: vec![],
+                triggers: vec![],
+                duration: None,
+            }
+        );
+        assert_eq!(serde_json::to_string(&empty).unwrap(), EMPTY_ROW);
+
+        // (b) POSITIVE REACH-GUARD: a populated duration MUST emit the key, or
+        //     assertion (a) is vacuous and B2b's writes would vanish on export.
+        let stated = Effect::CreateEmblem {
+            statics: vec![],
+            triggers: vec![],
+            duration: Some(Duration::UntilEndOfTurn),
+        };
+        let stated_json = serde_json::to_string(&stated).unwrap();
+        assert!(
+            stated_json.contains("\"duration\""),
+            "a stated CR 611.2a window must be serialized: {stated_json}"
+        );
+        assert_eq!(
+            serde_json::from_str::<Effect>(&stated_json).unwrap(),
+            stated
+        );
+
+        // (c) Hostile fixture: a POPULATED row. A `skip_serializing_if` bug can
+        //     hide behind the empty-vec case, so round-trip a real static and a
+        //     real trigger too, and pin that no `duration` key appears.
+        let populated = Effect::CreateEmblem {
+            statics: vec![StaticDefinition::new(StaticMode::NoMaximumHandSize)],
+            triggers: vec![TriggerDefinition::new(TriggerMode::SpellCast)],
+            duration: None,
+        };
+        let populated_json = serde_json::to_string(&populated).unwrap();
+        assert!(
+            !populated_json.contains("\"duration\""),
+            "an unstated window must not emit a key: {populated_json}"
+        );
+        assert_eq!(
+            serde_json::from_str::<Effect>(&populated_json).unwrap(),
+            populated
+        );
+        assert_eq!(
+            serde_json::to_string(&serde_json::from_str::<Effect>(&populated_json).unwrap())
+                .unwrap(),
+            populated_json,
+            "a populated emblem row must re-serialize byte-identically"
+        );
     }
 
     /// A non-default subject must survive the round trip, or the card-data

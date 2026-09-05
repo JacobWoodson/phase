@@ -21142,7 +21142,11 @@ fn effect_emblem_tamiyo_field_researcher_hand_free_cast() {
             "You get an emblem with \"You may cast spells from your hand without paying their mana costs.\"",
         );
     match e {
-        Effect::CreateEmblem { statics, triggers } => {
+        Effect::CreateEmblem {
+            statics,
+            triggers,
+            duration: _,
+        } => {
             assert!(triggers.is_empty());
             assert_eq!(statics.len(), 1);
             assert!(
@@ -21197,7 +21201,11 @@ fn effect_emblem_with_whenever_trigger_extracts_trigger_definition() {
             "You get an emblem with \"Whenever you cast a spell, this emblem deals 5 damage to any target.\"",
         );
     match e {
-        Effect::CreateEmblem { statics, triggers } => {
+        Effect::CreateEmblem {
+            statics,
+            triggers,
+            duration: _,
+        } => {
             assert!(
                 statics.is_empty(),
                 "trigger-only emblem should not install statics, got {statics:?}"
@@ -21289,7 +21297,11 @@ fn effect_emblem_with_static_still_parses_as_static() {
     // even after the trigger-first dispatch.
     let e = parse_effect("You get an emblem with \"Ninjas you control get +1/+1.\"");
     match e {
-        Effect::CreateEmblem { statics, triggers } => {
+        Effect::CreateEmblem {
+            statics,
+            triggers,
+            duration: _,
+        } => {
             assert_eq!(statics.len(), 1);
             assert!(triggers.is_empty());
         }
@@ -21309,7 +21321,12 @@ fn effect_koth_emblem_grants_activated_ability_to_mountains() {
     let e = parse_effect(
             "You get an emblem with \"Mountains you control have '{T}: This land deals 1 damage to any target.'\"",
         );
-    let Effect::CreateEmblem { statics, triggers } = e else {
+    let Effect::CreateEmblem {
+        statics,
+        triggers,
+        duration: _,
+    } = e
+    else {
         panic!("expected CreateEmblem, got {e:?}");
     };
     assert!(

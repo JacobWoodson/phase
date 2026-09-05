@@ -244,9 +244,10 @@ const DESCRIPTION_KEY: &str = "description";
 ///   AbilityDefinition.duration                        <- the definition's own slot
 ///   Effect::BecomeCopy.duration                       ┐
 ///   Effect::GainActivatedAbilitiesOfTarget.duration   │
-///   Effect::GenericEffect.duration                    ├ the 6 Effect carriers
-///   Effect::ForceAttack.duration                      │
+///   Effect::GenericEffect.duration                    │
+///   Effect::ForceAttack.duration                      ├ the 7 Effect carriers
 ///   Effect::CastFromZone.duration                     │
+///   Effect::CreateEmblem.duration                     │ <- always `None` today
 ///   Effect::PreventDamage.prevention_duration         ┘ <- NOT named `duration`
 ///   CastingPermission::ExileWithAltCost.duration      ┐ CastingPermission
 ///   CastingPermission::PlayFromExile.duration         ┘

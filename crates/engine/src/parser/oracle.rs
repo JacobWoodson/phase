@@ -7677,7 +7677,11 @@ fn demote_lifetimes_in_effect(effect: &mut Effect) {
                 demote_lifetimes_in_static(static_def);
             }
         }
-        Effect::CreateEmblem { statics, triggers } => {
+        Effect::CreateEmblem {
+            statics,
+            triggers,
+            duration: _,
+        } => {
             for static_def in statics.iter_mut() {
                 demote_lifetimes_in_static(static_def);
             }
@@ -8427,7 +8431,11 @@ fn render_effect_descriptions(effect: &mut Effect, card_name: &str) {
                 render_static_descriptions(st, card_name);
             }
         }
-        Effect::CreateEmblem { statics, triggers } => {
+        Effect::CreateEmblem {
+            statics,
+            triggers,
+            duration: _,
+        } => {
             for st in statics.iter_mut() {
                 render_static_descriptions(st, card_name);
             }

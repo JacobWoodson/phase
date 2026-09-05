@@ -75,7 +75,17 @@ pub fn resolve(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     let (statics, triggers) = match &ability.effect {
-        Effect::CreateEmblem { statics, triggers } => (statics, triggers),
+        Effect::CreateEmblem {
+            statics,
+            triggers,
+            // CR 611.2a: the emblem's stated window. Provably `None` at every
+            // construction site today, so there is no window to apply and the
+            // `grant_emblem` call below is complete. THIS IS THE SITE THAT MUST
+            // CHANGE when a producer starts populating the field: `_` binds
+            // rather than wildcards, so a populated window would be dropped here
+            // with no compile error and the emblem would silently outlive it.
+            duration: _,
+        } => (statics, triggers),
         _ => return Err(EffectError::MissingParam("CreateEmblem".into())),
     };
 
@@ -170,6 +180,7 @@ mod tests {
             Effect::CreateEmblem {
                 statics: vec![graveyard_play],
                 triggers: Vec::new(),
+                duration: None,
             },
             vec![],
             ObjectId(100),
@@ -193,6 +204,7 @@ mod tests {
             Effect::CreateEmblem {
                 statics: vec![ninja_pump_static()],
                 triggers: Vec::new(),
+                duration: None,
             },
             vec![],
             ObjectId(100),
@@ -239,6 +251,7 @@ mod tests {
             Effect::CreateEmblem {
                 statics: vec![ninja_pump_static()],
                 triggers: Vec::new(),
+                duration: None,
             },
             vec![],
             source_id,
@@ -267,6 +280,7 @@ mod tests {
             Effect::CreateEmblem {
                 statics: vec![ninja_pump_static()],
                 triggers: Vec::new(),
+                duration: None,
             },
             vec![],
             ObjectId(100),
@@ -285,6 +299,7 @@ mod tests {
             Effect::CreateEmblem {
                 statics: vec![ninja_pump_static()],
                 triggers: Vec::new(),
+                duration: None,
             },
             vec![],
             ObjectId(100),
@@ -405,6 +420,7 @@ mod tests {
             Effect::CreateEmblem {
                 statics: Vec::new(),
                 triggers: vec![trig.clone()],
+                duration: None,
             },
             vec![],
             ObjectId(100),
@@ -457,6 +473,7 @@ mod tests {
             Effect::CreateEmblem {
                 statics: vec![static_def],
                 triggers: Vec::new(),
+                duration: None,
             },
             vec![],
             ObjectId(100),

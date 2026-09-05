@@ -7017,6 +7017,7 @@ fn try_parse_no_max_hand_size_effect(tp: TextPair<'_>) -> Option<Effect> {
         statics: vec![StaticDefinition::new(StaticMode::NoMaximumHandSize)
             .description("You have no maximum hand size.".to_string())],
         triggers: Vec::new(),
+        duration: None,
     })
 }
 
@@ -24349,6 +24350,7 @@ fn try_parse_emblem_creation(lower: &str, original: &str) -> Option<Effect> {
         return Some(Effect::CreateEmblem {
             statics: Vec::new(),
             triggers,
+            duration: None,
         });
     }
 
@@ -24369,6 +24371,7 @@ fn try_parse_emblem_creation(lower: &str, original: &str) -> Option<Effect> {
         Some(Effect::CreateEmblem {
             statics: static_defs,
             triggers: Vec::new(),
+            duration: None,
         })
     } else {
         // Fallback: create an emblem with an unimplemented static.
@@ -24377,6 +24380,7 @@ fn try_parse_emblem_creation(lower: &str, original: &str) -> Option<Effect> {
                 StaticDefinition::new(StaticMode::EmblemStatic).description(inner.to_string())
             ],
             triggers: Vec::new(),
+            duration: None,
         })
     }
 }

@@ -1736,6 +1736,7 @@ mod tests {
                 Effect::CreateEmblem {
                     statics: vec![grant_fight_static()],
                     triggers: vec![],
+                    duration: None,
                 },
             ),
         ));
@@ -1749,6 +1750,7 @@ mod tests {
                 Effect::CreateEmblem {
                     statics: vec![],
                     triggers: vec![emblem_trigger],
+                    duration: None,
                 },
             ),
         ));
@@ -1765,6 +1767,7 @@ mod tests {
                 Effect::CreateEmblem {
                     statics: vec![],
                     triggers: vec![trigger_unless_pay],
+                    duration: None,
                 },
             ),
         ));

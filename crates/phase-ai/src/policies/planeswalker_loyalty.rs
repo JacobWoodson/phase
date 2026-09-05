@@ -326,6 +326,7 @@ mod tests {
             Effect::CreateEmblem {
                 statics: Vec::new(),
                 triggers: Vec::new(),
+                duration: None,
             },
         );
         assert_score(

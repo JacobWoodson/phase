@@ -26056,7 +26056,12 @@ fn gideon_of_the_trials_emblem_full_parse() {
         );
     }
 
-    let Effect::CreateEmblem { statics, triggers } = &*r.abilities[2].effect else {
+    let Effect::CreateEmblem {
+        statics,
+        triggers,
+        duration: _,
+    } = &*r.abilities[2].effect
+    else {
         panic!(
             "third loyalty ability must create an emblem, got {:?}",
             r.abilities[2].effect
@@ -28046,6 +28051,7 @@ fn render_net_reaches_every_nested_description_carrier() {
     parsed.abilities.push(carrier(Effect::CreateEmblem {
         statics: vec![static_def("emblem_static")],
         triggers: vec![trigger_def("emblem_trigger")],
+        duration: None,
     }));
     tags.extend(["emblem_static", "emblem_trigger"]);
 

@@ -2438,11 +2438,23 @@ fn apply_duration_to_effect(effect: &mut Effect, duration: &Duration) {
 ///   | rg -n 'duration: (Option<)?Duration'
 /// ```
 ///
-/// At the time of writing that returns SEVEN duration-bearing variants —
+/// At the time of writing that returns EIGHT duration-bearing variants —
 /// GenericEffect, CastFromZone, BecomeCopy, GainActivatedAbilitiesOfTarget,
-/// ForceAttack, ForceBlock, and PreventDamage (whose field is named
-/// `prevention_duration`, which is exactly why an eye-enumeration missed it).
-/// All seven are members. Two more are members without an embedded field:
+/// ForceAttack, ForceBlock, PreventDamage (whose field is named
+/// `prevention_duration`, which is exactly why an eye-enumeration missed it),
+/// and CreateEmblem.
+///
+/// SEVEN of the eight are members. `CreateEmblem` is the deliberate NON-member,
+/// recorded here rather than left to a future eye-enumeration: a stated prefix
+/// governs the lifetime of the effect it prefixes, but an emblem is a separate
+/// object in the command zone (CR 114.1 + CR 114.2) and the prefix does not set
+/// that object's lifetime, so distributing it onto `CreateEmblem.duration`
+/// would stamp the wrong subject. That field is written by the emblem's own
+/// parser branch, never by this distributor. Whether an emblem's window is ever
+/// prefix-governed is a CR 611.2a-vs-CR 114 question deferred until a real card
+/// raises it; until then this variant stays in the catch-all BY DECISION.
+///
+/// Two more are members without an embedded field:
 /// `GrantCastingPermission { permission: CastingPermission::PlayFromExile { .. } }`,
 /// and `AddRestriction`, whose expiry derives from `AbilityDefinition.duration`
 /// in `add_restriction::fill_runtime_fields` (CR 514.2).
