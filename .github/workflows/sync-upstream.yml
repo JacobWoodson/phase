@@ -1,0 +1,64 @@
+name: Sync fork with upstream
+
+# Keeps this fork's `main` current with phase-rs/phase.
+#
+# Why this exists: a stale fork `main` silently poisons branch work. A PR cut
+# from it looks clean locally while actually being hundreds of commits behind
+# upstream, and the divergence only surfaces as merge conflicts (or, worse, as
+# protocol/version numbers bumped from stale values) after review has started.
+#
+# Uses the `merge-upstream` API, which FAST-FORWARDS ONLY. If this fork's `main`
+# ever carries a commit upstream does not have, the sync fails loudly instead of
+# force-pushing over it — losing fork-only work is never worth an automatic sync.
+# A failure here means someone must reconcile `main` by hand.
+
+on:
+  schedule:
+    # 07:00 UTC daily. Cron on GitHub is best-effort and can lag under load;
+    # this is a background hygiene task, so a late run is harmless.
+    - cron: "0 7 * * *"
+  # Lets you sync on demand from the Actions tab without waiting for the cron.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  # Never let two syncs race on the same ref.
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    # Guard against this workflow running anywhere but the fork it was written
+    # for — a fork-of-a-fork, or upstream itself if the file ever lands there.
+    if: github.repository == 'JacobWoodson/phase'
+    steps:
+      - name: Fast-forward main from upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          before="$(gh api repos/${{ github.repository }}/git/ref/heads/main --jq .object.sha)"
+
+          # `merge-upstream` fast-forwards, or fails if the histories diverged.
+          # `|| true` on the call itself so a non-zero exit does not mask the
+          # response body, which carries the actionable message.
+          response="$(gh api -X POST repos/${{ github.repository }}/merge-upstream \
+            -f branch=main 2>&1)" || {
+              echo "::error::Fork sync failed. If main has diverged from upstream, \
+          reconcile it by hand — this workflow will not force-push over fork-only commits."
+              echo "$response"
+              exit 1
+            }
+
+          echo "$response"
+
+          after="$(gh api repos/${{ github.repository }}/git/ref/heads/main --jq .object.sha)"
+          if [ "$before" = "$after" ]; then
+            echo "Already current at ${before:0:9} — nothing to do."
+          else
+            echo "Fast-forwarded ${before:0:9} -> ${after:0:9}."
+          fi
