@@ -4738,6 +4738,12 @@ export interface PlayerSummary {
  * pairing (2 seats), a full or short pod (up to `arity`), and a bye (1 seat).
  * `outcome` is emitted with **no** `skip_serializing_if`, so a pending pairing
  * arrives as an explicit `"outcome": null`.
+ *
+ * NOTE (protocol v6, client-render deferred): the wire struct now also carries
+ * a required `report_gate` (broker-owned per-pairing report legality). It is
+ * intentionally not mirrored here yet — the client-rendering follow-up adds the
+ * field and consumes it. Received unknown fields are ignored by `JSON.parse`,
+ * so omitting it is inert. The Rust line citations below predate the v6 shift.
  */
 export interface TournamentPairingView {
   id: PairingId;
@@ -4747,8 +4753,27 @@ export interface TournamentPairingView {
 }
 
 /**
+ * The role selector carried by the wire's `RenewTournamentCredential` (protocol
+ * v6). Mirrors `lobby_broker::tournament::TournamentRole`, which has no
+ * `rename_all` and so serializes as `"Organizer"` / `"Player"`.
+ *
+ * Deliberately NOT named `TournamentRole`: `stores/multiplayerStore` already
+ * exports a lowercase display-role `TournamentRole = "organizer" | "player"`,
+ * and the two spellings are wire-incompatible. The credential-renewal sender (a
+ * follow-up) must send THESE capitalized values, or the broker rejects the
+ * frame with a serde unknown-variant error.
+ */
+export type TournamentCredentialRole = "Organizer" | "Player";
+
+/**
  * One row of the tournament list. Mirrors
- * `crates/lobby-broker/src/protocol.rs:507-528`.
+ * `crates/lobby-broker/src/protocol.rs:507-528` (citation predates the v6 shift).
+ *
+ * NOTE (protocol v6, client-render deferred): the wire struct now also carries
+ * a required `scoring` (resolved `ScoringPolicy`) and `open_actions`
+ * (broker-owned set of legal tournament actions). Both are intentionally not
+ * mirrored here yet — the client-rendering follow-up adds and consumes them.
+ * Unknown received fields are ignored by `JSON.parse`, so omitting them is inert.
  */
 export interface TournamentSummary {
   code: string;
@@ -4792,8 +4817,13 @@ export interface TournamentView {
 
 /**
  * `LobbyServerMessage::TournamentCreated`'s payload
- * (`crates/lobby-broker/src/protocol.rs:830-834`). A point reply only —
- * `organizer_token` is minted here and is never broadcast.
+ * (`crates/lobby-broker/src/protocol.rs:830-834`; citation predates the v6 shift).
+ * A point reply only — `organizer_token` is minted here and is never broadcast.
+ *
+ * NOTE (protocol v6, client-render deferred): the wire payload now also carries
+ * a required `expires_at_ms` beside the token (credential expiry). It is
+ * intentionally not mirrored here yet — the credential-rotation client
+ * follow-up adds and consumes it; the unknown field is ignored on parse.
  */
 export interface TournamentCreatedReply {
   code: string;
@@ -4803,8 +4833,13 @@ export interface TournamentCreatedReply {
 
 /**
  * `LobbyServerMessage::TournamentJoined`'s payload
- * (`crates/lobby-broker/src/protocol.rs:837-841`). A point reply only —
- * `player_token` is minted here and is never broadcast.
+ * (`crates/lobby-broker/src/protocol.rs:837-841`; citation predates the v6 shift).
+ * A point reply only — `player_token` is minted here and is never broadcast.
+ *
+ * NOTE (protocol v6, client-render deferred): the wire payload now also carries
+ * a required `expires_at_ms` beside the token (credential expiry). It is
+ * intentionally not mirrored here yet — the credential-rotation client
+ * follow-up adds and consumes it; the unknown field is ignored on parse.
  */
 export interface TournamentJoinedReply {
   code: string;
