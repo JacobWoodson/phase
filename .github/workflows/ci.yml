@@ -164,6 +164,12 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+        with:
+          # This job compiles pull-request code (build scripts, proc macros)
+          # on the runner. Checkout otherwise leaves the job's token in
+          # .git/config, where that code could read it. Nothing here needs
+          # git authentication after the initial fetch.
+          persist-credentials: false
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
