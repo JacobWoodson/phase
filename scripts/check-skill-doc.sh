@@ -140,8 +140,8 @@ fn parse_router_keyword_line\b	crates/engine/src/parser/oracle_keyword.rs
 fn parse_granted_keyword_fragment\b	crates/engine/src/parser/oracle_keyword.rs
 fn extract_granted_keyword_list\b	crates/engine/src/parser/oracle_keyword.rs
 fn is_keyword_cost_line\b	crates/engine/src/parser/oracle_keyword.rs
-ROUTER_KEYWORD_CASES\b	crates/engine/src/parser/oracle_keyword.rs
-KNOWN_NOUN_PARAM_LEAKS\b	crates/engine/src/parser/oracle_keyword.rs
+const ROUTER_KEYWORD_CASES\b	crates/engine/src/parser/oracle_keyword.rs
+const KNOWN_NOUN_PARAM_LEAKS\b	crates/engine/src/parser/oracle_keyword.rs
 fn strip_trailing_duration\b	crates/engine/src/parser/oracle_effect/lower.rs
 fn strip_leading_duration\b	crates/engine/src/parser/oracle_effect/lower.rs
 fn parse_search_library_details\b	crates/engine/src/parser/oracle_effect/search.rs
