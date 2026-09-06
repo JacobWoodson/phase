@@ -115,6 +115,13 @@ EOF
 #     also matches `parse_target_with_ctx`), so a row keeps passing after the
 #     symbol it names has been renamed away -- the exact drift this invariant
 #     exists to catch.
+#
+#     A row body must contain no unescaped ERE metacharacter. Under the old
+#     substring match a row like `fn peel_clause(` was a valid literal; under
+#     -E it is a regex syntax error, and grep's exit 2 is reported by the `||`
+#     below as documented-symbol-missing -- a regex bug wearing a doc-drift
+#     message. Escape the character, or pin the row with the declaration
+#     keyword instead (`const FOO`, `struct Bar`).
 # ---------------------------------------------------------------------------
 while IFS=$'\t' read -r pat file; do
   grep -qE "$pat" "$file" || err "documented symbol missing: '$pat' in $file"
@@ -226,13 +233,19 @@ done < <(grep -oE '// Priority [^:]+:' "$ORACLE" | sed -E 's#// Priority ##; s#:
 # Each entry is a symbol REMOVED or RENAMED by a landed refactor. If a future
 # rename retires a name the doc cites, add it here in the same commit.
 # ---------------------------------------------------------------------------
+# Both greps anchor the retired name with a trailing \b. Unanchored, a dead
+# name matches its own longer siblings, and both guards then fire on a tree that
+# is not stale: a NEW `parse_keyword_from_oracle_v2()` anywhere under the parser
+# trips the non-vacuity guard, and a SKILL.md citation of
+# `extract_keyword_line_v2()` trips the dead-cite guard. Both fail closed (a
+# spurious red, never a silent green), which is why this trailed invariant (2).
 while IFS= read -r dead; do
   [ -n "$dead" ] || continue
-  if grep -q "$dead" "$SKILL"; then
+  if grep -qE "$dead\b" "$SKILL"; then
     err "SKILL.md cites '$dead', which no longer exists in the parser tree (renamed/removed)"
   fi
   # Non-vacuity: if the symbol came BACK, this list is the stale thing.
-  if grep -rq "fn $dead" crates/engine/src/parser/; then
+  if grep -rqE "fn $dead\b" crates/engine/src/parser/; then
     err "'$dead' is listed as dead but exists in the parser tree — update this list, not the doc"
   fi
 done <<'EOF'
