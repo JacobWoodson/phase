@@ -239,6 +239,13 @@ done < <(grep -oE '// Priority [^:]+:' "$ORACLE" | sed -E 's#// Priority ##; s#:
 # trips the non-vacuity guard, and a SKILL.md citation of
 # `extract_keyword_line_v2()` trips the dead-cite guard. Both fail closed (a
 # spurious red, never a silent green), which is why this trailed invariant (2).
+#
+# The anchor is trailing-only, so a live `try_extract_keyword_line` would still
+# trip both guards. That also fails closed, and no such name exists today.
+#
+# As with invariant (2), these are EREs now: an entry below must be a bare
+# identifier with no unescaped ERE metacharacter, or grep exits 2 and the `||`
+# reports a regex bug as doc drift.
 while IFS= read -r dead; do
   [ -n "$dead" ] || continue
   if grep -qE "$dead\b" "$SKILL"; then
