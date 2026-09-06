@@ -149,6 +149,39 @@ jobs:
           fi
           ./scripts/check-test-card-data-load.sh "$BASE"
 
+  windows-lint:
+    name: Windows lint (phase-ai clippy)
+    runs-on: windows-latest
+    # Scoped to phase-ai on purpose. The defect class this catches is
+    # cfg-gated code that only compiles on one platform, and phase-ai is
+    # where the repo's `#[cfg(unix)]` test paths live (ai_gate's symlink
+    # test, duel_suite's reserved-sink test). A full
+    # `--workspace --all-targets` Windows clippy is NOT viable here:
+    # release.yml's Windows leg documents ~33-34 min warm against a 35-min
+    # ceiling, and cache misses there tripped the timeout and cancelled
+    # releases. A cold scoped run measured ~6 min locally; 25 leaves room
+    # for a cold hosted cache without approaching that failure mode.
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          # Distinct from rust-lint's `rust-debug` key: that cache is built by
+          # a Linux runner and shares nothing with an MSVC target.
+          cache-shared-key: rust-windows-lint
+
+      # `--tests` is the point of this job, not an incidental flag. The Windows
+      # break in #8591 was a `#[cfg(test)]`-only binding, so it is invisible to
+      # any target set that omits test targets -- which is every Windows job
+      # the repo had (release.yml and preview-server.yml build `phase-server`;
+      # shell-release.yml runs `cargo check` on phase-tauri).
+      #
+      # `--locked` matches rust-lint: a Windows-only lockfile rewrite would
+      # otherwise go unnoticed here.
+      - name: Clippy (phase-ai, Windows)
+        run: cargo clippy --locked -p phase-ai --bins --tests -- -D warnings
+
   rust-test-build:
     name: Rust tests (build archive)
     runs-on: ubuntu-latest
