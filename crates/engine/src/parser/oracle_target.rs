@@ -2173,6 +2173,21 @@ fn parse_named_filter_terminator(input: &str) -> Result<(&str, ()), nom::Err<Ora
 ///
 /// Prefer `parse_type_phrase_with_ctx` when a `ParseContext` is available —
 /// it enables relative-player scope resolution for "that player controls".
+///
+/// # Not interchangeable with the other `parse_type_phrase`
+///
+/// [`crate::parser::oracle_nom::target::parse_type_phrase`] has the same name
+/// and reads the same grammatical slot, but it is a different reader, and their
+/// accepted grammars diverge — the measured differences are tabulated on the
+/// private `TypePhraseGrammar` enum in `oracle_nom/quantity.rs`, which selects
+/// between them as an explicit typed parameter; this reader is its `Legacy` arm.
+///
+/// One consequence is load-bearing for every caller: this reader is
+/// INFALLIBLE. There is no `Err` to propagate — an unrecognized phrase
+/// ("those creatures", "them") comes back as an empty `TypedFilter` plus the
+/// whole input, which is NOT `TargetFilter::Any`. A caller that means to
+/// decline unrecognized input needs an emptiness check (or a whole-clause
+/// remainder check); an `Any` guard will not catch it.
 pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     parse_type_phrase_with_ctx(text, &mut ParseContext::default())
 }

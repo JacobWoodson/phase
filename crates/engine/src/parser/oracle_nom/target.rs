@@ -36,8 +36,18 @@ pub fn parse_declared_target_prefix(input: &str) -> OracleResult<'_, ()> {
 /// Parse a type phrase into a `TargetFilter`.
 ///
 /// Handles: optional "non" prefix, optional supertype, optional color prefix,
-/// core type(s) joined by " or ", and optional controller suffix. This is the
-/// nom equivalent of `oracle_target::parse_type_phrase`.
+/// core type(s) joined by " or ", and optional controller suffix.
+///
+/// # Not interchangeable with the other `parse_type_phrase`
+///
+/// `crate::parser::oracle_target::parse_type_phrase` has the same name and
+/// reads the same grammatical slot, but it is a different reader — it is not a
+/// legacy copy of this one, and this is not a drop-in nom port of it. Their
+/// accepted grammars diverge, so the choice of reader changes which cards a
+/// caller accepts. The measured differences are tabulated on the private
+/// `TypePhraseGrammar` enum in `oracle_nom/quantity.rs`, which selects between
+/// them as an explicit typed parameter; this reader is its `Strict` arm, and
+/// reports an unrecognized phrase as `Err`.
 pub fn parse_type_phrase(input: &str) -> OracleResult<'_, TargetFilter> {
     // Optional "non" prefix (consumed separately from type negation)
     let (rest, non_prefix) = opt(parse_non_prefix).parse(input)?;
