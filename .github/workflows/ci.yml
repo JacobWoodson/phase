@@ -38,6 +38,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # Not persisted: the token is not needed after the fetch, and
+          # leaving it in .git/config exposes it to anything this job runs.
+          persist-credentials: false
           # Full history so the parser-combinator gate can diff against origin/main.
           fetch-depth: 0
 
@@ -155,6 +158,10 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Not persisted: the token is not needed after the fetch, and
+          # leaving it in .git/config exposes it to anything this job runs.
+          persist-credentials: false
 
       - name: Free runner disk for Rust test linking
         # Build the workspace's test binaries once. Keep the Rust caches intact
@@ -244,6 +251,10 @@ jobs:
         shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Not persisted: the token is not needed after the fetch, and
+          # leaving it in .git/config exposes it to anything this job runs.
+          persist-credentials: false
 
       # Some snapshot tests query Cargo metadata at runtime. This makes Cargo
       # available but does not build test binaries; those come from the archive.
@@ -292,6 +303,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # Not persisted: the token is not needed after the fetch, and
+          # leaving it in .git/config exposes it to anything this job runs.
+          persist-credentials: false
           # Parse-diff reads both parents of GitHub's synthetic PR merge commit.
           fetch-depth: 2
 
@@ -689,6 +703,10 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Not persisted: the token is not needed after the fetch, and
+          # leaving it in .git/config exposes it to anything this job runs.
+          persist-credentials: false
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -738,6 +756,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Not persisted: the token is not needed after the fetch, and
+          # leaving it in .git/config exposes it to anything this job runs.
+          persist-credentials: false
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -756,6 +778,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Not persisted: the token is not needed after the fetch, and
+          # leaving it in .git/config exposes it to anything this job runs.
+          persist-credentials: false
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -801,6 +827,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Not persisted: the token is not needed after the fetch, and
+          # leaving it in .git/config exposes it to anything this job runs.
+          persist-credentials: false
 
       - name: Validate Gradle wrapper
         uses: gradle/actions/wrapper-validation@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
@@ -940,6 +970,10 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Not persisted: the token is not needed after the fetch, and
+          # leaving it in .git/config exposes it to anything this job runs.
+          persist-credentials: false
 
       - uses: pnpm/action-setup@v4
         with:
@@ -963,6 +997,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Not persisted: the token is not needed after the fetch, and
+          # leaving it in .git/config exposes it to anything this job runs.
+          persist-credentials: false
 
       - uses: pnpm/action-setup@v4
         with:
