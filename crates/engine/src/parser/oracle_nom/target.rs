@@ -38,30 +38,16 @@ pub fn parse_declared_target_prefix(input: &str) -> OracleResult<'_, ()> {
 /// Handles: optional "non" prefix, optional supertype, optional color prefix,
 /// core type(s) joined by " or ", and optional controller suffix.
 ///
-/// # CR 109.2: NOT interchangeable with the other `parse_type_phrase`
+/// # Not interchangeable with the other `parse_type_phrase`
 ///
-/// `crate::parser::oracle_target::parse_type_phrase` has the SAME NAME and
-/// reads the same grammatical slot, but it is a DIFFERENT reader — it is not a
-/// legacy copy of this one, and this is not a drop-in nom port of it. Two ways
-/// that bites:
-///
-/// 1. **The return shape is TRANSPOSED.** This returns `OracleResult`, whose
-///    `Ok` is `(remainder, filter)`; the other returns `(filter, remainder)`.
-///    Both are a 2-tuple of a `TargetFilter` and a `&str`, so transposing the
-///    destructuring still TYPE-CHECKS wherever the binding names are not
-///    load-bearing. Never transpose it.
-/// 2. **The type-list join differs.** This joins on `" or "` ONLY
-///    (`parse_type_list`); the other folds all seven `TYPE_SEPARATORS` forms
-///    (`", and/or "`, `", and "`, `", or "`, `", "`, `"or "`, `"and/or "`,
-///    `"and "`). Measured: `"creatures and planeswalkers they control"` SPLITS
-///    here — `Typed{Creature}` plus the remainder `" and planeswalkers …"` —
-///    and FOLDS there into one `Or[..]` consumed whole. This reader also
-///    carries no ownership / token / combat-relation grammar.
-///
-/// So the choice of reader silently changes which cards a caller accepts. Pin
-/// it by fully-qualified path at every call site rather than by whichever
-/// `use` is in scope — `oracle_nom/quantity.rs` makes it an explicit typed
-/// parameter (`TypePhraseGrammar`) for exactly this reason.
+/// `crate::parser::oracle_target::parse_type_phrase` has the same name and
+/// reads the same grammatical slot, but it is a different reader — it is not a
+/// legacy copy of this one, and this is not a drop-in nom port of it. Their
+/// accepted grammars diverge, so the choice of reader changes which cards a
+/// caller accepts. The measured differences are tabulated on the private
+/// `TypePhraseGrammar` enum in `oracle_nom/quantity.rs`, which selects between
+/// them as an explicit typed parameter; this reader is its `Strict` arm, and
+/// reports an unrecognized phrase as `Err`.
 pub fn parse_type_phrase(input: &str) -> OracleResult<'_, TargetFilter> {
     // Optional "non" prefix (consumed separately from type negation)
     let (rest, non_prefix) = opt(parse_non_prefix).parse(input)?;

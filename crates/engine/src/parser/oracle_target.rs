@@ -2174,35 +2174,20 @@ fn parse_named_filter_terminator(input: &str) -> Result<(&str, ()), nom::Err<Ora
 /// Prefer `parse_type_phrase_with_ctx` when a `ParseContext` is available —
 /// it enables relative-player scope resolution for "that player controls".
 ///
-/// # CR 109.2: NOT interchangeable with the other `parse_type_phrase`
+/// # Not interchangeable with the other `parse_type_phrase`
 ///
-/// [`crate::parser::oracle_nom::target::parse_type_phrase`] has the SAME NAME
-/// and reads the same grammatical slot, but it is a DIFFERENT reader. Three
-/// ways that bites:
+/// [`crate::parser::oracle_nom::target::parse_type_phrase`] has the same name
+/// and reads the same grammatical slot, but it is a different reader, and their
+/// accepted grammars diverge — the measured differences are tabulated on the
+/// private `TypePhraseGrammar` enum in `oracle_nom/quantity.rs`, which selects
+/// between them as an explicit typed parameter; this reader is its `Legacy` arm.
 ///
-/// 1. **The return shape is TRANSPOSED.** This returns `(filter, remainder)`;
-///    the other returns `OracleResult`, whose `Ok` is `(remainder, filter)`.
-///    Both are a 2-tuple of a `TargetFilter` and a `&str`, so transposing the
-///    destructuring still TYPE-CHECKS wherever the binding names are not
-///    load-bearing. Never transpose it.
-/// 2. **This one is INFALLIBLE.** There is no `Err` to propagate: on a phrase
-///    it does not recognize ("those creatures", "them") it returns an EMPTY
-///    `TypedFilter` plus the WHOLE input — NOT `TargetFilter::Any`, so an
-///    `Any` guard does NOT catch it. A caller that declines unrecognized input
-///    needs an emptiness check (or a whole-clause remainder check), not an
-///    `Any` check. The other reader simply fails with `Err`.
-/// 3. **The type-list join differs.** This folds all seven `TYPE_SEPARATORS`
-///    forms (`", and/or "`, `", and "`, `", or "`, `", "`, `"or "`,
-///    `"and/or "`, `"and "`); the other joins on `" or "` ONLY. Measured:
-///    `"creatures and planeswalkers they control"` FOLDS here into one
-///    `Or[..]` consumed whole, and SPLITS there into `Typed{Creature}` plus
-///    the remainder `" and planeswalkers …"`. This reader also carries
-///    ownership / token / combat-relation grammar the other one does not.
-///
-/// So the choice of reader silently changes which cards a caller accepts. Pin
-/// it by fully-qualified path at every call site rather than by whichever
-/// `use` is in scope — `oracle_nom/quantity.rs` makes it an explicit typed
-/// parameter (`TypePhraseGrammar`) for exactly this reason.
+/// One consequence is load-bearing for every caller: this reader is
+/// INFALLIBLE. There is no `Err` to propagate — an unrecognized phrase
+/// ("those creatures", "them") comes back as an empty `TypedFilter` plus the
+/// whole input, which is NOT `TargetFilter::Any`. A caller that means to
+/// decline unrecognized input needs an emptiness check (or a whole-clause
+/// remainder check); an `Any` guard will not catch it.
 pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     parse_type_phrase_with_ctx(text, &mut ParseContext::default())
 }
