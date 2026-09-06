@@ -827,6 +827,7 @@ mod issue_8302_liberator_mana_spent_power;
 mod issue_841_selvala_explorer_returned;
 mod issue_8455_town_greeter;
 mod issue_847_braids_cabal_minion;
+mod issue_8485_maze_of_ith_defender;
 mod issue_852_torrential_gearhulk;
 mod issue_8543_up_to_draw_count_choice;
 mod issue_859_weathered_wayfarer;
