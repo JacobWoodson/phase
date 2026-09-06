@@ -4256,6 +4256,29 @@ pub fn parse_that_much_or_many(input: &str) -> OracleResult<'_, QuantityRef> {
     .parse(input)
 }
 
+/// CR 706.4: Die-roll result demonstratives — "that result" (the die the
+/// player chose) and "the other result" (the remaining die).
+///
+/// Both map to `QuantityRef::EventContextAmount`, the unbound demonstrative,
+/// because a leaf combinator cannot see whether a preceding clause actually
+/// rolled apportioned dice. Chain assembly performs the binding to
+/// `DieResultSelected` where that proof exists (CR 608.2c). If no apportioned
+/// roll precedes them, they correctly remain the generic event-context amount.
+///
+/// Covers ONLY the two apportioning demonstratives. The bare "the result" is
+/// deliberately excluded: it is the single-roll phrase already routed by the
+/// where-X fallback in `oracle_effect::lower`, which requires
+/// `parse_cda_quantity` to decline it first (see
+/// `cda_quantity_returns_none_for_the_result`). Matching it here would shadow
+/// that ordering and mis-claim CDA-handled phrases.
+pub fn parse_die_result_demonstrative(input: &str) -> OracleResult<'_, QuantityRef> {
+    value(
+        QuantityRef::EventContextAmount,
+        alt((tag("that result"), tag("the other result"))),
+    )
+    .parse(input)
+}
+
 /// Parse event-context quantity references.
 ///
 /// Two referent kinds under two different rules. CR 608.2h governs the VALUE forms
@@ -4269,6 +4292,13 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
         // single-authority combinator (also used by the player-counter,
         // counter-removal, and mana-production count-prefix slots).
         parse_that_much_or_many,
+        // CR 706.4: "that result" / "the other result" — a die-roll
+        // demonstrative. Parsed as the UNBOUND `EventContextAmount` here and
+        // rebound to `QuantityRef::DieResultSelected` by chain assembly once
+        // it can prove the preceding clause is an apportioned roll
+        // (CR 608.2c). Parsing them as the generic demonstrative keeps this
+        // combinator free of chain context, which it does not have.
+        parse_die_result_demonstrative,
         value(QuantityRef::EventContextAmount, tag("that damage")),
         // CR 608.2h: "the damage dealt" bare form in a triggered ability
         // body — refers to the total from the triggering damage event, an

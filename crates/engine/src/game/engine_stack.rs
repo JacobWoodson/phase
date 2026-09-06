@@ -131,8 +131,16 @@ pub(super) fn finalize_trigger_target_selection(
 /// `EventContextAmount` ("where X is the result") resolves against the rolled
 /// number during the legality check or the step-by-step choose walk. The next
 /// `apply()` clears `die_result_this_resolution`, so this cannot leak.
+///
+/// CR 706.4: the apportioned pair is re-stamped alongside the scalar, on the
+/// same boundary and for the same reason — a cap written as "the other result"
+/// must resolve against the die it was apportioned, not the unbound-reference 0.
 fn restamp_pending_die_result(state: &mut GameState) {
     state.die_result_this_resolution = state.pending_trigger.as_ref().and_then(|t| t.die_result);
+    state.die_results_apportioned = state
+        .pending_trigger
+        .as_ref()
+        .and_then(|t| t.die_results_apportioned);
 }
 
 pub(super) fn handle_trigger_target_selection_select_targets(

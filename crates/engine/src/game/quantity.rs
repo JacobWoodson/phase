@@ -18,10 +18,10 @@ use crate::game::speed::effective_speed;
 use crate::types::ability::{
     AggregateFunction, AttackScope, BasicLandType, CardTypeSetSource, CastManaObjectScope,
     CastManaSpentMetric, ContinuousModification, ControllerRef, CountScope, DamageChannel,
-    FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, PossessionAxis,
-    QuantityExpr, QuantityRef, ResolvedAbility, RoundingMode, StaticCondition, SubtypeExclusion,
-    TargetDamageSourceBinding, TargetFilter, TargetRef, ThisWayCause, TrackedAnaphorSource,
-    TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
+    DieResultSelection, FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope,
+    PossessionAxis, QuantityExpr, QuantityRef, ResolvedAbility, RoundingMode, StaticCondition,
+    SubtypeExclusion, TargetDamageSourceBinding, TargetFilter, TargetRef, ThisWayCause,
+    TrackedAnaphorSource, TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_types, CounterType};
@@ -1128,6 +1128,8 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::PartySize { .. }
         | QuantityRef::Speed { .. }
         | QuantityRef::EventContextAmount
+        // CR 706.4: an apportioned die result is a resolution-local scalar.
+        | QuantityRef::DieResultSelected { .. }
         | QuantityRef::AttachmentsOnLeavingObject { .. }
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
@@ -1459,6 +1461,8 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::LifeLostThisTurn { .. }
         | QuantityRef::Speed { .. }
         | QuantityRef::EventContextAmount
+        // CR 706.4: an apportioned die result is a resolution-local scalar.
+        | QuantityRef::DieResultSelected { .. }
         | QuantityRef::AttachmentsOnLeavingObject { .. }
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
@@ -1758,6 +1762,8 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         | QuantityRef::UnspentMana { .. }
         | QuantityRef::Speed { .. }
         | QuantityRef::EventContextAmount
+        // CR 706.4: an apportioned die result is a resolution-local scalar.
+        | QuantityRef::DieResultSelected { .. }
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
         // CR 117.1: spell-cast journals store each spell's cast-time
@@ -2024,6 +2030,8 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::LifeLostThisTurn { .. }
         | QuantityRef::Speed { .. }
         | QuantityRef::EventContextAmount
+        // CR 706.4: an apportioned die result is a resolution-local scalar.
+        | QuantityRef::DieResultSelected { .. }
         | QuantityRef::AttachmentsOnLeavingObject { .. }
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
@@ -4396,6 +4404,19 @@ fn resolve_ref(
         //      continuation fallbacks (e.g. "discard up to N, then draw that
         //      many"; "dealt excess damage this way, add that much {R}").
         //   6. `0` — undefined.
+        // CR 706.4: One die of an apportioned two-die roll made earlier in this
+        // same resolution ("Roll two d12 and choose one result … that result …
+        // the other result"). Unlike `EventContextAmount` this leaf has a
+        // single authoritative source and deliberately does NOT fall back to
+        // the triggering event: if the apportionment is absent the roll has not
+        // resolved, and 0 is the only honest answer.
+        QuantityRef::DieResultSelected { selection } => state
+            .die_results_apportioned
+            .map(|(chosen, other)| match selection {
+                DieResultSelection::Chosen => chosen,
+                DieResultSelection::Other => other,
+            })
+            .unwrap_or(0),
         QuantityRef::EventContextAmount => state
             // CR 614.1a: Moonlit-scoped "that many" copy count — highest priority,
             // un-shadowable. `Some` only while a `CopyTokenOf` substitution
@@ -16672,6 +16693,9 @@ mod tests {
     fn resolve_event_context_amount_falls_through_when_no_die_result() {
         let mut state = GameState::new_two_player(42);
         state.die_result_this_resolution = None;
+        // CR 706.4: the apportioned pair is resolution-scoped on the
+        // same boundary as the scalar die result above.
+        state.die_results_apportioned = None;
         state.current_trigger_event = Some(crate::types::events::GameEvent::DamageDealt {
             source_id: ObjectId(1),
             target: TargetRef::Player(PlayerId(0)),

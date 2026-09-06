@@ -2534,6 +2534,9 @@ mod tests {
         state.current_trigger_events.clear();
         state.current_trigger_match_count = None;
         state.die_result_this_resolution = None;
+        // CR 706.4: the apportioned pair is resolution-scoped on the
+        // same boundary as the scalar die result above.
+        state.die_results_apportioned = None;
 
         let p0_before = state.players[0].life;
         let p1_before = state.players[1].life;

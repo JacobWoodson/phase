@@ -1492,6 +1492,11 @@ pub fn fallback_action(
         WaitingFor::CoinFlipKeepChoice { keep_count, .. } => Some(GameAction::SelectCoinFlips {
             keep_indices: (0..*keep_count).collect(),
         }),
+        // CR 706.4 + CR 608.2d: apportioned die-roll selection — `results` is
+        // never empty when this prompt is raised, so index 0 is always a legal
+        // pick. Any legal index resolves the prompt; the evaluated candidate
+        // enumerator chooses between them properly.
+        WaitingFor::DieResultChoice { .. } => Some(GameAction::SelectDieResult { index: 0 }),
         // CR 608.2d: SearchPartitionChoice requires EXACTLY primary_count cards —
         // an empty selection is illegal. Deterministically take the first
         // primary_count of the found set for the battlefield (rest auto-route).

@@ -18,8 +18,8 @@ use nom::Parser;
 
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::effect_chain::{
-    AbsorbKind, ClauseDisposition, ClauseId, ClausePlacement, EffectChainIr, OtherwiseKind,
-    PlayerScopeRewrite, PriorModifier, ReplaceMeaningKind, ReplicateKind,
+    AbsorbKind, ClauseDisposition, ClauseId, ClauseIr, ClausePlacement, EffectChainIr,
+    OtherwiseKind, PlayerScopeRewrite, PriorModifier, ReplaceMeaningKind, ReplicateKind,
 };
 use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::error::OracleError;
@@ -27,8 +27,8 @@ use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     CastFromZoneDriver, CastingPermission, ChoiceType, Comparator, ControllerRef, DamageChannel,
-    Effect, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, StaticCondition, SubAbilityLink,
-    TapStateChange, TargetFilter,
+    DieResultSelection, Effect, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
+    StaticCondition, SubAbilityLink, TapStateChange, TargetFilter,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -76,7 +76,8 @@ use super::{
     contains_explicit_tracked_set_pronoun, contains_implicit_tracked_set_pronoun,
     def_is_damage_dealer, def_is_dig_look, def_is_dig_or_mill, def_is_generic_effect_head,
     def_is_keyword_counter_placement, def_is_perpetual_keyword_grant,
-    demote_unbindable_batch_aggregate, draw_object_count_filter, fold_cast_copy_of_card_defs,
+    demote_unbindable_batch_aggregate, draw_object_count_filter, each_filter_quantity_expr_mut,
+    each_quantity_expr_mut, each_target_filter_mut, fold_cast_copy_of_card_defs,
     has_explicit_player_target, inject_chosen_color_choice_grant, mark_uses_tracked_set,
     nearest_publisher_is_self_move, parse_spell_graveyard_replacement_rider,
     parse_spells_cast_this_way_graveyard_replacement_rider,
@@ -1486,6 +1487,199 @@ fn bind_chosen_number_anaphor(def: &mut AbilityDefinition, prior: &[AbilityDefin
             },
         });
     }
+}
+
+/// CR 706.4 + CR 608.2c: Bind each die-result demonstrative in a chain to the
+/// specific die of a preceding apportioned roll that its printed text names.
+///
+/// The parser lowers both "that result" and "the other result" to the UNBOUND
+/// `QuantityRef::EventContextAmount`, because a leaf combinator cannot see
+/// whether a roll precedes it. This pass supplies exactly the proof that leaf
+/// lacked: it runs only when an earlier clause in the SAME chain is an
+/// apportioned `Effect::RollDie`, and it reads each later def's ORIGIN CLAUSE's
+/// printed fragment to decide which die that clause names. Per CR 608.2c later
+/// text modifies the meaning of earlier text, which is what licenses binding a
+/// demonstrative to an antecedent the grammar names rather than to the
+/// triggering event.
+///
+/// Binding is CLAUSE-scoped, not def-scoped, because a `where X is <die>`
+/// trailer binds the single X its clause prints even when that clause lowers
+/// into several defs ("each opponent loses X life and you gain X life, where X
+/// is the other result" — two defs, one X).
+///
+/// Rebinding (rather than a bespoke `QuantityRef` produced at parse time)
+/// preserves arithmetic wrappers: "twice that result" stays
+/// `Multiply { inner: Ref(DieResultSelected { .. }) }` because
+/// `QuantityExpr::rebind_event_context_amount` walks into every wrapper.
+///
+/// A chain with no apportioned roll is left completely untouched, so ordinary
+/// "that much" / "that many" consumers keep their event-context meaning.
+fn rebind_die_result_demonstratives(
+    defs: &mut [AbilityDefinition],
+    ir: &EffectChainIr,
+    arena: &Arena,
+) {
+    // CR 706.4: the apportionment must be established by an EARLIER clause;
+    // a demonstrative before the roll has no antecedent to bind to.
+    let Some(roll_index) = defs.iter().position(|def| {
+        matches!(
+            &*def.effect,
+            Effect::RollDie {
+                selection: Some(_),
+                ..
+            }
+        )
+    }) else {
+        return;
+    };
+
+    // CR 706.4 + CR 107.3: which die each def names, by index into `defs`.
+    // Computed as a separate pass because a `where X is <die>` trailer binds
+    // the whole SENTENCE it terminates, not just the clause whose bytes carry
+    // the phrase — so a def's selection can come from a LATER clause.
+    let selections = die_selection_per_def(defs, ir, arena);
+
+    for index in roll_index + 1..defs.len() {
+        let Some(selection) = selections[index] else {
+            continue;
+        };
+        let antecedent = QuantityRef::DieResultSelected { selection };
+        let def = &mut defs[index];
+        // CR 608.2c: rebind BOTH quantity positions a clause can name a die
+        // from — its own amount slot ("deals damage equal to that result") and
+        // any comparison threshold inside its target filter ("with mana value
+        // less than or equal to the other result"). Composing the two shared
+        // visitors covers the whole class without either learning the other's
+        // domain.
+        let mut rebind = |expr: &mut QuantityExpr| {
+            expr.rebind_event_context_amount(&antecedent);
+        };
+        each_quantity_expr_mut(def.effect.as_mut(), &mut rebind);
+        each_target_filter_mut(def.effect.as_mut(), &mut |filter| {
+            each_filter_quantity_expr_mut(filter, &mut rebind);
+        });
+    }
+}
+
+/// CR 706.4 + CR 107.3: Resolve, for every def, which die of the apportioned
+/// roll its printed text names.
+///
+/// Two scopes are in play, and conflating them is what makes a paired-X card
+/// bind asymmetrically:
+///
+///  * An INLINE demonstrative ("damage equal to that result") names a die for
+///    the clause that prints it, and for that clause alone.
+///  * A `where X is <die>` TRAILER binds the algebraic X of the SENTENCE it
+///    terminates. "Each opponent loses X life and you gain X life, where X is
+///    the other result" prints ONE X; the clause splitter cuts it at the `and`
+///    into two clauses, and only the second carries the trailer's bytes. Both
+///    halves print the same X, so both must resolve to the same die.
+///
+/// `ClauseBoundary::Sentence` is the authority for where that trailer's scope
+/// begins: it is exactly the printed full stop that ends the previous
+/// instruction. Walking back over `Then`/`Comma`/absent boundaries — the
+/// within-sentence links, per `sub_link_after_boundary` — and stopping at a
+/// `Sentence` boundary binds the trailer to its own sentence and no further, so
+/// an unrelated earlier sentence's X is never captured.
+///
+/// Defs with no clause of their own (`ContinuationProduct`) are left unbound:
+/// they print no text, so they name no die.
+fn die_selection_per_def(
+    defs: &[AbilityDefinition],
+    ir: &EffectChainIr,
+    arena: &Arena,
+) -> Vec<Option<DieResultSelection>> {
+    let clause_of = |index: usize| -> Option<&ClauseIr> {
+        let origin = arena.prov_at(index)?.origin?;
+        ir.clauses.iter().find(|c| c.id == origin)
+    };
+
+    // Pass 1: the inline demonstrative each def's OWN clause prints.
+    let mut selections: Vec<Option<DieResultSelection>> = (0..defs.len())
+        .map(|index| {
+            clause_of(index)
+                .and_then(|clause| clause.source.fragment())
+                .and_then(die_result_selection_in)
+        })
+        .collect();
+
+    // Pass 2: spread each `where X is <die>` trailer back over the rest of its
+    // sentence. Only a def whose own clause carries the trailer starts a
+    // spread, and the walk stops at the first `Sentence` boundary — the printed
+    // end of the previous instruction.
+    for index in 0..defs.len() {
+        let Some(clause) = clause_of(index) else {
+            continue;
+        };
+        let Some(fragment) = clause.source.fragment() else {
+            continue;
+        };
+        let Some(selection) = where_x_is_die_result(fragment) else {
+            continue;
+        };
+        for earlier in (0..index).rev() {
+            // CR 608.2c: `ClauseIr::boundary` is the boundary that FOLLOWS its
+            // clause (`ClauseChunk::boundary_after`), so the link between
+            // `earlier` and the clause after it is `earlier`'s own field. A
+            // `Sentence` there is the printed full stop that ends the previous
+            // instruction, and the trailer's X does not reach across it.
+            let boundary = clause_of(earlier).and_then(|c| c.boundary);
+            if matches!(boundary, Some(ClauseBoundary::Sentence)) {
+                break;
+            }
+            // An earlier def that already named a die INLINE printed its own
+            // demonstrative; the trailer does not override it.
+            if selections[earlier].is_none() {
+                selections[earlier] = Some(selection);
+            }
+        }
+    }
+
+    selections
+}
+
+/// CR 107.3: The die named by a `where X is <die demonstrative>` trailer, if
+/// the fragment ends in one. Distinguished from a bare inline demonstrative
+/// because only the trailer carries sentence-wide binding scope.
+fn where_x_is_die_result(fragment: &str) -> Option<DieResultSelection> {
+    let lower = fragment.to_lowercase();
+    // Scanned at word boundaries rather than anchored: the trailer sits at the
+    // end of a clause whose head is arbitrary ("...that creature, where X is
+    // the other result"). The die demonstrative is parsed inside the same
+    // combinator, so a `where X is` that names something else (a count, a
+    // chosen number) does not match and the scan moves on to the next
+    // boundary.
+    nom_primitives::scan_at_word_boundaries(&lower, |i| {
+        preceded(tag::<_, _, OracleError<'_>>("where x is "), die_result_arms).parse(i)
+    })
+}
+
+/// CR 706.4: Which die a clause's printed text names, if it names one.
+///
+/// Scans at word boundaries so the phrase is found wherever it sits in the
+/// clause ("deals damage equal to that result to each creature" carries it mid
+/// clause; "equal to the other result" ends with it).
+fn die_result_selection_in(fragment: &str) -> Option<DieResultSelection> {
+    let lower = fragment.to_lowercase();
+    nom_primitives::scan_at_word_boundaries(&lower, die_result_arms)
+}
+
+/// CR 706.4: the die demonstratives themselves, over already-lowercased text.
+/// Shared by the bare inline scan and by the `where X is <die>` trailer so both
+/// recognize exactly the same set of demonstratives.
+///
+/// The `Other` arm is tried first because "the other result" also contains a
+/// bare "result": an unordered `alt` would let a shorter arm win on the same
+/// span.
+fn die_result_arms(i: &str) -> nom::IResult<&str, DieResultSelection, OracleError<'_>> {
+    alt((
+        value(
+            DieResultSelection::Other,
+            tag::<_, _, OracleError<'_>>("the other result"),
+        ),
+        value(DieResultSelection::Chosen, tag("that result")),
+    ))
+    .parse(i)
 }
 
 pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
@@ -3076,6 +3270,13 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         }
     }
     env.arena.assert_mirrors(&defs);
+
+    // CR 706.4 + CR 608.2c: bind "that result" / "the other result" to the
+    // individual dice of a preceding apportioned roll. Sited HERE — after
+    // phase 1 has produced the complete FLAT `defs` list and before phase 2
+    // folds it into a nested chain — because the pass needs every clause of
+    // the chain and its printed fragment side by side.
+    rebind_die_result_demonstratives(&mut defs, ir, &env.arena);
 
     // ── Phase 2: Post-loop assembly (unchanged) ────────────────────────
     let kind = ir.kind;

@@ -1,9 +1,11 @@
 use rand::Rng;
 
 use crate::game::quantity::resolve_quantity;
-use crate::types::ability::{DieRollModifier, Effect, EffectError, EffectKind, ResolvedAbility};
+use crate::types::ability::{
+    DieRollModifier, Effect, EffectError, EffectKind, QuantityExpr, ResolvedAbility,
+};
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, WaitingFor};
 
 use super::resolve_ability_chain;
 use crate::game::ability_utils::build_resolved_from_def_with_targets;
@@ -38,15 +40,35 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (count_expr, sides, results, modifier) = match &ability.effect {
+    let (count_expr, sides, results, modifier, selection) = match &ability.effect {
         Effect::RollDie {
             count,
             sides,
             results,
             modifier,
-        } => (count, *sides, results, modifier.as_ref()),
+            selection,
+        } => (count, *sides, results, modifier.as_ref(), *selection),
         _ => return Err(EffectError::MissingParam("RollDie".to_string())),
     };
+
+    // CR 706.4 + CR 608.2d: An apportioned roll ("roll two d12 and choose one
+    // result") rolls all its dice, then suspends so the roll's controller can
+    // choose which result the following clauses read. Both results are used —
+    // the unchosen one is "the other result" — so no roll is ignored
+    // (contrast CR 706.6). A results table never coexists with an
+    // apportionment (CR 706.3b), so this path is disjoint from the table walk
+    // below.
+    if let Some(apportioned_count) = selection {
+        return resolve_apportioned(
+            state,
+            ability,
+            sides,
+            apportioned_count,
+            count_expr,
+            modifier,
+            events,
+        );
+    }
 
     // CR 706.1: Resolve how many dice of this kind to roll, in the ability's
     // context; clamp at zero (a 0-count roll is a no-op). Each die is rolled
@@ -122,6 +144,9 @@ pub fn resolve(
         state.die_result_this_resolution = Some(total_actual);
     } else {
         state.die_result_this_resolution = None;
+        // CR 706.4: the apportioned pair is resolution-scoped on the
+        // same boundary as the scalar die result above.
+        state.die_results_apportioned = None;
     }
 
     events.push(GameEvent::EffectResolved {
@@ -131,6 +156,129 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 706.4 + CR 608.2d: Roll the dice of an apportioned roll and suspend for
+/// the controller's selection of "that result".
+///
+/// The dice are rolled here — CR 706.1 rolling happens when the instruction
+/// resolves — and the choice follows in the same resolution (CR 608.2d: a
+/// choice made while applying the effect). `die_results_apportioned` is
+/// stamped by `resume_after_selection` once the choice arrives; until then the
+/// following clauses have nothing to read, which is correct because they have
+/// not resolved yet.
+///
+/// A disagreeing `count_expr`, and any `modifier`, are rejected rather than
+/// ignored. The parser stamps `count` with the apportioned arity itself (2) and
+/// hardcodes `modifier: None` on this path, so a count that resolves to
+/// anything but that arity — or the unstamped default of one — and any modifier
+/// at all means the effect was built by something that believes an apportioned
+/// roll can carry a CR 706.2 modifier or a count that disagrees with the
+/// apportionment. Silently dropping either would roll the right dice and then
+/// produce wrong results; failing loudly surfaces the gap instead.
+#[allow(clippy::too_many_arguments)]
+fn resolve_apportioned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    sides: u8,
+    apportioned_count: u8,
+    count_expr: &QuantityExpr,
+    modifier: Option<&DieRollModifier>,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    // CR 706.2: a modifier adjusts the natural roll before any consumer reads
+    // it. Nothing below applies one, so accepting it would silently discard it.
+    if modifier.is_some() {
+        return Err(EffectError::InvalidParam(
+            "RollDie: an apportioned roll (CR 706.4) cannot carry a CR 706.2 modifier — \
+             the modifier would be dropped before the results are apportioned"
+                .to_string(),
+        ));
+    }
+
+    // CR 706.1: the number of dice rolled comes from `selection`'s arity, so a
+    // `count` that disagrees with it would be discarded here. The parser stamps
+    // the apportioned arity itself on this path (`count: Fixed { value: 2 }`
+    // alongside `selection`), so that is the value normally seen; the guard also
+    // tolerates the unstamped default of one. Do not tighten this to reject the
+    // arity — that would reject every card in the class.
+    let count = resolve_quantity(state, count_expr, ability.controller, ability.source_id);
+    if count != 1 && count != i32::from(apportioned_count) {
+        return Err(EffectError::InvalidParam(format!(
+            "RollDie: an apportioned roll (CR 706.4) rolls its `selection` arity \
+             ({apportioned_count}), but `count` resolved to {count}"
+        )));
+    }
+
+    // CR 706.1: each die is rolled independently with the same number of sides.
+    // The arity comes from the effect rather than a literal here, so the roll
+    // can never disagree with the apportionment the parser recorded.
+    let results: Vec<u8> = (0..apportioned_count)
+        .map(|_| roll_die(state, ability.controller, sides, events))
+        .collect();
+
+    // CR 706.4: the aggregate is meaningless for an apportioned roll — each
+    // clause reads ONE die — so clear it rather than leaving a stale or summed
+    // value for a later "the result" consumer to misread.
+    state.die_result_this_resolution = None;
+    state.die_results_apportioned = None;
+
+    state.waiting_for = WaitingFor::DieResultChoice {
+        player: ability.controller,
+        results,
+    };
+    Ok(())
+}
+
+/// CR 706.4 + CR 608.2d: Record the apportionment once the controller has
+/// chosen which rolled result is "that result". The remaining die becomes "the
+/// other result"; both stay in use.
+///
+/// `index` is validated against `results` by the resolution-choice handler
+/// before this is called; an out-of-range index is ignored here rather than
+/// panicking, so a malformed action can never take the game down.
+///
+/// CR 603.12: the pair stamped here is resolution-scoped, and an apportioned
+/// roll's chain may lower a reflexive "When you do …" sub-ability that resolves
+/// on its own stack entry in a LATER `apply()`. It therefore travels the same
+/// route as its scalar sibling `die_result_this_resolution` —
+/// `PendingTrigger.die_results_apportioned` →
+/// `StackEntryKind::TriggeredAbility` → `TriggeredResolutionScope` → re-stamped
+/// by `bind_triggered_resolution_scope` — and is saved/restored across nested
+/// contexts by `TriggerEventContextSnapshot` and replayed across interactive
+/// pauses by `ResolvingTriggerContext`. Keep the two channels in lockstep: a
+/// stamp added here without the matching carrier lets `DieResultSelected`
+/// resolve to the unbound-reference 0 while `die_result` resolves correctly.
+pub(crate) fn resume_after_selection(state: &mut GameState, results: &[u8], index: usize) {
+    let Some(&chosen_roll) = results.get(index) else {
+        return;
+    };
+    let chosen = i32::from(chosen_roll);
+    // CR 706.4: "the other result" names a UNIQUE die only when exactly two
+    // were rolled. At any other arity there is no single "other", so the
+    // apportionment is not recorded at all — `DieResultSelected` then resolves
+    // to the honest 0 of an unbound reference rather than to a duplicate of the
+    // chosen die, which would be indistinguishable from a legitimate roll. The
+    // parser stamps `selection` only at arity 2 today, so this is the arity
+    // guard's runtime half: when a future apportionment extends the selection
+    // enum past two dice, this refuses to fabricate rather than silently
+    // answering wrong.
+    let Some(other) = results
+        .iter()
+        .enumerate()
+        .find(|(i, _)| *i != index)
+        .map(|(_, value)| i32::from(*value))
+        .filter(|_| results.len() == 2)
+    else {
+        // CR 706.4: a bare "the result" consumer still reads the chosen die —
+        // that demonstrative needs no apportionment.
+        state.die_result_this_resolution = Some(chosen);
+        return;
+    };
+    state.die_results_apportioned = Some((chosen, other));
+    // CR 706.4: a bare "the result" consumer in the same resolution reads the
+    // chosen die, matching the printed text's own demonstrative.
+    state.die_result_this_resolution = Some(chosen);
 }
 
 #[cfg(test)]
@@ -160,6 +308,8 @@ mod tests {
                 sides: 20,
                 results: vec![branch],
                 modifier: None,
+                // CR 706.4: not an apportioned roll.
+                selection: None,
             },
             vec![],
             ObjectId(1),
@@ -207,6 +357,8 @@ mod tests {
                 sides: 20,
                 results: vec![branch],
                 modifier: None,
+                // CR 706.4: not an apportioned roll.
+                selection: None,
             },
             vec![],
             ObjectId(1),
@@ -230,6 +382,8 @@ mod tests {
                 sides: 6,
                 results: vec![],
                 modifier: None,
+                // CR 706.4: not an apportioned roll.
+                selection: None,
             },
             vec![],
             ObjectId(1),
@@ -288,6 +442,8 @@ mod tests {
                         },
                     },
                 }),
+                // CR 706.4: not an apportioned roll.
+                selection: None,
             },
             vec![],
             ObjectId(1),
@@ -334,6 +490,8 @@ mod tests {
                         },
                     },
                 }),
+                // CR 706.4: not an apportioned roll.
+                selection: None,
             },
             vec![],
             ObjectId(1),
@@ -365,6 +523,8 @@ mod tests {
                     sides: 20,
                     results: vec![],
                     modifier: None,
+                    // CR 706.4: not an apportioned roll.
+                    selection: None,
                 },
                 vec![],
                 ObjectId(1),
@@ -406,6 +566,8 @@ mod tests {
                     sides,
                     results: vec![],
                     modifier: None,
+                    // CR 706.4: not an apportioned roll.
+                    selection: None,
                 },
                 vec![],
                 ObjectId(1),
@@ -443,6 +605,8 @@ mod tests {
                 sides: 20,
                 results: vec![],
                 modifier: None,
+                // CR 706.4: not an apportioned roll.
+                selection: None,
             },
             vec![],
             ObjectId(1),
@@ -539,6 +703,8 @@ mod tests {
                         },
                     },
                 }),
+                // CR 706.4: not an apportioned roll.
+                selection: None,
             },
             vec![],
             ObjectId(1),
@@ -614,6 +780,8 @@ mod tests {
                         },
                     },
                 }),
+                // CR 706.4: not an apportioned roll.
+                selection: None,
             },
             vec![],
             ObjectId(1),
@@ -644,6 +812,8 @@ mod tests {
                 sides: 20,
                 results: vec![],
                 modifier: None,
+                // CR 706.4: not an apportioned roll.
+                selection: None,
             },
             vec![],
             ObjectId(1),
@@ -711,6 +881,8 @@ mod tests {
                 sides: 20,
                 results: vec![],
                 modifier: None,
+                // CR 706.4: not an apportioned roll.
+                selection: None,
             },
             vec![],
             ObjectId(1),
@@ -777,6 +949,8 @@ mod tests {
                 sides: 6,
                 results: vec![],
                 modifier: None,
+                // CR 706.4: not an apportioned roll.
+                selection: None,
             },
             vec![],
             ObjectId(1),
@@ -843,6 +1017,8 @@ mod tests {
                 sides: 6,
                 results: vec![],
                 modifier: None,
+                // CR 706.4: not an apportioned roll.
+                selection: None,
             },
             vec![],
             ObjectId(1),
@@ -892,6 +1068,8 @@ mod tests {
                 sides: 20,
                 results: vec![branch],
                 modifier: None,
+                // CR 706.4: not an apportioned roll.
+                selection: None,
             },
             vec![],
             ObjectId(1),
@@ -923,6 +1101,8 @@ mod tests {
                 sides: 6,
                 results: vec![],
                 modifier: None,
+                // CR 706.4: not an apportioned roll.
+                selection: None,
             },
             vec![],
             ObjectId(1),
@@ -982,6 +1162,8 @@ mod tests {
                 sides: 6,
                 results: vec![branch],
                 modifier: None,
+                // CR 706.4: not an apportioned roll.
+                selection: None,
             },
             vec![],
             ObjectId(1),

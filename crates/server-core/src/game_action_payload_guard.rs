@@ -684,6 +684,9 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::ChooseBranch { .. }
         | GameAction::SubmitLifeRedistribution { .. }
         | GameAction::ChooseDamageSource { .. }
+        // CR 706.4: a single index into the rolled results — a bounded scalar.
+        // The engine validates it against `results.len()` before use.
+        | GameAction::SelectDieResult { .. }
         | GameAction::DecideOptionalCost { .. }
         | GameAction::RespondToSpliceOffer { .. }
         | GameAction::ChooseAdventureFace { .. }

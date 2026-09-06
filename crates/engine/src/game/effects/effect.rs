@@ -3564,6 +3564,8 @@ mod tests {
                 sides: 6,
                 results: vec![],
                 modifier: None,
+                // CR 706.4: not an apportioned roll.
+                selection: None,
             },
             vec![],
             creature,

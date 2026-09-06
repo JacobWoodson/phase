@@ -217,6 +217,10 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         // CR 705.1 + CR 614.1a: Krark's Thumb keep choice is a forced
         // mid-resolution selection; route to the ability catch-all.
         | WaitingFor::CoinFlipKeepChoice { .. }
+        // CR 706.4 + CR 608.2d: apportioned die-roll selection is a forced
+        // mid-resolution choice; route to the ability catch-all alongside the
+        // other mid-resolution selections.
+        | WaitingFor::DieResultChoice { .. }
         | WaitingFor::ActivationCostOneOfChoice { .. }
         // CR 601.2b: choosing an additional cost's mode (e.g. behold a chosen
         // creature type) is a casting-cost-phase step; route to the ability bucket.

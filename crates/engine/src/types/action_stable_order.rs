@@ -279,6 +279,12 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
             };
             cmp_val(a0, b0)
         }
+        GameAction::SelectDieResult { index: a0 } => {
+            let GameAction::SelectDieResult { index: b0 } = b else {
+                unreachable!("cmp_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0)
+        }
         GameAction::ChooseOutsideGameCards { selections: a0 } => {
             let GameAction::ChooseOutsideGameCards { selections: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");

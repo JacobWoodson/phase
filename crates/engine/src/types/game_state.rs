@@ -12593,6 +12593,21 @@ pub enum WaitingFor {
         results: Vec<bool>,
         keep_count: usize,
     },
+    /// CR 706.4 + CR 608.2d: Waiting for the player who rolled an apportioned
+    /// multi-die roll to choose which result the following clauses read as
+    /// "that result" ("Roll two d12 and choose one result"). The unchosen die
+    /// becomes "the other result" — both are used, so this is an
+    /// apportionment, not an ignored roll (CR 706.6).
+    ///
+    /// The choice is made while applying the effect, per CR 608.2d, which is
+    /// why it suspends resolution rather than being announced on the stack.
+    DieResultChoice {
+        player: PlayerId,
+        /// The rolled results, in roll order. Exactly two today (the arity the
+        /// parser stamps `selection` for), and the index the player submits
+        /// selects `chosen`; the remaining entry is `other`.
+        results: Vec<u8>,
+    },
     /// CR 701.20e: Waiting for the player to choose which looked-at cards to keep.
     DigChoice {
         /// Player who looks at the cards and makes any selection.
@@ -14707,6 +14722,7 @@ impl WaitingFor {
             WaitingFor::ArrangePlanarDeckTopChoice { .. } => "ArrangePlanarDeckTopChoice",
             WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
             WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
+            WaitingFor::DieResultChoice { .. } => "DieResultChoice",
             WaitingFor::DigChoice { .. } => "DigChoice",
             WaitingFor::SurveilChoice { .. } => "SurveilChoice",
             WaitingFor::RevealChoice { .. } => "RevealChoice",
@@ -14866,6 +14882,7 @@ impl WaitingFor {
             | WaitingFor::ArrangePlanarDeckTopChoice { player, .. }
             | WaitingFor::RedistributeLifeTotals { player, .. }
             | WaitingFor::CoinFlipKeepChoice { player, .. }
+            | WaitingFor::DieResultChoice { player, .. }
             | WaitingFor::DigChoice { player, .. }
             | WaitingFor::SurveilChoice { player, .. }
             | WaitingFor::RevealChoice { player, .. }
@@ -15530,6 +15547,7 @@ pub struct TriggeredAbilityProvenance {
     source_name: String,
     subject_match_count: Option<u32>,
     die_result: Option<i32>,
+    die_results_apportioned: Option<(i32, i32)>,
     provenance: Option<SyntheticTriggerProvenance>,
 }
 
@@ -15562,6 +15580,7 @@ impl StackResolutionEntryFence {
                 source_name,
                 subject_match_count,
                 die_result,
+                die_results_apportioned,
                 provenance,
             } => StackResolutionEntryProvenance::TriggeredAbility(Box::new(
                 TriggeredAbilityProvenance {
@@ -15573,6 +15592,7 @@ impl StackResolutionEntryFence {
                     source_name: source_name.clone(),
                     subject_match_count: *subject_match_count,
                     die_result: *die_result,
+                    die_results_apportioned: *die_results_apportioned,
                     provenance: provenance.clone(),
                 },
             )),
@@ -16441,6 +16461,14 @@ pub enum StackEntryKind {
         /// `die_result_this_resolution`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         die_result: Option<i32>,
+        /// CR 706.4 + CR 603.12: the apportioned ("that result" / "the other
+        /// result") pair captured at trigger push, carried for the same reason
+        /// as the scalar `die_result` above — a reflexive sub-ability resolving
+        /// on this entry re-stamps `die_results_apportioned` so a
+        /// `QuantityRef::DieResultSelected` reads its die rather than the
+        /// unbound-reference 0.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        die_results_apportioned: Option<(i32, i32)>,
         /// Typed identity for synthesized keyword triggers. The frontend reads
         /// this only through `StackEntryDisplay`, never from raw stack state.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -16750,6 +16778,13 @@ pub struct ResolvingTriggerContext {
     /// CR 706.4: A die result recorded earlier in this resolution ("roll a die …
     /// remove that many counters"); outranks the event amount in the cascade.
     pub die_result: Option<i32>,
+    /// CR 706.4: the apportioned ("that result" / "the other result") pair of a
+    /// two-die roll made earlier in this resolution. Captured with its scalar
+    /// sibling because both are resolution-scoped on the same boundary: a
+    /// clause that pauses for a choice and resumes on a drained continuation
+    /// would otherwise read the unbound-reference 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub die_results_apportioned: Option<(i32, i32)>,
 }
 
 impl ResolvingTriggerContext {
@@ -16761,12 +16796,14 @@ impl ResolvingTriggerContext {
         (state.current_trigger_event.is_some()
             || !state.current_trigger_events.is_empty()
             || state.current_trigger_match_count.is_some()
-            || state.die_result_this_resolution.is_some())
+            || state.die_result_this_resolution.is_some()
+            || state.die_results_apportioned.is_some())
         .then(|| Self {
             event: state.current_trigger_event.clone(),
             events: state.current_trigger_events.clone(),
             match_count: state.current_trigger_match_count,
             die_result: state.die_result_this_resolution,
+            die_results_apportioned: state.die_results_apportioned,
         })
     }
 }
@@ -18969,6 +19006,22 @@ declare_game_state! {
     /// (safe — always cleared at comparison boundaries).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub die_result_this_resolution: Option<i32>,
+
+    /// CR 706.4 + CR 608.2d: The apportioned results of a two-die roll whose
+    /// printed text tells later clauses which die to read ("Roll two d12 and
+    /// choose one result … that result … the other result").
+    ///
+    /// `.0` is the result the roll's controller chose while applying the
+    /// effect (CR 608.2d — a choice made on resolution, not on announcement);
+    /// `.1` is the remaining one. Read by
+    /// `QuantityRef::DieResultSelected`. Kept separate from
+    /// `die_result_this_resolution` because that field carries the AGGREGATE
+    /// of a multi-die roll — summing the two dice is exactly the wrong answer
+    /// for an apportioned roll, where each clause reads one die.
+    /// Resolution-scoped and cleared on the same boundaries, following the
+    /// same PartialEq-OMISSION pattern.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub die_results_apportioned: Option<(i32, i32)>,
 
     /// Count from the most recent interactive effect resolution (e.g., number of cards
     /// actually discarded in a DiscardChoice). Used as fallback for EventContextAmount
@@ -23641,6 +23694,7 @@ impl GameState {
             last_effect_amount: None,
             last_effect_excess_amount: None,
             die_result_this_resolution: None,
+            die_results_apportioned: None,
             last_effect_count: None,
             last_effect_counts_by_player: HashMap::new(),
             clause_minimum_snapshot: None,
@@ -25660,6 +25714,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         last_effect_amount: _,
         last_effect_excess_amount: _,
         die_result_this_resolution: _,
+        die_results_apportioned: _,
         last_effect_count: _,
         last_effect_counts_by_player: _,
         clause_minimum_snapshot: _,
@@ -28163,6 +28218,7 @@ mod tests {
                 source_name: "Normal trigger source".to_string(),
                 subject_match_count: None,
                 die_result: None,
+                die_results_apportioned: None,
                 provenance: None,
             },
         });
@@ -29312,6 +29368,7 @@ mod tests {
                 source_name: "Triggered carrier source".to_string(),
                 subject_match_count: None,
                 die_result: None,
+                die_results_apportioned: None,
                 provenance: None,
             },
         });
@@ -31621,6 +31678,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                die_results_apportioned: None,
                 provenance: None,
             },
         });
@@ -35092,6 +35150,7 @@ mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            die_results_apportioned: None,
             provenance: None,
         };
         let json = serde_json::to_string(&trigger).unwrap();
@@ -35268,6 +35327,7 @@ mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            die_results_apportioned: None,
             provenance: None,
         }));
         state.pending_trigger_firing = Some(TriggerFiring::Ordinary);
@@ -35885,6 +35945,7 @@ mod tests {
                 source_name: "Token".to_string(),
                 subject_match_count: None,
                 die_result: None,
+                die_results_apportioned: None,
                 provenance: None,
             },
         }

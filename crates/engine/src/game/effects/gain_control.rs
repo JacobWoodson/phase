@@ -1158,6 +1158,8 @@ mod tests {
                 sides: 4,
                 results: vec![],
                 modifier: None,
+                // CR 706.4: not an apportioned roll.
+                selection: None,
             },
             vec![],
             purse,

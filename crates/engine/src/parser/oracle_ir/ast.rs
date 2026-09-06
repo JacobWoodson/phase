@@ -873,10 +873,15 @@ pub(crate) enum ImperativeFamilyAst {
     /// CR 706.2: Optional additive/subtractive modifier applied to the natural
     /// result before result-table lookup ("Roll a d20 and add the number of
     /// cards in your hand").
+    /// CR 706.4: `selection` carries the die arity when the printed text
+    /// apportions the results between later clauses ("and choose one
+    /// result"). Stamped at parse time and carried through lowering — never
+    /// searched for afterward.
     RollDie {
         count: crate::types::ability::QuantityExpr,
         sides: u8,
         modifier: Option<crate::types::ability::DieRollModifier>,
+        selection: Option<u8>,
     },
     /// CR 705: Flip a coin.
     FlipCoin,

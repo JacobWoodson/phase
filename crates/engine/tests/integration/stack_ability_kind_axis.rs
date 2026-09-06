@@ -134,6 +134,7 @@ fn push_ability_entry(
             source_name: String::new(),
             subject_match_count: None,
             die_result: None,
+            die_results_apportioned: None,
             provenance: None,
         },
         AbilityEntry::Activated { targets } => StackEntryKind::ActivatedAbility {

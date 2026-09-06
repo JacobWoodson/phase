@@ -6008,6 +6008,8 @@ mod tests {
                         effect: Box::new(link(wrapped.clone())),
                     }],
                     modifier: None,
+                    // CR 706.4: not an apportioned roll.
+                    selection: None,
                 },
             ),
             (
@@ -6063,6 +6065,8 @@ mod tests {
                         effect: Box::new(link(draw_one())),
                     }],
                     modifier: None,
+                    // CR 706.4: not an apportioned roll.
+                    selection: None,
                 },
             ),
             (
@@ -6929,6 +6933,8 @@ mod tests {
                 sides: 20,
                 results: vec![],
                 modifier: None,
+                // CR 706.4: not an apportioned roll.
+                selection: None,
             },
         )));
         assert!(is_mana_ability(&def));
@@ -6956,6 +6962,8 @@ mod tests {
                 sides: 20,
                 results: vec![],
                 modifier: None,
+                // CR 706.4: not an apportioned roll.
+                selection: None,
             },
         )));
         let mut events = Vec::new();

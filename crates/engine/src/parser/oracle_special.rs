@@ -213,7 +213,11 @@ pub(crate) fn find_terminal_roll_die(def: &mut AbilityDefinition) -> Option<&mut
     if let Some(ref mut sub) = def.sub_ability {
         return find_terminal_roll_die(sub);
     }
-    if matches!(&*def.effect, Effect::RollDie { results, .. } if results.is_empty()) {
+    // CR 706.3b: only an unapportioned roll may acquire a results table. A
+    // roll whose results are already apportioned between later clauses
+    // (CR 706.4) is a different consumption shape and must not be captured.
+    if matches!(&*def.effect, Effect::RollDie { results, selection, .. } if results.is_empty() && selection.is_none())
+    {
         return Some(&mut *def.effect);
     }
     None
@@ -222,7 +226,10 @@ pub(crate) fn find_terminal_roll_die(def: &mut AbilityDefinition) -> Option<&mut
 /// CR 706.3b: A results table belongs to the first die-roll instruction in its
 /// paragraph even when later instructions remain in that ability's chain.
 pub(crate) fn find_result_table_roll_die(def: &mut AbilityDefinition) -> Option<&mut Effect> {
-    if matches!(&*def.effect, Effect::RollDie { results, .. } if results.is_empty()) {
+    // CR 706.3b + CR 706.4: as in `find_terminal_roll_die`, an apportioned
+    // roll never takes a results table.
+    if matches!(&*def.effect, Effect::RollDie { results, selection, .. } if results.is_empty() && selection.is_none())
+    {
         return Some(&mut *def.effect);
     }
     def.sub_ability
@@ -291,6 +298,10 @@ pub(super) fn try_parse_die_roll_table(
                 sides,
                 results: vec![],
                 modifier,
+                // CR 706.3b: the roll instruction, its modifiers, and its
+                // results table are all one ability — the table consumes the
+                // result, so a results-table roll is never apportioned.
+                selection: None,
             }),
             None,
             None,

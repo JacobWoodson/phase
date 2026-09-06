@@ -2443,6 +2443,15 @@
     "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}",
     "removeLabel": "Remove"
   },
+  "dieResult": {
+    "choose": {
+      "title": "Choose one result",
+      "subtitle": "Both dice are used — the result you choose, and the other one."
+    },
+    "buttons": {
+      "choose": "Choose this"
+    }
+  },
   "coinFlip": {
     "keep": {
       "title": "Krark's Thumb",

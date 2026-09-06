@@ -1077,8 +1077,8 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 91] = [
     UnsupportedCapability {
         code: "local.selection-unsupported",
         area: "prompts",
-        reason: "One code shared by seven engine actions that are all pick-one-or-more from a labelled set: ChooseOption, SubmitVoteCandidate (CR 701.38 voting), SubmitSpellbookDraft, ChoosePile (PileSide = A|B), ChooseBranch, SubmitLifeRedistribution, ChooseDamageSource. Every one of them is ChooseFromSelection's shape — labelled options with min/max totals. They are collapsed under one code because they share one cause (no mapping written), not because they share one obstacle.",
-        suggested_protocol_extension: "None needed upstream — ChooseFromSelection is the generic escape hatch and covers all seven. This is the largest single adapter-work item in this registry.",
+        reason: "One code shared by eight engine actions that are all pick-one-or-more from a labelled set: ChooseOption, SubmitVoteCandidate (CR 701.38 voting), SubmitSpellbookDraft, ChoosePile (PileSide = A|B), ChooseBranch, SubmitLifeRedistribution, ChooseDamageSource, SelectDieResult (CR 706.4 apportioned die-roll selection). Every one of them is ChooseFromSelection's shape — labelled options with min/max totals. They are collapsed under one code because they share one cause (no mapping written), not because they share one obstacle.",
+        suggested_protocol_extension: "None needed upstream — ChooseFromSelection is the generic escape hatch and covers all eight. This is the largest single adapter-work item in this registry.",
     },
     UnsupportedCapability {
         code: "local.pile-partition-unsupported",
@@ -2726,7 +2726,12 @@ pub fn convert_available_action(
         | GameAction::ChoosePile { .. }
         | GameAction::ChooseBranch { .. }
         | GameAction::SubmitLifeRedistribution { .. }
-        | GameAction::ChooseDamageSource { .. } => {
+        | GameAction::ChooseDamageSource { .. }
+        // CR 706.4 + CR 608.2d: picking which rolled die reads as "that result"
+        // is a pick-one from a labelled set like the rest of this arm — the
+        // options are die faces rather than cards or targets, so the label is
+        // the only handle a client gets.
+        | GameAction::SelectDieResult { .. } => {
             AvailableActionConversion::Unsupported("local.selection-unsupported")
         }
         GameAction::SubmitPilePartition { .. } => {

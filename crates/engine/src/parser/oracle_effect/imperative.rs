@@ -11516,6 +11516,9 @@ pub(super) fn parse_imperative_family_ast(
                         count: QuantityExpr::Fixed { value: 1 },
                         sides,
                         modifier,
+                        // CR 706.4: a single die has no second result to
+                        // apportion against.
+                        selection: None,
                     }
                 })
             }
@@ -12248,6 +12251,14 @@ fn try_parse_roll_n_dice(lower: &str) -> Option<ImperativeFamilyAst> {
     }
 
     let (sides, rest_after_sides) = parse_die_sides_with_rest(after)?;
+    // CR 706.4: An apportionment tail ("and choose one result") is part of the
+    // SAME roll instruction — it names how later clauses read the results
+    // rather than starting a new instruction — so it is consumed here instead
+    // of falling through to chain parsing as a separate clause.
+    let (rest_after_sides, apportioned) = match parse_die_result_apportionment(rest_after_sides) {
+        Ok((rest, ())) => (rest, true),
+        Err(_) => (rest_after_sides, false),
+    };
     // CR 706.1: The remainder must be only the plural/singular die noun
     // (possibly with trailing punctuation) — a wider clause means this isn't a
     // bare multi-dice roll, so fall through to higher-level chain parsing.
@@ -12259,6 +12270,24 @@ fn try_parse_roll_n_dice(lower: &str) -> Option<ImperativeFamilyAst> {
         return None;
     }
 
+    // CR 706.4: `DieResultSelection::Other` names a unique die only when
+    // exactly two were rolled, so the apportionment is recorded only at that
+    // arity.
+    //
+    // At any OTHER arity the printed text still apportions — the tail was
+    // consumed, so the card really does say "choose one result" — and the
+    // engine has no way to represent that yet. Returning `None` here surfaces
+    // the whole line as `Effect::unimplemented` upstream rather than lowering
+    // it to a plain unapportioned roll whose later "that result" clauses would
+    // silently fall back to the event-context amount (0). That keeps coverage
+    // HONEST: the card is reported as an engine gap instead of as supported
+    // with a wrong answer.
+    let selection = match (apportioned, &expr) {
+        (true, QuantityExpr::Fixed { value: 2 }) => Some(2),
+        (true, _) => return None,
+        (false, _) => None,
+    };
+
     Some(ImperativeFamilyAst::RollDie {
         count: expr,
         sides,
@@ -12266,7 +12295,27 @@ fn try_parse_roll_n_dice(lower: &str) -> Option<ImperativeFamilyAst> {
         // vanishingly rare and parsed via the table path; the bare form has
         // no modifier.
         modifier: None,
+        selection,
     })
+}
+
+/// CR 706.4: Consume the apportionment tail of an apportioned multi-die roll —
+/// "roll two d12 **and choose one result**". Per CR 706.4 an ability that rolls
+/// dice without a results table indicates in its own text how the results are
+/// used; this tail is that indication, and it binds the later "that result" /
+/// "the other result" clauses to individual dice.
+///
+/// The conjunction is the one axis that actually varies across the printed
+/// class ("and choose one result" / "then choose one result"); the selection
+/// phrase itself is invariant. Crossing determiner × noun-number axes onto it
+/// would admit "choose a result" / "choose one results", which no card prints —
+/// widening a combinator past the printed class buys no coverage and lets
+/// malformed text parse as a real apportionment.
+fn parse_die_result_apportionment(input: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = nom::character::complete::multispace0.parse(input)?;
+    let (rest, _) = alt((tag("and "), tag("then "))).parse(rest)?;
+    let (rest, _) = tag("choose one result").parse(rest)?;
+    Ok((rest, ()))
 }
 
 /// CR 706.1a: Returns `(sides, remainder)`. The remainder is the slice immediately after
@@ -13783,11 +13832,14 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
             count,
             sides,
             modifier,
+            selection,
         } => Effect::RollDie {
             count,
             sides,
             results: vec![],
             modifier,
+            // CR 706.4: carried from the parse, never re-derived here.
+            selection,
         },
         // CR 705.2: the bare imperative lowers with `flipper = Controller`; a
         // player subject ("that player flips a coin") is stamped onto `flipper`
@@ -22163,8 +22215,11 @@ mod tests {
                 sides,
                 modifier,
                 results,
+                selection,
             } => {
                 assert_eq!(*sides, 20);
+                // CR 706.4: a bare single-die roll is never apportioned.
+                assert!(selection.is_none());
                 assert_eq!(
                     *count,
                     crate::types::ability::QuantityExpr::Fixed { value: 1 }

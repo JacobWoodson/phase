@@ -114,6 +114,15 @@ pub struct PendingTrigger {
     /// resolution scope cleared) can re-stamp `die_result_this_resolution`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub die_result: Option<i32>,
+    /// CR 706.4 + CR 603.12: the apportioned ("that result" / "the other
+    /// result") pair captured at trigger push, alongside the scalar
+    /// `die_result` above and for the same reason: a reflexive "When you do …"
+    /// sub-ability resolves on its own stack entry in a later `apply()`, after
+    /// the rolling resolution's scope cleared, and must be able to re-stamp
+    /// `die_results_apportioned` or a `QuantityRef::DieResultSelected` there
+    /// resolves to the unbound-reference 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub die_results_apportioned: Option<(i32, i32)>,
     /// Typed presentation provenance for a synthesized keyword trigger.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<SyntheticTriggerProvenance>,
@@ -145,6 +154,7 @@ impl PendingTrigger {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            die_results_apportioned: None,
             provenance: None,
         }
     }
@@ -227,6 +237,11 @@ pub(super) struct TriggerEventContextSnapshot {
     current_trigger_events: Vec<GameEvent>,
     current_trigger_match_count: Option<u32>,
     die_result_this_resolution: Option<i32>,
+    /// CR 706.4: the apportioned pair travels with the scalar die result. Both
+    /// are resolution-scoped on the same boundary, so a nested context that
+    /// saves one and not the other would leave a "the other result" consumer
+    /// reading the unbound-reference 0 after the nested context returns.
+    die_results_apportioned: Option<(i32, i32)>,
 }
 
 pub(super) fn push_trigger_event_context(
@@ -240,6 +255,7 @@ pub(super) fn push_trigger_event_context(
         current_trigger_events: state.current_trigger_events.clone(),
         current_trigger_match_count: state.current_trigger_match_count,
         die_result_this_resolution: state.die_result_this_resolution,
+        die_results_apportioned: state.die_results_apportioned,
     };
     state.current_trigger_event = trigger_event
         .cloned()
@@ -261,6 +277,7 @@ pub(super) fn restore_trigger_event_context(
     state.current_trigger_events = snapshot.current_trigger_events;
     state.current_trigger_match_count = snapshot.current_trigger_match_count;
     state.die_result_this_resolution = snapshot.die_result_this_resolution;
+    state.die_results_apportioned = snapshot.die_results_apportioned;
 }
 
 /// CR 608.2: Push a PendingContinuation's captured ResolvingTriggerContext
@@ -274,6 +291,10 @@ pub(super) fn push_resolving_trigger_context(
     let snapshot =
         push_trigger_event_context(state, ctx.event.as_ref(), &ctx.events, ctx.match_count);
     state.die_result_this_resolution = ctx.die_result;
+    // CR 706.4: the apportioned pair replays with its scalar sibling so a
+    // "the other result" clause reached from a drained continuation reads the
+    // die it was apportioned, not the unbound-reference 0.
+    state.die_results_apportioned = ctx.die_results_apportioned;
     snapshot
 }
 
@@ -2842,6 +2863,7 @@ fn collect_matching_triggers_inner(
                         },
                         subject_match_count,
                         die_result: None,
+                        die_results_apportioned: None,
                         provenance: None,
                     },
                     trigger_events,
@@ -4138,6 +4160,7 @@ fn collect_latched_batched_zone_triggers(
                 }),
                 subject_match_count,
                 die_result: None,
+                die_results_apportioned: None,
                 provenance: None,
             },
             trigger_events,
@@ -4415,6 +4438,7 @@ fn collect_pending_triggers_with_collection(
                             may_trigger_origin: None,
                             subject_match_count: None,
                             die_result: None,
+                            die_results_apportioned: None,
                             provenance: None,
                         }));
                     }
@@ -4463,6 +4487,7 @@ fn collect_pending_triggers_with_collection(
                             may_trigger_origin: None,
                             subject_match_count: None,
                             die_result: None,
+                            die_results_apportioned: None,
                             provenance: None,
                         }));
                     }
@@ -4507,6 +4532,7 @@ fn collect_pending_triggers_with_collection(
                             }),
                             subject_match_count: None,
                             die_result: None,
+                            die_results_apportioned: None,
                             provenance: None,
                         }));
                     }
@@ -4553,6 +4579,7 @@ fn collect_pending_triggers_with_collection(
                         may_trigger_origin: None,
                         subject_match_count: None,
                         die_result: None,
+                        die_results_apportioned: None,
                         provenance: None,
                     }));
                 }
@@ -4600,6 +4627,7 @@ fn collect_pending_triggers_with_collection(
                             }),
                             subject_match_count: None,
                             die_result: None,
+                            die_results_apportioned: None,
                             provenance: None,
                         }));
                     }
@@ -4679,6 +4707,7 @@ fn collect_pending_triggers_with_collection(
                                         may_trigger_origin: None,
                                         subject_match_count: None,
                                         die_result: None,
+                                        die_results_apportioned: None,
                                         provenance: None,
                                     }));
                                 }
@@ -5275,6 +5304,7 @@ fn collect_pending_triggers_with_collection(
                         may_trigger_origin: None,
                         subject_match_count: None,
                         die_result: None,
+                        die_results_apportioned: None,
                         provenance: Some(SyntheticTriggerProvenance::Storm {
                             copy_count: copy_count.max(0) as u32,
                         }),
@@ -5340,6 +5370,7 @@ fn collect_pending_triggers_with_collection(
                     may_trigger_origin: None,
                     subject_match_count: None,
                     die_result: None,
+                    die_results_apportioned: None,
                     provenance: None,
                 }));
             }
@@ -5407,6 +5438,7 @@ fn collect_pending_triggers_with_collection(
                     may_trigger_origin: None,
                     subject_match_count: None,
                     die_result: None,
+                    die_results_apportioned: None,
                     provenance: None,
                 }));
             }
@@ -5529,6 +5561,7 @@ fn collect_pending_triggers_with_collection(
                     may_trigger_origin: None,
                     subject_match_count: None,
                     die_result: None,
+                    die_results_apportioned: None,
                     provenance: None,
                 }));
             }
@@ -5601,6 +5634,7 @@ fn collect_pending_triggers_with_collection(
                     may_trigger_origin: None,
                     subject_match_count: None,
                     die_result: None,
+                    die_results_apportioned: None,
                     provenance: None,
                 }));
             }
@@ -5674,6 +5708,7 @@ fn collect_pending_triggers_with_collection(
                         may_trigger_origin: None,
                         subject_match_count: None,
                         die_result: None,
+                        die_results_apportioned: None,
                         provenance: None,
                     }));
                 }
@@ -5733,6 +5768,7 @@ fn collect_pending_triggers_with_collection(
                     may_trigger_origin: None,
                     subject_match_count: None,
                     die_result: None,
+                    die_results_apportioned: None,
                     provenance: None,
                 }));
             }
@@ -5767,6 +5803,7 @@ fn collect_pending_triggers_with_collection(
                         may_trigger_origin: None,
                         subject_match_count: None,
                         die_result: None,
+                        die_results_apportioned: None,
                         provenance: None,
                     }));
                 }
@@ -5805,6 +5842,7 @@ fn collect_pending_triggers_with_collection(
                         may_trigger_origin: None,
                         subject_match_count: None,
                         die_result: None,
+                        die_results_apportioned: None,
                         provenance: None,
                     }));
                 }
@@ -5900,6 +5938,7 @@ fn collect_pending_triggers_with_collection(
                             may_trigger_origin: None,
                             subject_match_count: None,
                             die_result: None,
+                            die_results_apportioned: None,
                             provenance: None,
                         }));
                     }
@@ -5945,6 +5984,7 @@ fn collect_pending_triggers_with_collection(
                             may_trigger_origin: None,
                             subject_match_count: None,
                             die_result: None,
+                            die_results_apportioned: None,
                             provenance: None,
                         }));
                     }
@@ -5992,6 +6032,7 @@ fn collect_pending_triggers_with_collection(
                     may_trigger_origin: None,
                     subject_match_count: None,
                     die_result: None,
+                    die_results_apportioned: None,
                     provenance: None,
                 }));
                 session.mark_speed_trigger_used(state, trigger_controller);
@@ -6041,6 +6082,7 @@ fn collect_pending_triggers_with_collection(
                     may_trigger_origin: None,
                     subject_match_count: None,
                     die_result: None,
+                    die_results_apportioned: None,
                     provenance: None,
                 }));
             }
@@ -6285,6 +6327,7 @@ fn ring_pending_trigger(
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        die_results_apportioned: None,
         provenance: None,
     })
 }
@@ -6908,6 +6951,10 @@ fn group_is_order_independent(state: &GameState, group: &[PendingTriggerContext]
             // CR 706.2 + CR 603.12: the stamped die-roll result is part of the
             // resolution function's identity (defense-in-depth; N-F pins it).
             && t.die_result == first.pending.die_result
+            // CR 706.4: the apportioned pair is likewise part of the resolution
+            // function's identity — two triggers that read different dice are
+            // not interchangeable for CR 603.3b ordering purposes.
+            && t.die_results_apportioned == first.pending.die_results_apportioned
             && {
                 let mut candidate = t.ability.clone();
                 normalize_ability_identity(&mut candidate);
@@ -8102,6 +8149,7 @@ fn push_pending_trigger_to_stack_with_firing_and_duration_events(
         may_trigger_origin,
         subject_match_count,
         die_result,
+        die_results_apportioned,
         provenance,
         ..
     } = trigger;
@@ -8172,6 +8220,7 @@ fn push_pending_trigger_to_stack_with_firing_and_duration_events(
             source_name,
             subject_match_count,
             die_result,
+            die_results_apportioned,
             provenance,
         },
     };
@@ -9226,6 +9275,7 @@ fn resolve_accepted_triggered_mana_body(
             trigger_event: trigger.trigger_event.as_ref(),
             subject_match_count: trigger.subject_match_count,
             die_result: trigger.die_result,
+            die_results_apportioned: trigger.die_results_apportioned,
         }),
         Some(trigger_events.to_vec()),
     );
@@ -10562,6 +10612,7 @@ pub fn check_state_triggers(state: &mut GameState) {
                     may_trigger_origin: None,
                     subject_match_count: None,
                     die_result: None,
+                    die_results_apportioned: None,
                     provenance: None,
                 });
             }
@@ -11409,6 +11460,10 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
         // event override is consumed only by `ObjectCount`'s
         // `OtherThanTriggerObject` exclusion.
         | QuantityRef::EventContextAmount
+        // CR 706.4: the apportioned die results are recorded during the
+        // ROLL's resolution and are absent at detection time, exactly like
+        // the event-context family above.
+        | QuantityRef::DieResultSelected { .. }
         | QuantityRef::EventContextPlayerCount { .. }
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
@@ -12339,6 +12394,7 @@ fn delayed_trigger_to_context(
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            die_results_apportioned: None,
             provenance: None,
         },
         trigger.provenance,
@@ -15629,6 +15685,8 @@ fn quantity_ref_refs_cost_paid_object(qty: &QuantityRef) -> bool {
         | QuantityRef::UnspentMana { .. }
         | QuantityRef::Speed { .. }
         | QuantityRef::EventContextAmount
+        // CR 706.4: a die result names no cost-paid object.
+        | QuantityRef::DieResultSelected { .. }
         | QuantityRef::AttachmentsOnLeavingObject { .. }
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
@@ -16069,6 +16127,96 @@ pub mod tests {
         GameState::new_two_player(42)
     }
 
+    /// CR 706.4 + CR 608.2d: `TriggerEventContextSnapshot` must round-trip the
+    /// apportioned (chosen, other) pair, not only the scalar die result.
+    ///
+    /// Every `push_trigger_event_context` / `restore_trigger_event_context`
+    /// pair opens a nested context inside a live resolution — a mode choice, a
+    /// target-legality recomputation, a linked-exile sub-chain. The scalar
+    /// `die_result_this_resolution` has always been saved and restored across
+    /// that seam. If the pair is not, whatever runs inside the nested context
+    /// can clear or overwrite `die_results_apportioned` and a later "the other
+    /// result" clause in the SAME resolution reads the unbound-reference 0 that
+    /// `QuantityRef::DieResultSelected` falls back to, with no event-cascade
+    /// fallback to rescue it.
+    #[test]
+    fn trigger_event_context_snapshot_round_trips_the_apportioned_pair() {
+        let mut state = GameState::new_two_player(7);
+        state.die_result_this_resolution = Some(9);
+        state.die_results_apportioned = Some((9, 4));
+
+        let snapshot = push_trigger_event_context(&mut state, None, &[], None);
+
+        // Whatever the nested context does to the resolution-scoped die
+        // channels — here, the clear that a nested roll or a fresh resolution
+        // boundary performs — must not outlive the nested context.
+        state.die_result_this_resolution = None;
+        state.die_results_apportioned = None;
+
+        restore_trigger_event_context(&mut state, snapshot);
+
+        assert_eq!(
+            state.die_result_this_resolution,
+            Some(9),
+            "the scalar die result must survive the nested trigger context"
+        );
+        assert_eq!(
+            state.die_results_apportioned,
+            Some((9, 4)),
+            "the apportioned pair is resolution-scoped on the same boundary as \
+             the scalar and must survive the nested trigger context with it"
+        );
+    }
+
+    /// CR 706.4 + CR 608.2: `ResolvingTriggerContext` replay is the continuation
+    /// half of the same contract — a resolution that paused for a player choice
+    /// and resumes on a drained continuation must get its apportioned pair back,
+    /// or the clause that resumes reads the unbound-reference 0.
+    #[test]
+    fn resolving_trigger_context_replays_the_apportioned_pair() {
+        let mut state = GameState::new_two_player(11);
+        state.die_result_this_resolution = Some(5);
+        state.die_results_apportioned = Some((5, 12));
+
+        let ctx = crate::types::game_state::ResolvingTriggerContext::capture(&state)
+            .expect("a live apportioned roll is context worth capturing");
+        assert_eq!(ctx.die_results_apportioned, Some((5, 12)));
+
+        state.die_result_this_resolution = None;
+        state.die_results_apportioned = None;
+
+        let snapshot = push_resolving_trigger_context(&mut state, &ctx);
+        assert_eq!(
+            state.die_results_apportioned,
+            Some((5, 12)),
+            "replaying a captured resolution context must restore the \
+             apportioned pair alongside its scalar sibling"
+        );
+        assert_eq!(state.die_result_this_resolution, Some(5));
+
+        restore_trigger_event_context(&mut state, snapshot);
+        assert_eq!(
+            state.die_results_apportioned, None,
+            "and the replay must be undone when the drain completes"
+        );
+    }
+
+    /// CR 706.4: an apportionment ALONE is worth capturing. Without the pair in
+    /// the `capture` predicate a resolution whose only live die state is the
+    /// apportionment (the scalar having been cleared by a nested clause) would
+    /// capture `None` and replay nothing.
+    #[test]
+    fn resolving_trigger_context_captures_an_apportionment_with_no_scalar() {
+        let mut state = GameState::new_two_player(13);
+        state.die_result_this_resolution = None;
+        state.die_results_apportioned = Some((2, 8));
+
+        let ctx = crate::types::game_state::ResolvingTriggerContext::capture(&state)
+            .expect("an apportioned pair alone is live resolution context");
+        assert_eq!(ctx.die_results_apportioned, Some((2, 8)));
+        assert_eq!(ctx.die_result, None);
+    }
+
     #[test]
     fn saga_entry_counter_is_inside_entry_boundary_but_prior_event_is_not() {
         let saga = ObjectId(10);
@@ -16186,6 +16334,7 @@ pub mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            die_results_apportioned: None,
             provenance: None,
         };
 
@@ -16261,6 +16410,7 @@ pub mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            die_results_apportioned: None,
             provenance: None,
         };
         let mut pending = vec![PendingTriggerContext::delayed(
@@ -17135,6 +17285,7 @@ pub mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            die_results_apportioned: None,
             provenance: None,
         }));
         state.waiting_for = WaitingFor::OptionalEffectChoice {
@@ -22323,6 +22474,7 @@ pub mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            die_results_apportioned: None,
             provenance: None,
         };
 
@@ -22403,6 +22555,7 @@ pub mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            die_results_apportioned: None,
             provenance: None,
         };
 
@@ -22427,6 +22580,7 @@ pub mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            die_results_apportioned: None,
             provenance: None,
         };
 
@@ -25295,6 +25449,7 @@ pub mod tests {
                 may_trigger_origin: None,
                 subject_match_count: None,
                 die_result: None,
+                die_results_apportioned: None,
                 provenance: None,
             },
             trigger_events: vec![event.clone()],
@@ -25427,6 +25582,7 @@ pub mod tests {
                 may_trigger_origin: None,
                 subject_match_count: None,
                 die_result: None,
+                die_results_apportioned: None,
                 provenance: None,
             },
             trigger_events: vec![event.clone()],
@@ -25726,6 +25882,7 @@ pub mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            die_results_apportioned: None,
             provenance: None,
         };
         let context = PendingTriggerContext::single(pending);
@@ -37735,6 +37892,7 @@ pub mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            die_results_apportioned: None,
             provenance: None,
         })
     }
@@ -39117,6 +39275,7 @@ pub mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            die_results_apportioned: None,
             provenance: None,
         })
     }
@@ -39336,6 +39495,7 @@ pub mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            die_results_apportioned: None,
             provenance: None,
         })
     }
@@ -41705,6 +41865,7 @@ pub mod tests {
                 may_trigger_origin: None,
                 subject_match_count: None,
                 die_result: None,
+                die_results_apportioned: None,
                 provenance: None,
             },
             &mut Vec::new(),
@@ -41961,6 +42122,7 @@ pub mod tests {
                 may_trigger_origin: None,
                 subject_match_count: None,
                 die_result: None,
+                die_results_apportioned: None,
                 provenance: None,
             },
             &mut Vec::new(),
@@ -42064,6 +42226,7 @@ pub mod tests {
                 may_trigger_origin: None,
                 subject_match_count: None,
                 die_result: None,
+                die_results_apportioned: None,
                 provenance: None,
             },
             &mut Vec::new(),
@@ -42265,6 +42428,7 @@ pub mod tests {
                 may_trigger_origin: None,
                 subject_match_count: None,
                 die_result: None,
+                die_results_apportioned: None,
                 provenance: None,
             },
             &mut Vec::new(),
@@ -42356,6 +42520,7 @@ pub mod tests {
                 may_trigger_origin: None,
                 subject_match_count: None,
                 die_result: None,
+                die_results_apportioned: None,
                 provenance: None,
             },
             &mut Vec::new(),

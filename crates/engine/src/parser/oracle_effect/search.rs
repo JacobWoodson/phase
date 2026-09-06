@@ -100,16 +100,66 @@ pub(super) fn parse_search_library_details(
         .parse(input)
     });
 
-    // Fallback: "for N cards" / "for X cards" without "up to".
-    let for_match = if up_to_match.is_none() && any_number_tail.is_none() {
-        scan_preceded(lower, "for ", nom_quantity::parse_quantity_expr_number)
-            // Require a word break after the number (" cards" / " creature ...").
-            // Guards against matching "for a", "for an", etc. where parse_number fails
-            // (good) but also avoids partial matches like "for the".
-            .filter(|(_, off)| lower.as_bytes().get(*off).is_some_and(|b| *b == b' '))
+    // CR 107.1 + CR 608.2c: "for a number of [FILTER] cards equal to <quantity>"
+    // — an exact count carried by a trailing "equal to" phrase rather than a
+    // leading numeral. Same defect shape as the `for_that_many_match` branch
+    // below: without it the clause falls through to the `Fixed { 1 }` default
+    // AND drops the type phrase, so "a number of basic land cards equal to the
+    // other result" silently becomes "find one card of any type" (Wild
+    // Endeavor).
+    //
+    // Unlike every sibling branch, this one's count phrase sits AFTER its type
+    // phrase rather than before it, so a single "start of the filter tail"
+    // offset cannot describe the filter text: any offset that keeps "basic land
+    // cards" also drags "equal to <quantity>" along behind it, and that residue
+    // reaches the filter-suffix dispatch loop as an unmatched tail. The loop
+    // then emits `TargetFallback`, which the coverage classifier counts as a
+    // gap — so the card parsed to a perfectly correct AST and was still
+    // reported unsupported. This branch therefore yields the type-phrase SLICE
+    // it isolated (the span between "a number of " and " equal to ") instead of
+    // an offset, which is the only branch whose filter text is not a suffix of
+    // `lower`.
+    //
+    // Ordered BEFORE the bare `for_match` fallback because that fallback reads
+    // the article in "for a number of …" as the numeral one (`parse_number`
+    // accepts "a"), which would otherwise claim this clause as `Fixed { 1 }`
+    // and swallow the real count.
+    //
+    // The quantity itself is delegated to `parse_quantity_ref`, the single
+    // reference authority — this branch contributes only the count-prefix
+    // grammar, so any quantity that authority learns (die-result
+    // demonstratives, "the number of …", anaphoric amounts) works here for
+    // free rather than being re-enumerated.
+    let for_a_number_of_match = if up_to_match.is_none() && any_number_tail.is_none() {
+        scan_preceded(lower, "for a number of ", |input| {
+            // Split the clause at " equal to ": the head is the filter text,
+            // the tail carries the count. Returning the head as the parsed
+            // value keeps the count phrase out of the filter entirely.
+            let (after_equal, type_phrase) = (
+                take_until::<_, _, OracleError<'_>>(" equal to "),
+                tag(" equal to "),
+            )
+                .parse(input)
+                .map(|(rest, (before, _))| (rest, before))?;
+            let (_, qty) = nom_quantity::parse_quantity_ref(after_equal)?;
+            Ok((input, (QuantityExpr::Ref { qty }, type_phrase)))
+        })
+        .map(|((expr, type_phrase), _)| (expr, type_phrase))
     } else {
         None
     };
+
+    // Fallback: "for N cards" / "for X cards" without "up to".
+    let for_match =
+        if up_to_match.is_none() && any_number_tail.is_none() && for_a_number_of_match.is_none() {
+            scan_preceded(lower, "for ", nom_quantity::parse_quantity_expr_number)
+                // Require a word break after the number (" cards" / " creature ...").
+                // Guards against matching "for a", "for an", etc. where parse_number fails
+                // (good) but also avoids partial matches like "for the".
+                .filter(|(_, off)| lower.as_bytes().get(*off).is_some_and(|b| *b == b' '))
+        } else {
+            None
+        };
 
     // CR 608.2c: "for that many/much [FILTER] cards" without "up to" — an
     // anaphoric back-reference to a count produced by an earlier instruction in
@@ -140,17 +190,47 @@ pub(super) fn parse_search_library_details(
     // CR 107.1c + CR 701.23d: up_to=true ⇒ searcher picks 0..=count (vs. exactly count).
     // "any number of" uses i32::MAX as an unbounded ceiling — the resolver floors it
     // against matching.len(), so the effective ceiling is always the legal-option set.
-    let (count, count_end_in_for, up_to) =
-        match (any_number_tail, up_to_match, for_match, for_that_many_match) {
-            (Some(off), _, _, _) => (QuantityExpr::Fixed { value: i32::MAX }, Some(off), true),
-            (None, Some((expr, off)), _, _) => (expr, Some(off), true),
-            (None, None, Some((expr, _)), _) => (expr, None, false),
-            // CR 608.2c: exact anaphoric count — keep the offset so the trailing type
-            // phrase is parsed into the filter (unlike the numeric `for` path, whose
-            // pre-existing filter handling is intentionally left unchanged here).
-            (None, None, None, Some((expr, off))) => (expr, Some(off), false),
-            (None, None, None, None) => (QuantityExpr::Fixed { value: 1 }, None, false),
-        };
+    // `filter_text` names where the searched-for type phrase lives. Every branch
+    // but one points at a suffix of `lower` via a byte offset (`TailFrom`); the
+    // "a number of … equal to <quantity>" branch prints its count AFTER the type
+    // phrase, so it carries the isolated slice instead (`Slice`) and thereby
+    // keeps its count phrase out of the filter-suffix dispatch loop.
+    enum FilterText<'a> {
+        TailFrom(usize),
+        Slice(&'a str),
+    }
+
+    let (count, filter_text, up_to) = match (
+        any_number_tail,
+        up_to_match,
+        for_a_number_of_match,
+        for_match,
+        for_that_many_match,
+    ) {
+        (Some(off), _, _, _, _) => (
+            QuantityExpr::Fixed { value: i32::MAX },
+            Some(FilterText::TailFrom(off)),
+            true,
+        ),
+        (None, Some((expr, off)), _, _, _) => (expr, Some(FilterText::TailFrom(off)), true),
+        // CR 107.1 + CR 608.2c: "a number of [FILTER] cards equal to <quantity>" —
+        // exact count read from the tail, with the type phrase handed over as an
+        // already-isolated slice so the trailing "equal to <quantity>" never
+        // reaches the filter parser. Matched BEFORE the bare `for_match` numeral
+        // path, which would otherwise read this clause's leading article as the
+        // numeral one.
+        (None, None, Some((expr, type_phrase)), _, _) => {
+            (expr, Some(FilterText::Slice(type_phrase)), false)
+        }
+        (None, None, None, Some((expr, _)), _) => (expr, None, false),
+        // CR 608.2c: exact anaphoric count — keep the offset so the trailing type
+        // phrase is parsed into the filter (unlike the numeric `for` path, whose
+        // pre-existing filter handling is intentionally left unchanged here).
+        (None, None, None, None, Some((expr, off))) => {
+            (expr, Some(FilterText::TailFrom(off)), false)
+        }
+        (None, None, None, None, None) => (QuantityExpr::Fixed { value: 1 }, None, false),
+    };
 
     // Extract the type filter from after "for a/an" or from the tail after "up to N"
     // or "any number of".
@@ -159,11 +239,15 @@ pub(super) fn parse_search_library_details(
     // the filter tail on this conjunction BEFORE parsing so each side becomes a
     // distinct `TargetFilter` and the suffix parser for the primary filter does
     // not consume the extras as a dangling "and a ..." fragment.
-    let (filter, extra_filters) = if let Some(type_start) = count_end_in_for {
+    let (filter, extra_filters) = if let Some(text) = filter_text {
         // "for up to five creature cards" or "for any number of dragon creature cards"
         // — type text starts after the number / quantity phrase. Multi-filter is
         // not supported for explicit-count searches (grammar always uses "a X and a Y").
-        (parse_search_filter(&lower[type_start..], ctx), Vec::new())
+        let type_text = match text {
+            FilterText::TailFrom(start) => &lower[start..],
+            FilterText::Slice(slice) => slice,
+        };
+        (parse_search_filter(type_text, ctx), Vec::new())
     } else if let Some(after_for) = strip_after(lower, "for a ") {
         parse_search_filter_with_extras(after_for, ctx)
     } else if let Some(after_for) = strip_after(lower, "for an ") {

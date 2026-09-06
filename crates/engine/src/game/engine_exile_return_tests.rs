@@ -838,6 +838,7 @@ fn white_auracite_real_oracle_text_returns_exiled_card() {
             source_name: String::new(),
             subject_match_count: None,
             die_result: None,
+            die_results_apportioned: None,
             provenance: None,
         },
     });
@@ -991,6 +992,7 @@ fn haytham_kenway_per_opponent_exile_returns_when_source_leaves() {
             source_name: String::new(),
             subject_match_count: None,
             die_result: None,
+            die_results_apportioned: None,
             provenance: None,
         },
     });
@@ -1112,6 +1114,7 @@ fn journey_to_nowhere_two_trigger_oracle_returns_exiled_creature() {
             source_name: String::new(),
             subject_match_count: None,
             die_result: None,
+            die_results_apportioned: None,
             provenance: None,
         },
     });

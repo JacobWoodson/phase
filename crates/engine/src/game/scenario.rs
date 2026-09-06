@@ -1967,6 +1967,7 @@ impl GameRunner {
             WaitingFor::ArrangePlanarDeckTopChoice { .. } => "ArrangePlanarDeckTopChoice",
             WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
             WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
+            WaitingFor::DieResultChoice { .. } => "DieResultChoice",
             WaitingFor::DigChoice { .. } => "DigChoice",
             WaitingFor::SurveilChoice { .. } => "SurveilChoice",
             WaitingFor::RevealChoice { .. } => "RevealChoice",
@@ -3047,6 +3048,7 @@ fn waiting_for_variant_name(waiting: &WaitingFor) -> &'static str {
         WaitingFor::SurveilChoice { .. } => "SurveilChoice",
         WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
         WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
+        WaitingFor::DieResultChoice { .. } => "DieResultChoice",
         WaitingFor::ReplacementChoice { .. } => "ReplacementChoice",
         WaitingFor::NamedChoice { .. } => "NamedChoice",
         WaitingFor::TributeChoice { .. } => "TributeChoice",
@@ -3530,6 +3532,16 @@ fn drive_resolution(
                 act_collect(
                     runner,
                     GameAction::SelectCoinFlips { keep_indices },
+                    &mut events,
+                )?;
+            }
+            // CR 706.4: apportioned die-roll selection — deterministically take
+            // the first rolled die as "that result" so scenario replays are
+            // reproducible.
+            WaitingFor::DieResultChoice { .. } => {
+                act_collect(
+                    runner,
+                    GameAction::SelectDieResult { index: 0 },
                     &mut events,
                 )?;
             }

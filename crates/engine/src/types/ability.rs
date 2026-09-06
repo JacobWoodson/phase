@@ -1481,6 +1481,29 @@ pub struct DieResultBranch {
     pub effect: Box<AbilityDefinition>,
 }
 
+/// CR 706.4: Which of an apportioned multi-die roll's results a later clause
+/// reads. Emitted only for the "roll two dN and choose one result" grammar,
+/// where CR 706.4 ("The text of those abilities will indicate how to use the
+/// results of the die rolls") makes the printed text — not a results table —
+/// the authority for apportioning the two results between clauses.
+///
+/// The two variants are the complete partition of a TWO-die apportionment:
+/// the player chooses one result (`Chosen`), and `Other` names the remaining
+/// one. `Other` is well-defined only for exactly two dice, which is why the
+/// parser stamps `selection` only when `count == 2` (CR 706.4). This is not a
+/// results table (CR 706.3b) and not an ignored roll (CR 706.6) — both results
+/// are used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum DieResultSelection {
+    /// CR 706.4 + CR 608.2d: The result the roll's controller chose while
+    /// applying the effect ("choose one result" → "that result").
+    Chosen,
+    /// CR 706.4: The result NOT chosen ("the other result"). Well-defined only
+    /// because the apportionment is over exactly two dice.
+    Other,
+}
+
 /// CR 706.2: Modifier applied to a die roll's natural result before the
 /// effect's result table is consulted. "Roll a d20 and add the number of
 /// cards in your hand" → `Add(QuantityExpr::Ref(HandSize { player: Controller }))`.
@@ -8324,6 +8347,17 @@ pub enum QuantityRef {
     /// CR 603.7c: Numeric value from the triggering event.
     /// Extracts amount/count from DamageDealt, LifeChanged, CardsDrawn, CounterAdded, etc.
     EventContextAmount,
+    /// CR 706.4: One result of an apportioned multi-die roll made earlier in
+    /// the same resolving instruction sequence ("Roll two d12 and choose one
+    /// result. … equal to that result. … equal to the other result.").
+    ///
+    /// Distinct from `EventContextAmount`: that leaf is the UNBOUND
+    /// demonstrative supplied by a triggering event, whereas this one names a
+    /// specific die of a roll the same resolution already performed. Chain
+    /// assembly rebinds the parsed `EventContextAmount` to this leaf once it
+    /// can prove the preceding clause is an apportioned `Effect::RollDie`
+    /// (CR 608.2c — later text modifying the meaning of earlier text).
+    DieResultSelected { selection: DieResultSelection },
     /// CR 120.1 + CR 603.2c + CR 608.2c: Count distinct players named by the
     /// current triggering event batch, after applying a player filter relative
     /// to the resolving ability's controller. Used by "for each opponent dealt
@@ -8811,6 +8845,8 @@ impl QuantityRef {
             | QuantityRef::PreviousEffectCount
             | QuantityRef::UnspentMana { .. }
             | QuantityRef::EventContextAmount
+            // CR 706.4: carries a die selector, not a PlayerScope.
+            | QuantityRef::DieResultSelected { .. }
             | QuantityRef::EventContextPlayerCount { .. }
             | QuantityRef::AttachmentsOnLeavingObject { .. }
             | QuantityRef::EventContextSourceCostX
@@ -16351,6 +16387,16 @@ pub enum Effect {
     /// `FlipCoins.count` precedent (CR 705).
     /// CR 706.2: `modifier` adjusts the natural roll before result-branch lookup.
     /// `None` means the natural result is used unchanged.
+    /// CR 706.4: `selection` is `Some(n)` — carrying the apportioned arity —
+    /// only for the apportioned two-die grammar ("roll two dN and choose one
+    /// result"), where later
+    /// clauses read the individual results via
+    /// `QuantityRef::DieResultSelected`. `None` — the overwhelming majority —
+    /// means no clause apportions the results, which covers both the plain
+    /// roll and the results-table form (CR 706.3b, where the table itself
+    /// consumes the result). It is elided from serialized output so cards
+    /// without an apportionment cost zero bytes and their card-data stays
+    /// byte-identical.
     RollDie {
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
@@ -16359,6 +16405,15 @@ pub enum Effect {
         results: Vec<DieResultBranch>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         modifier: Option<DieRollModifier>,
+        /// CR 706.4 + CR 608.2d: `Some(n)` when the roll's `n` results are
+        /// apportioned between later clauses by a choice the roll's controller
+        /// makes while applying the effect. The parser stamps this only for
+        /// `n == 2` — the sole arity for which `DieResultSelection::Other`
+        /// names a unique die — but the field carries the arity rather than a
+        /// bare marker so a future three-die apportionment extends the
+        /// selection enum instead of re-typing this field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selection: Option<u8>,
     },
     /// CR 705: Flip a coin. Optionally execute different effects on win/lose.
     ///

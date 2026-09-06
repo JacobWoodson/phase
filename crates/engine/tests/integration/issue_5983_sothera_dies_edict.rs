@@ -106,6 +106,7 @@ fn push_sothera_dies_trigger(
             source_name: "Sothera, the Supervoid".into(),
             subject_match_count: None,
             die_result: None,
+            die_results_apportioned: None,
         provenance: None,
         },
     };

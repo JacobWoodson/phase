@@ -1333,6 +1333,19 @@ pub fn candidate_actions_broad_with_probe(
                 Vec::new()
             }
         }
+        // CR 706.4 + CR 608.2d: each rolled die is a legal choice for "that
+        // result". The tactical value of the two options differs per card
+        // (Reckless Endeavor trades damage against Treasure), so every index is
+        // offered and the evaluator ranks them.
+        WaitingFor::DieResultChoice { player, results } => (0..results.len())
+            .map(|index| {
+                candidate(
+                    GameAction::SelectDieResult { index },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::DigChoice {
             player,
             keep_count,

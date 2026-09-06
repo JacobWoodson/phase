@@ -538,6 +538,8 @@ fn tracked_die_roll_modifier_adds_discarded_count_to_result() {
                     qty: QuantityRef::TrackedSetSize,
                 },
             }),
+            // CR 706.4: not an apportioned roll.
+            selection: None,
         },
     );
 

@@ -4537,6 +4537,7 @@ mod tests {
                     source_name: String::new(),
                     subject_match_count: None,
                     die_result: None,
+                    die_results_apportioned: None,
                     provenance: None,
                 },
             });
@@ -4958,6 +4959,7 @@ mod tests {
                 source_name: "Grapeshot".to_string(),
                 subject_match_count: None,
                 die_result: None,
+                die_results_apportioned: None,
                 provenance: Some(SyntheticTriggerProvenance::Storm { copy_count: 2 }),
             },
         });
@@ -5173,6 +5175,7 @@ mod tests {
                 source_name: "Watcher".to_string(),
                 subject_match_count: None,
                 die_result: None,
+                die_results_apportioned: None,
                 provenance: None,
             },
         });
@@ -5294,6 +5297,7 @@ mod tests {
                     may_trigger_origin: None,
                     subject_match_count: None,
                     die_result: None,
+                    die_results_apportioned: None,
                     provenance: None,
                 },
                 provenance,
@@ -7657,6 +7661,7 @@ mod tests {
                 source_name: MARKER.to_string(),
                 subject_match_count: None,
                 die_result: None,
+                die_results_apportioned: None,
                 provenance: None,
             },
         };

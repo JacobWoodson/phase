@@ -148,6 +148,8 @@ enum HumanResponseModel {
     DamageAssignments,
     TriggerOrder,
     CoinFlipSequence,
+    /// CR 706.4: pick which rolled die is "that result".
+    DieResultSelection,
     TargetSequence,
     CategorySelection,
     CombatRelations(CombatRelationAction),
@@ -171,6 +173,7 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         WaitingFor::GameOver { .. } => HumanResponseModel::Terminal,
         WaitingFor::OrderTriggers { .. } => HumanResponseModel::TriggerOrder,
         WaitingFor::CoinFlipKeepChoice { .. } => HumanResponseModel::CoinFlipSequence,
+        WaitingFor::DieResultChoice { .. } => HumanResponseModel::DieResultSelection,
         WaitingFor::ChooseXValue { .. } => {
             HumanResponseModel::NumberRange(NumberResponseAction::ChooseX)
         }
@@ -406,6 +409,12 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
             Some(InteractionSlotKind::Single),
         ),
         WaitingFor::CoinFlipKeepChoice { .. } => (
+            InteractionWaitingForCode::Sequence,
+            None,
+            Some(InteractionSlotKind::Single),
+        ),
+        // CR 706.4: exactly one of the rolled dice is chosen.
+        WaitingFor::DieResultChoice { .. } => (
             InteractionWaitingForCode::Sequence,
             None,
             Some(InteractionSlotKind::Single),
@@ -1013,6 +1022,12 @@ struct TriggerOrderProjection {
 struct CoinFlipProjection {
     candidate_count: usize,
     keep_count: usize,
+}
+
+/// CR 706.4: the rolled results a die-result choice offers.
+#[derive(Debug, Clone)]
+struct DieResultProjection {
+    results: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2536,6 +2551,21 @@ fn coin_flip_projection(
     Ok(Some(CoinFlipProjection {
         candidate_count: results.len(),
         keep_count: *keep_count,
+    }))
+}
+
+/// CR 706.4: project the rolled dice of an apportioned roll for selection.
+fn die_result_projection(
+    waiting_for: &WaitingFor,
+) -> Result<Option<DieResultProjection>, InteractionReasonCode> {
+    let WaitingFor::DieResultChoice { results, .. } = waiting_for else {
+        return Ok(None);
+    };
+    if results.len() > MAX_INTERACTION_LIST_LEN {
+        return Err(InteractionReasonCode::PayloadTooLarge);
+    }
+    Ok(Some(DieResultProjection {
+        results: results.clone(),
     }))
 }
 
@@ -4504,6 +4534,8 @@ fn selection_projection(
         | WaitingFor::EquipTarget { .. }
         | WaitingFor::RedistributeLifeTotals { .. }
         | WaitingFor::CoinFlipKeepChoice { .. }
+        // CR 706.4: selecting a die result selects a number, not an object.
+        | WaitingFor::DieResultChoice { .. }
         | WaitingFor::RevealChoice { .. }
         | WaitingFor::OutsideGameChoice { .. }
         | WaitingFor::BeholdChoice { .. }
@@ -5517,6 +5549,10 @@ fn project_action_payload(
                 push_value_surface(surfaces, InteractionRoleCode::CoinFlipIndex, index);
             }
         }
+        // CR 706.4: the index of the die chosen as "that result".
+        GameAction::SelectDieResult { index } => {
+            push_value_surface(surfaces, InteractionRoleCode::DieResultIndex, index);
+        }
         GameAction::ChooseOutsideGameCards { selections } => {
             for selection in selections {
                 match selection {
@@ -6214,6 +6250,7 @@ fn action_code(action: &GameAction) -> InteractionActionCode {
             InteractionActionCode::ChooseRemoveCounterCostDistribution
         }
         GameAction::SelectCoinFlips { .. } => InteractionActionCode::SelectCoinFlips,
+        GameAction::SelectDieResult { .. } => InteractionActionCode::SelectDieResult,
         GameAction::ChooseOutsideGameCards { .. } => InteractionActionCode::ChooseOutsideGameCards,
         GameAction::SelectTargets { .. } => InteractionActionCode::SelectTargets,
         GameAction::ChooseTarget { .. } => InteractionActionCode::ChooseTarget,
@@ -6777,6 +6814,34 @@ fn coin_flip_choices(
                     role: InteractionRoleCode::CoinFlipIndex,
                     index: Some(index as u32),
                     value: index.to_string(),
+                },
+            ],
+            status: InteractionChoiceStatus::Available,
+        })
+        .collect()
+}
+
+/// CR 706.4: one choice per rolled die. The surfaced `value` is the die's
+/// actual result — the number the player is choosing between — while `index`
+/// keeps the selection unambiguous when both dice show the same result.
+fn die_result_choices(
+    interaction_id: &InteractionId,
+    projection: &DieResultProjection,
+) -> Vec<InteractionChoice> {
+    projection
+        .results
+        .iter()
+        .enumerate()
+        .map(|(index, result)| InteractionChoice {
+            id: interaction_choice_id(interaction_id, 'd', index),
+            surfaces: vec![
+                InteractionPresentationSurface::Summary {
+                    code: InteractionSummaryCode::Candidate,
+                },
+                InteractionPresentationSurface::Value {
+                    role: InteractionRoleCode::DieResultIndex,
+                    index: Some(index as u32),
+                    value: result.to_string(),
                 },
             ],
             status: InteractionChoiceStatus::Available,
@@ -7623,6 +7688,43 @@ fn opportunity_for_slot(
                         maximum: Some(keep_count),
                         aggregate: None,
                         confirmable: keep_count == 0,
+                    },
+                },
+                InteractionAvailability::InputRequired,
+            )
+        }
+        // CR 706.4 + CR 608.2d: choose exactly one of the rolled dice as "that
+        // result"; the other becomes "the other result".
+        HumanResponseModel::DieResultSelection => {
+            let projection = match die_result_projection(&filtered_state.waiting_for) {
+                Ok(Some(projection)) => projection,
+                Ok(None) => unreachable!("die-result model requires die-result projection"),
+                Err(_) => return payload_too_large_opportunity(&slot.interaction_id),
+            };
+            (
+                InteractionOpportunity {
+                    interaction_id: slot.interaction_id.clone(),
+                    response: InteractionOpportunityResponse::Schema {
+                        spec: InteractionResponseSpec::Sequence {
+                            min: 1,
+                            max: 1,
+                            unique: true,
+                            include_all: false,
+                            engine_validated: false,
+                            escape: None,
+                            confirm: ConfirmSemantics::Explicit,
+                        },
+                        candidates: die_result_choices(&slot.interaction_id, &projection),
+                    },
+                    surfaces: vec![InteractionPresentationSurface::Summary {
+                        code: InteractionSummaryCode::Decision,
+                    }],
+                    progress: InteractionProgress {
+                        selected: 0,
+                        minimum: 1,
+                        maximum: Some(1),
+                        aggregate: None,
+                        confirmable: false,
                     },
                 },
                 InteractionAvailability::InputRequired,
@@ -8748,6 +8850,8 @@ fn attachment_fans_for_slot(
         | HumanResponseModel::DamageAssignments
         | HumanResponseModel::TriggerOrder
         | HumanResponseModel::CoinFlipSequence
+        // CR 706.4: die results are bare numbers — no game object to attach.
+        | HumanResponseModel::DieResultSelection
         | HumanResponseModel::CategorySelection
         | HumanResponseModel::CombatRelations(_)
         | HumanResponseModel::ManaGroups(_)
@@ -9515,6 +9619,33 @@ fn materialize_coin_flip_response(
             selected: projection.keep_count as u32,
             minimum: projection.keep_count as u32,
             maximum: Some(projection.keep_count as u32),
+            aggregate: None,
+            confirmable: true,
+        },
+    ))
+}
+
+/// CR 706.4 + CR 608.2d: exactly one die is chosen as "that result".
+fn materialize_die_result_response(
+    interaction_id: &InteractionId,
+    projection: &DieResultProjection,
+    response: &InteractionResponse,
+) -> Result<(GameAction, InteractionProgress), InteractionReasonCode> {
+    let InteractionResponse::Sequence { choice_ids } = response else {
+        return Err(InteractionReasonCode::MalformedResponse);
+    };
+    if choice_ids.len() != 1 {
+        return Err(InteractionReasonCode::ConstraintUnsatisfied);
+    }
+    let index = (0..projection.results.len())
+        .find(|index| interaction_choice_id(interaction_id, 'd', *index) == choice_ids[0])
+        .ok_or(InteractionReasonCode::UnknownChoice)?;
+    Ok((
+        GameAction::SelectDieResult { index },
+        InteractionProgress {
+            selected: 1,
+            minimum: 1,
+            maximum: Some(1),
             aggregate: None,
             confirmable: true,
         },
@@ -10731,6 +10862,11 @@ fn materialize_response(
             let projection = coin_flip_projection(&filtered_state.waiting_for)?
                 .ok_or(InteractionReasonCode::UnsupportedResponse)?;
             return materialize_coin_flip_response(interaction_id, projection, response);
+        }
+        HumanResponseModel::DieResultSelection => {
+            let projection = die_result_projection(&filtered_state.waiting_for)?
+                .ok_or(InteractionReasonCode::UnsupportedResponse)?;
+            return materialize_die_result_response(interaction_id, &projection, response);
         }
         HumanResponseModel::TargetSequence => {
             let projection = target_sequence_projection(&filtered_state.waiting_for)?

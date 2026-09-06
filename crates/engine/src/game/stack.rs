@@ -1033,6 +1033,7 @@ pub(crate) fn bind_resolution_scope(
             trigger_event,
             subject_match_count,
             die_result,
+            die_results_apportioned,
             ..
         } => Some(TriggeredResolutionScope {
             condition: condition.as_ref(),
@@ -1043,6 +1044,7 @@ pub(crate) fn bind_resolution_scope(
             trigger_event: trigger_event.as_ref(),
             subject_match_count: *subject_match_count,
             die_result: *die_result,
+            die_results_apportioned: *die_results_apportioned,
         }),
         _ => None,
     };
@@ -1066,6 +1068,10 @@ pub(crate) struct TriggeredResolutionScope<'a> {
     pub trigger_event: Option<&'a GameEvent>,
     pub subject_match_count: Option<u32>,
     pub die_result: Option<i32>,
+    /// CR 706.4: the apportioned pair, bound in lockstep with `die_result` so
+    /// a "the other result" clause on this entry reads its die instead of the
+    /// unbound-reference 0.
+    pub die_results_apportioned: Option<(i32, i32)>,
 }
 
 /// The decision-and-binding half of [`bind_resolution_scope`], with no stack
@@ -1125,6 +1131,11 @@ pub(crate) fn bind_triggered_resolution_scope(
         // the original roll's resolution scope cleared) reads the rolled value
         // via the `QuantityRef::EventContextAmount` cascade.
         state.die_result_this_resolution = scope.die_result;
+        // CR 706.4 + CR 603.12: the apportioned pair is re-stamped with its
+        // scalar sibling so a reflexive "When you do … the other result"
+        // sub-ability resolving on its own stack entry reads the die it was
+        // apportioned via `QuantityRef::DieResultSelected`.
+        state.die_results_apportioned = scope.die_results_apportioned;
     }
 
     true
@@ -1397,6 +1408,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         state.current_trigger_events.clear();
         state.current_trigger_match_count = None;
         state.die_result_this_resolution = None;
+        // CR 706.4: the apportioned pair is resolution-scoped on the
+        // same boundary as the scalar die result above.
+        state.die_results_apportioned = None;
         finish_resolving_stack_entry(
             state,
             super::lifecycle::DelayedTerminalDisposition::NoLegalChoice,
@@ -1504,6 +1518,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 state.current_trigger_events.clear();
                 state.current_trigger_match_count = None;
                 state.die_result_this_resolution = None;
+                // CR 706.4: the apportioned pair is resolution-scoped on the
+                // same boundary as the scalar die result above.
+                state.die_results_apportioned = None;
                 return;
             }
             None => {
@@ -1600,6 +1617,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 // CR 706.2 + CR 706.4: clear the carried die-roll result at the
                 // same cross-resolution boundary as the batched subject count.
                 state.die_result_this_resolution = None;
+                // CR 706.4: the apportioned pair is resolution-scoped on the
+                // same boundary as the scalar die result above.
+                state.die_results_apportioned = None;
                 finish_resolving_stack_entry(
                     state,
                     super::lifecycle::DelayedTerminalDisposition::AllTargetsIllegal,
@@ -1629,6 +1649,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         state.current_trigger_events.clear();
         state.current_trigger_match_count = None;
         state.die_result_this_resolution = None;
+        // CR 706.4: the apportioned pair is resolution-scoped on the
+        // same boundary as the scalar die result above.
+        state.die_results_apportioned = None;
         return;
     }
 
@@ -2071,6 +2094,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                     state.current_trigger_events.clear();
                                     state.current_trigger_match_count = None;
                                     state.die_result_this_resolution = None;
+                                    // CR 706.4: the apportioned pair is resolution-scoped on the
+                                    // same boundary as the scalar die result above.
+                                    state.die_results_apportioned = None;
                                     return;
                                 }
                             }
@@ -2188,6 +2214,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             state.current_trigger_events.clear();
                             state.current_trigger_match_count = None;
                             state.die_result_this_resolution = None;
+                            // CR 706.4: the apportioned pair is resolution-scoped on the
+                            // same boundary as the scalar die result above.
+                            state.die_results_apportioned = None;
                             return;
                         }
                     }
@@ -2223,6 +2252,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     // the same cross-resolution boundary as the batched subject
                     // count.
                     state.die_result_this_resolution = None;
+                    // CR 706.4: the apportioned pair is resolution-scoped on the
+                    // same boundary as the scalar die result above.
+                    state.die_results_apportioned = None;
                     return;
                 }
             }
@@ -2318,6 +2350,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         state.current_trigger_events.clear();
                         state.current_trigger_match_count = None;
                         state.die_result_this_resolution = None;
+                        // CR 706.4: the apportioned pair is resolution-scoped on the
+                        // same boundary as the scalar die result above.
+                        state.die_results_apportioned = None;
                         return;
                     }
                 }
@@ -2695,6 +2730,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 706.2 + CR 706.4: clear the carried die-roll result at the same
     // cross-resolution boundary as the batched subject count.
     state.die_result_this_resolution = None;
+    // CR 706.4: the apportioned pair is resolution-scoped on the
+    // same boundary as the scalar die result above.
+    state.die_results_apportioned = None;
 
     events.push(GameEvent::StackResolved {
         object_id: entry.id,
@@ -3226,6 +3264,10 @@ pub(crate) fn priority_checkpoint_is_settled(state: &GameState) -> bool {
         && state.current_trigger_events.is_empty()
         && state.current_trigger_match_count.is_none()
         && state.die_result_this_resolution.is_none()
+        // CR 706.4: the apportioned pair is resolution-scoped on the same
+        // boundary as the scalar die result above, so a settled checkpoint must
+        // prove both are gone — not just the scalar.
+        && state.die_results_apportioned.is_none()
         && state.resolution_stack.is_empty()
         && state.pending_miracle_offers.is_empty()
         && state.pending_paradigm_remaining_offers.is_none()
@@ -3277,6 +3319,7 @@ fn self_counter_run_key<'a>(
         source_name: _,
         subject_match_count: _,
         die_result: _,
+        die_results_apportioned: _,
         provenance: None,
     } = &entry.kind
     else {
@@ -3511,6 +3554,7 @@ fn fixed_controller_gain_life_run_key<'a>(
         source_name: _,
         subject_match_count: _,
         die_result: _,
+        die_results_apportioned: _,
         provenance: None,
     } = &entry.kind
     else {
@@ -3721,6 +3765,7 @@ fn fixed_opponent_effect_run_key<'a>(
         source_name: _,
         subject_match_count: _,
         die_result: _,
+        die_results_apportioned: _,
         provenance: None,
     } = &entry.kind
     else {
@@ -4465,9 +4510,10 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
 ///   equal deep `ability` carry the same batched subject count. It is therefore
 ///   redundant to key on (would never break a run the other fields kept
 ///   together) and is correctly applied from the top entry in the batch path.
-/// - `die_result` — EXCLUDED for the same reason as `subject_match_count`: it
-///   is CR 706.2 resolution data (the carried die-roll result re-stamped from
-///   the run's top entry in `resolve_batched`), not run identity. Keying on it
+/// - `die_result` / `die_results_apportioned` — EXCLUDED for the same reason as
+///   `subject_match_count`: both are CR 706.2 / CR 706.4 resolution data (the
+///   carried die-roll result and its apportioned pair, re-stamped from the
+///   run's top entry in `resolve_batched`), not run identity. Keying on either
 ///   would needlessly split runs without changing correctness.
 fn batch_run_key<'a>(state: &'a GameState, entry: &'a StackEntry) -> Option<BatchRunKey<'a>> {
     let StackEntryKind::TriggeredAbility {
@@ -4479,6 +4525,7 @@ fn batch_run_key<'a>(state: &'a GameState, entry: &'a StackEntry) -> Option<Batc
         source_name: _,
         subject_match_count: _,
         die_result: _,
+        die_results_apportioned: _,
         provenance: None,
     } = &entry.kind
     else {
@@ -5339,6 +5386,7 @@ mod tests {
                 source_name: "Trygon Predator".to_string(),
                 subject_match_count: None,
                 die_result: None,
+                die_results_apportioned: None,
                 provenance: None,
             },
         });
@@ -5363,6 +5411,7 @@ mod tests {
             may_trigger_origin: Some(MayTriggerOrigin::Printed { trigger_index: 0 }),
             subject_match_count: None,
             die_result: None,
+            die_results_apportioned: None,
             provenance: None,
         }));
         state.waiting_for = WaitingFor::Priority {
@@ -5763,6 +5812,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                die_results_apportioned: None,
                 provenance: None,
             },
         });
@@ -6864,6 +6914,7 @@ mod tests {
                     source_name: String::new(),
                     subject_match_count: None,
                     die_result: None,
+                    die_results_apportioned: None,
                     provenance: None,
                 },
             });
@@ -6918,6 +6969,7 @@ mod tests {
                     source_name: "Grapeshot".to_string(),
                     subject_match_count: None,
                     die_result: None,
+                    die_results_apportioned: None,
                     provenance: Some(SyntheticTriggerProvenance::Storm { copy_count }),
                 },
             });
@@ -6976,6 +7028,7 @@ mod tests {
                     source_name: "Honored Dreyleader".to_string(),
                     subject_match_count: None,
                     die_result: None,
+                    die_results_apportioned: None,
                     provenance: None,
                 },
             });
@@ -7027,6 +7080,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                die_results_apportioned: None,
                 provenance: None,
             },
         };
@@ -7081,6 +7135,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                die_results_apportioned: None,
                 provenance: None,
             },
         };
@@ -7272,6 +7327,7 @@ mod tests {
                     source_name: String::new(),
                     subject_match_count: None,
                     die_result: None,
+                    die_results_apportioned: None,
                     provenance: None,
                 },
             }
@@ -7738,6 +7794,7 @@ mod tests {
                     source_name: "Battered Golem".to_string(),
                     subject_match_count: None,
                     die_result: None,
+                    die_results_apportioned: None,
                     provenance: None,
                 },
             });
@@ -8054,6 +8111,7 @@ mod tests {
                         source_name: "Scute Swarm".to_string(),
                         subject_match_count: None,
                         die_result: None,
+                        die_results_apportioned: None,
                         provenance: None,
                     },
                 });
@@ -8132,6 +8190,7 @@ mod tests {
                     source_name: state.objects[&source].name.clone(),
                     subject_match_count: None,
                     die_result: None,
+                    die_results_apportioned: None,
                     provenance: None,
                 },
             });
@@ -8172,6 +8231,7 @@ mod tests {
                     source_name: state.objects[&source].name.clone(),
                     subject_match_count: None,
                     die_result: None,
+                    die_results_apportioned: None,
                     provenance: None,
                 },
             });
@@ -8218,6 +8278,7 @@ mod tests {
                     source_name: state.objects[&source].name.clone(),
                     subject_match_count: None,
                     die_result: None,
+                    die_results_apportioned: None,
                     provenance: None,
                 },
             });
@@ -8259,6 +8320,7 @@ mod tests {
                     source_name: state.objects[&source].name.clone(),
                     subject_match_count: None,
                     die_result: None,
+                    die_results_apportioned: None,
                     provenance: None,
                 },
             });
@@ -9259,6 +9321,7 @@ mod tests {
                         source_name: String::new(),
                         subject_match_count: None,
                         die_result: None,
+                        die_results_apportioned: None,
                         provenance: None,
                     },
                 });
@@ -9560,6 +9623,7 @@ mod tests {
                         source_name: "Scute Swarm".to_string(),
                         subject_match_count: None,
                         die_result: None,
+                        die_results_apportioned: None,
                         provenance: None,
                     },
                 });
@@ -13897,6 +13961,7 @@ mod tests {
                 source_name: "Ancient Bronze Dragon".to_string(),
                 subject_match_count: None,
                 die_result: Some(11),
+                die_results_apportioned: None,
                 provenance: None,
             },
         });
@@ -13916,6 +13981,80 @@ mod tests {
         // entry resolves (mirrors the batched subject-count lifecycle).
         assert_eq!(state.die_result_this_resolution, None);
         assert_eq!(state.current_trigger_match_count, None);
+    }
+
+    /// CR 706.4 + CR 603.12: the apportioned sibling of the test above. A
+    /// reflexive "When you do … the other result" sub-ability resolves on its
+    /// own `StackEntryKind::TriggeredAbility` entry, in a later resolution
+    /// scope than the roll that apportioned the dice, so the (chosen, other)
+    /// pair must be carried on the entry and re-stamped by `resolve_top` for
+    /// `QuantityRef::DieResultSelected` to read.
+    ///
+    /// Without the carried pair this reads the unbound-reference 0 that
+    /// `DieResultSelected` deliberately falls back to (it has a single
+    /// authoritative source and never consults the triggering event), while its
+    /// scalar sibling `die_result` resolves correctly — the two resolution-
+    /// scoped die channels diverging across the CR 603.12 boundary.
+    #[test]
+    fn reflexive_entry_lifts_carried_apportioned_pair_into_resolution_scope() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(0),
+            "Arcane Endeavor".to_string(),
+            Zone::Battlefield,
+        );
+
+        // The reflexive sub-ability reads "the OTHER result" — the die the
+        // controller did not choose (4), never the chosen one (9).
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::DieResultSelected {
+                        selection: crate::types::ability::DieResultSelection::Other,
+                    },
+                },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+
+        state.stack.push_back(StackEntry {
+            id: source,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(ability),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: "Arcane Endeavor".to_string(),
+                subject_match_count: None,
+                die_result: Some(9),
+                die_results_apportioned: Some((9, 4)),
+                provenance: None,
+            },
+        });
+
+        let life_before = state.players[0].life;
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            state.players[0].life - life_before,
+            4,
+            "the reflexive entry must read the carried apportioned pair's OTHER              die (4), not the chosen die (9) and not the unbound-reference 0"
+        );
+        // Both die channels clear together at the cross-resolution boundary.
+        assert_eq!(state.die_result_this_resolution, None);
+        assert_eq!(
+            state.die_results_apportioned, None,
+            "the apportioned pair is resolution-scoped on the same boundary as              its scalar sibling"
+        );
     }
 
     /// CR 306.5b + CR 712.14a: A permanent spell cast transformed enters as its
@@ -14154,6 +14293,7 @@ mod tests {
                     source_name: "Conditional Trigger".to_string(),
                     subject_match_count: None,
                     die_result: None,
+                    die_results_apportioned: None,
                     provenance: None,
                 },
             });
@@ -14315,6 +14455,7 @@ mod tests {
                     trigger_event: Some(&event_a),
                     subject_match_count: Some(4),
                     die_result: Some(6),
+                    die_results_apportioned: None,
                 }),
                 None,
             ));
@@ -14340,6 +14481,7 @@ mod tests {
                     trigger_event: Some(&event_a),
                     subject_match_count: None,
                     die_result: None,
+                    die_results_apportioned: None,
                 }),
                 Some(vec![event_a.clone(), event_b.clone()]),
             ));
@@ -14366,6 +14508,7 @@ mod tests {
                     trigger_event: None,
                     subject_match_count: Some(2),
                     die_result: None,
+                    die_results_apportioned: None,
                 }),
                 Some(vec![event_b.clone(), event_a.clone()]),
             ));
@@ -14415,6 +14558,7 @@ mod tests {
                     trigger_event: Some(&event_a),
                     subject_match_count: Some(4),
                     die_result: Some(6),
+                    die_results_apportioned: None,
                 }),
                 Some(vec![event_a.clone(), event_b.clone()]),
             ));
@@ -14445,6 +14589,7 @@ mod tests {
                     trigger_event: Some(&event_a),
                     subject_match_count: Some(4),
                     die_result: Some(6),
+                    die_results_apportioned: None,
                 }),
                 None,
             ));
@@ -14474,6 +14619,7 @@ mod tests {
                     source_name: String::new(),
                     subject_match_count: Some(3),
                     die_result: Some(20),
+                    die_results_apportioned: None,
                     provenance: None,
                 },
             };
@@ -14493,6 +14639,7 @@ mod tests {
                     trigger_event: Some(&event_a),
                     subject_match_count: Some(3),
                     die_result: Some(20),
+                    die_results_apportioned: None,
                 }),
                 Some(vec![event_a.clone(), event_b.clone()]),
             ));

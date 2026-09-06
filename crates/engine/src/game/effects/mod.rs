@@ -2511,6 +2511,10 @@ fn build_reflexive_pending_trigger(
         may_trigger_origin: ability.may_trigger_origin.clone(),
         subject_match_count: freeze_reflexive_event_count(state, controller, source_id),
         die_result: state.die_result_this_resolution,
+        // CR 706.4 + CR 603.12: an apportioned roll's pair travels with the
+        // scalar so a reflexive "When you do … the other result" sub-ability
+        // reads its die when it resolves as its own stack object.
+        die_results_apportioned: state.die_results_apportioned,
         provenance: None,
         ability: Box::new(ability),
         timestamp,
@@ -2774,6 +2778,11 @@ fn try_materialize_reflexive_trigger_inner(
         // creating ability so the reflexive entry can re-stamp it when it
         // resolves as its own stack object.
         die_result: state.die_result_this_resolution,
+        // CR 706.4 + CR 603.12: the apportioned pair is captured with its
+        // scalar sibling for the same reason — the reflexive entry re-stamps it
+        // when it resolves, so a `QuantityRef::DieResultSelected` there reads
+        // the apportioned die rather than the unbound-reference 0.
+        die_results_apportioned: state.die_results_apportioned,
         provenance: None,
     };
     let trigger_events = crate::game::triggers::take_pending_trigger_event_batch(state, &pending);
@@ -3199,7 +3208,11 @@ fn change_zone_forwards_chosen_attach_host(sub: &ResolvedAbility) -> bool {
         )
 }
 
-fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
+/// CR 608.2d: The single authority for "this `WaitingFor` is a prompt raised
+/// from INSIDE a resolution", as opposed to a between-resolutions prompt like
+/// priority. Crate-visible so the resolution-scope boundary test in
+/// `engine.rs` shares this one list instead of re-deriving it.
+pub(crate) fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
     matches!(
         waiting_for,
         WaitingFor::MeldPairChoice { .. }
@@ -3209,6 +3222,10 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::ArrangePlanarDeckTopChoice { .. }
             | WaitingFor::RedistributeLifeTotals { .. }
             | WaitingFor::CoinFlipKeepChoice { .. }
+            // CR 706.4 + CR 608.2d: the clauses that read "that result" /
+            // "the other result" must not resolve until the controller has
+            // chosen which die is which.
+            | WaitingFor::DieResultChoice { .. }
             | WaitingFor::DigChoice { .. }
             | WaitingFor::SurveilChoice { .. }
             | WaitingFor::RevealChoice { .. }
@@ -3681,6 +3698,8 @@ fn quantity_ref_counts_population_matching(
         | QuantityRef::UnspentMana { .. }
         | QuantityRef::Speed { .. }
         | QuantityRef::EventContextAmount
+        // CR 706.4: a die result counts no object population.
+        | QuantityRef::DieResultSelected { .. }
         | QuantityRef::EventContextPlayerCount { .. }
         | QuantityRef::AttachmentsOnLeavingObject { .. }
         | QuantityRef::EventContextSourceCostX
@@ -10917,12 +10936,13 @@ pub fn resolve_ability_chain(
         state.last_effect_amount = None;
         // CR 120.10: resolution-local excess channel resets with its total twin.
         state.last_effect_excess_amount = None;
-        // NOTE: `state.die_result_this_resolution` is intentionally NOT cleared
-        // here. `roll_die::resolve` stamps it AFTER this depth-0 prelude runs
+        // NOTE: `state.die_result_this_resolution` — and its CR 706.4 apportioned
+        // sibling `state.die_results_apportioned` — are intentionally NOT cleared
+        // here. `roll_die::resolve` stamps them AFTER this depth-0 prelude runs
         // (the prelude runs once at chain top, before `RollDie` executes), so
-        // the inline class still reads a live value. Clearing it here would wipe
-        // the value carried onto a reflexive "When you do … the result"
-        // sub-ability entry before that entry resolves (CR 603.12). Cross-
+        // the inline class still reads a live value. Clearing them here would wipe
+        // the values carried onto a reflexive "When you do … the result" /
+        // "… the other result" sub-ability entry before it resolves (CR 603.12). Cross-
         // resolution isolation comes from the four `stack.rs` reset sites and
         // the `engine.rs` apply() clear. (CR 706.2 + CR 706.4 + CR 603.12)
         state.last_effect_counts_by_player.clear();
@@ -22699,6 +22719,8 @@ mod tests {
                 sides: 6,
                 results: vec![],
                 modifier: None,
+                // CR 706.4: not an apportioned roll.
+                selection: None,
             },
             vec![],
             ObjectId(100),

@@ -2200,6 +2200,9 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::TrackedSetSize
         | QuantityRef::FilteredTrackedSetSize { .. }
         | QuantityRef::ExiledFromHandThisResolution
+        // CR 706.4: an apportioned die result is produced by THIS resolution's
+        // own roll, not carried on a frozen event tag.
+        | QuantityRef::DieResultSelected { .. }
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::PreviousEffectCount
         | QuantityRef::TurnsTaken
@@ -5734,6 +5737,11 @@ fn rw_effect(
             sides: _,
             results,
             modifier: _,
+            // CR 706.4: the apportionment arity is a parse-time shape marker;
+            // it reads and writes no game state of its own (the results it
+            // apportions are read through `QuantityRef::DieResultSelected`,
+            // profiled at its own leaf).
+            selection: _,
         } => {
             let mut p = rw_quantity_expr(count);
             for r in results {
@@ -6375,6 +6383,9 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         // Resolution-local / turn- / commander-scoped: no per-source binding
         // (member-invariant under uniformity).
         QuantityRef::ExiledFromHandThisResolution
+        // CR 706.4: resolution-local die result — no per-source binding, so it
+        // is member-invariant under uniformity like its scalar siblings.
+        | QuantityRef::DieResultSelected { .. }
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::PreviousEffectCount
         | QuantityRef::TurnsTaken

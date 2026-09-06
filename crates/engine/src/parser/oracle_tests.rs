@@ -28164,6 +28164,8 @@ fn render_net_reaches_every_nested_description_carrier() {
             effect: Box::new(ability("roll_die")),
         }],
         modifier: None,
+        // CR 706.4: not an apportioned roll.
+        selection: None,
     }));
     tags.push("roll_die");
 

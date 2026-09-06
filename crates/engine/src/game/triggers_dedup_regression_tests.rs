@@ -3329,6 +3329,7 @@ fn order_triggers_distinct_event_context_still_prompt() {
             may_trigger_origin: None,
             subject_match_count: Some(count),
             die_result: None,
+            die_results_apportioned: None,
             provenance: None,
         })
     };
@@ -3389,6 +3390,7 @@ fn order_triggers_event_context_ability_still_prompts_on_distinct_events() {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            die_results_apportioned: None,
             provenance: None,
         })
     };
@@ -3441,6 +3443,7 @@ fn archenemy_hero_team_orders_triggers_from_multiple_heroes_together() {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            die_results_apportioned: None,
             provenance: None,
         })
     };
@@ -3705,6 +3708,7 @@ fn queued_context_for(event: GameEvent) -> PendingTriggerContext {
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        die_results_apportioned: None,
         provenance: None,
     })
 }
@@ -4116,6 +4120,7 @@ fn continuation_pending(
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        die_results_apportioned: None,
         provenance: None,
     }
 }

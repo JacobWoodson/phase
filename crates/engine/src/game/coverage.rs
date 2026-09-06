@@ -1658,6 +1658,11 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             format!("life lost this turn ({})", fmt_player_scope(player))
         }
         QuantityRef::EventContextAmount => "event amount".into(),
+        // CR 706.4: apportioned two-die roll result.
+        QuantityRef::DieResultSelected { selection } => match selection {
+            crate::types::ability::DieResultSelection::Chosen => "the chosen die result".into(),
+            crate::types::ability::DieResultSelection::Other => "the other die result".into(),
+        },
         QuantityRef::SpellsCastThisTurn { scope, filter } => match filter {
             Some(filter) => format!(
                 "{} spells cast this turn ({})",
@@ -3409,6 +3414,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             sides,
             results,
             modifier,
+            selection,
         } => {
             if !matches!(count, QuantityExpr::Fixed { value: 1 }) {
                 d.push(("count".into(), fmt_quantity(count)));
@@ -3416,6 +3422,11 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("sides".into(), sides.to_string()));
             if !results.is_empty() {
                 d.push(("branches".into(), results.len().to_string()));
+            }
+            // CR 706.4: surface the apportionment so the coverage overlay shows
+            // that later clauses read individual dice.
+            if selection.is_some() {
+                d.push(("result selection".into(), "choose one of two".into()));
             }
             if let Some(m) = modifier {
                 let label = match m {
@@ -8567,6 +8578,9 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::ExiledFromHandThisResolution => ("ExiledFromHandThisResolution", Handled),
         QuantityRef::LifeLostThisTurn { .. } => ("LifeLostThisTurn", Handled),
         QuantityRef::EventContextAmount => ("EventContextAmount", Handled),
+        // CR 706.4: resolved by `quantity::resolve_ref` from
+        // `die_results_apportioned`.
+        QuantityRef::DieResultSelected { .. } => ("DieResultSelected", Handled),
         QuantityRef::SpellsCastThisTurn { .. } => ("SpellsCastThisTurn", Handled),
         QuantityRef::SpellsCastBeforeTriggeringSpell { .. } => {
             ("SpellsCastBeforeTriggeringSpell", Handled)
@@ -13592,6 +13606,8 @@ mod tests {
                         },
                     ],
                     modifier: None,
+                    // CR 706.4: not an apportioned roll.
+                    selection: None,
                 },
             ),
             AbilityDefinition::new(

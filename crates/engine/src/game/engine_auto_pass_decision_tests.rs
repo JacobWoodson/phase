@@ -664,6 +664,7 @@ fn push_natural_token_batch(
                 source_name: "Batch source".to_string(),
                 subject_match_count: None,
                 die_result: None,
+                die_results_apportioned: None,
                 provenance: None,
             },
         });
@@ -2009,6 +2010,7 @@ fn fenced_session_tears_down_when_resolution_ends_the_game() {
             source_name: "Terminal trigger".to_string(),
             subject_match_count: None,
             die_result: None,
+            die_results_apportioned: None,
             provenance: None,
         },
     });

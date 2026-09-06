@@ -521,6 +521,8 @@ pub enum InteractionActionCode {
     SelectCards,
     ChooseRemoveCounterCostDistribution,
     SelectCoinFlips,
+    /// CR 706.4: choose which rolled die is "that result".
+    SelectDieResult,
     ChooseOutsideGameCards,
     SelectTargets,
     ChooseTarget,
@@ -661,6 +663,8 @@ pub enum InteractionRoleCode {
     CounterType,
     Amount,
     CoinFlipIndex,
+    /// CR 706.4: one rolled die of an apportioned roll; `value` is its result.
+    DieResultIndex,
     SideboardIndex,
     FaceUpExile,
     OptionIndex,

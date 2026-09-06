@@ -18,6 +18,7 @@ type ArrangePlanarDeckTopChoice = Extract<
   { type: "ArrangePlanarDeckTopChoice" }
 >;
 type CoinFlipKeepChoice = Extract<WaitingFor, { type: "CoinFlipKeepChoice" }>;
+type DieResultChoice = Extract<WaitingFor, { type: "DieResultChoice" }>;
 type DigChoice = Extract<WaitingFor, { type: "DigChoice" }>;
 type SurveilChoice = Extract<WaitingFor, { type: "SurveilChoice" }>;
 type RevealChoice = Extract<WaitingFor, { type: "RevealChoice" }>;
@@ -318,6 +319,51 @@ export function CoinFlipKeepModal({ data }: { data: CoinFlipKeepChoice["data"] }
             </span>
             <span className="rounded-full bg-emerald-500/90 px-3 py-1 text-xs font-bold text-white">
               {t("coinFlip.buttons.keep")}
+            </span>
+          </motion.button>
+        ))}
+      </div>
+    </ChoiceOverlay>
+  );
+}
+
+// CR 706.4: "Roll two dN and choose one result." The chosen die feeds the
+// clause that says "that result"; the remaining die is "the other result".
+// Both are used, so neither is discarded.
+export function DieResultModal({ data }: { data: DieResultChoice["data"] }) {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+
+  const chooseResult = useCallback(
+    (index: number) => {
+      dispatch({
+        type: "SelectDieResult",
+        data: { index },
+      });
+    },
+    [dispatch],
+  );
+
+  return (
+    <ChoiceOverlay
+      title={t("dieResult.choose.title")}
+      subtitle={t("dieResult.choose.subtitle")}
+    >
+      <div className="flex flex-wrap justify-center gap-4">
+        {data.results.map((result, index) => (
+          <motion.button
+            key={index}
+            type="button"
+            onClick={() => chooseResult(index)}
+            className="flex flex-col items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-6 py-4"
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.98 }}
+          >
+            <span className="flex h-16 w-16 items-center justify-center rounded-full bg-sky-400/90 text-xl font-bold text-sky-950">
+              {result}
+            </span>
+            <span className="rounded-full bg-emerald-500/90 px-3 py-1 text-xs font-bold text-white">
+              {t("dieResult.buttons.choose")}
             </span>
           </motion.button>
         ))}

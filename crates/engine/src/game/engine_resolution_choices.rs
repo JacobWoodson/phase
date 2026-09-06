@@ -871,6 +871,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::ArrangePlanarDeckTopChoice { .. }
             | WaitingFor::RedistributeLifeTotals { .. }
             | WaitingFor::CoinFlipKeepChoice { .. }
+            | WaitingFor::DieResultChoice { .. }
             | WaitingFor::ManifestDreadChoice { .. }
             | WaitingFor::CastOffer {
                 kind: CastOfferKind::Discover { .. },
@@ -2019,6 +2020,32 @@ pub(super) fn handle_resolution_choice(
                 Some(wf) => wf,
                 None => finish_with_continuation(state, player, events),
             };
+            ResolutionChoiceOutcome::WaitingFor(wf)
+        }
+        (
+            WaitingFor::DieResultChoice { player, results },
+            GameAction::SelectDieResult { index },
+        ) => {
+            // CR 706.4: the chosen result must name one of the dice actually
+            // rolled.
+            if index >= results.len() {
+                return Err(EngineError::InvalidAction(format!(
+                    "Die result index {index} out of range"
+                )));
+            }
+            // CR 706.4 + CR 608.2d: record the apportionment, then let the
+            // chain continuation resolve the clauses that read "that result"
+            // and "the other result".
+            crate::game::effects::roll_die::resume_after_selection(state, &results, index);
+            // CR 706.4: the apportionment is resolution-scoped, but this
+            // branch must NOT clear it here. The clauses that read "that
+            // result" and "the other result" may re-suspend for prompts of
+            // their own (Arcane Endeavor's optional free cast, Wild Endeavor's
+            // search), so the pair has to outlive this action. Both the
+            // `apply()` preservation and the end-of-resolution clear now live
+            // on the shared resolution boundary in `engine.rs`, which sees the
+            // completion of a paused resolution that this branch cannot.
+            let wf = finish_with_continuation(state, player, events);
             ResolutionChoiceOutcome::WaitingFor(wf)
         }
         (

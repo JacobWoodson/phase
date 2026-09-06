@@ -999,6 +999,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
             source_name: String::new(),
             subject_match_count: None,
             die_result: None,
+            die_results_apportioned: None,
             provenance: None,
         },
     };
@@ -1374,6 +1375,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
             source_name: String::new(),
             subject_match_count: None,
             die_result: None,
+            die_results_apportioned: None,
             provenance: None,
         },
     };
@@ -2188,6 +2190,7 @@ fn cast_synthetic_earthbend(
             source_name: String::new(),
             subject_match_count: None,
             die_result: None,
+            die_results_apportioned: None,
             provenance: None,
         },
     };
@@ -2503,6 +2506,7 @@ fn earthbended_land_returns_tapped_after_exile() {
             source_name: String::new(),
             subject_match_count: None,
             die_result: None,
+            die_results_apportioned: None,
             provenance: None,
         },
     };

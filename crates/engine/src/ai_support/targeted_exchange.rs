@@ -1664,6 +1664,8 @@ mod tests {
                         effect: Box::new(fight_def()),
                     }],
                     modifier: None,
+                    // CR 706.4: not an apportioned roll.
+                    selection: None,
                 },
             ),
         ));

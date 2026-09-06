@@ -350,6 +350,7 @@ fn pending_trigger_with_no_legal_target_at_choose_time_drops_not_errors() {
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        die_results_apportioned: None,
         provenance: None,
     };
     let entry_id = ObjectId(state.next_object_id);
@@ -367,6 +368,7 @@ fn pending_trigger_with_no_legal_target_at_choose_time_drops_not_errors() {
             source_name: "Pinger".to_string(),
             subject_match_count: None,
             die_result: None,
+            die_results_apportioned: None,
             provenance: None,
         },
     });
@@ -4028,6 +4030,7 @@ fn push_token_trigger(
             source_name: "Token".to_string(),
             subject_match_count: None,
             die_result: None,
+            die_results_apportioned: None,
             provenance: None,
         },
     });

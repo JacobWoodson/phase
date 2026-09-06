@@ -2253,6 +2253,7 @@ mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            die_results_apportioned: None,
             provenance: None,
         }));
 

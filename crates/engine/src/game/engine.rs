@@ -1472,7 +1472,34 @@ fn apply_action_boundary_core(
     state.last_effect_count = None;
     state.last_effect_counts_by_player.clear();
     state.exiled_from_hand_this_resolution = 0;
-    state.die_result_this_resolution = None;
+    // CR 706.1 + CR 706.4 + CR 608.2d: The rolled results are scoped to the
+    // resolution that rolled them, and this action boundary is NOT that
+    // resolution's end whenever the roll's own chain is still suspended
+    // mid-resolution. An apportioned roll (CR 706.4) chooses "that result" in
+    // the middle of its chain, and the clauses that consume "that result" and
+    // "the other result" resolve AFTER that choice — across one or more further
+    // action boundaries whenever a later clause raises its own prompt (Arcane
+    // Endeavor's optional free cast, Wild Endeavor's library search, Grave
+    // Endeavor's target choice). Wiping here unconditionally destroyed the
+    // apportionment before the second consumer read it, collapsing "the other
+    // result" to the unbound-reference 0 of `QuantityRef::DieResultSelected`.
+    //
+    // So preserve both fields exactly while a resolution is still paused, and
+    // clear them on the boundary that really does end the resolution. Cross-
+    // resolution isolation is unchanged: `resolution_is_suspended` is false at
+    // every ordinary action boundary, and both the `stack.rs` reset sites (a
+    // resolution that never paused) and
+    // `settle_resolving_stack_entry_after_continuation_resume` (one that did)
+    // still clear both fields the moment the roll's resolution completes.
+    // This mirrors `clause_minimum_snapshot`, the sibling resolution-scoped
+    // value that is likewise not cleared here so it survives a paused
+    // resolution.
+    if !resolution_is_suspended(state) {
+        state.die_result_this_resolution = None;
+        // CR 706.4: the apportioned pair is resolution-scoped on the
+        // same boundary as the scalar die result above.
+        state.die_results_apportioned = None;
+    }
     state.consumed_before_priority_trigger_events.clear();
     if recovered_stale_priority_pass && !pre_recovery_pass_was_authorized {
         lifecycle.discard();
@@ -1775,6 +1802,32 @@ fn recover_ownerless_post_replacement_completion_at_priority_boundary(
     };
     *state = recovered;
     true
+}
+
+/// CR 608.2 + CR 608.2d: True while a spell or ability's resolution is paused
+/// part-way through, waiting on a choice its own text calls for.
+///
+/// This is the boundary test for the resolution-scoped values that `apply()`
+/// resets: an action submitted while this holds is a step *inside* one
+/// resolution, not the start of an unrelated one, so per-resolution state
+/// stamped by an earlier clause must survive it and stay readable by the
+/// clauses that have not resolved yet.
+///
+/// Both halves matter, and neither implies the other:
+/// - a non-empty `resolution_stack` is a chain parked mid-flight (the roll's
+///   continuation, a repeat frame, an optional-effect frame) that will resume
+///   and run more clauses;
+/// - a `waiting_for` that is a resolution choice is the prompt a clause raised
+///   from inside resolution, which can be live in the very same `apply()` that
+///   pushed no frame at all.
+///
+/// Deliberately NOT keyed to the roll's own chain identity: this states the
+/// general boundary, so every resolution-scoped value can share one honest
+/// answer to "is this action boundary the end of a resolution?" rather than
+/// each one re-deriving a private notion of ownership.
+fn resolution_is_suspended(state: &GameState) -> bool {
+    !state.resolution_stack.is_empty()
+        || crate::game::effects::waits_for_resolution_choice(&state.waiting_for)
 }
 
 fn is_orphaned_devour_completion_at_priority_boundary(state: &GameState) -> bool {
@@ -7739,6 +7792,16 @@ pub(super) fn settle_resolving_stack_entry_after_continuation_resume(state: &mut
     {
         return;
     }
+    // CR 706.1 + CR 706.4: a roll's results die with the resolution that rolled
+    // them, and this predicate is the engine's authority on "that resolution has
+    // now finished". Clearing HERE rather than at the resume drain is what makes
+    // the boundary complete: a resolution that paused can finish either by
+    // draining its continuation or by a choice handler that settles directly
+    // without one (declining an offered free cast), and only this function is on
+    // both paths. The `stack.rs` reset sites still cover a resolution that never
+    // paused at all.
+    state.die_result_this_resolution = None;
+    state.die_results_apportioned = None;
     settle_finished_resolving_stack_entry(state);
 }
 
@@ -13183,6 +13246,7 @@ fn apply_action(
                 may_trigger_origin: None,
                 subject_match_count: None,
         die_result: None,
+        die_results_apportioned: None,
             provenance: None,
             };
             super::triggers::push_pending_trigger_to_stack(state, trigger, &mut events);
@@ -19396,6 +19460,7 @@ mod stage2_injector_tests {
                     source_name: String::new(),
                     subject_match_count: None,
                     die_result: None,
+                    die_results_apportioned: None,
                     provenance: None,
                 },
             }
@@ -19508,6 +19573,7 @@ mod stage2_injector_tests {
                     source_name: String::new(),
                     subject_match_count: None,
                     die_result: None,
+                    die_results_apportioned: None,
                     provenance: None,
                 },
             });
@@ -20276,6 +20342,7 @@ mod stage2_injector_tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                die_results_apportioned: None,
                 provenance: None,
             },
         }
@@ -21238,6 +21305,7 @@ mod stage2_injector_tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            die_results_apportioned: None,
             provenance: None,
         }));
         let prompt = cursor_live.waiting_for.clone();
@@ -22387,6 +22455,7 @@ mod bounded_offer_conjunct_tests {
                         source_name: String::new(),
                         subject_match_count: None,
                         die_result: None,
+                        die_results_apportioned: None,
                         provenance: None,
                     },
                 }
@@ -23209,6 +23278,7 @@ mod resolving_carrier_settle_tests {
             source_name: "Test Trigger".to_string(),
             subject_match_count: None,
             die_result: None,
+            die_results_apportioned: None,
             provenance: None,
         }
     }

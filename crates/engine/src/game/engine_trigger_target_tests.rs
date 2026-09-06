@@ -119,6 +119,7 @@ fn trigger_target_selection_select_targets_pushes_to_stack() {
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        die_results_apportioned: None,
         provenance: None,
     };
     let pending_for_state = pending.clone();
@@ -236,6 +237,7 @@ fn trigger_target_selection_rejects_illegal_target() {
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        die_results_apportioned: None,
         provenance: None,
     };
     let pending_for_state = pending.clone();
@@ -328,6 +330,7 @@ fn triggered_modal_modes_with_targets_wait_for_target_selection() {
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        die_results_apportioned: None,
         provenance: None,
     };
     let pending_for_state = pending.clone();
@@ -471,6 +474,7 @@ fn setup_vindictive_lich_pending_trigger(state: &mut GameState) {
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        die_results_apportioned: None,
         provenance: None,
     };
     let pending_for_state = pending.clone();
@@ -615,6 +619,7 @@ fn triggered_modal_modes_without_targets_consume_pending_trigger() {
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        die_results_apportioned: None,
         provenance: None,
     };
     let pending_for_state = pending.clone();
@@ -741,6 +746,7 @@ fn triggered_commander_modal_cap_uses_controller_board_state() {
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        die_results_apportioned: None,
         provenance: None,
     };
     let pending_for_state = pending.clone();
@@ -827,6 +833,7 @@ fn trigger_target_selection_enforces_different_player_constraint() {
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        die_results_apportioned: None,
         provenance: None,
     };
     let pending_for_state = pending.clone();
@@ -985,6 +992,7 @@ fn choose_target_action_advances_trigger_selection_from_engine_state() {
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        die_results_apportioned: None,
         provenance: None,
     };
     let pending_for_state = pending.clone();
@@ -1105,6 +1113,7 @@ fn triggered_modal_modes_reject_unsatisfiable_target_constraints() {
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        die_results_apportioned: None,
         provenance: None,
     };
     let pending_for_state = pending.clone();
@@ -1219,6 +1228,7 @@ fn all_modes_exhausted_clears_pending_trigger() {
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        die_results_apportioned: None,
         provenance: None,
     };
     let pending_for_state = pending.clone();
@@ -1332,6 +1342,7 @@ fn no_legal_target_trigger_drop_releases_pending_trigger_event_batch() {
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        die_results_apportioned: None,
         provenance: None,
     };
     let pending_for_state = pending.clone();

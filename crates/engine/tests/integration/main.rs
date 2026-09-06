@@ -1419,6 +1419,7 @@ mod prospective_fetchland_mana;
 mod quick_draw_target_opponent;
 mod rankle_and_torbran;
 mod razorkin_needlehead_opponent_draw_damage_2869;
+mod reckless_endeavor_die_selection;
 mod reflexive_body_token_referent;
 mod reflexive_discard_this_way;
 mod reflexive_if_rider;

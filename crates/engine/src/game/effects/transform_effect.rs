@@ -391,6 +391,7 @@ mod tests {
                     source_name: "Front Face".to_string(),
                     subject_match_count: None,
                     die_result: None,
+                    die_results_apportioned: None,
                     provenance: None,
                 }
             } else {
@@ -487,6 +488,7 @@ mod tests {
                     source_name: "Front Face".to_string(),
                     subject_match_count: None,
                     die_result: None,
+                    die_results_apportioned: None,
                     provenance: None,
                 },
             },
@@ -560,6 +562,7 @@ mod tests {
                     source_name: "Front Face".to_string(),
                     subject_match_count: None,
                     die_result: None,
+                    die_results_apportioned: None,
                     provenance: None,
                 },
             },

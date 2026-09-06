@@ -2405,6 +2405,11 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             sibling: false,
             projected: false,
         },
+        // CR 706.4: the apportioned result of a roll made earlier in the SAME
+        // resolution. Not an event read (no triggering event supplies it), not
+        // a sibling-fed board resource, and not a projected resource — the two
+        // dice are already rolled and frozen when this leaf resolves.
+        QuantityRef::DieResultSelected { .. } => Axes::NONE,
         QuantityRef::AttachmentsOnLeavingObject { controller, .. } => {
             let mut acc = Axes::NONE;
             if let Some(x) = controller {
@@ -8872,6 +8877,8 @@ mod tests {
             sides: 6,
             results: Vec::new(),
             modifier: None,
+            // CR 706.4: not an apportioned roll.
+            selection: None,
         }));
         assert!(effect_is_randomness_bearing(&Effect::FlipCoinUntilLose {
             win_effect: Box::new(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),

@@ -3441,6 +3441,8 @@ mod tests {
                 effect: Box::new(conjure_ability("roll", Zone::Hand)),
             }],
             modifier: None,
+            // CR 706.4: not an apportioned roll.
+            selection: None,
         };
         walk_effect(&roll, &mut names);
 

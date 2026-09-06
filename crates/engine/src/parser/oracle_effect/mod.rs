@@ -29742,13 +29742,57 @@ fn strip_trailing_activation_restriction_sentence(text: &str) -> String {
 /// amounts meaningfully reference player-scoped possessives ("their life",
 /// "their hand") in Oracle text. Variants not listed here keep their
 /// expressions untouched; add arms here when a new variant surfaces a
-/// possessive quantity.
+/// possessive quantity, or when a rewrite pass needs to reach a secondary
+/// quantity slot (entry counters, cast-permission thresholds).
 pub(crate) fn each_quantity_expr_mut(effect: &mut Effect, f: &mut impl FnMut(&mut QuantityExpr)) {
     match effect {
         Effect::LoseLife { amount, .. }
         | Effect::GainLife { amount, .. }
         | Effect::SetLifeTotal { amount, .. } => f(amount),
         Effect::DealDamage { amount, .. } => f(amount),
+        // CR 120.1: the mass-damage siblings of `DealDamage` carry the same
+        // magnitude slot; without these arms a die-result or possessive
+        // quantity bound into "deals N damage to each creature" is invisible to
+        // every caller of this visitor.
+        Effect::DamageAll { amount, .. } | Effect::DamageEachPlayer { amount, .. } => f(amount),
+        // CR 111.1 + CR 707.1: number of tokens created.
+        Effect::Token { count, .. } => f(count),
+        // CR 122.1: mass counter placement (the `PutCounter` sibling).
+        Effect::PutCounterAll { count, .. } => f(count),
+        // CR 122.1 + CR 614.1c: entry counters are applied as the object enters
+        // the destination zone, so their counts are quantity slots of the
+        // zone-change itself (Grave Endeavor: "return a creature card … with a
+        // number of +1/+1 counters on it equal to that result"). Both the
+        // unconditional and the filter-gated lists are visited, matching
+        // `Effect::for_each_quantity_expr`'s coverage of the same two fields.
+        Effect::ChangeZone {
+            enter_with_counters,
+            conditional_enter_with_counters,
+            ..
+        } => {
+            for (_, count) in enter_with_counters {
+                f(count);
+            }
+            for (_, _, count) in conditional_enter_with_counters {
+                f(count);
+            }
+        }
+        // CR 601.2e + CR 202.3: a cast-from-zone grant gates its legal pool
+        // through BOTH the `target` filter (visited by `each_target_filter_mut`)
+        // and this mana-value permission constraint — `cast_from_zone.rs` checks
+        // the two in conjunction. Leaving the constraint unvisited lets a
+        // rewrite bind one authority and not the other, which empties the pool
+        // (Arcane Endeavor: "mana value less than or equal to the other result").
+        Effect::CastFromZone {
+            constraint: Some(CastPermissionConstraint::ManaValue { value, .. }),
+            ..
+        } => f(value),
+        // CR 701.23a: the number of cards a search finds is a quantity slot like
+        // any other count ("search your library for a number of basic land cards
+        // equal to the other result" — Wild Endeavor). Without this arm the
+        // die-binding and player-scope rewrites cannot see it, so the count stays
+        // an unbound demonstrative that resolves to the wrong number.
+        Effect::SearchLibrary { count, .. } => f(count),
         Effect::Draw { count, .. }
         | Effect::Mill { count, .. }
         | Effect::Discard { count, .. }
@@ -29774,6 +29818,49 @@ pub(crate) fn each_quantity_expr_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
         Effect::CreateDelayedTrigger { effect, .. } => {
             each_quantity_expr_mut(&mut effect.effect, f);
         }
+        _ => {}
+    }
+}
+
+/// CR 608.2c: Apply `f` to every `QuantityExpr` a `TargetFilter` carries in a
+/// comparison threshold.
+///
+/// Filters express thresholds ("creature with power greater than or equal to
+/// that result", "spell with mana value less than or equal to the other
+/// result") as `FilterProp` comparisons whose right-hand side is a
+/// `QuantityExpr`. Those quantities are just as bindable as an effect's own
+/// amount slot, but `each_quantity_expr_mut` cannot see them because they sit
+/// behind a `TargetFilter` rather than on the effect. Composing this with
+/// `each_target_filter_mut` is what lets a rewrite reach both positions
+/// without either visitor growing knowledge of the other's domain.
+///
+/// The three quantity-bearing `FilterProp` variants are matched explicitly, so
+/// a fourth forces a decision here rather than being silently skipped.
+pub(crate) fn each_filter_quantity_expr_mut(
+    filter: &mut TargetFilter,
+    f: &mut impl FnMut(&mut QuantityExpr),
+) {
+    match filter {
+        TargetFilter::Typed(typed) => {
+            for prop in &mut typed.properties {
+                match prop {
+                    // CR 202.3: mana-value threshold.
+                    FilterProp::Cmc { value, .. }
+                    // CR 208.1 + CR 208.3: power/toughness threshold.
+                    | FilterProp::PtComparison { value, .. } => f(value),
+                    // CR 122.1: counter-count threshold.
+                    FilterProp::Counters { count, .. } => f(count),
+                    _ => {}
+                }
+            }
+        }
+        // CR 601.2c: boolean combinators route to their members.
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            for member in filters {
+                each_filter_quantity_expr_mut(member, f);
+            }
+        }
+        TargetFilter::Not { filter } => each_filter_quantity_expr_mut(filter, f),
         _ => {}
     }
 }
@@ -29816,6 +29903,13 @@ pub(crate) fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
             ..
         }
         | Effect::Destroy { target, .. }
+        // CR 120.1 + CR 701.7a: the mass siblings carry the population they
+        // affect in the same `target` slot, and that filter can hold a
+        // comparison threshold ("each creature with power >= that result").
+        | Effect::DestroyAll { target, .. }
+        | Effect::DamageAll { target, .. }
+        | Effect::PutCounterAll { target, .. }
+        | Effect::CastFromZone { target, .. }
         | Effect::Regenerate { target, .. }
         | Effect::RemoveAllDamage { target, .. }
         | Effect::Sacrifice { target, .. }
