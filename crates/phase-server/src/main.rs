@@ -195,7 +195,7 @@ type SharedGameSpectators = Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<
 fn restore_persisted_session(json: &str, db: SharedDb) -> Result<GameSession, String> {
     let persisted = serde_json::from_str::<server_core::PersistedSession>(json)
         .map_err(|error| error.to_string())?;
-    GameSession::from_persisted(persisted, db.as_ref())
+    GameSession::from_persisted(persisted, &db)
 }
 
 /// Admit a persisted draft row only when its SQLite key names the enclosed
@@ -3326,8 +3326,11 @@ mod restored_full_startup_tests {
     }
 
     fn restore(snapshot: &FullPersistSnapshot) -> GameSession {
-        GameSession::from_persisted(snapshot.persisted.clone(), &CardDatabase::default())
-            .expect("persisted test session restores")
+        GameSession::from_persisted(
+            snapshot.persisted.clone(),
+            &Arc::new(CardDatabase::default()),
+        )
+        .expect("persisted test session restores")
     }
 
     #[test]
@@ -7902,7 +7905,7 @@ async fn handle_client_message(
                         ai_requests,
                         db.card_names(),
                         format_config.clone(),
-                        db.as_ref(),
+                        db,
                     ) {
                         Ok(created) => created,
                         Err(error) => {
@@ -8652,7 +8655,7 @@ async fn handle_client_message(
                         let public_before =
                             session.lobby_meta.as_ref().is_some_and(|meta| meta.public);
                         if should_start {
-                            if let Err(bracket_err) = session.start_game(db.as_ref()) {
+                            if let Err(bracket_err) = session.start_game(db) {
                                 // start_game guarantees no mutation on Err, so the session still
                                 // holds the joining player. We keep them seated — rolling back
                                 // would require deleting their deck/token which is more invasive.
@@ -9882,7 +9885,7 @@ async fn handle_client_message(
                 // Collect a bracket-violation message to broadcast after releasing the state lock.
                 // start_game guarantees no mutation on Err, so session state is untouched.
                 let bracket_error: Option<String> = if started {
-                    match session.start_game(db.as_ref()) {
+                    match session.start_game(db) {
                         Ok(()) => None,
                         Err(bracket_err) => {
                             started = false;
