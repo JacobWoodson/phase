@@ -42766,6 +42766,53 @@ fn labeled_choice_ternary_artifact_creature_land() {
     );
 }
 
+/// CR 205.2a: bare lists remain labels; only the proven as-enters/static
+/// relation promotes Cloud Key and Archon later in document lowering.
+#[test]
+fn bare_core_type_lists_remain_labeled_choices() {
+    assert_eq!(
+        super::try_parse_named_choice(
+            "choose artifact, creature, enchantment, instant, or sorcery"
+        ),
+        Some(ChoiceType::Labeled {
+            options: vec![
+                "Artifact".to_string(),
+                "Creature".to_string(),
+                "Enchantment".to_string(),
+                "Instant".to_string(),
+                "Sorcery".to_string(),
+            ],
+        })
+    );
+}
+
+/// CR 205.2a: Stenn's exclusion is represented as its ordered positive
+/// complement, so prompt generation and answer validation share one domain.
+#[test]
+fn card_type_other_than_uses_ordered_positive_complement() {
+    assert_eq!(
+        super::try_parse_named_choice("choose a card type other than creature or land."),
+        Some(ChoiceType::card_type_from(vec![
+            CoreType::Artifact,
+            CoreType::Enchantment,
+            CoreType::Instant,
+            CoreType::Planeswalker,
+            CoreType::Sorcery,
+        ]))
+    );
+    for malformed in [
+        "choose a card type other than creature or",
+        "choose a card type other than creature, creature",
+        "choose a card type other than battle",
+    ] {
+        assert_eq!(
+            super::try_parse_named_choice(malformed),
+            None,
+            "{malformed}"
+        );
+    }
+}
+
 /// Teferi's Realm — 4-option Oxford-comma labeled choice. Confirms the
 /// generalization is N-ary, not capped at 3.
 #[test]
