@@ -260,6 +260,25 @@ parse_keyword_from_oracle
 extract_keyword_line
 EOF
 
+# ---------------------------------------------------------------------------
+# (5) This gate's own regression suite, run ahead of the verdict.
+#
+# Every invariant above stands on its patterns discriminating: a row that keeps
+# matching after the symbol it names is renamed away reports green while the doc
+# it guards has rotted. That has shipped twice (an unanchored row absorbing its
+# longer siblings, and a row with no declaration keyword satisfied by a comment),
+# and neither was visible from this script's own output. The suite pins those as
+# properties, so it runs where the gate runs.
+#
+# The guard is also the recursion stop: the throwaway repos the suite builds
+# copy only this script, so the file is absent there and the fixture's own
+# invocation skips this block.
+# ---------------------------------------------------------------------------
+if [ -f "$(dirname "$0")/check_skill_doc_tests.py" ]; then
+  python3 "$(dirname "$0")/check_skill_doc_tests.py" >/dev/null 2>&1 ||
+    err "gate self-tests failed — run: python3 scripts/check_skill_doc_tests.py"
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "✗ STALE — update .claude/skills/oracle-parser/SKILL.md (see §12)" >&2
   exit 1

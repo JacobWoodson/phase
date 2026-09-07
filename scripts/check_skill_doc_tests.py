@@ -38,10 +38,23 @@ SKILL = Path(".claude/skills/oracle-parser/SKILL.md")
 # honest: the table under test is the real one, not a hand-written stand-in.
 TREE = [Path("crates/engine/src/parser"), SKILL]
 
-# CI and any POSIX host resolve `bash` from PATH. On Windows that name is often
-# WSL's stub, which exits non-zero without running anything, so allow an
-# override rather than hard-coding an install path.
-BASH = os.environ.get("BASH", "bash")
+def _shell() -> str:
+    """The bash to run the gate under.
+
+    `bash` from PATH is correct on CI and any POSIX host. It is not always
+    correct on Windows, where that name often resolves to WSL's stub, which
+    exits non-zero without running anything -- every case then fails for a
+    reason that has nothing to do with the gate. `SKILL_DOC_TEST_BASH`
+    overrides; otherwise fall back to whatever `shutil.which` finds.
+    """
+    override = os.environ.get("SKILL_DOC_TEST_BASH")
+    if override:
+        return override
+    found = shutil.which("bash")
+    return found or "bash"
+
+
+SHELL_BIN = _shell()
 
 METACHARACTERS = set(".*+?[]{}()|^$")
 
@@ -49,6 +62,17 @@ METACHARACTERS = set(".*+?[]{}()|^$")
 def ere_body(pat: str) -> str:
     """A row pattern with its trailing `\\b` anchor removed."""
     return pat[:-2] if pat.endswith("\\b") else pat
+
+
+def unescaped_metacharacters(pat: str) -> set[str]:
+    """The ERE metacharacters a pattern leaves unescaped.
+
+    `check-skill-doc.sh` documents escaping as the supported way to carry one,
+    and the gate does accept `fn peel_clause\\(`, so an escaped pair is not an
+    offender. Dropping every backslash-escaped pair first is what makes this
+    screen agree with the contract rather than overrule it.
+    """
+    return set(re.sub(r"\\.", "", ere_body(pat))) & METACHARACTERS
 
 
 class Gate:
@@ -69,7 +93,7 @@ class Gate:
 
     def run(self) -> subprocess.CompletedProcess:
         return subprocess.run(
-            [BASH, str(self.root / "scripts" / SCRIPT.name)],
+            [SHELL_BIN, str(self.root / "scripts" / SCRIPT.name)],
             capture_output=True,
             text=True,
         )
@@ -94,13 +118,20 @@ class Gate:
         ]
 
     def retired(self) -> list[str]:
-        """Invariant (4)'s retired-symbol list."""
-        body = re.search(
-            r"rename retires a name the doc cites.*?<<'EOF'\n(.*?)\nEOF\n",
-            self.read(Path("scripts") / SCRIPT.name),
-            re.S,
-        ).group(1)
-        return [line for line in body.split("\n") if line.strip()]
+        """Invariant (4)'s retired-symbol list.
+
+        Anchored on the `grep -rqE "fn $dead\\b"` line rather than on prose, so
+        rewording a comment cannot silently reshape what this returns.
+        """
+        script = self.read(Path("scripts") / SCRIPT.name)
+        found = re.search(r'grep -rqE "fn \$dead.*?<<\'EOF\'\n(.*?)\nEOF\n', script, re.S)
+        if found is None:
+            raise AssertionError(
+                "could not locate invariant (4)'s retired-symbol heredoc in "
+                + SCRIPT.name
+                + " -- update Gate.retired() alongside the gate"
+            )
+        return [line for line in found.group(1).split("\n") if line.strip()]
 
 
 def gate(fn):
@@ -143,7 +174,7 @@ class SkillDocGate(unittest.TestCase):
             # offending row would surface as an opaque `re.error` from the
             # re.search below instead of its own clean message.
             self.assertFalse(
-                set(body) & METACHARACTERS,
+                unescaped_metacharacters(pat),
                 "row " + repr(pat) + " carries an unescaped ERE metacharacter",
             )
             keywords, _, symbol = body.rpartition(" ")
@@ -172,8 +203,8 @@ class SkillDocGate(unittest.TestCase):
         Covers invariant (4)'s retired list too: it became ERE-interpreted in
         the same change that anchored it, so it carries the same constraint.
         """
-        offenders = [pat for pat, _ in g.rows() if set(ere_body(pat)) & METACHARACTERS]
-        offenders += [d for d in g.retired() if set(d) & METACHARACTERS]
+        offenders = [pat for pat, _ in g.rows() if unescaped_metacharacters(pat)]
+        offenders += [d for d in g.retired() if unescaped_metacharacters(d)]
         self.assertEqual(
             offenders, [], "unescaped ERE metacharacters: " + repr(offenders)
         )
