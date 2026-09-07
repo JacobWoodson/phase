@@ -588,10 +588,13 @@ pub struct DungeonRoomView {
     /// CR 309.4: total rooms on the dungeon card, so the badge can place the
     /// marker ("room 3 of 7") rather than showing a naked index.
     pub room_count: u8,
-    /// CR 309.1: the printed dungeon card's Scryfall identity, so the client
-    /// can show the card the venture marker moves across. A dungeon is never
-    /// on the battlefield (CR 309.3 puts it in the command zone), so there is
-    /// no `printed_ref`-carrying object for the client to resolve art from.
+    /// The printed dungeon card's Scryfall identity, so the client can show the
+    /// card the venture marker moves across.
+    ///
+    /// CR 309.2b: a dungeon card brought into the game is put into the command
+    /// zone, so it is never a battlefield object and no `printed_ref`-carrying
+    /// object exists for the client to resolve art from. (Matches the citation
+    /// on `dungeon_rooms` below.) The ids themselves implement no rule.
     pub card: DungeonCardView,
     /// CR 309.4a-c: every room on the card, in printed order, each with the
     /// rooms it leads to and where it sits on the card face. This is what lets
@@ -622,7 +625,8 @@ pub struct DungeonRoomNodeView {
     /// CR 309.5a: the rooms the venture marker may move to from here. Empty
     /// for the bottommost room (CR 309.5).
     pub next_rooms: Vec<u8>,
-    /// Where this room is drawn on the card, as a fraction of the image.
+    /// Where this room is drawn on the card. Permille of the image — see
+    /// `RoomMarkerPoint`, which documents why it is not a fraction.
     pub marker: crate::game::dungeon::RoomMarkerPoint,
 }
 
@@ -1234,8 +1238,8 @@ fn dungeon_card_view(dungeon: crate::game::dungeon::DungeonId) -> DungeonCardVie
 /// CR 309.4 + CR 309.5a: Project the whole dungeon graph — every room, its
 /// outgoing edges, and where it is drawn on the card.
 ///
-/// The client needs all of it at once: it draws the marker on the current room
-/// and dims the rooms that can no longer be reached, and neither is derivable
+/// The client needs all of it at once: it places the marker on the current room
+/// and marks the rooms reachable from it (CR 309.5a), and neither is derivable
 /// from the current room alone.
 fn dungeon_room_nodes(dungeon: crate::game::dungeon::DungeonId) -> Vec<DungeonRoomNodeView> {
     let markers = crate::game::dungeon::marker_points(dungeon);

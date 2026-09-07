@@ -107,8 +107,8 @@ pub struct DungeonDefinition {
 /// image meaningful rather than decorative — the marker lands in the drawn room
 /// it represents.
 ///
-/// Fractions, not pixels, because the client renders the card at whatever width
-/// the panel gives it and picks an image rung by viewport. Fractions also
+/// Relative units, not pixels, because the client renders the card at whatever
+/// width the panel gives it and picks an image rung by viewport. They also
 /// transfer across printings: the token-set and oversized printings of a
 /// dungeon are the same layout at the same proportions (verified by comparing
 /// the `tafr` and `oafr` Lost Mine scans, identical at every rung).
@@ -128,8 +128,9 @@ pub struct RoomMarkerPoint {
     pub y_permille: u16,
 }
 
-/// Authoring helper: the coordinates are read off the card as fractions, so
-/// they are written as fractions and converted once, here.
+/// Authoring shorthand so the tables below read as coordinate pairs rather
+/// than repeated struct literals. Takes permille directly — the values are
+/// measured off the card face and written in the stored unit.
 const fn pt(x_permille: u16, y_permille: u16) -> RoomMarkerPoint {
     RoomMarkerPoint {
         x_permille,
@@ -137,8 +138,12 @@ const fn pt(x_permille: u16, y_permille: u16) -> RoomMarkerPoint {
     }
 }
 
-/// CR 309.4: Centers of each room's drawn rectangle on the dungeon card,
-/// indexed in the same order as the dungeon's `rooms` table.
+/// Centers of each room's drawn rectangle on the dungeon card, indexed in the
+/// same order as the dungeon's `rooms` table.
+///
+/// Deliberately carries no CR annotation: this is display geometry, not a rule.
+/// CR 309.4 describes the rooms and the venture marker but specifies no
+/// coordinates, and annotating plumbing would surface it as rules coverage.
 ///
 /// Authored from the printed card faces; there is no coordinate data on
 /// Scryfall (its `oracle_text` gives only ordered "Name — Effect. (Leads to:)"
@@ -217,7 +222,7 @@ static UNDERCITY_MARKERS: [RoomMarkerPoint; 9] = [
 /// card (3/2/3/2/3/2/3). Rooms in the 3-rows sit at the thirds; rooms in the
 /// 2-rows sit offset between them, which is what makes the diagonal corridors
 /// line up on the printed card.
-/// Read off the printed card face (CLB token, 2024 printing).
+/// Read off the printed card face (`tclb` token, released 2022-06-10).
 static BALDURS_GATE_MARKERS: [RoomMarkerPoint; 19] = [
     // Row 1 — full width
     pt(500, 170), // 0  Crash Landing
@@ -248,14 +253,14 @@ static BALDURS_GATE_MARKERS: [RoomMarkerPoint; 19] = [
     pt(810, 822), // 18 Temple of Bhaal
 ];
 
-/// CR 309.1: The dungeon card's identity on Scryfall, so the client can show
-/// the printed card the venture marker moves across.
+/// The dungeon card's identity on Scryfall, so the client can show the printed
+/// card the venture marker moves across.
 ///
 /// A dungeon is a real printed card, not a synthesized object, so it has no
 /// `printed_ref` on any battlefield object to borrow — a dungeon never enters
-/// the battlefield (CR 309.3: it goes to the command zone). This is the only
-/// place its printing identity exists, which is why it lives beside the room
-/// tables rather than in the client.
+/// the battlefield (CR 309.2b: a dungeon card brought into the game is put into
+/// the command zone). This is the only place its printing identity exists,
+/// which is why it lives beside the room tables rather than in the client.
 ///
 /// Two lookup paths, because the five dungeons are not indexed uniformly by the
 /// client's Scryfall sidecars (verified against the Scryfall API):
@@ -286,8 +291,9 @@ pub struct DungeonCardRef {
     pub face_name: &'static str,
 }
 
-/// CR 309.1: The printed card behind each dungeon. Ids verified against the
-/// Scryfall API rather than transcribed from memory.
+/// The printed card behind each dungeon. Ids verified against the Scryfall API
+/// rather than transcribed from memory. Identity plumbing, not a rule — no CR
+/// annotation belongs here.
 pub fn card_ref(id: DungeonId) -> DungeonCardRef {
     match id {
         DungeonId::LostMineOfPhandelver => DungeonCardRef {
@@ -305,8 +311,8 @@ pub fn card_ref(id: DungeonId) -> DungeonCardRef {
             scryfall_id: "70b284bd-7a8f-4b60-8238-f746bdc5b236",
             face_name: "Tomb of Annihilation",
         },
-        // CR 309.1: the only double-faced dungeon. `face_name` is what picks the
-        // dungeon face out of `Undercity // The Initiative`.
+        // The only double-faced dungeon. `face_name` is what picks the dungeon
+        // face out of `Undercity // The Initiative`.
         DungeonId::Undercity => DungeonCardRef {
             oracle_id: "36b61021-72f0-4c22-a41d-9b2f093d7ca8",
             scryfall_id: "2c65185b-6cf0-451d-985e-56aa45d9a57d",

@@ -16,7 +16,7 @@ interface UseDungeonCardImageResult {
  * Resolve the printed dungeon card's image.
  *
  * This exists as its own hook rather than reusing `useCardImage` because a
- * dungeon is not a game object: it never enters the battlefield (CR 309.3 puts
+ * dungeon is not a game object: it never enters the battlefield (CR 309.2b puts
  * it in the command zone), so there is no `GameObject` with a `printed_ref` to
  * feed that hook, and none of its machinery — visual packs, art-selection
  * chains, printing pickers, face-down backs, the failed-source ladder — has
@@ -61,27 +61,41 @@ export function useDungeonCardImage(card: DungeonCardView): UseDungeonCardImageR
         // Not in the card table — expected for Undercity, and for any dungeon
         // if the sidecar has not loaded. Fall through to the token table.
       }
-      return await fetchTokenImageByRef(
-        {
-          scryfall_id: scryfallId,
-          scryfall_oracle_id: oracleId,
-          face_name: faceName,
-          // `TokenImageRef.preset_id` is a token-preset concept with no meaning
-          // for a dungeon card. `fetchTokenImageAssetByRef` reads only the ids
-          // and the face name; this is here to satisfy the shared type.
-          preset_id: "",
-        },
-        "normal",
-      );
+      // Inside the `try` as well: `fetchTokenImageAssetByRef` reaches
+      // `resolveImageUrl`, which THROWS ("No <size> image for ...") when the
+      // table has an entry that carries no URL for the requested rung. That is
+      // a reachable path, not defensive padding — `loadTokenImagesData`
+      // swallows its own network failures with `.catch(() => null)`, so this
+      // throw is the live failure vector, and it is the Undercity path, the
+      // one dungeon that MUST resolve through this table.
+      try {
+        return await fetchTokenImageByRef(
+          {
+            scryfall_id: scryfallId,
+            scryfall_oracle_id: oracleId,
+            face_name: faceName,
+            // `TokenImageRef.preset_id` is a token-preset concept with no
+            // meaning for a dungeon card. `fetchTokenImageAssetByRef` reads
+            // only the ids and the face name; this is here to satisfy the
+            // shared type.
+            preset_id: "",
+          },
+          "normal",
+        );
+      } catch {
+        return null;
+      }
     }
 
-    void resolve().then((resolved) => {
-      if (cancelled) return;
-      // `deriveImageUrl` returns its input unchanged for anything that is not a
-      // sized Scryfall URL, so this is safe on every value that reaches it.
-      setSrc(resolved ? deriveImageUrl(resolved, "large") : null);
-      setIsLoading(false);
-    });
+    void resolve()
+      .catch(() => null)
+      .then((resolved) => {
+        if (cancelled) return;
+        // `deriveImageUrl` returns its input unchanged for anything that is not
+        // a sized Scryfall URL, so this is safe on every value that reaches it.
+        setSrc(resolved ? deriveImageUrl(resolved, "large") : null);
+        setIsLoading(false);
+      });
 
     return () => {
       cancelled = true;

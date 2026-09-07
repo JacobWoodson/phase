@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 
@@ -7,6 +7,11 @@ import type { DungeonRoomView } from "../../adapter/types.ts";
 
 interface Props {
   anchorEl: HTMLElement;
+  /** Ref to the panel's root. The panel portals to `document.body`, so an
+   *  outside-click handler anchored on the chip alone would treat a tap
+   *  INSIDE the panel as outside and dismiss it. Touch has no hover to fall
+   *  back on, so without this the pinning gesture defeats itself. */
+  panelRef?: RefObject<HTMLDivElement | null>;
   /** Engine projection of the dungeon and where this player's marker sits.
    *  Every value rendered here is engine-authored (CR 309.4); this component
    *  positions and styles them and computes nothing about the game. */
@@ -40,7 +45,7 @@ const CARD_ASPECT = 680 / 488;
  * `pointer-events-none` — it is hoverable so the pointer can travel from the
  * badge into the card without dismissing it.
  */
-export function DungeonMapPopover({ anchorEl, view }: Props) {
+export function DungeonMapPopover({ anchorEl, view, panelRef }: Props) {
   const { t } = useTranslation("game");
   const [pos, setPos] = useState<{
     left: number;
@@ -84,6 +89,7 @@ export function DungeonMapPopover({ anchorEl, view }: Props) {
 
   return createPortal(
     <div
+      ref={panelRef}
       className="fixed z-[130]"
       style={{ left: pos.left, top: pos.top, transform }}
       role="dialog"

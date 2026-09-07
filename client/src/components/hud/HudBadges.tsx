@@ -138,6 +138,9 @@ interface DungeonBadgeProps {
 export function DungeonBadge({ room }: DungeonBadgeProps) {
   const { t } = useTranslation("game");
   const chipRef = useRef<HTMLButtonElement>(null);
+  // The panel portals to `document.body`, so containment has to be tested
+  // against its own root as well as the chip — see the pointerdown handler.
+  const panelRef = useRef<HTMLDivElement>(null);
   const [hoverOpen, setHoverOpen] = useState(false);
   // Click latches the panel open so it survives the pointer leaving, and so
   // touch devices — which never fire hover — can open it at all.
@@ -168,9 +171,15 @@ export function DungeonBadge({ room }: DungeonBadgeProps) {
   useEffect(() => {
     if (!pinned) return undefined;
     const onPointerDown = (event: PointerEvent) => {
+      // Both roots, not just the chip: the panel is portaled out of this
+      // subtree, so testing the chip alone dismisses on a tap INSIDE the
+      // panel. Desktop hides that (the wrapper span still receives the
+      // bubbled synthetic event, keeping `hoverOpen` true), but touch has no
+      // hover — the panel would close the moment it was touched.
       if (
         event.target instanceof Node
         && chipRef.current?.contains(event.target) !== true
+        && panelRef.current?.contains(event.target) !== true
       ) {
         setPinned(false);
       }
@@ -216,7 +225,7 @@ export function DungeonBadge({ room }: DungeonBadgeProps) {
       </button>
       {open && chipRef.current ? (
         <span onMouseEnter={onEnter} onMouseLeave={onLeave}>
-          <DungeonMapPopover anchorEl={chipRef.current} view={room} />
+          <DungeonMapPopover anchorEl={chipRef.current} view={room} panelRef={panelRef} />
         </span>
       ) : null}
     </>

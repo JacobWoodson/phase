@@ -56,6 +56,18 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 67 — `DerivedViews::DungeonRoomView` gained required `card`
+///      (`DungeonCardView`) and `rooms` (`Vec<DungeonRoomNodeView>`) fields,
+///      publishing the dungeon card's Scryfall identity and the full room
+///      graph with each room's outgoing edges and its position on the card
+///      face. A PARSE bump like 66, not a silent capability loss like 24:
+///      neither field carries a serde default, so a v66 peer cannot
+///      deserialize a snapshot in which anyone is venturing. The break is
+///      symmetric — a v67 client reading a v66 host's `dungeon_rooms` entry
+///      finds no `card` and throws in render rather than degrading. Follows
+///      the same reasoning as the earlier dungeon-projection bump, which
+///      chose a parse break over letting a mismatched peer play on with a
+///      dead panel.
 /// 66 — `ReplacementCondition::FirstTokenCreationEachTurn` moved its required
 ///      `player` field to an optional `active_player_req`, and
 ///      `CopyTargetPurpose` gained a `CopyTokenSource` variant. Both are
@@ -400,7 +412,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 66;
+pub const PROTOCOL_VERSION: u32 = 67;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the

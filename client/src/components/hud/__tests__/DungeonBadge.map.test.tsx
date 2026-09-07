@@ -180,6 +180,27 @@ describe("DungeonBadge map panel", () => {
     );
   });
 
+  // Regression: `fetchTokenImageAssetByRef` reaches `resolveImageUrl`, which
+  // THROWS when the table holds an entry with no URL for the requested rung.
+  // That call used to sit outside the hook's `try`, and the promise chain had
+  // no `.catch`, so the rejection escaped: `setIsLoading(false)` never ran and
+  // the panel sat on "Loading dungeon card…" forever. Resolving-to-null (the
+  // test below) does NOT cover this — it is a different branch, which is how
+  // the suite read green over the bug.
+  it("shows the unavailable state when the token table REJECTS", async () => {
+    fetchCardImageAssetByOracleId.mockRejectedValue(new Error("not in local data"));
+    fetchTokenImageByRef.mockRejectedValue(new Error("No normal image for \"Undercity\""));
+
+    render(<DungeonBadge room={lostMine()} />);
+    fireEvent.mouseEnter(screen.getByRole("button", { name: /venturing in/i }));
+
+    // Settles into the unavailable message rather than hanging on "Loading".
+    expect(await screen.findByText("Dungeon card image unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("Loading dungeon card…")).toBeNull();
+    // And the marker layer still renders, so the panel stays useful.
+    expect(screen.getByTitle("Goblin Lair")).toBeInTheDocument();
+  });
+
   it("still shows the map when no art resolves at all", async () => {
     fetchCardImageAssetByOracleId.mockRejectedValue(new Error("not in local data"));
     fetchTokenImageByRef.mockResolvedValue(null);
