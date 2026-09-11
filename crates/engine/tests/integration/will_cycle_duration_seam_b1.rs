@@ -507,7 +507,7 @@ const GAEAS_WILL: &str = "Suspend 4—{G}\nUntil end of turn, you may play lands
 const MAGUS_OF_THE_WILL: &str = "{2}{B}, {T}, Exile this creature: Until end of turn, you may play lands and cast spells from your graveyard. If a card would be put into your graveyard from anywhere this turn, exile that card instead.";
 
 #[test]
-fn v5_will_cycle_cards_remain_honestly_unsupported() {
+fn v5_will_cycle_permission_body_is_no_longer_refused() {
     // MULTI-AUTHORITY hostile fixture: three different arrival shapes — a bare
     // sorcery, a sorcery preceded by a Suspend line, and a creature's activated
     // ability. All three must yield the SAME verdict, proving the outcome keys
@@ -530,13 +530,27 @@ fn v5_will_cycle_cards_remain_honestly_unsupported() {
     ] {
         let parsed = parse_with_types(text, name, types);
 
-        // (i) coverage stays RED — the permission body is still unimplemented.
+        // (i) The permission body is no longer refused.
+        //
+        // INVERTED by the delivery seam (`will_cycle_delivery.rs`). It previously
+        // read "must still report an Unimplemented effect", pinning B1's honest
+        // claim that the duration seam alone made zero cards supported. That claim
+        // was true when written: the refused `"play lands"` fragment survived,
+        // because parsing it was never sufficient — `Effect::CastFromZone` is not a
+        // channel any land-permission consumer reads.
+        //
+        // The delivery pass now lowers the whole coordinated sentence to one
+        // `GenericEffect` that installs a `GraveyardCastPermission`, so no
+        // `Unimplemented` fragment remains. This row stays a REGRESSION GUARD on
+        // the ARRIVAL SHAPE — all three shapes must agree — while
+        // `will_cycle_delivery.rs` owns what a player can actually do with the
+        // grant (it resolves the card and asks the production consumer).
         assert!(
-            parsed
+            !parsed
                 .abilities
                 .iter()
                 .any(|a| matches!(&*a.effect, Effect::Unimplemented { .. })),
-            "{name}: must still report an Unimplemented effect"
+            "{name}: the permission body must not be refused"
         );
         // (ii) B1 fabricates no emblem.
         assert!(
