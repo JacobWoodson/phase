@@ -199,6 +199,15 @@ fn g1_the_permission_does_not_reach_an_opponent() {
         .core_types
         .push(engine::types::card_type::CoreType::Land);
 
+    // REACH-GUARD FIRST: the grant must actually be live for the CASTER, or the
+    // opponent emptiness below would pass for a failed delivery rather than for
+    // the player binding under test.
+    let caster_playable = graveyard_lands_playable_by_permission(runner.state(), PlayerId(0));
+    assert!(
+        caster_playable.iter().any(|(id, _)| *id == _land),
+        "reach-guard: the caster must hold the permission, got {caster_playable:?}"
+    );
+
     let opponent_playable = graveyard_lands_playable_by_permission(runner.state(), PlayerId(1));
     assert!(
         opponent_playable.is_empty(),
@@ -216,7 +225,28 @@ fn g1_the_permission_does_not_reach_an_opponent() {
 /// (`controller: You` against the printed "other players' graveyards").
 #[test]
 fn g2_a_grant_with_no_stated_window_is_not_delivered() {
+    // PAIRED POSITIVE REACH-GUARD, run first. The only difference between this
+    // fixture and the windowed one is the leading "Until end of turn, ", so if
+    // the windowed form delivers and this one does not, the WINDOW is what the
+    // row is measuring — not a parse failure, an unresolved cast, or a total
+    // delivery regression, each of which would otherwise turn this row green.
+    let (windowed_runner, windowed_land) = resolve_will(YAWGMOTHS_WILL);
+    let windowed = graveyard_lands_playable_by_permission(windowed_runner.state(), PlayerId(0));
+    assert!(
+        windowed.iter().any(|(id, _)| *id == windowed_land),
+        "reach-guard: the windowed twin of this sentence must deliver, or this \
+         row proves nothing about the window, got {windowed:?}"
+    );
+
     let (runner, land) = resolve_will("You may play lands and cast spells from your graveyard.");
+
+    // Staging guard: the land really is in the graveyard, so an empty result
+    // cannot be explained by the fixture never staging a candidate.
+    assert_eq!(
+        runner.state().objects[&land].zone,
+        Zone::Graveyard,
+        "reach-guard: the staged land must be in the graveyard"
+    );
 
     // The windowless form is owned by the STATIC parser, not this pass, so no
     // resolution-created permission may appear. (If the static path later starts
@@ -228,4 +258,87 @@ fn g2_a_grant_with_no_stated_window_is_not_delivered() {
         "CR 611.2a: a grant with no stated window must not be recovered as a \
          resolution-created permission, got {playable:?}"
     );
+}
+
+/// REGRESSION: the rewrite must SPLICE the cast node out, not truncate the chain.
+///
+/// Magus of the Will puts the whole card on ONE line, so the following sentence's
+/// replacement ("If a card would be put into your graveyard from anywhere this
+/// turn, exile that card instead") lowers as the cast sibling's own
+/// `sub_ability`. An earlier revision replaced the head and set
+/// `sub_ability = None`, which discarded that independent printed clause and
+/// raised two `swallowed-clause` warnings — while Yawgmoth's Will, which prints
+/// the same sentence on a SEPARATE line, was unaffected.
+///
+/// The one-line arrival shape is the one that loses text, which is exactly what a
+/// chain-truncating rewrite hides. This row pins both halves: the permission is
+/// delivered AND the replacement clause survives.
+#[test]
+fn g3_the_magus_replacement_clause_survives_the_rewrite() {
+    const MAGUS: &str = "{2}{B}, {T}, Exile this creature: Until end of turn, you may play lands and cast spells from your graveyard. If a card would be put into your graveyard from anywhere this turn, exile that card instead.";
+
+    let parsed = on_big_stack(move || {
+        engine::parser::parse_oracle_text(
+            MAGUS,
+            "Magus of the Will",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        )
+    });
+
+    // (i) THE REGRESSION. The parser must not silently drop the replacement
+    // sentence; the swallow audit is the authority that notices when it does.
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "the rewrite must not swallow the replacement clause, got {:?}",
+        parsed.parse_warnings
+    );
+
+    // (ii) REACH-GUARD: the permission is actually delivered for this fixture, so
+    // (i) cannot pass merely because the pass declined to fire at all.
+    assert!(
+        parsed
+            .abilities
+            .iter()
+            .any(ability_grants_graveyard_permission),
+        "reach-guard: Magus must still deliver the graveyard permission"
+    );
+
+    // (iii) The replacement tail is REATTACHED rather than merely present
+    // somewhere: it must hang off the ability whose head is the delivered grant.
+    assert!(
+        parsed.abilities.iter().any(|ability| {
+            ability_grants_graveyard_permission(ability) && ability.sub_ability.is_some()
+        }),
+        "the cast node must be spliced out and its tail reattached, not truncated"
+    );
+}
+
+/// Does this ability's head install a `GraveyardCastPermission`?
+///
+/// Selects the grant by the mode it actually carries rather than by "some
+/// `GenericEffect` exists", so a row cannot pass on an unrelated continuous
+/// effect that happens to share the outer shape.
+fn ability_grants_graveyard_permission(
+    ability: &engine::types::ability::AbilityDefinition,
+) -> bool {
+    let engine::types::ability::Effect::GenericEffect {
+        static_abilities, ..
+    } = &*ability.effect
+    else {
+        return false;
+    };
+    static_abilities.iter().any(|static_def| {
+        static_def.modifications.iter().any(|modification| {
+            matches!(
+                modification,
+                engine::types::ability::ContinuousModification::GrantStaticAbility { definition }
+                    if matches!(
+                        definition.mode,
+                        engine::types::statics::StaticMode::GraveyardCastPermission { .. }
+                    )
+            )
+        })
+    })
 }

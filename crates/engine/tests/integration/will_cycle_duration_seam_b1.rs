@@ -552,6 +552,23 @@ fn v5_will_cycle_permission_body_is_no_longer_refused() {
                 .any(|a| matches!(&*a.effect, Effect::Unimplemented { .. })),
             "{name}: the permission body must not be refused"
         );
+        // (i-b) POSITIVE SHAPE, paired with the absence check above.
+        //
+        // Assertion (i) is a negative, and for the Magus fixture so are (ii) and
+        // (iii) — its `expected_installs` is 0 because line 2 sits inside an
+        // activated ability's effect text. An empty or wholly failed parse would
+        // therefore satisfy every assertion in this loop body for that row.
+        //
+        // Pin the delivered grant BY ITS MODE so the row cannot pass on an
+        // unrelated `GenericEffect`: the permission must actually be installed,
+        // on all three arrival shapes.
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .any(ability_installs_graveyard_permission),
+            "{name}: the coordinated sentence must deliver a GraveyardCastPermission"
+        );
         // (ii) B1 fabricates no emblem.
         assert!(
             !parsed
@@ -654,4 +671,40 @@ fn v5b_the_same_grammar_on_a_permanent_host_is_stamped_not_permanent() {
              PERMANENT replacement on a permanent host"
         );
     }
+}
+
+/// Does this ability (or anything down its chain) install a
+/// `GraveyardCastPermission`?
+///
+/// Selects the grant by the static mode it carries rather than by "some
+/// `GenericEffect` exists", so a fixture carrying an unrelated windowed
+/// continuous effect cannot satisfy the positive shape check.
+fn ability_installs_graveyard_permission(
+    ability: &engine::types::ability::AbilityDefinition,
+) -> bool {
+    if let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*ability.effect
+    {
+        let installs = static_abilities.iter().any(|static_def| {
+            static_def.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    engine::types::ability::ContinuousModification::GrantStaticAbility {
+                        definition,
+                    } if matches!(
+                        definition.mode,
+                        engine::types::statics::StaticMode::GraveyardCastPermission { .. }
+                    )
+                )
+            })
+        });
+        if installs {
+            return true;
+        }
+    }
+    ability
+        .sub_ability
+        .as_deref()
+        .is_some_and(ability_installs_graveyard_permission)
 }

@@ -11,8 +11,8 @@ use engine::game::visibility::filter_state_for_viewer;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
     AbilityDefinition, CastFromZoneDriver, CastPermissionConstraint, ChoiceType, Comparator,
-    ControllerRef, Duration, Effect, FilterProp, ObjectScope, QuantityExpr, QuantityRef,
-    ResolutionCastWindow, ResolvedAbility, TargetFilter, TypeFilter, TypedFilter,
+    ContinuousModification, ControllerRef, Duration, Effect, FilterProp, ObjectScope, QuantityExpr,
+    QuantityRef, ResolutionCastWindow, ResolvedAbility, TargetFilter, TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -21,6 +21,7 @@ use engine::types::game_state::{CastOfferKind, ExileLinkKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
 const KIORA: &str = "Vigilance, ward {3}\nWhenever you cast a Kraken, Leviathan, Octopus, or Serpent spell from your hand, look at the top X cards of your library, where X is that spell's mana value. You may cast a spell with mana value less than X from among them without paying its mana cost. Put the rest on the bottom of your library in a random order.";
@@ -464,8 +465,34 @@ fn the_will_cycle_window_rides_the_delivered_permission() {
 
 /// Depth-first search for the first `GenericEffect`'s duration in a chain.
 fn generic_effect_duration_in(definition: &AbilityDefinition) -> Option<Option<Duration>> {
-    if let Effect::GenericEffect { duration, .. } = definition.effect.as_ref() {
-        return Some(duration.clone());
+    // PIN THE GRANT BY ITS MODE, not by "the first `GenericEffect` in ability
+    // order". Every fixture on this row carries a second printed sentence, and
+    // Gaea's Will additionally carries a Suspend line, so an unrelated windowed
+    // `GenericEffect` can sit ahead of the one under test. Matching positionally
+    // would let this row stay green even if the delivery pass stopped emitting
+    // the `GraveyardCastPermission` entirely — the exact regression it exists to
+    // catch.
+    if let Effect::GenericEffect {
+        duration,
+        static_abilities,
+        ..
+    } = definition.effect.as_ref()
+    {
+        let grants_graveyard_permission = static_abilities.iter().any(|static_def| {
+            static_def.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::GrantStaticAbility { definition }
+                        if matches!(
+                            definition.mode,
+                            StaticMode::GraveyardCastPermission { .. }
+                        )
+                )
+            })
+        });
+        if grants_graveyard_permission {
+            return Some(duration.clone());
+        }
     }
     definition
         .sub_ability

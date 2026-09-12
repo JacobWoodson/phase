@@ -32,7 +32,7 @@ use crate::types::statics::{CastFrequency, StaticMode};
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
-use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
+use super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
 use super::oracle_nom::condition::parse_graveyard_keyword_grant_sentence;
 use super::oracle_nom::prevention::has_each_time_event_relative_prevention;
 use super::oracle_nom::primitives::{
@@ -2257,15 +2257,43 @@ fn retarget_creature_type_choice_dig_filters_in_ability(def: &mut AbilityDefinit
 /// the consumer, and the grant is bound to the GRANTEE rather than the source --
 /// Magus of the Will exiles itself as an activation cost, so a
 /// source-presence-bound grant would never exist.
+/// CR 116.2a: the bare land-play fragment the cast-effect guard leaves behind when
+/// the sequence splitter separates a coordinated "play lands and cast spells from
+/// `<zone>`" sentence.
+///
+/// Composed from nom axes rather than matched as a literal sentence, so the
+/// recognizer covers the PHRASE CLASS and not one spelling: an optional
+/// permission head ("you may "), the verb, and the land noun in either number.
+/// `all_consuming` keeps it boundary-safe — a longer sentence that merely STARTS
+/// with these words is not this fragment and must stay refused, which is what
+/// preserves strict failure for forms outside the implemented class.
+fn parse_refused_land_play_fragment(input: &str) -> OracleResult<'_, ()> {
+    all_consuming(value(
+        (),
+        (
+            opt(tag("you may ")),
+            tag("play "),
+            alt((tag("lands"), tag("land"))),
+        ),
+    ))
+    .parse(input)
+}
+
 fn deliver_coordinated_graveyard_permission_in_ability(def: &mut AbilityDefinition) {
     // The land half is what the cast-effect guard refused, so it arrives as an
-    // `Unimplemented` whose fragment is exactly the bare "play lands" phrase.
+    // `Unimplemented` carrying the bare land-play phrase.
     let head_is_refused_land_play = matches!(
         &*def.effect,
         Effect::Unimplemented { description, .. }
             if description
                 .as_deref()
-                .is_some_and(|d| d.eq_ignore_ascii_case("play lands"))
+                .is_some_and(|d| {
+                    // The fragment's case is not guaranteed, and the combinator
+                    // matches lowercase tags: normalize once here rather than
+                    // spelling every arm twice.
+                    nom_parse_lower(&d.to_lowercase(), parse_refused_land_play_fragment)
+                        .is_some()
+                })
     );
 
     if head_is_refused_land_play {
@@ -2310,8 +2338,25 @@ fn deliver_coordinated_graveyard_permission_in_ability(def: &mut AbilityDefiniti
             // Both halves are now carried by the single permission, so the cast
             // sibling must not ALSO lower to its own `CastFromZone` -- that would
             // leave two grants for one printed sentence.
+            //
+            // SPLICE, do not truncate. The cast node is removed and its OWN tail is
+            // reattached, because that tail can carry an INDEPENDENT printed clause.
+            //
+            // MEASURED on Magus of the Will, whose activated ability puts the whole
+            // card on one line: its cast sibling owns the following sentence's
+            // lowered replacement ("If a card would be put into your graveyard from
+            // anywhere this turn, exile that card instead") as its own
+            // `sub_ability`. Dropping the chain wholesale discarded that clause and
+            // raised two `swallowed-clause` warnings, while Yawgmoth's Will — which
+            // prints the same sentence on a SEPARATE line, so it lowers to a second
+            // top-level ability — was unaffected. The one-line arrival shape is the
+            // one that loses text, which is exactly the case a chain-truncating
+            // rewrite hides.
             *def.effect = effect;
-            def.sub_ability = None;
+            def.sub_ability = def
+                .sub_ability
+                .take()
+                .and_then(|cast_node| cast_node.sub_ability);
             // CR 608.2d + CR 116.2a: the printed "you MAY play lands" is the
             // permission being granted, NOT a choice the resolving spell offers.
             //
