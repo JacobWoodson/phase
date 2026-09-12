@@ -255,6 +255,10 @@ export interface StructuralRules {
 /** `legal_sets: null` means unrestricted; a list restricts to exactly it. */
 export interface LegalityRules {
   legal_sets: SetCode[] | null;
+  /** Cards legal regardless of `legal_sets`, unioned with it — a ruleset can
+   *  name a card its set list cannot express. Optional because it postdates
+   *  the Axis-A save path; absent means an empty list. */
+  legal_cards?: string[];
   banned: string[];
   restricted: string[];
   legacy: LegacyRuleSet;
@@ -3406,13 +3410,19 @@ export type DecisionSource =
  */
 export type DecisionTemplate = Record<string, unknown>;
 
-/** Mirrors `engine::analysis::loop_check::ShortcutProposal`. */
+/**
+ * Mirrors `engine::analysis::loop_check::ShortcutProposal`. `shortened_by` is the responder
+ * whose named place is the proposal's current ending point (CR 732.2b); it is `skip_serializing_if
+ * none` on the wire, so an unshortened proposal serializes exactly as before and no protocol
+ * version moves — the same posture the two optional fields this interface does not mirror ship.
+ */
 export interface ShortcutProposal {
   proposer: PlayerId;
   predicted_winner: PlayerId | null;
   count: IterationCount;
   unbounded: ResourceAxis[];
   win_kind: WinKind;
+  shortened_by?: PlayerId;
 }
 
 /**

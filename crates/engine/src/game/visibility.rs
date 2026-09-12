@@ -7756,6 +7756,7 @@ mod tests {
                     key: DecisionGroupKey::from_sources(&[slot.source], DecisionKind::LoopChoice),
                 }),
                 per_cycle: None,
+                shortened_by: None,
             },
         };
         state

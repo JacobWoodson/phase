@@ -604,15 +604,20 @@ impl CardPoolAuthority<'_> {
 }
 
 /// A custom format's resolved card pool: which cards are IN the pool (by
-/// printing — `legal_sets: None` means unrestricted), overlaid with its
-/// banned/restricted lists. Built once per evaluation by [`Self::resolve`]
-/// from a [`LegalityRules`] value, never assembled piecemeal.
+/// printing — `legal_sets: None` means unrestricted — or by name, via
+/// `legal_cards`), overlaid with its banned/restricted lists. Built once per
+/// evaluation by [`Self::resolve`] from a [`LegalityRules`] value, never
+/// assembled piecemeal.
 ///
 /// `Debug` is required because [`CardPoolAuthority`] borrows this type and
 /// derives `Debug` itself.
 #[derive(Debug)]
 struct DeclaredPool {
     legal_sets: Option<Vec<SetCode>>,
+    /// CR 201.3b canonical names, like `banned`/`restricted` below: a ruleset
+    /// naming a card individually must match a decklist spelling it by either
+    /// face. Unioned with `legal_sets` — see `LegalityRules::legal_cards`.
+    legal_cards: HashSet<String>,
     /// CR 201.3b: canonical (`canonical_deck_count_key`) names, so a banned
     /// entry naming a split/DFC's whole-card identity ("Fire // Ice") matches
     /// a decklist naming just one face ("Fire"). A banned/restricted entry
@@ -627,6 +632,11 @@ impl DeclaredPool {
     fn resolve(db: &CardDatabase, rules: &LegalityRules) -> Self {
         Self {
             legal_sets: rules.legal_sets.clone(),
+            legal_cards: rules
+                .legal_cards
+                .iter()
+                .map(|name| canonical_deck_count_key(db, name))
+                .collect(),
             banned: rules
                 .banned
                 .iter()
@@ -647,8 +657,15 @@ impl DeclaredPool {
     /// {format_label})" message in the shared evaluator, so the two card-pool
     /// authorities must report absence identically.
     fn status(&self, db: &CardDatabase, name: &str) -> Option<LegalityStatus> {
+        let canonical = canonical_deck_count_key(db, name);
         if let Some(sets) = &self.legal_sets {
-            if !printed_in_any_set(db, name, sets) {
+            // A named card is in the pool whether or not any legal set contains
+            // it — the two membership tests are a union, because a ruleset that
+            // names a card is stating a legality its set list could not.
+            //
+            // Checked only inside the `Some` arm: `legal_sets: None` already
+            // admits everything, so widening an unrestricted pool is a no-op.
+            if !self.legal_cards.contains(&canonical) && !printed_in_any_set(db, name, sets) {
                 return None;
             }
         }
@@ -658,7 +675,6 @@ impl DeclaredPool {
         // only constructed-shaped formats, leaving the commander validator and
         // the FreeForAll / TwoHeadedGiant / Limited routes to disagree with it.
         // `ante_deck_violations` applies it once, for all of them.
-        let canonical = canonical_deck_count_key(db, name);
         if self.banned.contains(&canonical) {
             return Some(LegalityStatus::Banned);
         }
@@ -9304,6 +9320,7 @@ mod tests {
             },
             legality: LegalityRules {
                 legal_sets: None,
+                legal_cards: Vec::new(),
                 banned: Vec::new(),
                 restricted: Vec::new(),
                 legacy: LegacyRuleSet::default(),
@@ -9385,6 +9402,44 @@ mod tests {
         Value::Object(cards).to_string()
     }
 
+    /// `legal_cards` is UNIONED with the set check, never a substitute for it,
+    /// and never an override of `banned`/`restricted`.
+    ///
+    /// The real case: Old School 95 names Mana Crypt legal AND restricts it.
+    /// Its only era printing is in no legal set, so without the union the
+    /// restriction would name a card that could never reach a deck — a dead
+    /// list entry rather than a one-copy limit.
+    #[test]
+    fn declared_pool_unions_named_cards_with_the_set_check() {
+        let db = CardDatabase::from_json_str(&custom_pool_db_json()).unwrap();
+        let rules = LegalityRules {
+            legal_sets: Some(vec![SetCode("MH3".to_string())]),
+            legal_cards: vec!["Out Of Pool Card".to_string()],
+            banned: Vec::new(),
+            restricted: vec!["Out Of Pool Card".to_string()],
+            legacy: LegacyRuleSet::default(),
+        };
+        let pool = DeclaredPool::resolve(&db, &rules);
+
+        // Named but printed only outside `legal_sets`: in the pool, and the
+        // restricted list still applies to it. Both halves matter — `Legal`
+        // here would mean the union skipped the later lists.
+        assert_eq!(
+            pool.status(&db, "Out Of Pool Card"),
+            Some(LegalityStatus::Restricted)
+        );
+
+        // Paired controls on the SAME pool: the set check still admits what it
+        // always did, and a card that is neither printed in a legal set nor
+        // named is still absent. Without these, a `legal_cards` that admitted
+        // everything would pass the assertion above.
+        assert_eq!(
+            pool.status(&db, "In Pool Card"),
+            Some(LegalityStatus::Legal)
+        );
+        assert_eq!(pool.status(&db, "No Printings Card"), None);
+    }
+
     /// Every non-negative pool assertion here is paired with a positive on the
     /// SAME `DeclaredPool` (same `rules` value), so a `printed_in_any_set`
     /// that always returned `false` would fail the positives instead of
@@ -9398,6 +9453,7 @@ mod tests {
         // rules-side direction.
         let rules = LegalityRules {
             legal_sets: Some(vec![SetCode("mh3".to_string())]),
+            legal_cards: Vec::new(),
             banned: Vec::new(),
             restricted: Vec::new(),
             legacy: LegacyRuleSet::default(),
@@ -9786,6 +9842,7 @@ mod tests {
         let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
         let rules = LegalityRules {
             legal_sets: None,
+            legal_cards: Vec::new(),
             banned: vec!["Legal Standard".to_string()],
             restricted: vec!["Legal Standard".to_string(), "Not Standard".to_string()],
             legacy: LegacyRuleSet::default(),
