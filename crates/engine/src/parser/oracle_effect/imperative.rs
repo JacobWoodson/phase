@@ -13003,9 +13003,21 @@ fn try_parse_roll_die_with_modifier(
 /// and CR 706.1a fixes it at 1 (a dN is "numbered from 1 to N"). A printed
 /// "0 or less" therefore yields `(1, 0)` and is refused below by `min > max`.
 ///
+/// ASYMMETRY WITH `"N+"`, deliberate and bounded. The open-ended UPPER form maps
+/// to `u8::MAX` so a modifier-boosted roll above the printed bound still lands in
+/// the branch (CR 706.2). The `"N or less"` form does NOT get the mirrored
+/// treatment of a `0` floor, because CR 706.1a makes 1 the smallest NATURAL
+/// result and this lower bound is exact for an unmodified roll. A negative
+/// modifier can drive a result below 1 (CR 706.2 allows the final number to be
+/// any integer), and such a result would fall through this branch rather than
+/// into it. No printed card combines a downward modifier with an "or less" row,
+/// so the gap is unreachable today; it is recorded here rather than papered over
+/// by widening the floor to 0, which would silently swallow `"0 or less"` — the
+/// exact refusal the guard below exists to make.
+///
 /// This is also the DETECTOR the spell-resolution continuation loop uses to
-/// recognize a results-table row (`oracle.rs`) — the parser is the detector, so
-/// the loop and the row collector can never disagree about what a row is.
+/// recognize a results-table row (`oracle.rs`), so the loop and the row
+/// collector share this one row grammar.
 pub(crate) fn try_parse_die_result_line(text: &str) -> Option<(u8, u8, &str)> {
     // CR 706.3a: a result-table header is one complete numeric range followed
     // by a pipe and a nonempty instruction. Keep the grammar here rather than

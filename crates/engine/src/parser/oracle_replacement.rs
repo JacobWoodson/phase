@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, tag_no_case, take_till, take_until, take_while1};
+use nom::bytes::complete::{tag, tag_no_case, take_until, take_while1};
 use nom::character::complete::{anychar, char, multispace0, multispace1};
 use nom::combinator::{all_consuming, eof, map_opt, opt, peek, recognize, rest, value};
 use nom::multi::{many_till, separated_list1};
@@ -12,8 +12,8 @@ use nom::Parser;
 
 use super::oracle_effect::become_copy_except::parse_except_clause;
 use super::oracle_effect::{
-    parse_effect_chain, parse_effect_chain_with_context, parse_effect_clause,
-    parse_named_choice_object, scan_at_random, try_parse_named_choice,
+    excise_selection_qualifier, parse_effect_chain, parse_effect_chain_with_context,
+    parse_effect_clause, parse_named_choice_object, try_parse_named_choice,
     try_parse_named_choice_conjunction,
 };
 use super::oracle_ir::context::ParseContext;
@@ -2224,25 +2224,15 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
     // `all_consuming` object arm (a numeric enumeration, say) declines on the
     // trailing qualifier and the `?` below abandons the whole replacement.
     //
-    // BOUNDED TO THE OBJECT'S OWN SENTENCE: `choose_object` runs to the end of
-    // the LINE, not the end of the clause (Camato Scout's is "a basic land type
-    // at random. ~ has landwalk of the chosen type"), so an unbounded scan would
-    // let a LATER sentence's "at random" retarget this choice's selection mode.
-    let object_sentence = take_till::<_, _, OracleError<'_>>(|c| c == '.')
-        .parse(choose_object)
-        .map_or(choose_object, |(_, head)| head);
-    let (selection, choose_object) = match scan_at_random(object_sentence) {
-        Some((before, after)) => (
+    // The excision (including its sentence bounding) is `excise_selection_qualifier`,
+    // the SINGLE authority shared with the classifier gate that decides whether
+    // this builder is reached at all. The two must agree byte-for-byte on the
+    // phrase handed to the object table; a local copy here is exactly the drift
+    // that made every `all_consuming` object arm invisible to the classifier.
+    let (selection, choose_object) = match excise_selection_qualifier(choose_object) {
+        Some(excised) => (
             crate::types::ability::TargetSelectionMode::Random,
-            // Excise ONLY the qualifier; every other byte — including any
-            // following sentence — is preserved, so every as-enters card
-            // without the qualifier keeps a byte-identical object phrase.
-            Cow::Owned(format!(
-                "{}{}{}",
-                before.trim_end(),
-                after,
-                &choose_object[object_sentence.len()..]
-            )),
+            Cow::Owned(excised),
         ),
         None => (
             crate::types::ability::TargetSelectionMode::Chosen,

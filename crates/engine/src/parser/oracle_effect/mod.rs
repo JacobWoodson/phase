@@ -71,7 +71,7 @@ use crate::parser::oracle_static::parse_passive_cant_be_cast_spell_filter;
 #[cfg(test)]
 use crate::parser::oracle_trigger::parse_trigger_line;
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_until};
+use nom::bytes::complete::{tag, take_till, take_until};
 use nom::character::complete::{anychar, multispace0, multispace1, space1};
 use nom::combinator::{
     all_consuming, eof, map, map_opt, not, opt, peek, recognize, rest, value, verify,
@@ -1630,18 +1630,22 @@ fn scan_contains_phrase(text: &str, phrase: &str) -> bool {
     nom_primitives::scan_contains(text, phrase)
 }
 
-/// CR 608.2d (override) + CR 701.9b (analogous): the single authority for the
-/// "at random" selection qualifier. Locates the phrase at any WORD BOUNDARY and
-/// splits the text around it, returning `(before, after)`.
+/// CR 608.2d (override) + CR 701.9b (analogous): locate the "at random"
+/// selection qualifier at any WORD BOUNDARY and split the text around it,
+/// returning `(before, after)`.
 ///
-/// Every choice arm that recognizes a random selection calls THIS rather than
-/// repeating the scan: the `Choose(Player)` arm in
-/// `parse_target_player_relative_clause` (which needs only the mode) and the
-/// as-enters-choose replacement builder in `oracle_replacement.rs` (which needs
-/// the split as well, so it can excise the qualifier before the choice-object
-/// table sees it). A third consumer costs one call rather than one copy.
+/// This is the authority for the AS-ENTERS CHOICE axis specifically: the
+/// `Choose(Player)` arm in `parse_target_player_relative_clause` (which needs
+/// only the mode) and [`excise_selection_qualifier`] (which needs the split).
 ///
-/// Behaviour-identical to the `scan_contains(text, "at random")` it replaces:
+/// **Scope of that claim, stated honestly.** It is NOT yet the only reader of
+/// the phrase corpus-wide — `oracle_effect/imperative.rs`, `oracle_modal.rs` and
+/// `oracle_trigger.rs` still ask `scan_contains(.., "at random")` for their own
+/// unrelated clause shapes. Those sites only need the boolean and do not excise,
+/// so they are behaviourally equivalent today; converging them is a later,
+/// unrelated refactor, not something this doc may claim as already done.
+///
+/// Behaviour-identical to the `scan_contains(text, "at random")` it replaced:
 /// `scan_preceded` runs the same word-boundary loop with the same `tag`, and
 /// only additionally preserves the surrounding slices.
 pub(crate) fn scan_at_random(text: &str) -> Option<(&str, &str)> {
@@ -1649,6 +1653,39 @@ pub(crate) fn scan_at_random(text: &str) -> Option<(&str, &str)> {
         tag::<_, _, OracleError<'_>>("at random").parse(input)
     })
     .map(|(before, _, after)| (before, after))
+}
+
+/// CR 608.2d (override) + CR 614.1c: remove an "at random" selection qualifier
+/// from a choice clause, bounded to the clause's OWN SENTENCE.
+///
+/// **The single authority for the EXCISION, not merely for the scan.** The
+/// as-enters classifier (`oracle_classifier::is_as_enters_choose_pattern`) and
+/// the as-enters builder (`oracle_replacement::parse_as_enters_choose`) must
+/// agree byte-for-byte on the phrase they hand to the choice-object table; a
+/// second copy of this arithmetic is precisely the classifier/builder drift that
+/// made every `all_consuming` object arm invisible whenever a qualifier was
+/// printed. One function, two callers.
+///
+/// BOUNDED TO THE CLAUSE'S OWN SENTENCE: a choice clause runs to the end of the
+/// LINE, not the end of the sentence (Camato Scout's is "a basic land type at
+/// random. ~ has landwalk of the chosen type"), so an unbounded scan would let a
+/// LATER sentence's "at random" retarget this choice's selection mode.
+///
+/// Returns `None` when the clause's own sentence carries no qualifier, so
+/// callers can keep their pre-existing path bit-identical for every other line.
+/// On `Some`, only the qualifier is removed — every other byte, including any
+/// following sentence, is preserved.
+pub(crate) fn excise_selection_qualifier(clause: &str) -> Option<String> {
+    let sentence = take_till::<_, _, OracleError<'_>>(|c| c == '.')
+        .parse(clause)
+        .map_or(clause, |(_, head)| head);
+    let (before, after) = scan_at_random(sentence)?;
+    Some(format!(
+        "{}{}{}",
+        before.trim_end(),
+        after,
+        &clause[sentence.len()..]
+    ))
 }
 
 /// CR 115.7 + CR 113.3b / CR 113.3c: locate the stack-object target grammar
@@ -28445,9 +28482,15 @@ fn parse_number_enumeration(rest: &str) -> Option<(u32, u32)> {
         _ => return None,
     };
     // Contiguity: ascending with a step of exactly 1. `windows(2)` rather than an
-    // index loop, and `pair[0] + 1` cannot wrap because `parse_number` yields a
-    // small `u32` parsed from printed digits.
-    if items.windows(2).any(|pair| pair[1] != pair[0] + 1) {
+    // index loop. `checked_add` rather than `+`: `parse_number` yields a `u32`
+    // parsed from arbitrary printed digits, so a pathological literal at
+    // `u32::MAX` would panic on overflow in a debug build. A successor that
+    // cannot be represented is by definition not the next element, so `None`
+    // folds to "not contiguous" — the same refusal every other gap takes.
+    if items
+        .windows(2)
+        .any(|pair| pair[0].checked_add(1) != Some(pair[1]))
+    {
         return None;
     }
     Some((items[0], *items.last()?))
@@ -28741,11 +28784,18 @@ pub(crate) fn parse_named_choice_object_with_provenance(
         Some(ChoiceType::NumberRange {
             min,
             max: Some(max),
-            // CR 609.3 / CR 608.2d: parse-detected distinctness, not hardcoded,
-            // so this arm behaves exactly like its "a number between" sibling if
-            // a "that hasn't been chosen" clause ever appears on an enumeration.
-            // An enumeration leaves no tail (it is `all_consuming`), so today
-            // this resolves to the `NumberDistinctness::Repeatable` default.
+            // CR 608.2d: a player can't choose an illegal or impossible option,
+            // which is the rule a "that hasn't been chosen" clause expresses.
+            //
+            // This call is NOT parse-detection: `parse_number_enumeration` is
+            // `all_consuming`, so an enumeration leaves no tail and there is
+            // nothing to detect. It is routed through the shared detector purely
+            // so the DEFAULT comes from one place — the same
+            // `NumberDistinctness::Repeatable` its "a number between" sibling
+            // resolves to — instead of being restated here. If a distinctness
+            // clause ever appears on an enumeration, the arm's `all_consuming`
+            // gate declines the whole phrase first, so it would have to be
+            // handled before this point, not here.
             distinctness: parse_number_distinctness(""),
         })
     } else if let Ok((range_rest, _)) = tag::<_, _, E>("a number between ").parse(rest) {

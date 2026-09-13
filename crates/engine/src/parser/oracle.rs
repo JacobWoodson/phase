@@ -4918,9 +4918,15 @@ fn parse_normalized_oracle_ir(
             //    parses cannot perturb that, because `lower_ability_ir` takes no
             //    `ParseContext` and nothing under `oracle_effect/` carries
             //    interior mutability.
-            // 3. The predicate is invariant under the envelope:
-            //    `has_unimplemented` reads only `effect` and `sub_ability`, both
-            //    CR 608.2 resolution-tree fields, and the shell stamps neither.
+            // 3. The predicate is invariant under the envelope: `has_unimplemented`
+            //    reads `effect`, `sub_ability`, `else_ability`, and the nested
+            //    definitions carried inside the wrapper effects it enumerates
+            //    (`CreateDelayedTrigger`, `RollDie` results, the coin-flip
+            //    branches) — every one of them a CR 608.2 resolution-tree field.
+            //    The shell stamps NONE of them: it writes cost, cost_reduction,
+            //    activation restrictions and the other CR 602.1 envelope fields
+            //    only. So the pre-shell and post-shell lowerings still agree on
+            //    this predicate.
             //
             // Cost: one extra lowering per LEVEL-block activated line (two or
             // three rather than one or two). It is intrinsic, not laziness — the
@@ -7048,12 +7054,21 @@ fn parse_normalized_oracle_ir(
                     // that swallows row 1 leaves the collector's cursor past it
                     // and silently drops that row from the table.
                     //
-                    // The parser IS the detector: this is the same
-                    // `all_consuming` row grammar `parse_die_result_branches_ir`
-                    // uses, so the loop and the collector cannot disagree about
-                    // what a row is. The RAW line is passed, not a prepared one
-                    // — the grammar does its own `trim()`, and preparing a table
-                    // row would rewrite the very text being classified.
+                    // The parser IS the detector: this calls the SAME
+                    // `all_consuming` row grammar function
+                    // `parse_die_result_branches_ir` calls, so the loop and the
+                    // collector cannot disagree about what a ROW is.
+                    //
+                    // Bound of that claim, stated exactly: the collector applies
+                    // `strip_reminder_text` to the line before parsing it and
+                    // this guard does not, so the two can still disagree about a
+                    // row whose prefix is preceded by reminder text. No printed
+                    // card has one. What is shared is the row grammar itself, not
+                    // the whole pre-processing pipeline.
+                    //
+                    // The RAW line is passed, not a prepared one — the grammar
+                    // does its own `trim()`, and preparing a table row would
+                    // rewrite the very text being classified.
                     || crate::parser::oracle_effect::imperative::try_parse_die_result_line(
                         lines[next_i],
                     )
@@ -11234,5 +11249,70 @@ mod die_table_attach_seam_tests {
                 .is_some(),
             "the row grammar — not the attach predicate — is what fixes Druid"
         );
+    }
+}
+
+/// Row 1.D — a results-table row whose body genuinely cannot be parsed must
+/// surface an HONEST failure marker rather than vanishing, and it must do so on
+/// the PRODUCTION path.
+///
+/// The `has_unimplemented` tests elsewhere in this file hand-build a `RollDie`
+/// AST, which proves the gate can SEE such a marker but not that the row
+/// collector ever PRODUCES one. This module drives the real collector
+/// (`parse_die_result_branches_ir` → `parse_ability_ir_standalone`), so the
+/// marker path is actually exercised end to end.
+#[cfg(test)]
+mod die_result_row_failure_marker_tests {
+    use super::has_unimplemented;
+    use crate::parser::oracle_effect::lower_ability_ir;
+    use crate::parser::oracle_special::parse_die_result_branches_ir;
+    use crate::types::ability::{AbilityKind, Effect};
+
+    /// A synthetic two-row table: row 1 is ordinary, row 2's body is prose no
+    /// effect parser claims. Both rows must survive — one as a real effect, one
+    /// as an honest marker.
+    const LINES: [&str; 2] = [
+        "1—9 | Draw a card.",
+        "10—20 | Zyzzyx the ineffable quorbulates prismatically.",
+    ];
+
+    #[test]
+    fn an_unparseable_row_body_surfaces_a_marker_instead_of_vanishing() {
+        let (branches, next_line) = parse_die_result_branches_ir(&LINES, 0, AbilityKind::Spell);
+        // A row that VANISHES is worse than a row that fails: the table would
+        // silently shrink and the printed instruction would be unrecoverable.
+        assert_eq!(branches.len(), 2, "both printed rows must be collected");
+        assert_eq!(next_line, 2, "the collector must consume both rows");
+        assert_eq!((branches[0].min, branches[0].max), (1, 9));
+        assert_eq!((branches[1].min, branches[1].max), (10, 20));
+
+        let unparseable = lower_ability_ir(&branches[1].effect);
+        assert!(
+            matches!(unparseable.effect.as_ref(), Effect::Unimplemented { .. }),
+            "the unparseable row body must lower to an honest failure marker, \
+             got {:?}",
+            unparseable.effect
+        );
+        // The marker must be visible to the continuation gate, or the card would
+        // still advertise support it does not have.
+        assert!(
+            has_unimplemented(&unparseable),
+            "the marker must be observable by the acceptance gate"
+        );
+    }
+
+    /// PAIRED POSITIVE REACH-GUARD: the parseable row IN THE SAME TABLE attaches
+    /// a real effect. Without it, a collector that marked every row would pass
+    /// the assertion above while being completely inert.
+    #[test]
+    fn the_sibling_row_in_the_same_table_still_carries_a_real_effect() {
+        let (branches, _) = parse_die_result_branches_ir(&LINES, 0, AbilityKind::Spell);
+        let parseable = lower_ability_ir(&branches[0].effect);
+        assert!(
+            matches!(parseable.effect.as_ref(), Effect::Draw { .. }),
+            "the ordinary row must still lower to its real effect, got {:?}",
+            parseable.effect
+        );
+        assert!(!has_unimplemented(&parseable));
     }
 }

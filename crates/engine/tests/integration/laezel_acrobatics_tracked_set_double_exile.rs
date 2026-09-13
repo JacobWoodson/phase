@@ -15,17 +15,72 @@
 //! these assertions WILL FAIL — that is their job. Replace the pinned
 //! `Zone::Exile` census with `Zone::Battlefield` then, deliberately.
 //!
-//! **What was NOT established:** the mechanism. CR 400.7 makes a card returning
-//! from exile a NEW OBJECT WITH A NEW ID, and the suspected cause is that the
-//! chain tracked set retains dead original ids which the zone-change consumer's
-//! `filter_map` silently drops. This phase measured the OUTCOME (cards lost in
-//! exile), not that mechanism, and deliberately does not assert it. Note the
-//! loss reproduces on the `1—9` band too, which never re-publishes — so a
-//! double-publish explanation alone does not cover what was observed.
+//! # TRACKED-SET-RETURN-DEFECT — mechanism, measured. Follow-up work, not fixed here.
 //!
-//! Identity is checked by CARD NAME, never by `ObjectId` (CR 400.7 invalidates
-//! ids across the return) and never by cardinality alone (a run that dropped one
-//! card and returned a different one could satisfy a matching count by accident).
+//! Grep that tag to find every note about this defect.
+//!
+//! **The published set is CORRECT. The CONSUME side is what fails.**
+//!
+//! An earlier revision of this note claimed the set held dead pre-exile ids that
+//! CR 400.7 had invalidated. That was inferred, not measured, and it is WRONG:
+//! `zones.rs:1438` mutates `obj_mut.zone` on the SAME `GameObject` under the
+//! same `state.objects` key, the only `ObjectId` allocator is `create_object`
+//! (`zones.rs:731`) which the move path never reaches, and CR 400.7 is modeled
+//! by bumping `GameObject::incarnation` rather than by issuing a new id. So the
+//! published ids stay live, and `filter.rs` evaluates
+//! `TargetFilter::TrackedSet` as a bare `set.contains(&object_id)` with no
+//! incarnation check and no zone gate.
+//!
+//! **What actually fails (verified against source).** `change_zone.rs:1982`
+//! re-derives the scan zones after the tracked-set sentinel binds, but gates
+//! that on `matches!(&ability.effect, Effect::ChangeZoneAll { origin: None, .. })`.
+//! A SINGULAR `Effect::ChangeZone` — which is exactly what "Return those cards
+//! to the battlefield" lowers to — falls to the `else` branch and keeps the
+//! battlefield default, so it scans the BATTLEFIELD for members that are sitting
+//! in EXILE and moves nothing. The reason the default is never corrected is that
+//! `TargetFilter::extract_in_zone` (`types/ability.rs:19644`) has arms for
+//! `Typed`, `Or`/`And`/`Not`, `ExiledBySource` and stack filters but NO
+//! tracked-set arm, so a tracked-set filter answers `None`. That gap is already
+//! documented in-repo at `put_on_top.rs:341`, where a `Zone::Library` fallback
+//! is called out as "LOAD BEARING, NOT DECORATIVE" for the same reason.
+//!
+//! A `ChangeZoneAll` consumer takes the working re-derivation branch, which is
+//! why Mass Polymorph, Synthetic Destiny and Worlds Within Worlds are fine.
+//!
+//! **Isolating probe (reproduces with NO die table anywhere in the card).** A
+//! card whose entire text is
+//! `"Exile all nontoken creatures you control. Return those cards to the
+//! battlefield under their owner's control."`
+//! also fails to return them — inline and delayed-return spellings alike — while
+//! the published set is `{TrackedSetId(1): [ObjectId(1), ObjectId(2)]}`, i.e.
+//! the correct, still-live ids of the two stranded creatures. So the defect is
+//! NOT specific to die tables, not specific to the double exile, and NOT
+//! introduced by this phase. It pre-dates this run.
+//!
+//! **Deliberately NOT repaired by a parser-side `uses_tracked_set` flip.** An
+//! earlier revision of this phase marked `CreateDelayedTrigger.uses_tracked_set`
+//! on standalone-parsed bodies. That was withdrawn: `TrackedSet { id: 0 }` is a
+//! LATE-BOUND SENTINEL which `targeting::resolve_tracked_set_sentinel` — "the
+//! single authority for sentinel binding" — already resolves at fire time using
+//! the same `chain_tracked_set_id` → `latest_tracked_set_id` lookup the eager
+//! flag path uses. The flag therefore bought no behavior here (measured: the
+//! creatures are lost identically with and without it), while
+//! `delayed_trigger.rs`'s ChangeZone arm has a catch-all
+//! (`_ => TargetFilter::TrackedSet { id: real_id }`) that REPLACES a compound
+//! target filter wholesale once the flag is true — so flipping it can discard a
+//! body's restrictions and turn a WORKING card wrong. Net benefit zero, net risk
+//! real; the flip was reverted. It also would not have helped: the failure is on
+//! the SCAN-ZONE side, not the binding side.
+//!
+//! **What was NOT established:** which of the two seams a fix should take — give
+//! `extract_in_zone` a tracked-set arm that derives the members' actual zone, or
+//! widen `change_zone.rs:1982`'s re-derivation gate to cover singular
+//! `ChangeZone`. Both are runtime changes, out of this phase's scope, and the
+//! choice is not guessed here.
+//!
+//! Identity is checked by CARD NAME rather than `ObjectId` so the assertions
+//! stay readable, and never by cardinality alone (a run that dropped one card and
+//! returned a different one could satisfy a matching count by accident).
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::events::GameEvent;

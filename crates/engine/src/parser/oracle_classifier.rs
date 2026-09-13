@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_till, take_until};
+use nom::bytes::complete::{tag, take_until};
 use nom::combinator::{opt, peek, value, verify};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -11,7 +11,7 @@ use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::scan_contains;
 use super::oracle_util::parse_mana_symbols;
 use crate::parser::oracle_effect::{
-    scan_at_random, split_leading_conditional, try_parse_named_choice,
+    excise_selection_qualifier, split_leading_conditional, try_parse_named_choice,
     try_parse_named_choice_conjunction,
 };
 
@@ -1189,41 +1189,19 @@ fn is_as_enters_choose_pattern(lower: &str) -> bool {
             //
             // The first disjunct is evaluated unchanged, so every line WITHOUT a
             // qualifier takes a bit-identical path and this is purely additive.
+            // `excise_selection_qualifier` is the SINGLE excision authority,
+            // shared with `parse_as_enters_choose`. The classifier and the
+            // builder must derive the SAME object phrase — a local copy of this
+            // arithmetic here is the very drift the second disjunct exists to
+            // close.
             try_parse_named_choice(i).is_some()
-                || choice_clause_without_selection_qualifier(i)
+                || excise_selection_qualifier(i)
                     .is_some_and(|excised| try_parse_named_choice(&excised).is_some())
         })
         .parse(i)
     })
     .is_some();
     has_as && has_enters && has_choose
-}
-
-/// Remove an "at random" selection qualifier from a `"choose …"` clause, so the
-/// classifier probes the same object phrase the builder will.
-///
-/// Delegates to `scan_at_random` — the SINGLE at-random authority, shared with
-/// `parse_target_player_relative_clause` and `parse_as_enters_choose`. A second
-/// copy of the scan here is exactly the drift this function exists to remove.
-///
-/// BOUNDED TO THE CLAUSE'S OWN SENTENCE, mirroring the builder: the clause runs
-/// to the end of the LINE, so an unbounded scan would let a LATER sentence's
-/// "at random" (e.g. "choose a color. Discard a card at random.") make this
-/// classify as a random choice. Returns `None` when no qualifier is present, so
-/// the caller's first disjunct remains the only path for ordinary lines.
-fn choice_clause_without_selection_qualifier(choose_clause: &str) -> Option<String> {
-    let sentence = take_till::<_, _, OracleError<'_>>(|c| c == '.')
-        .parse(choose_clause)
-        .map_or(choose_clause, |(_, head)| head);
-    let (before, after) = scan_at_random(sentence)?;
-    // Excise ONLY the qualifier; every other byte — including any following
-    // sentence — is preserved.
-    Some(format!(
-        "{}{}{}",
-        before.trim_end(),
-        after,
-        &choose_clause[sentence.len()..]
-    ))
 }
 
 /// CR 701.3a + CR 614.1: the attach-time analogue of `is_as_enters_choose_pattern`
@@ -1886,8 +1864,8 @@ mod as_enters_choose_qualifier_classification_tests {
     /// be excised from this choice's object phrase.
     ///
     /// FIRST PRODUCTION BRANCH REACHED: the sentence-bounding
-    /// `take_till(|c| c == '.')` in `choice_clause_without_selection_qualifier`,
-    /// before `scan_at_random` ever runs. The line still classifies (its object
+    /// `take_till(|c| c == '.')` inside `excise_selection_qualifier`, before
+    /// `scan_at_random` ever runs. The line still classifies (its object
     /// is a plain prefix arm), so this pins the BOUNDING, and the builder-side
     /// test pins that the exported mode stays `Chosen`.
     #[test]
@@ -1897,9 +1875,7 @@ mod as_enters_choose_qualifier_classification_tests {
         // The excision helper must decline: the object's own sentence carries no
         // qualifier, so there is nothing to remove.
         assert_eq!(
-            super::choice_clause_without_selection_qualifier(
-                "choose a color. discard a card at random."
-            ),
+            super::excise_selection_qualifier("choose a color. discard a card at random."),
             None,
             "the qualifier is in a later sentence and is out of this clause's scope"
         );
@@ -1911,18 +1887,15 @@ mod as_enters_choose_qualifier_classification_tests {
     #[test]
     fn the_excision_removes_only_the_qualifier() {
         assert_eq!(
-            super::choice_clause_without_selection_qualifier("choose 2, 3, or 4 at random."),
+            super::excise_selection_qualifier("choose 2, 3, or 4 at random."),
             Some("choose 2, 3, or 4.".to_string())
         );
         assert_eq!(
-            super::choice_clause_without_selection_qualifier(
+            super::excise_selection_qualifier(
                 "choose a basic land type at random. ~ has landwalk of the chosen type."
             ),
             Some("choose a basic land type. ~ has landwalk of the chosen type.".to_string())
         );
-        assert_eq!(
-            super::choice_clause_without_selection_qualifier("choose a color."),
-            None
-        );
+        assert_eq!(super::excise_selection_qualifier("choose a color."), None);
     }
 }
