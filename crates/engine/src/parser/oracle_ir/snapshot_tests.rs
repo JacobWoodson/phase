@@ -2023,7 +2023,11 @@ fn laezels_acrobatics_inline_die_table_is_owned_by_nonterminal_roll() {
         "Exile all nontoken creatures you control, then roll a d20.\n1—9 | Return those cards to the battlefield under their owner's control at the beginning of the next end step.\n10—20 | Return those cards to the battlefield under their owner's control, then exile them again. Return those cards to the battlefield under their owner's control at the beginning of the next end step.",
         "Lae'zel's Acrobatics",
         &["Instant"],
-        1,
+        // CR 706.3b: BOTH printed rows. This pin read 1 while the card prints 2,
+        // because the spell-resolution continuation loop swallowed the `1—9` row
+        // before the attach pass could collect it. The continuation guard
+        // restores the collector's precondition, so the whole table now attaches.
+        2,
     );
 }
 
@@ -2033,7 +2037,11 @@ fn overwhelming_encounter_inline_die_table_is_owned_by_nonterminal_roll() {
         "Creatures you control gain vigilance and trample until end of turn. Roll a d20.\n1—9 | Creatures you control get +2/+2 until end of turn.\n10—19 | Put two +1/+1 counters on each creature you control.\n20 | Put four +1/+1 counters on each creature you control.",
         "Overwhelming Encounter",
         &["Sorcery"],
-        2,
+        // CR 706.3b: ALL THREE printed rows. Same cause as Lae'zel's above — the
+        // swallowed `1—9` row now attaches, and it lowers to the mass
+        // `PumpAll{Typed{Creature, controller: You}}` the print states, not the
+        // single-target `Pump{Any}` the swallowed sibling used to produce.
+        3,
     );
 }
 

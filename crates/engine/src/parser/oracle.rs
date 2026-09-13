@@ -7041,6 +7041,23 @@ fn parse_normalized_oracle_ir(
                 if level_consumed.contains(&next_i)
                     || preparsed_consumed.contains(&next_i)
                     || spacecraft_consumed.contains(&next_i)
+                    // CR 706.3b: a results-table row belongs to its paragraph's
+                    // die roll, never to the spell-resolution continuation. Stop
+                    // the loop AT the first row so the attach pass below starts
+                    // on row 1 and collects the whole table in one call; a loop
+                    // that swallows row 1 leaves the collector's cursor past it
+                    // and silently drops that row from the table.
+                    //
+                    // The parser IS the detector: this is the same
+                    // `all_consuming` row grammar `parse_die_result_branches_ir`
+                    // uses, so the loop and the collector cannot disagree about
+                    // what a row is. The RAW line is passed, not a prepared one
+                    // — the grammar does its own `trim()`, and preparing a table
+                    // row would rewrite the very text being classified.
+                    || crate::parser::oracle_effect::imperative::try_parse_die_result_line(
+                        lines[next_i],
+                    )
+                    .is_some()
                     || parse_oracle_block(&lines, next_i).is_some()
                 {
                     break;
@@ -10715,15 +10732,83 @@ pub(super) fn lower_unsupported_node(
     def
 }
 
-/// Check if an AbilityDefinition (or its sub_ability chain) contains Unimplemented effects.
+/// Check if an `AbilityDefinition` contains `Unimplemented` effects anywhere the
+/// continuation gate can observe — its own effect, the definitions wrapped
+/// inside that effect, its `sub_ability` chain, or its `else_ability` branch.
+///
+/// CR 706.3b + coverage honesty: a parse failure nested inside a wrapper effect
+/// must be visible here. Reporting a chain clean because the failure hid under a
+/// delayed trigger or a die-result branch is a coverage-honesty defect — the
+/// card silently claims support it does not have. The measured live instance is
+/// Lae'zel's Acrobatics, whose swallowed `1—9` row lowered to
+/// `CreateDelayedTrigger { effect: Unimplemented { name: "1—9" } }`.
+///
+/// The `sub_ability` recursion is an `||` disjunct, NOT an early `return`: the
+/// previous body returned the sub-chain's verdict outright and therefore never
+/// consulted `else_ability` (or anything else) when a `sub_ability` was present
+/// and clean.
+///
+/// SCOPE NOTE: the fully general form belongs beside
+/// `Effect::for_each_quantity_expr` (`types/ability.rs`) as a
+/// `for_each_nested_definition` visitor with an exhaustive, wildcard-free match,
+/// so a newly added definition-carrying variant becomes a compile error rather
+/// than a silent miss. `crates/engine/src/types/` is out of this phase's scope
+/// rule, so the enumeration below is deliberately BOUNDED to the wrapper shapes
+/// this phase measured, and the general form is reported as DEFERRED(phase 4).
 pub(super) fn has_unimplemented(def: &AbilityDefinition) -> bool {
     if matches!(*def.effect, Effect::Unimplemented { .. }) {
         return true;
     }
-    if let Some(ref sub) = def.sub_ability {
-        return has_unimplemented(sub);
+    if effect_wrapped_definitions_have_unimplemented(&def.effect) {
+        return true;
     }
-    false
+    def.sub_ability.as_deref().is_some_and(has_unimplemented)
+        || def.else_ability.as_deref().is_some_and(has_unimplemented)
+}
+
+/// The bounded wrapper-shape enumeration behind [`has_unimplemented`].
+///
+/// Arms are ordered by variant name so a future addition is easy to place. Each
+/// covers one shape whose payload is a nested `AbilityDefinition` that the
+/// continuation gate can actually observe today.
+fn effect_wrapped_definitions_have_unimplemented(effect: &Effect) -> bool {
+    match effect {
+        // CR 603.7a: a delayed triggered ability created during resolution. The
+        // measured live instance (Lae'zel's Acrobatics' swallowed table row).
+        Effect::CreateDelayedTrigger { effect, .. } => has_unimplemented(effect),
+        // CR 705.1: coin-flip branch effects. One shape class, so all three
+        // siblings are covered together — splitting the cluster would leave the
+        // gate blind to the same failure on a neighbouring variant.
+        Effect::FlipCoin {
+            win_effect,
+            lose_effect,
+            ..
+        }
+        | Effect::FlipCoins {
+            win_effect,
+            lose_effect,
+            ..
+        } => {
+            win_effect.as_deref().is_some_and(has_unimplemented)
+                || lose_effect.as_deref().is_some_and(has_unimplemented)
+        }
+        Effect::FlipCoinUntilLose { win_effect, .. } => has_unimplemented(win_effect),
+        // CR 706.3a: a results-table striation's body. This is what keeps a
+        // restored-but-unparseable die row honest rather than silently accepted.
+        Effect::RollDie { results, .. } => results
+            .iter()
+            .any(|branch| has_unimplemented(&branch.effect)),
+        // BOUND OF THIS PHASE, stated rather than wildcarded silently: the
+        // remaining definition-carrying variants are `Effect::ChooseOneOf`
+        // (`branches`), `Effect::SeparateIntoPiles` (`chosen_pile_effect` /
+        // `unchosen_pile_effect`), `Effect::RevealFromHand` (`on_decline`) and
+        // `Effect::Vote` (`per_choice_effect`). They are NOT descended into
+        // here: this phase measured neither their population nor the
+        // acceptance-gate blast radius of making them visible, and a wildcard
+        // here cannot be made exhaustive without the `types/ability.rs` visitor.
+        // Covering them is DEFERRED(phase 4) together with that visitor.
+        _ => false,
+    }
 }
 
 /// Parse an activated-ability effect chain with self-reference fallback.
@@ -10840,3 +10925,314 @@ mod tests;
 #[cfg(test)]
 #[path = "oracle_pipeline_snapshot_tests.rs"]
 mod pipeline_snapshot_tests;
+
+/// Row 1.J — the continuation gate's failure-recursion helper must see a parse
+/// failure nested inside a WRAPPER EFFECT, not only inside a `sub_ability` chain.
+///
+/// Every test here fails against the pre-change body, which was:
+/// ```ignore
+/// if matches!(*def.effect, Effect::Unimplemented { .. }) { return true; }
+/// if let Some(ref sub) = def.sub_ability { return has_unimplemented(sub); }
+/// false
+/// ```
+/// — it examined no wrapper payload at all, and its `sub_ability` arm was an
+/// early `return` that suppressed every later field.
+#[cfg(test)]
+mod has_unimplemented_wrapper_recursion_tests {
+    use super::has_unimplemented;
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, DelayedTriggerCondition, DieResultBranch, Effect,
+        PlayerFilter, QuantityExpr, TargetFilter,
+    };
+    use crate::types::phase::Phase;
+
+    fn clean() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Shuffle {
+                target: TargetFilter::Controller,
+            },
+        )
+    }
+
+    fn failure() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::unimplemented("test-gap", "an unparsed fragment"),
+        )
+    }
+
+    /// PAIRED POSITIVE REACH-GUARD (C1.4). Without this, a helper that returned
+    /// `true` unconditionally would pass every other test in this module.
+    #[test]
+    fn a_definition_with_no_failure_anywhere_still_reports_clean() {
+        let mut def = clean().sub_ability(clean());
+        def.else_ability = Some(Box::new(clean()));
+        let mut wrapped = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(clean()),
+                uses_tracked_set: true,
+            },
+        );
+        wrapped.else_ability = Some(Box::new(clean()));
+        assert!(!has_unimplemented(&def));
+        assert!(!has_unimplemented(&wrapped));
+    }
+
+    /// The MEASURED LIVE INSTANCE: Lae'zel's Acrobatics' swallowed `1—9` row
+    /// lowered to `CreateDelayedTrigger { effect: Unimplemented { .. } }`, and
+    /// the gate reported the whole chain clean.
+    #[test]
+    fn sees_a_failure_under_a_delayed_trigger() {
+        let def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(failure()),
+                uses_tracked_set: true,
+            },
+        );
+        assert!(
+            has_unimplemented(&def),
+            "a failure under CreateDelayedTrigger.effect must be visible to the \
+             continuation gate — this is the Lae'zel's Acrobatics instance"
+        );
+    }
+
+    /// CR 706.3a: a restored results-table row whose body could not be parsed
+    /// must keep the card honestly red rather than silently accepted.
+    #[test]
+    fn sees_a_failure_under_a_die_result_branch() {
+        let def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::RollDie {
+                count: QuantityExpr::Fixed { value: 1 },
+                sides: 20,
+                results: vec![
+                    DieResultBranch {
+                        min: 1,
+                        max: 9,
+                        effect: Box::new(clean()),
+                    },
+                    DieResultBranch {
+                        min: 10,
+                        max: 20,
+                        effect: Box::new(failure()),
+                    },
+                ],
+                modifier: None,
+            },
+        );
+        assert!(
+            has_unimplemented(&def),
+            "a failure in ANY results-table branch must be visible"
+        );
+    }
+
+    /// CR 705.1: the coin-flip branch shapes. Covered as one sibling cluster —
+    /// splitting it would leave the gate blind on a neighbouring variant.
+    #[test]
+    fn sees_a_failure_under_either_coin_flip_branch() {
+        let win_bad = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoin {
+                win_effect: Some(Box::new(failure())),
+                lose_effect: Some(Box::new(clean())),
+                flipper: TargetFilter::Controller,
+            },
+        );
+        let lose_bad = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoin {
+                win_effect: Some(Box::new(clean())),
+                lose_effect: Some(Box::new(failure())),
+                flipper: TargetFilter::Controller,
+            },
+        );
+        let until_lose_bad = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoinUntilLose {
+                win_effect: Box::new(failure()),
+            },
+        );
+        assert!(has_unimplemented(&win_bad), "win_effect branch");
+        assert!(has_unimplemented(&lose_bad), "lose_effect branch");
+        assert!(has_unimplemented(&until_lose_bad), "FlipCoinUntilLose");
+    }
+
+    /// The SECOND half of the C1.4 gap, and the easy one to miss: the old body
+    /// `return`ed the `sub_ability` verdict, so a CLEAN sub-chain masked a dirty
+    /// `else_ability` entirely.
+    #[test]
+    fn a_clean_sub_ability_no_longer_masks_a_dirty_else_branch() {
+        let mut def = clean().sub_ability(clean());
+        def.else_ability = Some(Box::new(failure()));
+        assert!(
+            has_unimplemented(&def),
+            "a clean sub_ability must not short-circuit the else_ability check"
+        );
+    }
+
+    /// SIBLING: the pre-existing `sub_ability` path is not regressed by the
+    /// conversion from an early `return` to an `||` chain.
+    #[test]
+    fn still_sees_a_failure_under_a_plain_sub_ability() {
+        assert!(has_unimplemented(&clean().sub_ability(failure())));
+        assert!(has_unimplemented(
+            &clean().sub_ability(clean().sub_ability(failure()))
+        ));
+        assert!(has_unimplemented(&failure()));
+    }
+
+    /// The bound is real and is asserted, not merely commented: the variants
+    /// this phase deliberately does NOT descend into are still invisible, so a
+    /// reviewer can see exactly what DEFERRED(phase 4) is holding.
+    #[test]
+    fn the_deferred_wrapper_shapes_are_still_invisible_as_documented() {
+        let choose_one_of = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![failure()],
+            },
+        );
+        assert!(
+            !has_unimplemented(&choose_one_of),
+            "Effect::ChooseOneOf is OUT of this phase's bounded enumeration; when \
+             the general types/ability.rs visitor lands in phase 4 this assertion \
+             is expected to flip and must be updated deliberately"
+        );
+    }
+}
+
+/// Row 1.B' / claim C1.3 — the ATTACH-PREDICATE SEAM, measured directly.
+///
+/// Finding P3: the exported `results` vector is written by the attach pass, so a
+/// post-attach export CANNOT decide whether the pre-attach predicate fired. This
+/// module therefore calls the predicate on the IR the production path hands it,
+/// rather than inferring the verdict from card-data.
+///
+/// With the continuation guard in place, the spell-resolution loop breaks AT the
+/// first results-table row, so the `effect_line` the attach site at `oracle.rs`
+/// sees is exactly the card's HEADER LINE — which is what each fixture below
+/// reconstructs.
+///
+/// VERDICT THIS PINS: the guard restores the predicate's own precondition for
+/// every in-scope spell card, so `oracle_ir/effect_chain.rs` and
+/// `oracle_special.rs` are NOT widened by this phase (row 1.B' branch (iii)).
+/// If a future change made a header line lower with a partially-populated
+/// `results`, the predicate would silently return `false`, NO table would attach,
+/// and these assertions are what fail.
+#[cfg(test)]
+mod die_table_attach_seam_tests {
+    use crate::parser::oracle_effect::parse_ability_ir_standalone;
+    use crate::types::ability::{AbilityKind, Effect};
+
+    /// Every in-scope SPELL card's header line, exactly as the continuation loop
+    /// hands it to the attach site once the guard has stopped at row 1.
+    const SPELL_HEADERS: [(&str, &str); 3] = [
+        (
+            "Lae'zel's Acrobatics",
+            "Exile all nontoken creatures you control, then roll a d20.",
+        ),
+        (
+            "Overwhelming Encounter",
+            "Creatures you control gain vigilance and trample until end of turn. Roll a d20.",
+        ),
+        (
+            "Farideh's Fireball",
+            "Farideh's Fireball deals 5 damage to target creature or planeswalker. Roll a d20.",
+        ),
+    ];
+
+    /// (iii) The node reaching the writer carries NO partial `results`, so the
+    /// `results.is_empty()` precondition holds and the predicate fires.
+    #[test]
+    fn the_attach_predicate_fires_on_every_in_scope_spell_header() {
+        for (card, header) in SPELL_HEADERS {
+            let ir = parse_ability_ir_standalone(header, AbilityKind::Spell);
+            let roll_results: Vec<usize> = ir
+                .body
+                .clauses
+                .iter()
+                .filter_map(|clause| match &clause.parsed.effect {
+                    Effect::RollDie { results, .. } => Some(results.len()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                roll_results,
+                vec![0],
+                "{card}: the header line must lower to exactly one RollDie \
+                 carrying an EMPTY results vector — a partial table here is the \
+                 row 1.B' trigger that would require widening the predicate"
+            );
+            assert!(
+                ir.has_result_table_roll_die(),
+                "{card}: the attach predicate must fire, or no table attaches \
+                 and the printed rows are lost"
+            );
+        }
+    }
+
+    /// SIBLING / HOSTILE (row 1.B' branch (ii)'s guard, asserted even though the
+    /// widening did NOT fire): a roll node whose table is ALREADY attached must
+    /// still be REFUSED, so the predicate never becomes an unconditional accept.
+    ///
+    /// FIRST PRODUCTION BRANCH REACHED: `results.is_empty()` inside
+    /// `has_result_table_roll_die`, evaluating to `false`.
+    #[test]
+    fn the_attach_predicate_refuses_a_roll_whose_table_is_already_attached() {
+        use crate::types::ability::{AbilityDefinition, DieResultBranch, TargetFilter};
+
+        let mut ir = parse_ability_ir_standalone(
+            "Exile all nontoken creatures you control, then roll a d20.",
+            AbilityKind::Spell,
+        );
+        // PAIRED POSITIVE REACH-GUARD: with an empty table the node IS claimable,
+        // so the refusal below is selective rather than inert.
+        assert!(
+            ir.has_result_table_roll_die(),
+            "reach-guard: a roll with no attached table must be claimable"
+        );
+
+        // Populate the table, exactly as the writer would have.
+        for clause in &mut ir.body.clauses {
+            if let Effect::RollDie { results, .. } = &mut clause.parsed.effect {
+                results.push(DieResultBranch {
+                    min: 1,
+                    max: 20,
+                    effect: Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::Shuffle {
+                            target: TargetFilter::Controller,
+                        },
+                    )),
+                });
+            }
+        }
+        assert!(
+            !ir.has_result_table_roll_die(),
+            "a roll whose table is ALREADY attached must still be refused — \
+             otherwise the predicate is an unconditional accept and a second \
+             table could be stapled onto the same roll"
+        );
+    }
+
+    /// Druid of the Emerald Grove is a TRIGGER, so it reaches the P-D path whose
+    /// predicate (`has_terminal_roll_die`) carries NO emptiness requirement. Its
+    /// rows were never lost to the predicate — they were lost because the row
+    /// GRAMMAR declined the "9 or less" wording. Pinning that keeps the two
+    /// fixes separately attributable.
+    #[test]
+    fn the_druid_row_loss_is_attributable_to_the_row_grammar_not_the_predicate() {
+        use crate::parser::oracle_effect::imperative::try_parse_die_result_line;
+        assert!(
+            try_parse_die_result_line("9 or less | Put those cards into your hand, then shuffle.")
+                .is_some(),
+            "the row grammar — not the attach predicate — is what fixes Druid"
+        );
+    }
+}

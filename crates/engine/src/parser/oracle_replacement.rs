@@ -1,8 +1,9 @@
+use std::borrow::Cow;
 use std::str::FromStr;
 
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, tag_no_case, take_until, take_while1};
+use nom::bytes::complete::{tag, tag_no_case, take_till, take_until, take_while1};
 use nom::character::complete::{anychar, char, multispace0, multispace1};
 use nom::combinator::{all_consuming, eof, map_opt, opt, peek, recognize, rest, value};
 use nom::multi::{many_till, separated_list1};
@@ -12,7 +13,8 @@ use nom::Parser;
 use super::oracle_effect::become_copy_except::parse_except_clause;
 use super::oracle_effect::{
     parse_effect_chain, parse_effect_chain_with_context, parse_effect_clause,
-    parse_named_choice_object, try_parse_named_choice, try_parse_named_choice_conjunction,
+    parse_named_choice_object, scan_at_random, try_parse_named_choice,
+    try_parse_named_choice_conjunction,
 };
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::doc::OracleNodeIr;
@@ -2214,19 +2216,53 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
     // (not parsing dispatch). `parse_named_choice_object` expects the phrase
     // with "choose " already stripped.
     let choose_object = choose_suffix.trim_end().trim_end_matches('.').trim();
+
+    // CR 608.2d (override) + CR 701.9b (analogous) + CR 614.1c: an "at random"
+    // qualifier on an as-enters choice means the GAME selects the value, not the
+    // controller. It qualifies the SELECTION, not the choice OBJECT, so it is
+    // excised before the object table sees the phrase — otherwise an
+    // `all_consuming` object arm (a numeric enumeration, say) declines on the
+    // trailing qualifier and the `?` below abandons the whole replacement.
+    //
+    // BOUNDED TO THE OBJECT'S OWN SENTENCE: `choose_object` runs to the end of
+    // the LINE, not the end of the clause (Camato Scout's is "a basic land type
+    // at random. ~ has landwalk of the chosen type"), so an unbounded scan would
+    // let a LATER sentence's "at random" retarget this choice's selection mode.
+    let object_sentence = take_till::<_, _, OracleError<'_>>(|c| c == '.')
+        .parse(choose_object)
+        .map_or(choose_object, |(_, head)| head);
+    let (selection, choose_object) = match scan_at_random(object_sentence) {
+        Some((before, after)) => (
+            crate::types::ability::TargetSelectionMode::Random,
+            // Excise ONLY the qualifier; every other byte — including any
+            // following sentence — is preserved, so every as-enters card
+            // without the qualifier keeps a byte-identical object phrase.
+            Cow::Owned(format!(
+                "{}{}{}",
+                before.trim_end(),
+                after,
+                &choose_object[object_sentence.len()..]
+            )),
+        ),
+        None => (
+            crate::types::ability::TargetSelectionMode::Chosen,
+            Cow::Borrowed(choose_object),
+        ),
+    };
+
     // Named-attribute choices only. Object choices ("choose a creature") are
     // deliberately NOT claimed here — see `LinkedChoiceKind::CopyChosenHost`.
     // Claiming them as Moved+unsupported would reshape every as-enters
     // permanent-choose card (Dauntless Bodyguard, Scheming Fence, …) even when
     // no CopyChosen consumer exists.
-    let choice_type = parse_named_choice_object(choose_object)?;
+    let choice_type = parse_named_choice_object(choose_object.as_ref())?;
 
     let choose = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Choose {
             choice_type,
             persist: true,
-            selection: crate::types::ability::TargetSelectionMode::Chosen,
+            selection,
         },
     );
 
@@ -27887,5 +27923,189 @@ mod opposition_agent_parser_tests {
                 value: PreventionFormula::Quantity { .. }
             })
         ));
+    }
+}
+
+/// Rows 1.G and 1.H — the as-enters selection axis, asserted at the layer where
+/// `TargetSelectionMode` is OBSERVABLE.
+///
+/// Charter form (a): through `parse_replacement_line`, where the typed value is
+/// present. The superseded card-data form was VACUOUS and measured so:
+/// `Effect::Choose.selection` carries `skip_serializing_if`, and of the ~300
+/// `Choose` nodes inside `replacements` in the corpus export, ZERO carry a
+/// `selection` key — so at that layer a correct `Chosen`, a card with no
+/// replacement at all, and a total serialization failure are indistinguishable.
+#[cfg(test)]
+mod as_enters_at_random_selection_tests {
+    use super::parse_replacement_line;
+    use crate::types::ability::{ChoiceType, Effect, NumberDistinctness, TargetSelectionMode};
+
+    fn choose_effect(text: &str, card_name: &str) -> Option<Effect> {
+        let def = parse_replacement_line(text, card_name)?;
+        Some(*def.execute?.effect)
+    }
+
+    /// Row 1.G — Camato Scout gains the random selection axis. This is the card
+    /// Unit 1a alone moves, which is what proves 1a landed independently of 1b.
+    #[test]
+    fn camato_scout_gains_the_random_selection_axis() {
+        assert_eq!(
+            choose_effect(
+                "As Camato Scout enters, choose a basic land type at random. \
+                 Camato Scout has landwalk of the chosen type.",
+                "Camato Scout",
+            ),
+            Some(Effect::Choose {
+                choice_type: ChoiceType::BasicLandType,
+                persist: true,
+                selection: TargetSelectionMode::Random,
+            })
+        );
+    }
+
+    /// Row 1.H — the paired NEGATIVE, at the same layer, with row 1.G above as
+    /// its positive reach-guard.
+    ///
+    /// A-Thran Portal is chosen deliberately: it is the SAME `ChoiceType` as
+    /// Camato Scout WITHOUT the qualifier, so an over-broad detector flips it and
+    /// this assertion catches that rather than passing on a shape difference.
+    #[test]
+    fn a_non_random_as_enters_choice_still_exports_the_chosen_mode() {
+        assert_eq!(
+            choose_effect(
+                "As A-Thran Portal enters, choose a basic land type.",
+                "A-Thran Portal",
+            ),
+            Some(Effect::Choose {
+                choice_type: ChoiceType::BasicLandType,
+                persist: true,
+                selection: TargetSelectionMode::Chosen,
+            })
+        );
+        // Second shape, a different ChoiceType, so the guard is not specific to
+        // basic land types.
+        assert_eq!(
+            choose_effect(
+                "As Adaptive Automaton enters, choose a creature type.",
+                "Adaptive Automaton",
+            ),
+            Some(Effect::Choose {
+                choice_type: ChoiceType::creature_type(),
+                persist: true,
+                selection: TargetSelectionMode::Chosen,
+            })
+        );
+    }
+
+    /// Row 1.G HOSTILE FIXTURE — the choice object is non-random, but a LATER
+    /// SENTENCE on the same line contains "at random".
+    ///
+    /// FIRST PRODUCTION BRANCH REACHED: the sentence-bounding `take_till(. )` in
+    /// `parse_as_enters_choose`, BEFORE the scan ever runs. An unbounded
+    /// whole-tail scan — which `choose_object` invites, because it runs to the
+    /// end of the LINE — would let the later sentence retarget this choice.
+    #[test]
+    fn a_later_sentences_at_random_does_not_retarget_the_selection() {
+        assert_eq!(
+            choose_effect(
+                "As Test Card enters, choose a color. Discard a card at random.",
+                "Test Card",
+            ),
+            Some(Effect::Choose {
+                choice_type: ChoiceType::color(),
+                persist: true,
+                selection: TargetSelectionMode::Chosen,
+            }),
+            "the qualifier belongs to the LATER sentence and must not reach this \
+             choice's selection mode"
+        );
+    }
+
+    /// Row 1.K — the run-level outcome: Haktos' enumeration AND random axis
+    /// together. Asserted only after 1.F and 1.G have each been asserted
+    /// separately, so a failure stays attributable to the right unit.
+    #[test]
+    fn haktos_exports_the_enumeration_and_the_random_axis_together() {
+        assert_eq!(
+            choose_effect(
+                "As Haktos enters, choose 2, 3, or 4 at random.",
+                "Haktos the Unscarred",
+            ),
+            Some(Effect::Choose {
+                choice_type: ChoiceType::NumberRange {
+                    min: 2,
+                    max: Some(4),
+                    distinctness: NumberDistinctness::Repeatable,
+                },
+                persist: true,
+                selection: TargetSelectionMode::Random,
+            })
+        );
+    }
+
+    /// Row 1.F's EXISTENCE half at the parser layer: at base this line produced
+    /// NO replacement at all, because `parse_named_choice_object` returned `None`
+    /// and the `?` abandoned the whole builder BEFORE the selection mode was ever
+    /// constructed (C1.6). That is what makes 1a and 1b genuinely disjoint.
+    #[test]
+    fn haktos_gains_a_replacement_at_all() {
+        assert!(
+            parse_replacement_line(
+                "As Haktos enters, choose 2, 3, or 4 at random.",
+                "Haktos the Unscarred",
+            )
+            .is_some(),
+            "at base this returned None — the enumeration failure abandoned the \
+             entire replacement"
+        );
+    }
+
+    /// BLAST-RADIUS PROPERTY — when no qualifier is present the object phrase is
+    /// borrowed unchanged, so every as-enters card without "at random" takes a
+    /// bit-identical path through the object table. Exercised across the object
+    /// shapes the table dispatches on.
+    #[test]
+    fn non_random_as_enters_object_shapes_are_unchanged() {
+        for (text, name, expected) in [
+            (
+                "As Test Card enters, choose a card type.",
+                "Test Card",
+                ChoiceType::card_type(),
+            ),
+            (
+                "As Test Card enters, choose a number between 1 and 5.",
+                "Test Card",
+                ChoiceType::NumberRange {
+                    min: 1,
+                    max: Some(5),
+                    distinctness: NumberDistinctness::Repeatable,
+                },
+            ),
+        ] {
+            assert_eq!(
+                choose_effect(text, name),
+                Some(Effect::Choose {
+                    choice_type: expected,
+                    persist: true,
+                    selection: TargetSelectionMode::Chosen,
+                }),
+                "{text}"
+            );
+        }
+    }
+
+    /// RECORDED NON-CLAIM (row 1.F). Lydari Elephant is a verified member of the
+    /// at-random family and is NOT fixed by this run: its object becomes
+    /// "two numbers from 3 to 7", which no object arm recognizes, so the builder
+    /// still declines. Pinning it keeps the non-claim honest rather than assumed.
+    #[test]
+    fn lydari_elephant_is_still_not_claimed() {
+        assert!(parse_replacement_line(
+            "As Lydari Elephant enters, choose two numbers from 3 to 7 at random. \
+             Lydari Elephant's power is equal to the first number chosen and its \
+             toughness equal to the second number chosen.",
+            "Lydari Elephant",
+        )
+        .is_none());
     }
 }
