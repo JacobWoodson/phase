@@ -31,8 +31,10 @@
 //! suite deliberately uses a printed Ramunap-Excavator-shaped source rather than
 //! any one card's parsed text. Muldrotha, Karador, Lurrus and Ramunap Excavator
 //! all silently refused a card their controller owned, if an opponent happened to
-//! control it when it died, for the remainder of that step (CR 400.7 —
-//! `turns.rs` clears the LKI cache on step transition).
+//! control it when it died, for as long as the stale LKI entry survived —
+//! `turns.rs` clears the LKI cache on step transition, so exposure ends at the
+//! next step boundary. That cache lifetime is an engine implementation detail,
+//! not a Comprehensive Rules requirement.
 //!
 //! The failure direction is **mis-exclusion only**: the owner's own card is
 //! refused. No card is wrongly admitted by the pre-fix behaviour, so nothing
@@ -42,7 +44,14 @@ use engine::game::casting::{
     graveyard_lands_playable_by_permission, spell_objects_available_to_cast,
 };
 use engine::game::scenario::GameScenario;
-use engine::types::ability::{CardPlayMode, ControllerRef, TargetFilter, TypeFilter, TypedFilter};
+use engine::types::ability::{
+    CardPlayMode, ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter,
+};
+use engine::types::actions::GameAction;
+use engine::types::card_type::CoreType;
+use engine::types::game_state::CastPaymentMode;
+use engine::types::keywords::{BestowCost, Keyword, KeywordKind};
+use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::statics::{CastFrequency, StaticMode};
@@ -107,8 +116,9 @@ fn steal_then_bury(
 /// cover, BEFORE asserting anything about permissions.
 ///
 /// Without this the rows would pass vacuously the moment anything advanced a
-/// step (CR 400.7 clears the LKI cache) or the control change failed to take —
-/// and the assertion under test would be measuring nothing.
+/// step (`turns.rs` clears the LKI cache on step transition) or the control
+/// change failed to take — and the assertion under test would be measuring
+/// nothing.
 fn assert_lki_diverges(
     state: &engine::types::game_state::GameState,
     object_id: ObjectId,
@@ -275,4 +285,341 @@ fn the_owner_substitution_does_not_widen_to_another_players_card() {
         "CR 108.4a: the owner substitution must not widen the permission to a card owned \
          by another player, got {playable:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// PRODUCTION-FLOW ROWS
+//
+// The three rows above query the enumeration helpers directly. That is the
+// right altitude for proving the OWNER-vs-LKI axis, but it leaves the
+// downstream consumers untested: `GameAction::PlayLand` and
+// `GameAction::CastSpell` re-derive the permission through
+// `graveyard_lands_playable_by_permission` and `graveyard_permission_source`
+// respectively, and the bestow route adds a third consumer
+// (`has_graveyard_cast_permission_without_keyword_constraint`). A regression
+// confined to an elected-authority call site would leave the enumeration rows
+// green while the action itself was refused.
+//
+// These rows therefore submit the real actions and assert they COMPLETE.
+// ---------------------------------------------------------------------------
+
+/// Give `player` one unit of `ty` for deterministic payment.
+fn add_mana(runner: &mut engine::game::scenario::GameRunner, player: PlayerId, ty: ManaType) {
+    let unit = ManaUnit::new(ty, ObjectId(0), false, vec![]);
+    runner.state_mut().players[player.0 as usize]
+        .mana_pool
+        .add(unit);
+}
+
+/// Attach a printed graveyard permission to a fresh battlefield source owned by
+/// `controller`, and return the source's object id.
+fn stage_permission_source(
+    runner: &mut engine::game::scenario::GameRunner,
+    controller: PlayerId,
+    card_id: CardId,
+    name: &str,
+    play_mode: CardPlayMode,
+    types: Vec<TypeFilter>,
+) -> ObjectId {
+    let source = engine::game::zones::create_object(
+        runner.state_mut(),
+        card_id,
+        controller,
+        name.to_string(),
+        Zone::Battlefield,
+    );
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&source)
+        .expect("permission source")
+        .static_definitions
+        .push(printed_graveyard_permission(play_mode, types));
+    source
+}
+
+/// PRODUCTION FLOW -- the land path, through `GameAction::PlayLand`.
+///
+/// `handle_play_land` re-derives the permission via
+/// `graveyard_lands_playable_by_permission`; a stale-LKI refusal there surfaces
+/// as a rejected action, not merely an empty offer list.
+#[test]
+fn playing_a_stolen_then_buried_land_from_its_owners_graveyard_is_accepted() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let land = scenario.add_land_to_hand(PlayerId(0), "Forest").id();
+    let mut runner = scenario.build();
+
+    steal_then_bury(&mut runner, land, PlayerId(1));
+    stage_permission_source(
+        &mut runner,
+        PlayerId(0),
+        CardId(5153),
+        "Ramunap Excavator",
+        CardPlayMode::Play,
+        vec![TypeFilter::Land],
+    );
+
+    assert_lki_diverges(runner.state(), land, PlayerId(0), PlayerId(1));
+
+    let card_id = runner.state().objects[&land].card_id;
+    // CR 305.1 + CR 108.4a: the land's owner plays their own card from their own
+    // graveyard. The at-death controller is not a party to this permission.
+    runner
+        .act(GameAction::PlayLand {
+            object_id: land,
+            card_id,
+        })
+        .expect(
+            "CR 109.4 + CR 108.4a: playing a land from its OWNER's graveyard must be accepted \
+             even though an opponent controlled it when it died",
+        );
+
+    assert_eq!(
+        runner.state().objects[&land].zone,
+        Zone::Battlefield,
+        "the played land must actually reach the battlefield"
+    );
+}
+
+/// PRODUCTION FLOW -- the normal cast path, through `GameAction::CastSpell`.
+///
+/// The graveyard arm of the cast-legality gate calls
+/// `graveyard_permission_source` -- the ELECTED authority, a different consumer
+/// from the enumeration helper the sibling row covers.
+#[test]
+fn casting_a_stolen_then_buried_creature_from_its_owners_graveyard_is_accepted() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut builder = scenario.add_creature_to_hand(PlayerId(0), "Gravedigger", 2, 2);
+    builder.with_mana_cost(ManaCost::generic(1));
+    let creature = builder.id();
+    let mut runner = scenario.build();
+
+    steal_then_bury(&mut runner, creature, PlayerId(1));
+    stage_permission_source(
+        &mut runner,
+        PlayerId(0),
+        CardId(5154),
+        "Muldrotha, the Gravetide",
+        CardPlayMode::Cast,
+        vec![TypeFilter::Creature],
+    );
+    add_mana(&mut runner, PlayerId(0), ManaType::Colorless);
+
+    assert_lki_diverges(runner.state(), creature, PlayerId(0), PlayerId(1));
+
+    let card_id = runner.state().objects[&creature].card_id;
+    // CR 601.2a + CR 108.4a: the graveyard permission is elected for the card's
+    // OWNER, so the cast is legal.
+    runner
+        .act(GameAction::CastSpell {
+            object_id: creature,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect(
+            "CR 109.4 + CR 108.4a: casting a creature from its OWNER's graveyard must be \
+             accepted even though an opponent controlled it when it died",
+        );
+
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().objects[&creature].zone,
+        Zone::Battlefield,
+        "the cast creature must resolve onto the battlefield"
+    );
+}
+
+/// PRODUCTION FLOW -- the BESTOW keyword-constraint consumer.
+///
+/// The fourth changed call site,
+/// `has_graveyard_cast_permission_without_keyword_constraint`, is reached only
+/// from the bestow lane, and only for a card in a graveyard. It asks a narrow
+/// question: does some OTHER graveyard permission grant a plain cast, or is the
+/// only permission a "using its bestow ability" rider (the Detective's Phoenix
+/// shape)? When the answer is "rider only", CR 702.103a forbids falling back to
+/// a normal creature cast and the action is refused.
+///
+/// That question is answered by matching the permission's filter against the
+/// card -- which is exactly the owner-vs-LKI axis this suite covers. This row
+/// stages the rider-only permission on a card that died under an opponent's
+/// control and asserts the refusal still lands, i.e. the consumer resolved the
+/// permission against the card's OWNER rather than silently failing to match it
+/// at all.
+///
+/// NOTE ON SCOPE: a bestow cast from the graveyard under a permission with no
+/// bestow constraint (a plain Muldrotha-shaped "cast creature cards from your
+/// graveyard") is refused by this engine for reasons unrelated to owner
+/// scoping -- verified by isolation: the identical fixture with the `Bestow`
+/// keyword removed is accepted, and with it present is refused, whichever
+/// controller the card died under. That is a separate pre-existing gap in the
+/// bestow lane and is deliberately not addressed here.
+#[test]
+fn the_bestow_rider_refusal_resolves_its_permission_against_the_owner() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let mut builder = scenario.add_creature_to_hand(PlayerId(0), "Boon Satyr", 4, 2);
+    builder.with_mana_cost(ManaCost::generic(1));
+    let bestowed = builder.id();
+
+    // A legal host, so the refusal below cannot be caused by an absent target.
+    let host = scenario
+        .add_creature(PlayerId(0), "Grizzly Bears", 2, 2)
+        .id();
+
+    let mut runner = scenario.build();
+
+    {
+        let obj = runner
+            .state_mut()
+            .objects
+            .get_mut(&bestowed)
+            .expect("bestow card");
+        // CR 702.103a: bestow is a static ability that functions in any zone
+        // from which the card could be played.
+        obj.keywords
+            .push(Keyword::Bestow(BestowCost::Mana(ManaCost::generic(2))));
+        // CR 702.103b: bestow cards are Enchantment Creatures, so the bestow
+        // form removes only Creature and leaves Enchantment for the Aura.
+        for types in [&mut obj.card_types, &mut obj.base_card_types] {
+            if !types.core_types.contains(&CoreType::Enchantment) {
+                types.core_types.push(CoreType::Enchantment);
+            }
+        }
+    }
+
+    steal_then_bury(&mut runner, bestowed, PlayerId(1));
+
+    // The Detective's-Phoenix shape: the ONLY graveyard permission is a
+    // "using its bestow ability" rider, expressed as a keyword-kind constraint
+    // on the permission's own filter.
+    let source = engine::game::zones::create_object(
+        runner.state_mut(),
+        CardId(5155),
+        PlayerId(0),
+        "Bestow Rider Source".to_string(),
+        Zone::Battlefield,
+    );
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&source)
+        .expect("permission source")
+        .static_definitions
+        .push(
+            StaticDefinition::new(StaticMode::GraveyardCastPermission {
+                frequency: CastFrequency::Unlimited,
+                play_mode: CardPlayMode::Cast,
+                graveyard_destination_replacement: None,
+                extra_cost: None,
+                enters_with_counter: None,
+            })
+            .affected(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                // THE AXIS UNDER TEST, as in the sibling rows.
+                controller: Some(ControllerRef::You),
+                // CR 702.103a: the rider -- this permission authorizes only a
+                // bestow cast, which is what makes the fall-back refusal legal.
+                properties: vec![FilterProp::HasKeywordKind {
+                    value: KeywordKind::Bestow,
+                }],
+            })),
+        );
+    for _ in 0..2 {
+        add_mana(&mut runner, PlayerId(0), ManaType::Colorless);
+    }
+
+    assert_lki_diverges(runner.state(), bestowed, PlayerId(0), PlayerId(1));
+
+    // REACH-GUARD: the rider permission really does match this card, so the
+    // assertion below is about the bestow lane and not about a permission that
+    // failed to resolve at all. Pre-fix this list was EMPTY -- the stale LKI
+    // controller kept the owner's own card out of their own permission.
+    let castable = spell_objects_available_to_cast(runner.state(), PlayerId(0));
+    assert!(
+        castable.contains(&bestowed),
+        "reach-guard (CR 109.4 + CR 108.4a): the rider permission must resolve against the \
+         card's OWNER, so the card must be enumerated as castable, got {castable:?}"
+    );
+
+    let card_id = runner.state().objects[&bestowed].card_id;
+    let result = runner.act(GameAction::CastSpell {
+        object_id: bestowed,
+        card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    });
+
+    // CR 702.103a: a "using its bestow ability" rider does not authorize a
+    // normal creature cast, so the fall-through must be refused rather than
+    // quietly casting the card for its printed cost.
+    assert!(
+        result.is_err(),
+        "CR 702.103a: a bestow-rider permission must not authorize a normal creature cast \
+         from the graveyard, got {result:?}"
+    );
+    assert_eq!(
+        runner.state().objects[&bestowed].zone,
+        Zone::Graveyard,
+        "the refused card must stay in the graveyard"
+    );
+    assert_eq!(
+        runner.state().objects[&host].zone,
+        Zone::Battlefield,
+        "staging: the prospective Aura host must still be on the battlefield"
+    );
+}
+
+/// PRODUCTION-FLOW GUARD: the substitution must not let a player play a card
+/// they do not own, through the real action.
+///
+/// The enumeration guard above proves the offer list excludes it; this proves
+/// the action itself is REFUSED, which is the property that actually matters.
+#[test]
+fn playing_another_players_graveyard_land_is_still_refused() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let opponent_land = scenario.add_land_to_hand(PlayerId(1), "Island").id();
+    let own_land = scenario.add_land_to_hand(PlayerId(0), "Forest").id();
+    let mut runner = scenario.build();
+
+    steal_then_bury(&mut runner, own_land, PlayerId(1));
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(
+        runner.state_mut(),
+        opponent_land,
+        Zone::Graveyard,
+        &mut events,
+    );
+    stage_permission_source(
+        &mut runner,
+        PlayerId(0),
+        CardId(5156),
+        "Ramunap Excavator",
+        CardPlayMode::Play,
+        vec![TypeFilter::Land],
+    );
+
+    let opponent_card_id = runner.state().objects[&opponent_land].card_id;
+    let result = runner.act(GameAction::PlayLand {
+        object_id: opponent_land,
+        card_id: opponent_card_id,
+    });
+    assert!(
+        result.is_err(),
+        "CR 108.4a: the owner substitution must not let P0 play a land owned by P1, got {result:?}"
+    );
+
+    // REACH-GUARD: the permission is live on this same state, so the refusal
+    // above cannot be passing merely because nothing was granted at all.
+    let own_card_id = runner.state().objects[&own_land].card_id;
+    runner
+        .act(GameAction::PlayLand {
+            object_id: own_land,
+            card_id: own_card_id,
+        })
+        .expect("reach-guard: P0's OWN land must still be playable from their graveyard");
 }
