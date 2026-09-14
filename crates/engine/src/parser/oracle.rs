@@ -10748,7 +10748,7 @@ pub(super) fn lower_unsupported_node(
 }
 
 /// Check if an `AbilityDefinition` contains `Unimplemented` effects anywhere the
-/// continuation gate can observe — its own effect, the definitions wrapped
+/// continuation gate can observe — its own effect, the definitions nested
 /// inside that effect, its `sub_ability` chain, or its `else_ability` branch.
 ///
 /// CR 706.3b + coverage honesty: a parse failure nested inside a wrapper effect
@@ -10763,67 +10763,28 @@ pub(super) fn lower_unsupported_node(
 /// consulted `else_ability` (or anything else) when a `sub_ability` was present
 /// and clean.
 ///
-/// SCOPE NOTE: the fully general form belongs beside
-/// `Effect::for_each_quantity_expr` (`types/ability.rs`) as a
-/// `for_each_nested_definition` visitor with an exhaustive, wildcard-free match,
-/// so a newly added definition-carrying variant becomes a compile error rather
-/// than a silent miss. `crates/engine/src/types/` is out of this phase's scope
-/// rule, so the enumeration below is deliberately BOUNDED to the wrapper shapes
-/// this phase measured, and the general form is reported as DEFERRED(phase 4).
+/// The nested-definition step delegates to [`Effect::for_each_nested_definition`]
+/// (`types/ability.rs`), the single authority for which effects carry a direct
+/// executable payload. It replaces a bounded enumeration that wildcarded
+/// `ChooseOneOf`, `SeparateIntoPiles`, `RevealFromHand` and `Vote` to `false`:
+/// a failure under any of those four was invisible to this gate, so a chain
+/// carrying one was reported clean. Because the visitor's match is exhaustive
+/// and wildcard-free, a newly added definition-carrying `Effect` variant is now
+/// a compile error there rather than a silent miss here.
 pub(super) fn has_unimplemented(def: &AbilityDefinition) -> bool {
     if matches!(*def.effect, Effect::Unimplemented { .. }) {
         return true;
     }
-    if effect_wrapped_definitions_have_unimplemented(&def.effect) {
-        return true;
-    }
-    def.sub_ability.as_deref().is_some_and(has_unimplemented)
+    // `||` rather than `|=`: once a nested failure is found the remaining
+    // payloads are not re-descended, which keeps this the same short-circuiting
+    // walk the `.any()`/`||` chain it replaced was.
+    let mut nested_has_unimplemented = false;
+    def.effect.for_each_nested_definition(&mut |_, nested| {
+        nested_has_unimplemented = nested_has_unimplemented || has_unimplemented(nested);
+    });
+    nested_has_unimplemented
+        || def.sub_ability.as_deref().is_some_and(has_unimplemented)
         || def.else_ability.as_deref().is_some_and(has_unimplemented)
-}
-
-/// The bounded wrapper-shape enumeration behind [`has_unimplemented`].
-///
-/// Arms are ordered by variant name so a future addition is easy to place. Each
-/// covers one shape whose payload is a nested `AbilityDefinition` that the
-/// continuation gate can actually observe today.
-fn effect_wrapped_definitions_have_unimplemented(effect: &Effect) -> bool {
-    match effect {
-        // CR 603.7a: a delayed triggered ability created during resolution. The
-        // measured live instance (Lae'zel's Acrobatics' swallowed table row).
-        Effect::CreateDelayedTrigger { effect, .. } => has_unimplemented(effect),
-        // CR 705.1: coin-flip branch effects. One shape class, so all three
-        // siblings are covered together — splitting the cluster would leave the
-        // gate blind to the same failure on a neighbouring variant.
-        Effect::FlipCoin {
-            win_effect,
-            lose_effect,
-            ..
-        }
-        | Effect::FlipCoins {
-            win_effect,
-            lose_effect,
-            ..
-        } => {
-            win_effect.as_deref().is_some_and(has_unimplemented)
-                || lose_effect.as_deref().is_some_and(has_unimplemented)
-        }
-        Effect::FlipCoinUntilLose { win_effect, .. } => has_unimplemented(win_effect),
-        // CR 706.3a: a results-table striation's body. This is what keeps a
-        // restored-but-unparseable die row honest rather than silently accepted.
-        Effect::RollDie { results, .. } => results
-            .iter()
-            .any(|branch| has_unimplemented(&branch.effect)),
-        // BOUND OF THIS PHASE, stated rather than wildcarded silently: the
-        // remaining definition-carrying variants are `Effect::ChooseOneOf`
-        // (`branches`), `Effect::SeparateIntoPiles` (`chosen_pile_effect` /
-        // `unchosen_pile_effect`), `Effect::RevealFromHand` (`on_decline`) and
-        // `Effect::Vote` (`per_choice_effect`). They are NOT descended into
-        // here: this phase measured neither their population nor the
-        // acceptance-gate blast radius of making them visible, and a wildcard
-        // here cannot be made exhaustive without the `types/ability.rs` visitor.
-        // Covering them is DEFERRED(phase 4) together with that visitor.
-        _ => false,
-    }
 }
 
 /// Parse an activated-ability effect chain with self-reference fallback.
@@ -10956,8 +10917,9 @@ mod pipeline_snapshot_tests;
 mod has_unimplemented_wrapper_recursion_tests {
     use super::has_unimplemented;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, DelayedTriggerCondition, DieResultBranch, Effect,
-        PlayerFilter, QuantityExpr, TargetFilter,
+        AbilityDefinition, AbilityKind, ControllerRef, DelayedTriggerCondition, DieResultBranch,
+        Effect, NestedDefinitionEdge, PileSource, PlayerFilter, PlayerScope, QuantityExpr,
+        TargetFilter, VoteSubject, VoteTally, VoteVisibility, VoterScope,
     };
     use crate::types::phase::Phase;
 
@@ -11101,11 +11063,18 @@ mod has_unimplemented_wrapper_recursion_tests {
         assert!(has_unimplemented(&failure()));
     }
 
-    /// The bound is real and is asserted, not merely commented: the variants
-    /// this phase deliberately does NOT descend into are still invisible, so a
-    /// reviewer can see exactly what DEFERRED(phase 4) is holding.
+    /// The bound that DEFERRED(phase 4) was holding is GONE, and its absence is
+    /// asserted rather than merely commented.
+    ///
+    /// These four wrapper shapes — `ChooseOneOf`, `SeparateIntoPiles`,
+    /// `RevealFromHand` and `Vote` — were wildcarded to `false` by the bounded
+    /// enumeration this replaced, so a parse failure under any of them was
+    /// invisible to the continuation gate and the chain was reported clean.
+    /// This is the assertion the superseded
+    /// `the_deferred_wrapper_shapes_are_still_invisible_as_documented` said
+    /// "is expected to flip and must be updated deliberately".
     #[test]
-    fn the_deferred_wrapper_shapes_are_still_invisible_as_documented() {
+    fn the_previously_invisible_wrapper_shapes_are_now_seen() {
         let choose_one_of = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChooseOneOf {
@@ -11113,12 +11082,283 @@ mod has_unimplemented_wrapper_recursion_tests {
                 branches: vec![failure()],
             },
         );
-        assert!(
-            !has_unimplemented(&choose_one_of),
-            "Effect::ChooseOneOf is OUT of this phase's bounded enumeration; when \
-             the general types/ability.rs visitor lands in phase 4 this assertion \
-             is expected to flip and must be updated deliberately"
+        assert!(has_unimplemented(&choose_one_of), "ChooseOneOf branch");
+
+        let separate_chosen = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::SeparateIntoPiles {
+                partition_subject: VoterScope::EachOpponent,
+                object_filter: TargetFilter::Any,
+                chooser: PlayerScope::Controller,
+                chosen_pile_effect: Box::new(failure()),
+                pile_source: PileSource::Battlefield,
+                unchosen_pile_effect: None,
+            },
         );
+        assert!(
+            has_unimplemented(&separate_chosen),
+            "SeparateIntoPiles chosen pile"
+        );
+
+        let separate_unchosen = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::SeparateIntoPiles {
+                partition_subject: VoterScope::EachOpponent,
+                object_filter: TargetFilter::Any,
+                chooser: PlayerScope::Controller,
+                chosen_pile_effect: Box::new(clean()),
+                pile_source: PileSource::Battlefield,
+                unchosen_pile_effect: Some(Box::new(failure())),
+            },
+        );
+        assert!(
+            has_unimplemented(&separate_unchosen),
+            "SeparateIntoPiles unchosen pile"
+        );
+
+        let reveal = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::RevealFromHand {
+                filter: TargetFilter::Any,
+                on_decline: Some(Box::new(failure())),
+            },
+        );
+        assert!(has_unimplemented(&reveal), "RevealFromHand on_decline");
+
+        let vote_per_choice = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Vote {
+                choices: vec!["choice one".into()],
+                per_choice_effect: vec![Box::new(failure())],
+                starting_with: ControllerRef::You,
+                voter_scope: VoterScope::AllPlayers,
+                tally_mode: VoteTally::PerVote,
+                subject: VoteSubject::Named,
+                visibility: VoteVisibility::Open,
+            },
+        );
+        assert!(has_unimplemented(&vote_per_choice), "Vote per-choice");
+
+        let vote_object_outcome = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Vote {
+                choices: vec![],
+                per_choice_effect: vec![],
+                starting_with: ControllerRef::You,
+                voter_scope: VoterScope::AllPlayers,
+                tally_mode: VoteTally::PerVote,
+                subject: VoteSubject::Objects {
+                    candidate_filter: TargetFilter::Any,
+                    outcome_template: Box::new(failure()),
+                },
+                visibility: VoteVisibility::Open,
+            },
+        );
+        assert!(
+            has_unimplemented(&vote_object_outcome),
+            "Vote object outcome template"
+        );
+    }
+
+    /// PAIRED NEGATIVE for the four newly-visible shapes: the gate got wider,
+    /// not indiscriminate. A clean payload under each wrapper still reports
+    /// clean, so `the_previously_invisible_wrapper_shapes_are_now_seen` is
+    /// measuring the nested failure rather than the wrapper's mere presence.
+    #[test]
+    fn the_newly_visible_wrapper_shapes_still_report_clean_when_their_payload_is() {
+        let choose_one_of = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![clean(), clean()],
+            },
+        );
+        assert!(!has_unimplemented(&choose_one_of), "ChooseOneOf branch");
+
+        let separate = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::SeparateIntoPiles {
+                partition_subject: VoterScope::EachOpponent,
+                object_filter: TargetFilter::Any,
+                chooser: PlayerScope::Controller,
+                chosen_pile_effect: Box::new(clean()),
+                pile_source: PileSource::Battlefield,
+                unchosen_pile_effect: Some(Box::new(clean())),
+            },
+        );
+        assert!(!has_unimplemented(&separate), "SeparateIntoPiles");
+
+        let reveal = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::RevealFromHand {
+                filter: TargetFilter::Any,
+                on_decline: Some(Box::new(clean())),
+            },
+        );
+        assert!(!has_unimplemented(&reveal), "RevealFromHand on_decline");
+
+        let vote = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Vote {
+                choices: vec!["choice one".into()],
+                per_choice_effect: vec![Box::new(clean())],
+                starting_with: ControllerRef::You,
+                voter_scope: VoterScope::AllPlayers,
+                tally_mode: VoteTally::PerVote,
+                subject: VoteSubject::Objects {
+                    candidate_filter: TargetFilter::Any,
+                    outcome_template: Box::new(clean()),
+                },
+                visibility: VoteVisibility::Open,
+            },
+        );
+        assert!(!has_unimplemented(&vote), "Vote");
+    }
+
+    /// EDGE-SET GUARD. Pins the exact sequence
+    /// [`Effect::for_each_nested_definition`] emits, so the visitor cannot
+    /// silently drift from the consumers that depend on its completeness —
+    /// including `game/coverage.rs`, whose `DirectEffectPayloadEdge` traversal
+    /// covers this same payload set.
+    ///
+    /// A DROPPED edge here is the exact defect this whole change exists to
+    /// remove: it makes a nested parse failure invisible again, and the card
+    /// silently reclaims support it does not have. The visitor's match is
+    /// wildcard-free so a NEW definition-carrying variant is a compile error;
+    /// this test covers the other direction, an edge quietly stopping being
+    /// emitted for a variant that still carries a payload.
+    #[test]
+    fn the_nested_definition_edge_set_is_pinned() {
+        let payload = |name: &str| {
+            Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::unimplemented(name, format!("unsupported {name}")),
+            ))
+        };
+        let effects = vec![
+            Effect::Vote {
+                choices: vec!["one".into(), "two".into()],
+                per_choice_effect: vec![payload("vote_one"), payload("vote_two")],
+                starting_with: ControllerRef::You,
+                voter_scope: VoterScope::AllPlayers,
+                tally_mode: VoteTally::PerVote,
+                subject: VoteSubject::Objects {
+                    candidate_filter: TargetFilter::Any,
+                    outcome_template: payload("vote_outcome"),
+                },
+                visibility: VoteVisibility::Open,
+            },
+            Effect::SeparateIntoPiles {
+                partition_subject: VoterScope::EachOpponent,
+                object_filter: TargetFilter::Any,
+                chooser: PlayerScope::Controller,
+                chosen_pile_effect: payload("chosen"),
+                pile_source: PileSource::Battlefield,
+                unchosen_pile_effect: Some(payload("unchosen")),
+            },
+            Effect::RevealFromHand {
+                filter: TargetFilter::Any,
+                on_decline: Some(payload("decline")),
+            },
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: payload("delayed"),
+                uses_tracked_set: false,
+            },
+            Effect::RollDie {
+                count: QuantityExpr::Fixed { value: 1 },
+                sides: 6,
+                results: vec![
+                    DieResultBranch {
+                        min: 1,
+                        max: 3,
+                        effect: payload("row_low"),
+                    },
+                    DieResultBranch {
+                        min: 4,
+                        max: 6,
+                        effect: payload("row_high"),
+                    },
+                ],
+                modifier: None,
+            },
+            Effect::FlipCoin {
+                win_effect: Some(payload("flip_win")),
+                lose_effect: Some(payload("flip_lose")),
+                flipper: TargetFilter::Controller,
+            },
+            Effect::FlipCoins {
+                count: QuantityExpr::Fixed { value: 2 },
+                win_effect: Some(payload("flips_win")),
+                lose_effect: Some(payload("flips_lose")),
+                flipper: TargetFilter::Controller,
+            },
+            Effect::FlipCoinUntilLose {
+                win_effect: payload("until_lose_win"),
+            },
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![*payload("branch_one"), *payload("branch_two")],
+            },
+        ];
+
+        let mut edges = Vec::new();
+        for effect in &effects {
+            effect.for_each_nested_definition(&mut |edge, definition| {
+                assert!(
+                    matches!(*definition.effect, Effect::Unimplemented { .. }),
+                    "every payload in this matrix is an unimplemented leaf"
+                );
+                edges.push(edge);
+            });
+        }
+
+        assert_eq!(
+            edges,
+            vec![
+                NestedDefinitionEdge::VotePerChoice,
+                NestedDefinitionEdge::VotePerChoice,
+                NestedDefinitionEdge::VoteObjectOutcome,
+                NestedDefinitionEdge::SeparateIntoPilesChosen,
+                NestedDefinitionEdge::SeparateIntoPilesUnchosen,
+                NestedDefinitionEdge::RevealFromHandOnDecline,
+                NestedDefinitionEdge::CreateDelayedTriggerEffect,
+                NestedDefinitionEdge::RollDieResult,
+                NestedDefinitionEdge::RollDieResult,
+                NestedDefinitionEdge::FlipCoinWin,
+                NestedDefinitionEdge::FlipCoinLose,
+                NestedDefinitionEdge::FlipCoinsWin,
+                NestedDefinitionEdge::FlipCoinsLose,
+                NestedDefinitionEdge::FlipCoinUntilLoseWin,
+                NestedDefinitionEdge::ChooseOneOfBranch,
+                NestedDefinitionEdge::ChooseOneOfBranch,
+            ]
+        );
+
+        // Every effect in the matrix reaches the gate through the visitor.
+        for effect in &effects {
+            let def = AbilityDefinition::new(AbilityKind::Spell, effect.clone());
+            assert!(has_unimplemented(&def));
+        }
+    }
+
+    /// CONTROL for the edge-set guard: a carrier whose optional payloads are all
+    /// absent emits nothing and reports clean, so the pinned sequence above is
+    /// driven by the payloads present rather than by the carrier variants.
+    #[test]
+    fn a_carrier_with_no_payload_emits_no_edge() {
+        let empty = Effect::FlipCoin {
+            win_effect: None,
+            lose_effect: None,
+            flipper: TargetFilter::Controller,
+        };
+        let mut edges = Vec::new();
+        empty.for_each_nested_definition(&mut |edge, _| edges.push(edge));
+        assert!(edges.is_empty());
+        assert!(!has_unimplemented(&AbilityDefinition::new(
+            AbilityKind::Spell,
+            empty
+        )));
     }
 }
 
