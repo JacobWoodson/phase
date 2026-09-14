@@ -30,7 +30,7 @@ use crate::types::ability::{
     ReplacementCondition, ReplacementDefinition, ReplacementMode, SeatDirection, SharedQuality,
     SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind,
     SpellStackToGraveyardReplacement, StackAbilityKind, StaticCondition, StaticDefinition,
-    TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, VoteSubject, ZoneRef,
+    TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -7255,337 +7255,32 @@ fn visit_face_modifications(face: &CardFace, visit: &mut impl FnMut(&ContinuousM
 /// `GenericEffect`. Consumers that need to inspect an ability tree use this
 /// enumeration in addition to their existing traversal for those separate
 /// structures.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum DirectEffectPayloadEdge {
-    VotePerChoice,
-    VoteObjectOutcome,
-    SeparateIntoPilesChosen,
-    SeparateIntoPilesUnchosen,
-    RevealFromHandOnDecline,
-    CreateDelayedTriggerEffect,
-    RollDieResult,
-    FlipCoinWin,
-    FlipCoinLose,
-    FlipCoinsWin,
-    FlipCoinsLose,
-    FlipCoinUntilLoseWin,
-    ChooseOneOfBranch,
-}
+///
+/// This is an alias, not a second enumeration: the edge set is owned by
+/// [`NestedDefinitionEdge`] in `types/ability.rs`, beside the visitor that
+/// emits it. Two independent lists over one edge set is exactly the drift this
+/// module's traversal used to risk — the parser's own continuation gate had a
+/// bounded copy that silently omitted four carriers, which is the defect
+/// `Effect::for_each_nested_definition` was introduced to close.
+use crate::types::ability::NestedDefinitionEdge as DirectEffectPayloadEdge;
 
 /// Visits the one-level executable ability payloads embedded directly in an effect.
+///
+/// Thin adapter over [`Effect::for_each_nested_definition`], the single
+/// authority for which effects carry a direct executable payload. The traversal
+/// and its exhaustiveness guarantee live in the AST layer; this wrapper exists
+/// only so coverage's many call sites keep their `impl FnMut` call style rather
+/// than each spelling out `&mut`.
+///
+/// Because the AST-layer match is exhaustive and wildcard-free, a newly added
+/// definition-carrying `Effect` variant is a compile error there — and every
+/// consumer in this module inherits that guarantee instead of needing its own
+/// arm list to be kept in sync by hand.
 fn visit_direct_effect_ability_payloads<'a>(
     effect: &'a Effect,
     mut visit: impl FnMut(DirectEffectPayloadEdge, &'a AbilityDefinition),
 ) {
-    match effect {
-        Effect::Vote {
-            per_choice_effect,
-            subject,
-            ..
-        } => {
-            for effect in per_choice_effect {
-                visit(DirectEffectPayloadEdge::VotePerChoice, effect);
-            }
-            if let VoteSubject::Objects {
-                outcome_template, ..
-            } = subject
-            {
-                visit(DirectEffectPayloadEdge::VoteObjectOutcome, outcome_template);
-            }
-        }
-        Effect::SeparateIntoPiles {
-            chosen_pile_effect,
-            unchosen_pile_effect,
-            ..
-        } => {
-            visit(
-                DirectEffectPayloadEdge::SeparateIntoPilesChosen,
-                chosen_pile_effect,
-            );
-            if let Some(unchosen_pile_effect) = unchosen_pile_effect {
-                visit(
-                    DirectEffectPayloadEdge::SeparateIntoPilesUnchosen,
-                    unchosen_pile_effect,
-                );
-            }
-        }
-        Effect::RevealFromHand {
-            on_decline: Some(on_decline),
-            ..
-        } => {
-            visit(DirectEffectPayloadEdge::RevealFromHandOnDecline, on_decline);
-        }
-        Effect::CreateDelayedTrigger { effect, .. } => {
-            visit(DirectEffectPayloadEdge::CreateDelayedTriggerEffect, effect);
-        }
-        Effect::RollDie { results, .. } => {
-            for result in results {
-                visit(DirectEffectPayloadEdge::RollDieResult, &result.effect);
-            }
-        }
-        Effect::FlipCoin {
-            win_effect,
-            lose_effect,
-            ..
-        } => {
-            if let Some(win_effect) = win_effect {
-                visit(DirectEffectPayloadEdge::FlipCoinWin, win_effect);
-            }
-            if let Some(lose_effect) = lose_effect {
-                visit(DirectEffectPayloadEdge::FlipCoinLose, lose_effect);
-            }
-        }
-        Effect::FlipCoins {
-            win_effect,
-            lose_effect,
-            ..
-        } => {
-            if let Some(win_effect) = win_effect {
-                visit(DirectEffectPayloadEdge::FlipCoinsWin, win_effect);
-            }
-            if let Some(lose_effect) = lose_effect {
-                visit(DirectEffectPayloadEdge::FlipCoinsLose, lose_effect);
-            }
-        }
-        Effect::FlipCoinUntilLose { win_effect } => {
-            visit(DirectEffectPayloadEdge::FlipCoinUntilLoseWin, win_effect);
-        }
-        Effect::ChooseOneOf { branches, .. } => {
-            for branch in branches {
-                visit(DirectEffectPayloadEdge::ChooseOneOfBranch, branch);
-            }
-        }
-        // Keep this exhaustive: direct ability payloads must be classified above
-        // when a new `Effect` variant is introduced.
-        Effect::StartYourEngines { .. }
-        | Effect::ChangeSpeed { .. }
-        | Effect::DealDamage { .. }
-        | Effect::ApplyPostReplacementDamage { .. }
-        | Effect::EachDealsDamageEqualToPower { .. }
-        | Effect::EachSourceDealsDamage { .. }
-        | Effect::Draw { .. }
-        | Effect::Pump { .. }
-        | Effect::PairWith { .. }
-        | Effect::Destroy { .. }
-        | Effect::Regenerate { .. }
-        | Effect::RemoveAllDamage { .. }
-        | Effect::Counter { .. }
-        | Effect::CounterAll { .. }
-        | Effect::Token { .. }
-        | Effect::GainLife { .. }
-        | Effect::LoseLife { .. }
-        | Effect::SetTapState { .. }
-        | Effect::RemoveCounter { .. }
-        | Effect::Sacrifice { .. }
-        | Effect::DiscardCard { .. }
-        | Effect::Mill { .. }
-        | Effect::Scry { .. }
-        | Effect::PumpAll { .. }
-        | Effect::DamageAll { .. }
-        | Effect::DamageEachPlayer { .. }
-        | Effect::DestroyAll { .. }
-        | Effect::ChangeZone { .. }
-        | Effect::ChangeZoneAll { .. }
-        | Effect::Dig { .. }
-        | Effect::GainControl { .. }
-        | Effect::GainControlAll { .. }
-        | Effect::ControlNextTurn { .. }
-        | Effect::Attach { .. }
-        | Effect::UnattachAll { .. }
-        | Effect::Surveil { .. }
-        | Effect::Fight { .. }
-        | Effect::Bounce { .. }
-        | Effect::BounceAll { .. }
-        | Effect::Explore
-        | Effect::ExploreAll { .. }
-        | Effect::Investigate
-        | Effect::Tribute { .. }
-        | Effect::TimeTravel
-        | Effect::BecomeMonarch { .. }
-        | Effect::NoOp
-        | Effect::Proliferate
-        | Effect::ProliferateTarget { .. }
-        | Effect::Populate
-        | Effect::Clash
-        | Effect::Behold { .. }
-        | Effect::EndTheTurn
-        | Effect::EndCombatPhase
-        | Effect::SwitchPT { .. }
-        | Effect::CopySpell { .. }
-        | Effect::EpicCopy { .. }
-        | Effect::CastCopyOfCard { .. }
-        | Effect::CopyTokenOf { .. }
-        | Effect::CreateTokenCopyFromPool { .. }
-        | Effect::Myriad
-        | Effect::Encore
-        | Effect::CombineHost { .. }
-        | Effect::ChooseAugmentAndCombineWithHost { .. }
-        | Effect::Meld { .. }
-        | Effect::ExileHaunting { .. }
-        | Effect::HideawayConceal { .. }
-        | Effect::CopyTokenBlockingAttacker { .. }
-        | Effect::BecomeCopy { .. }
-        | Effect::ChoosePermanent { .. }
-        | Effect::GainActivatedAbilitiesOfTarget { .. }
-        | Effect::ChooseCard { .. }
-        | Effect::PutCounter { .. }
-        | Effect::ChooseCounterKind { .. }
-        | Effect::PutChosenCounter { .. }
-        | Effect::PutCounterAll { .. }
-        | Effect::MultiplyCounter { .. }
-        | Effect::ChooseCounterAdjustment { .. }
-        | Effect::DoublePT { .. }
-        | Effect::DoublePTAll { .. }
-        | Effect::MoveCounters { .. }
-        | Effect::ReproduceEventCounters { .. }
-        | Effect::Animate { .. }
-        | Effect::ReturnAsAura { .. }
-        | Effect::RegisterBending { .. }
-        | Effect::GenericEffect { .. }
-        | Effect::Cleanup { .. }
-        | Effect::Mana { .. }
-        | Effect::Discard { .. }
-        | Effect::Shuffle { .. }
-        | Effect::Transform { .. }
-        | Effect::FlipPermanent { .. }
-        | Effect::SearchLibrary { .. }
-        | Effect::SearchOutsideGame { .. }
-        // CR 400.11b: carries no nested ability definition.
-        | Effect::OpenBoosterPack { .. }
-        | Effect::RevealHand { .. }
-        | Effect::RevealFromHand {
-            on_decline: None, ..
-        }
-        | Effect::Reveal { .. }
-        | Effect::RevealTop { .. }
-        | Effect::ExileTop { .. }
-        | Effect::ExileFaceDownPile { .. }
-        | Effect::TargetOnly { .. }
-        | Effect::Choose { .. }
-        | Effect::OpponentGuess { .. }
-        | Effect::SwapChosenLabels { .. }
-        | Effect::RevealChosenNumbers { .. }
-        | Effect::ChooseDamageSource { .. }
-        | Effect::Suspect { .. }
-        | Effect::Unsuspect { .. }
-        | Effect::Connive { .. }
-        | Effect::PhaseOut { .. }
-        | Effect::PhaseIn { .. }
-        | Effect::ForceBlock { .. }
-        | Effect::ForceAttack { .. }
-        | Effect::SolveCase
-        | Effect::BecomePrepared { .. }
-        | Effect::BecomeUnprepared { .. }
-        | Effect::BecomeSaddled { .. }
-        | Effect::SetClassLevel { .. }
-        | Effect::AddTargetReplacement { .. }
-        | Effect::AddRestriction { .. }
-        | Effect::ReduceNextSpellCost { .. }
-        | Effect::GrantNextSpellAbility { .. }
-        | Effect::AddPendingETBCounters { .. }
-        | Effect::AddPendingEntersModifications { .. }
-        | Effect::CreateEmblem { .. }
-        | Effect::PayCost { .. }
-        | Effect::CastFromZone { .. }
-        | Effect::FreeCastFromZones { .. }
-        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
-        | Effect::PreventDamage { .. }
-        | Effect::CreateDamageReplacement { .. }
-        | Effect::CreateDrawReplacement { .. }
-        | Effect::CreatePlaneswalkReplacement { .. }
-        | Effect::LoseTheGame { .. }
-        | Effect::WinTheGame { .. }
-        | Effect::RingTemptsYou
-        | Effect::VentureIntoDungeon
-        | Effect::VentureInto { .. }
-        | Effect::TakeTheInitiative
-        | Effect::ArrangePlanarDeckTop { .. }
-        | Effect::Planeswalk
-        | Effect::ChaosEnsues
-        | Effect::ReverseTurnOrder
-        | Effect::RedistributeLifeTotals
-        | Effect::OpenAttractions { .. }
-        | Effect::RollToVisitAttractions
-        | Effect::AssembleContraptions { .. }
-        | Effect::AssembleContraptionsFromRollDifference
-        | Effect::CrankContraptions { .. }
-        | Effect::ReassembleContraption { .. }
-        | Effect::AssembleContraptionOnSprocket { .. }
-        | Effect::ReassembleContraptionOnSprocket { .. }
-        | Effect::PutSticker { .. }
-        | Effect::ApplySticker { .. }
-        | Effect::ProcessRadCounters
-        | Effect::GrantCastingPermission { .. }
-        | Effect::ChooseFromZone { .. }
-        | Effect::RememberCard { .. }
-        | Effect::NoteManaSpent
-        | Effect::ForEachCategory { .. }
-        | Effect::ChooseObjectsIntoTrackedSet { .. }
-        | Effect::ChooseAndSacrificeRest { .. }
-        | Effect::EachPlayerCopyChosen { .. }
-        | Effect::Exploit { .. }
-        | Effect::GainEnergy { .. }
-        | Effect::GivePlayerCounter { .. }
-        | Effect::LoseAllPlayerCounters { .. }
-        | Effect::ExileFromTopUntil { .. }
-        | Effect::RevealUntil { .. }
-        | Effect::Discover { .. }
-        | Effect::Heist { .. }
-        | Effect::HeistExile
-        | Effect::Cascade
-        | Effect::Ripple { .. }
-        | Effect::MiracleCast { .. }
-        | Effect::MadnessCast { .. }
-        | Effect::PutAtLibraryPosition { .. }
-        | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
-        | Effect::PutOnTopOrBottom { .. }
-        | Effect::GiftDelivery { .. }
-        | Effect::Goad { .. }
-        | Effect::GoadAll { .. }
-        | Effect::Detain { .. }
-        | Effect::SetRoomDoorLock { .. }
-        | Effect::ExchangeControl { .. }
-        | Effect::ChangeTargets { .. }
-        | Effect::Manifest { .. }
-        | Effect::ManifestDread
-        | Effect::Cloak { .. }
-        | Effect::TurnFaceUp { .. }
-        | Effect::TurnFaceDown { .. }
-        | Effect::ExtraTurn { .. }
-        | Effect::GrantExtraLoyaltyActivations { .. }
-        | Effect::SkipNextTurn { .. }
-        | Effect::SkipNextStep { .. }
-        | Effect::AdditionalPhase { .. }
-        | Effect::Double { .. }
-        | Effect::RuntimeHandled { .. }
-        | Effect::Incubate { .. }
-        | Effect::Amass { .. }
-        | Effect::Monstrosity { .. }
-        | Effect::Specialize
-        | Effect::Renown { .. }
-        | Effect::Bolster { .. }
-        | Effect::Adapt { .. }
-        | Effect::Learn
-        | Effect::Forage
-        | Effect::CompletePlayerAction { .. }
-        | Effect::Harness
-        | Effect::CollectEvidence { .. }
-        | Effect::Endure { .. }
-        | Effect::BlightEffect { .. }
-        | Effect::Seek { .. }
-        | Effect::SetLifeTotal { .. }
-        | Effect::ExchangeLifeWithStat { .. }
-        | Effect::ExchangeLifeTotals { .. }
-        | Effect::SetDayNight { .. }
-        | Effect::GiveControl { .. }
-        | Effect::RemoveFromCombat { .. }
-        | Effect::BecomeBlocked { .. }
-        | Effect::Conjure { .. }
-        | Effect::ApplyPerpetual { .. }
-        | Effect::Intensify { .. }
-        | Effect::DraftFromSpellbook { .. }
-        | Effect::Unimplemented { .. } => {}
-    }
+    effect.for_each_nested_definition(&mut visit);
 }
 
 /// Recursively visit modifications inside an ability's effect graph.
@@ -13772,7 +13467,7 @@ mod tests {
         AbilityCondition, AbilityKind, Comparator, ContinuousModification, ControllerRef,
         CounterTransferMode, DieResultBranch, Effect, PileSource, PlayerFilter, PlayerScope,
         PreventionAmount, PreventionScope, ReplacementCondition, StaticDefinition, TargetFilter,
-        TriggerConstraint, VoteTally, VoteVisibility, VoterScope,
+        TriggerConstraint, VoteSubject, VoteTally, VoteVisibility, VoterScope,
     };
     use crate::types::card_type::CardType;
     use crate::types::identifiers::{CardId, ObjectId};
