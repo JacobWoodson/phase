@@ -35,7 +35,7 @@ use crate::types::ability::{
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
 use crate::types::counter::{CounterMatch, CounterType};
-use crate::types::keywords::Keyword;
+use crate::types::keywords::{Keyword, ProtectionTarget};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
@@ -9045,6 +9045,17 @@ enum StructuralFeature {
     /// else in coverage can see it. This is exactly the "parses fine but the
     /// runtime cannot execute it" case `ResolverFeature` exists for.
     TrackedSetReturnAfterBattlefieldExit,
+    /// A `Protection` grant whose quality fell through the parser's untyped
+    /// `ProtectionTarget::CardType` catch-all and names something that is not a
+    /// card type at all, so `source_matches_card_type` can never match it and
+    /// the grant is INERT. The card parses, exports a real `AddKeyword`
+    /// modification, and protects from nothing — Haktos the Unscarred's
+    /// "each mana value other than the chosen number".
+    ///
+    /// The repo already documents this hazard class in `types/keywords.rs`'s
+    /// `parse_protection_target_monocolored_is_quality_not_card_type`, which
+    /// notes that such a grant "would do nothing".
+    InertProtectionQualityGrant,
 }
 
 impl StructuralFeature {
@@ -9067,6 +9078,7 @@ impl StructuralFeature {
             TrackedSetReturnAfterBattlefieldExit => {
                 "structural:tracked_set_return_after_battlefield_exit"
             }
+            InertProtectionQualityGrant => "structural:inert_protection_quality_grant",
         }
     }
 
@@ -9087,6 +9099,10 @@ impl StructuralFeature {
             // return its creatures. That pair is why the FLAG, not the effect
             // shape, is the discriminator.
             TrackedSetReturnAfterBattlefieldExit => FeatureSupport::Unhandled,
+            // MEASURED UNHANDLED. `source_matches_card_type` compares the quality
+            // only against core-type words and parseable subtypes, so a quality
+            // outside both can never match any source and the grant does nothing.
+            InertProtectionQualityGrant => FeatureSupport::Unhandled,
         }
     }
 }
@@ -9127,6 +9143,13 @@ fn extract_card_features(face: &CardFace, features: &mut HashMap<String, Feature
     // Static abilities and all definitions they grant.
     for stat in &face.static_abilities {
         extract_static_features(stat, features, TokenStaticTraversal::Include);
+    }
+    // CR 702.16: the same inert-grant check for a PRINTED keyword line, which
+    // lands on the face rather than inside a static's modifications.
+    for keyword in &face.keywords {
+        if keyword_is_inert_protection_grant(keyword) {
+            emit_structural(features, StructuralFeature::InertProtectionQualityGrant);
+        }
     }
     if face.additional_cost.is_some() {
         emit_structural(features, StructuralFeature::AdditionalCost);
@@ -9171,47 +9194,118 @@ fn extract_card_features(face: &CardFace, features: &mut HashMap<String, Feature
 /// Sudden Disappearance — same publisher, same singular-`ChangeZone` consumer —
 /// was measured WORKING. Marking a working card red is the same honesty
 /// violation as leaving a broken one green.
-fn delayed_trigger_strands_a_tracked_set(def: &AbilityDefinition) -> bool {
-    if let Effect::CreateDelayedTrigger {
-        effect,
-        uses_tracked_set,
-        ..
-    } = &*def.effect
-    {
-        if !*uses_tracked_set
-            && matches!(
-                &*effect.effect,
-                Effect::ChangeZone { target, .. } if matches!(
-                    target,
-                    TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
-                )
+/// TRAVERSAL: every executable payload edge, with the enclosing "inside an
+/// unbound delayed trigger" state propagated through all of them.
+///
+/// Descent reuses [`visit_direct_effect_ability_payloads`] rather than
+/// hand-rolling a second walk, so the census cannot drift from the repo's own
+/// definition of "nested executable payload" — `Vote`, `SeparateIntoPiles`,
+/// `RevealFromHand`, the flip branches and `ChooseOneOf` are all reached, not
+/// just `CreateDelayedTrigger` and `RollDie`.
+///
+/// The state is propagated rather than tested only at the delayed trigger's
+/// IMMEDIATE effect: a return nested in the body's `sub_ability` (or in any
+/// payload beneath it) strands its objects exactly the same way.
+fn scan_stranded_tracked_set(def: &AbilityDefinition, inside_unbound_delayed: bool) -> bool {
+    if inside_unbound_delayed
+        && matches!(
+            &*def.effect,
+            Effect::ChangeZone { target, .. } if matches!(
+                target,
+                TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
             )
-        {
-            return true;
-        }
+        )
+    {
+        return true;
     }
-    let nested = match &*def.effect {
-        Effect::CreateDelayedTrigger { effect, .. } => {
-            delayed_trigger_strands_a_tracked_set(effect)
+
+    // Entering THIS effect's delayed-trigger payload turns the state on when the
+    // trigger is unbound, and leaves it otherwise untouched so a bound trigger
+    // nested inside an unbound one is still evaluated on its own merits.
+    let delayed_payload_is_unbound = matches!(
+        &*def.effect,
+        Effect::CreateDelayedTrigger {
+            uses_tracked_set: false,
+            ..
         }
-        Effect::RollDie { results, .. } => results
-            .iter()
-            .any(|branch| delayed_trigger_strands_a_tracked_set(&branch.effect)),
-        _ => false,
-    };
-    nested
+    );
+    let mut found = false;
+    visit_direct_effect_ability_payloads(&def.effect, |edge, payload| {
+        let payload_state = match edge {
+            DirectEffectPayloadEdge::CreateDelayedTriggerEffect => delayed_payload_is_unbound,
+            _ => inside_unbound_delayed,
+        };
+        found |= scan_stranded_tracked_set(payload, payload_state);
+    });
+
+    found
         || def
             .sub_ability
             .as_deref()
-            .is_some_and(delayed_trigger_strands_a_tracked_set)
+            .is_some_and(|sub| scan_stranded_tracked_set(sub, inside_unbound_delayed))
         || def
             .else_ability
             .as_deref()
-            .is_some_and(delayed_trigger_strands_a_tracked_set)
+            .is_some_and(|branch| scan_stranded_tracked_set(branch, inside_unbound_delayed))
         || def
             .mode_abilities
             .iter()
-            .any(delayed_trigger_strands_a_tracked_set)
+            .any(|mode| scan_stranded_tracked_set(mode, inside_unbound_delayed))
+}
+
+fn delayed_trigger_strands_a_tracked_set(def: &AbilityDefinition) -> bool {
+    scan_stranded_tracked_set(def, false)
+}
+
+/// TRACKED-SET-RETURN-DEFECT's sibling honesty marker: a `Protection` grant the
+/// runtime can never satisfy.
+///
+/// `ProtectionTarget::CardType(s)` is the parser's catch-all for a protection
+/// quality it could not type (`types/keywords.rs`), and
+/// `game::keywords::source_matches_card_type` can only ever match `s` against a
+/// core type word or a parseable subtype. Any other string — "each mana value
+/// other than the chosen number" (Haktos the Unscarred), "each color", "that
+/// player" — makes the grant INERT: the card parses, exports a real
+/// `AddKeyword` modification, and grants nothing at runtime.
+///
+/// The predicate below mirrors `source_matches_card_type`'s two acceptance paths
+/// exactly, so the two cannot drift.
+fn protection_card_type_is_satisfiable(quality: &str) -> bool {
+    const CORE_TYPE_WORDS: [&str; 14] = [
+        "artifact",
+        "artifacts",
+        "creature",
+        "creatures",
+        "enchantment",
+        "enchantments",
+        "instant",
+        "instants",
+        "sorcery",
+        "sorceries",
+        "planeswalker",
+        "planeswalkers",
+        "land",
+        "lands",
+    ];
+    if CORE_TYPE_WORDS
+        .iter()
+        .any(|word| quality.eq_ignore_ascii_case(word))
+    {
+        return true;
+    }
+    // Same subtype gate `source_subtype_matches_protection_quality` applies:
+    // the quality must parse as a subtype and be fully consumed.
+    let lowered = quality.to_ascii_lowercase();
+    crate::parser::oracle_util::parse_subtype(&lowered)
+        .is_some_and(|(_, consumed)| consumed == lowered.len())
+}
+
+fn keyword_is_inert_protection_grant(keyword: &Keyword) -> bool {
+    matches!(
+        keyword,
+        Keyword::Protection(ProtectionTarget::CardType(quality))
+            if !protection_card_type_is_satisfiable(quality)
+    )
 }
 
 fn emit_structural(features: &mut HashMap<String, FeatureSupport>, s: StructuralFeature) {
@@ -9373,6 +9467,15 @@ fn extract_modification_features(
     features: &mut HashMap<String, FeatureSupport>,
     token_static_traversal: TokenStaticTraversal,
 ) {
+    // CR 702.16: a protection grant whose quality never lowered to a typed
+    // target is inert at runtime. Checked here rather than at the card level so
+    // it also covers grants nested inside `GrantAbility` payloads, which
+    // `walk_self_and_granted` routes through this same function.
+    if let ContinuousModification::AddKeyword { keyword } = modification {
+        if keyword_is_inert_protection_grant(keyword) {
+            emit_structural(features, StructuralFeature::InertProtectionQualityGrant);
+        }
+    }
     match modification {
         ContinuousModification::GrantAbility { definition } => {
             extract_ability_features_with_token_statics(

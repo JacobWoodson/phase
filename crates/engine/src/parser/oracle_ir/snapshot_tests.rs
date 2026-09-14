@@ -3269,8 +3269,9 @@ fn druid_of_the_emerald_grove_trigger_owns_all_three_printed_rows() {
             .iter()
             .map(|b| (b.min, b.max))
             .collect::<Vec<(u8, u8)>>(),
-        vec![(1, 9), (10, 19), (20, u8::MAX)],
-        "all three printed rows, including the \"9 or less\" wording (lower bound \
-         implicit at 1 per CR 706.1a) and the open-ended \"20+\" (u8::MAX)"
+        vec![(0, 9), (10, 19), (20, u8::MAX)],
+        "all three printed rows, including the \"9 or less\" wording (resolvable \
+         lower bound 0, because CR 706.2 selects on the post-modifier result and \
+         `apply_modifier` clamps it to 0) and the open-ended \"20+\" (u8::MAX)"
     );
 }

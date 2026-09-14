@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, tag_no_case, take_until, take_while1};
+use nom::bytes::complete::{tag, tag_no_case, take_till, take_until, take_while1};
 use nom::character::complete::{anychar, char, multispace0, multispace1};
 use nom::combinator::{all_consuming, eof, map_opt, opt, peek, recognize, rest, value};
 use nom::multi::{many_till, separated_list1};
@@ -2245,7 +2245,33 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
     // Claiming them as Moved+unsupported would reshape every as-enters
     // permanent-choose card (Dauntless Bodyguard, Scheming Fence, …) even when
     // no CopyChosen consumer exists.
-    let choice_type = parse_named_choice_object(choose_object.as_ref())?;
+    // CR 614.1c: RETRY on the choice object's OWN SENTENCE when the full phrase
+    // is refused.
+    //
+    // `choose_object` runs to the end of the LINE, so a card whose as-enters
+    // choice is followed by a second sentence hands that tail to the object
+    // table. A PREFIX-matching arm ignores the tail — Camato Scout's "a basic
+    // land type. ~ has landwalk of the chosen type" still matches
+    // `tag("a basic land type")` — but every `all_consuming` arm (the numeric
+    // and creature-type enumerations) declines on it, and the `?` here would
+    // then abandon the WHOLE replacement. That asymmetry between the two halves
+    // of the object table is the same class of defect that made those arms
+    // invisible to the classifier gate.
+    //
+    // Purely ADDITIVE: the full phrase is still tried first and unchanged, so no
+    // currently-succeeding parse takes a different path. Only a phrase that
+    // would otherwise have been refused outright gets this second chance.
+    let choice_type = match parse_named_choice_object(choose_object.as_ref()) {
+        Some(choice_type) => choice_type,
+        None => {
+            let object_phrase = choose_object.as_ref();
+            let sentence = take_till::<_, _, OracleError<'_>>(|c| c == '.')
+                .parse(object_phrase)
+                .map_or(object_phrase, |(_, head)| head)
+                .trim();
+            parse_named_choice_object(sentence)?
+        }
+    };
 
     let choose = AbilityDefinition::new(
         AbilityKind::Spell,
