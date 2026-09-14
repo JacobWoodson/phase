@@ -44,9 +44,7 @@ use engine::game::casting::{
     graveyard_lands_playable_by_permission, spell_objects_available_to_cast,
 };
 use engine::game::scenario::GameScenario;
-use engine::types::ability::{
-    CardPlayMode, ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter,
-};
+use engine::types::ability::{CardPlayMode, ControllerRef, TargetFilter, TypeFilter, TypedFilter};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::CastPaymentMode;
@@ -432,32 +430,24 @@ fn casting_a_stolen_then_buried_creature_from_its_owners_graveyard_is_accepted()
     );
 }
 
-/// PRODUCTION FLOW -- the BESTOW keyword-constraint consumer.
+/// THE row for the fourth call site,
+/// `has_graveyard_cast_permission_without_keyword_constraint`.
 ///
-/// The fourth changed call site,
-/// `has_graveyard_cast_permission_without_keyword_constraint`, is reached only
-/// from the bestow lane, and only for a card in a graveyard. It asks a narrow
-/// question: does some OTHER graveyard permission grant a plain cast, or is the
-/// only permission a "using its bestow ability" rider (the Detective's Phoenix
-/// shape)? When the answer is "rider only", CR 702.103a forbids falling back to
-/// a normal creature cast and the action is refused.
+/// That consumer short-circuits on its FIRST conjunct:
+/// `!filter_has_keyword_kind_constraint(source.filter, kind)`. So a permission
+/// carrying a `HasKeywordKind { Bestow }` rider can never witness the changed
+/// matcher on the third conjunct -- the fixture must use an UNCONSTRAINED
+/// permission (the plain Muldrotha shape, "you may cast creature cards from
+/// your graveyard"), which is what this row installs.
 ///
-/// That question is answered by matching the permission's filter against the
-/// card -- which is exactly the owner-vs-LKI axis this suite covers. This row
-/// stages the rider-only permission on a card that died under an opponent's
-/// control and asserts the refusal still lands, i.e. the consumer resolved the
-/// permission against the card's OWNER rather than silently failing to match it
-/// at all.
-///
-/// NOTE ON SCOPE: a bestow cast from the graveyard under a permission with no
-/// bestow constraint (a plain Muldrotha-shaped "cast creature cards from your
-/// graveyard") is refused by this engine for reasons unrelated to owner
-/// scoping -- verified by isolation: the identical fixture with the `Bestow`
-/// keyword removed is accepted, and with it present is refused, whichever
-/// controller the card died under. That is a separate pre-existing gap in the
-/// bestow lane and is deliberately not addressed here.
+/// The assertion is the consumer's own verdict, queried directly, so the row
+/// cannot pass on an unrelated failure the way a bare `is_err()` can: it is a
+/// POSITIVE assertion that the consumer answers `true` for a card whose LKI
+/// controller is the thief. Pre-fix it answers `false` -- the stale LKI
+/// controller fails the `controller: You` axis on the third conjunct, which is
+/// exactly the matcher this PR changes.
 #[test]
-fn the_bestow_rider_refusal_resolves_its_permission_against_the_owner() {
+fn the_bestow_keyword_constraint_consumer_resolves_against_the_owner() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
@@ -465,7 +455,7 @@ fn the_bestow_rider_refusal_resolves_its_permission_against_the_owner() {
     builder.with_mana_cost(ManaCost::generic(1));
     let bestowed = builder.id();
 
-    // A legal host, so the refusal below cannot be caused by an absent target.
+    // A legal Aura host, so nothing below can be explained by an absent target.
     let host = scenario
         .add_creature(PlayerId(0), "Grizzly Bears", 2, 2)
         .id();
@@ -492,57 +482,130 @@ fn the_bestow_rider_refusal_resolves_its_permission_against_the_owner() {
     }
 
     steal_then_bury(&mut runner, bestowed, PlayerId(1));
-
-    // The Detective's-Phoenix shape: the ONLY graveyard permission is a
-    // "using its bestow ability" rider, expressed as a keyword-kind constraint
-    // on the permission's own filter.
-    let source = engine::game::zones::create_object(
-        runner.state_mut(),
-        CardId(5155),
+    // UNCONSTRAINED, so the consumer's first conjunct passes and execution
+    // reaches the owner/LKI matcher.
+    stage_permission_source(
+        &mut runner,
         PlayerId(0),
-        "Bestow Rider Source".to_string(),
-        Zone::Battlefield,
+        CardId(5155),
+        "Muldrotha, the Gravetide",
+        CardPlayMode::Cast,
+        vec![TypeFilter::Creature],
     );
-    runner
-        .state_mut()
-        .objects
-        .get_mut(&source)
-        .expect("permission source")
-        .static_definitions
-        .push(
-            StaticDefinition::new(StaticMode::GraveyardCastPermission {
-                frequency: CastFrequency::Unlimited,
-                play_mode: CardPlayMode::Cast,
-                graveyard_destination_replacement: None,
-                extra_cost: None,
-                enters_with_counter: None,
-            })
-            .affected(TargetFilter::Typed(TypedFilter {
-                type_filters: vec![TypeFilter::Creature],
-                // THE AXIS UNDER TEST, as in the sibling rows.
-                controller: Some(ControllerRef::You),
-                // CR 702.103a: the rider -- this permission authorizes only a
-                // bestow cast, which is what makes the fall-back refusal legal.
-                properties: vec![FilterProp::HasKeywordKind {
-                    value: KeywordKind::Bestow,
-                }],
-            })),
-        );
     for _ in 0..2 {
         add_mana(&mut runner, PlayerId(0), ManaType::Colorless);
     }
 
     assert_lki_diverges(runner.state(), bestowed, PlayerId(0), PlayerId(1));
 
-    // REACH-GUARD: the rider permission really does match this card, so the
-    // assertion below is about the bestow lane and not about a permission that
-    // failed to resolve at all. Pre-fix this list was EMPTY -- the stale LKI
-    // controller kept the owner's own card out of their own permission.
+    // CR 109.4 + CR 108.4a: the consumer's own verdict. This is the third
+    // conjunct's matcher, reached only because the permission is unconstrained.
+    // Pre-fix: false.
+    assert!(
+        engine::game::casting::has_graveyard_cast_permission_without_keyword_constraint_for_test(
+            runner.state(),
+            PlayerId(0),
+            bestowed,
+            KeywordKind::Bestow,
+        ),
+        "CR 109.4 + CR 108.4a: the bestow keyword-constraint consumer must resolve an \
+         unconstrained graveyard permission against the card's OWNER, even though an \
+         opponent controlled it when it died"
+    );
+
+    // GUARD: the same consumer must not answer `true` for a card owned by
+    // another player -- the fix substitutes the owner axis, it does not drop it.
+    let opponent_card = engine::game::zones::create_object(
+        runner.state_mut(),
+        CardId(5157),
+        PlayerId(1),
+        "Opponent Creature".to_string(),
+        Zone::Graveyard,
+    );
+    assert!(
+        !engine::game::casting::has_graveyard_cast_permission_without_keyword_constraint_for_test(
+            runner.state(),
+            PlayerId(0),
+            opponent_card,
+            KeywordKind::Bestow,
+        ),
+        "CR 108.4a: the owner substitution must not widen the bestow consumer to a card \
+         owned by another player"
+    );
+
+    assert_eq!(
+        runner.state().objects[&host].zone,
+        Zone::Battlefield,
+        "staging: the prospective Aura host must still be on the battlefield"
+    );
+}
+
+/// The bestow CAST from a graveyard is blocked by a defect unrelated to owner
+/// scoping; this row pins that blocker so it cannot regress silently and so the
+/// row above is not mistaken for cast-path coverage.
+///
+/// `handle_bestow_cost_choice_with_payment_mode` calls `apply_bestow_aura_form`
+/// -- which per CR 702.103b strips the Creature core type -- BEFORE calling
+/// `prepare_spell_cast_with_variant_override`. That re-evaluates the graveyard
+/// permission, whose filter is `creature cards`, against a card that is no
+/// longer a creature, so the cast is refused with "Card is not in a castable
+/// zone".
+///
+/// CR 702.103b puts the form change "as a spell cast bestowed is put onto the
+/// stack" -- i.e. at CR 601.2a, AFTER the permission has authorized the cast --
+/// so re-deriving the permission from the post-change types is the defect.
+///
+/// Verified independent of this PR: the diff touches neither
+/// `apply_bestow_aura_form` nor any type filter, and the same refusal
+/// reproduces with an unconstrained permission whichever controller the card
+/// died under. Tracked separately rather than fixed here.
+#[test]
+fn bestow_cast_from_graveyard_is_blocked_by_the_aura_form_type_seam() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let mut builder = scenario.add_creature_to_hand(PlayerId(0), "Boon Satyr", 4, 2);
+    builder.with_mana_cost(ManaCost::generic(1));
+    let bestowed = builder.id();
+    scenario.add_creature(PlayerId(0), "Grizzly Bears", 2, 2);
+
+    let mut runner = scenario.build();
+    {
+        let obj = runner
+            .state_mut()
+            .objects
+            .get_mut(&bestowed)
+            .expect("bestow card");
+        obj.keywords
+            .push(Keyword::Bestow(BestowCost::Mana(ManaCost::generic(2))));
+        for types in [&mut obj.card_types, &mut obj.base_card_types] {
+            if !types.core_types.contains(&CoreType::Enchantment) {
+                types.core_types.push(CoreType::Enchantment);
+            }
+        }
+    }
+
+    // No control change here: the blocker is independent of the owner axis.
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), bestowed, Zone::Graveyard, &mut events);
+    stage_permission_source(
+        &mut runner,
+        PlayerId(0),
+        CardId(5158),
+        "Muldrotha, the Gravetide",
+        CardPlayMode::Cast,
+        vec![TypeFilter::Creature],
+    );
+    for _ in 0..4 {
+        add_mana(&mut runner, PlayerId(0), ManaType::Colorless);
+    }
+
+    // REACH-GUARD: the permission DOES authorize this card before the cast, so
+    // the refusal below is the bestow seam and not an absent permission.
     let castable = spell_objects_available_to_cast(runner.state(), PlayerId(0));
     assert!(
         castable.contains(&bestowed),
-        "reach-guard (CR 109.4 + CR 108.4a): the rider permission must resolve against the \
-         card's OWNER, so the card must be enumerated as castable, got {castable:?}"
+        "reach-guard: the unconstrained permission must offer the card, got {castable:?}"
     );
 
     let card_id = runner.state().objects[&bestowed].card_id;
@@ -553,23 +616,16 @@ fn the_bestow_rider_refusal_resolves_its_permission_against_the_owner() {
         payment_mode: CastPaymentMode::Auto,
     });
 
-    // CR 702.103a: a "using its bestow ability" rider does not authorize a
-    // normal creature cast, so the fall-through must be refused rather than
-    // quietly casting the card for its printed cost.
+    // The SPECIFIC blocker, not a bare `is_err()`.
+    let message = match &result {
+        Err(err) => format!("{err:?}"),
+        Ok(_) => String::new(),
+    };
     assert!(
-        result.is_err(),
-        "CR 702.103a: a bestow-rider permission must not authorize a normal creature cast \
-         from the graveyard, got {result:?}"
-    );
-    assert_eq!(
-        runner.state().objects[&bestowed].zone,
-        Zone::Graveyard,
-        "the refused card must stay in the graveyard"
-    );
-    assert_eq!(
-        runner.state().objects[&host].zone,
-        Zone::Battlefield,
-        "staging: the prospective Aura host must still be on the battlefield"
+        message.contains("Card is not in a castable zone"),
+        "the bestow/graveyard blocker must remain exactly this refusal -- if this row starts \
+         failing, the aura-form type seam was fixed and the consumer above should be \
+         promoted to a full cast-path regression, got {result:?}"
     );
 }
 
