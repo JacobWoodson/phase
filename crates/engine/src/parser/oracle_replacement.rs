@@ -28076,6 +28076,32 @@ mod as_enters_at_random_selection_tests {
         );
     }
 
+    /// Row 1.K TWIN — the reviewer's case: Haktos' choice sentence followed by
+    /// its protection continuation on the SAME line (Scryfall joins them with
+    /// ". "). Excision preserves following sentences, so the full object phrase
+    /// defeats every `all_consuming` arm — the labeled fallback's >2-word gate
+    /// refuses the protection tail — and only the first-sentence retry restores
+    /// the enumeration. Without the retry this returns None.
+    #[test]
+    fn haktos_choice_with_protection_continuation_still_exports_the_range() {
+        assert_eq!(
+            choose_effect(
+                "As Haktos enters, choose 2, 3, or 4 at random. Haktos has \
+                 protection from each mana value other than the chosen number.",
+                "Haktos the Unscarred",
+            ),
+            Some(Effect::Choose {
+                choice_type: ChoiceType::NumberRange {
+                    min: 2,
+                    max: Some(4),
+                    distinctness: NumberDistinctness::Repeatable,
+                },
+                persist: true,
+                selection: TargetSelectionMode::Random,
+            })
+        );
+    }
+
     /// BLAST-RADIUS PROPERTY — when no qualifier is present the object phrase is
     /// borrowed unchanged, so every as-enters card without "at random" takes a
     /// bit-identical path through the object table. Exercised across the object
