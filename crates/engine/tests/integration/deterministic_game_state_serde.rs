@@ -1181,6 +1181,7 @@ fn serde_hash_owner_census_is_exhaustive_and_every_canonical_owner_names_its_ada
 fn back_face(name: &str) -> BackFaceData {
     BackFaceData {
         is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
         name: name.to_string(),
         power: None,
         toughness: None,
@@ -2234,7 +2235,9 @@ fn real_game_state_hash_owners_are_canonical_and_round_trip_across_all_persisten
         first_name < second_name,
         "objects must emit by typed numeric key order"
     );
-    let specialize = field_fragment(&forward_json, "specialize_faces", "foretold");
+    // Anchored on the next field that serializes unconditionally: `foretold` holds its
+    // default here and no longer emits a key.
+    let specialize = field_fragment(&forward_json, "specialize_faces", "base_power");
     assert!(
         specialize.find("\"White\"").expect("white face")
             < specialize.find("\"Blue\"").expect("blue face"),

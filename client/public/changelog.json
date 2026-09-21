@@ -1,6 +1,49 @@
 {
   "entries": [
     {
+      "id": 211,
+      "date": "2026-09-18",
+      "title": "Winston Draft joins the table",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Winston Draft is now available, with local, bot-filled, and online draft-pod play\n• Feral Ghoul, Brass Knuckles, Zenos yae Galvus, Shelinda, Yevon Acolyte, Agent Frank Horrigan, and Willie Lumpkin, Postman join the playable card pool\n• Replicate now makes the correct copy for every additional payment, and older custom formats can use their historical Wish and legend-rule scopes\n\n🛠️ Cards That Now Work Right\n• Brass Knuckles and Balan grant double strike only while the printed number of Equipment are attached\n• Harm’s Way and the wider damage-redirection class preserve the chosen damage source and recipient; Dismantle carries counters to the replacement artifact as printed\n• Ohran Viper, Lowland Basilisk, Thicket Basilisk, and granted Basilisk abilities now destroy the creature they damaged at end of combat, without affecting a blinked replacement\n• Acorn Catapult makes its Squirrel token, Chittering Rats puts a target opponent’s card back on top, and Fractalize and Reflections of Littjara resolve their printed choices correctly\n• Combat and target conditions now retain the relevant player and object across effects, repairing Sea Monster, Electrostatic Bolt, Promise of Loyalty, Karazikar, Goblin Furrier, Indentured Oaf, and the wider \"any number of targets\" class\n• Paying a compound activation cost now honors its chosen branch, while spells cast from another zone retain the face and cost you selected through resolution\n\n⚔️ Combat & Gameplay\n• Attachments fall off symmetrically when either the attachment or its host leaves the battlefield\n• Effects that care about a player’s counter total, a unique leader, a chosen target set, or a source’s dealt damage now keep that information through the full ability chain\n• Started effects tied to a counter stop at the correct point after that counter changes\n\n🖥️ Interface\n• Follow-up prompts in chained abilities show the printed ability text, making choices such as Isochron Scepter’s copied-spell cast clear\n• Life totals now change with damage animation impact instead of jumping after the animation finishes\n• Draft pods prefill your host or join name from your saved multiplayer identity\n\n🤖 AI\n• AI players crack untapped fetchlands on their own turn when a valid land remains in the library, while preserving sensible timing for tapped fetchlands and sacrifice tutors\n\n🌐 Multiplayer\n• Tournament credentials rotate without interrupting an active session\n• Multiplayer state updates send opponents’ registered decks only to the player sideboarding, reducing bandwidth and keeping decklists private",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1550733762319482962"
+    },
+    {
+      "id": 210,
+      "date": "2026-09-13",
+      "title": "Inkshield makes Inklings",
+      "tags": [
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai",
+        "multiplayer"
+      ],
+      "body": "🛠️ Cards That Now Work Right\n• Inkshield now makes its Inkling tokens for each damage it prevents. Brace for Impact, Test of Faith, Gatta and Luzzu, and the wider prevention-rider class also keep the creature they refer to\n• Delay now exiles a countered spell with its three time counters, gives it suspend when needed, and lets it cast normally after the final counter is removed\n• City of Traitors sees another land enter even when that land asks an as-enters question, so its printed sacrifice trigger works again\n• Damage triggers now keep the creature that was damaged—and that creature’s controller—straight. This repairs cards including Phage the Untouchable, Toxin Sliver, Maarika, and the Kashi-Tribe cycle\n• Pack tactics checks the combined power of the creatures that attacked, including attackers that leave combat before its trigger resolves\n• Changeling cards in a library count as every creature type for revealed-card checks, so Herald’s Horn can reveal Morophon after naming Slivers\n• Spells with an unreadable additional cost are refused instead of being cast for free\n\n⚔️ Combat & Gameplay\n• Game choices, combat logs, and token entries retain clearer source information, including copied triggers\n• The AI no longer spends buffs on opposing creatures\n\n🖥️ Interface\n• Choosing cards from a zone starts fresh for each new prompt without losing a selection when the same prompt refreshes\n• Desktop game-state exports download correctly again, report their result accurately, and no longer interrupt a running game\n\n🌐 Multiplayer\n• P2P games stay connected through temporary signaling outages; latency is advisory and each player’s ping is visible\n• Self-hosted servers can replace an unusable data file safely instead of exiting",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424"
+    },
+    {
+      "id": 209,
+      "date": "2026-09-12",
+      "title": "Mana burn returns to the game",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Mana burn is now available in custom formats: unspent mana can cost life as phases end, including the normal replacement-effect choices\n• Spell Queller and Mirror Strike join the playable card pool\n• Tournament Organizer now supports the server’s latest lobby features, while Booster Tutor builds packs from the original Cube pool\n\n🛠️ Cards That Now Work Right\n• Sins of the Past and the wider \"cast from a graveyard, then exile this\" family finish every instruction in the order printed; qualifying \"if you cast it this way\" effects wait for that cast\n• Gifts Ungiven no longer offers each found card twice, and cards that count cards \"this way\" no longer double-count the same card\n• A copied Class begins at level 1 and can level up normally (Mirrormade copying Stormchaser’s Talent)\n• Descendants’ Path only offers its free cast when your library’s revealed card shares a creature type with one you control\n• Alms Collector, Karona, Appa, Steadfast Guardian, Echoing Return, Blizzard Brawl, Runaway Steam-Kin, and Tomb Tyrant now follow their printed conditions and recipients\n• Graveyard redirects, counters’ exile riders, damage-prevention formulas, mana-color conditions, and guarded modal choices retain the subjects and conditions their text names\n\n⚔️ Combat & Gameplay\n• Tainted Pact ends the game in a draw if its mandatory repeat reaches an empty library and can no longer progress, rather than freezing the game\n• A player named once in an upkeep trigger remains the recipient of the following actions, fixing effects such as Seizan, Anvil of Bogardan, and Maralen of the Mornsong\n• Loop shortcuts can be shortened by a responder when the rules allow, while the engine refuses shortcuts it cannot safely drive\n• Phase-changing effects that pause for a replacement choice now resume and finish the phase correctly\n\n🖥️ Interface\n• The visual-pack download picker works again in Chrome\n• Long choice lists appear without distracting staggered animation\n• Tournament credentials are kept only for the current browser session\n\n🌐 Multiplayer\n• P2P heartbeats keep flowing even while another game handler is busy, making connections more resilient",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424"
+    },
+    {
       "id": 208,
       "date": "2026-09-09",
       "title": "P2P hosting finds your LAN",

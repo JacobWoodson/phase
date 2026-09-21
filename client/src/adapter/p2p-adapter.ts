@@ -42,7 +42,7 @@ import {
   type NativeAiSeat,
   type NativeSessionAttachment,
 } from "./ws-adapter";
-import { PEER_CONNECT_OPTIONS, RECONNECT_DIAL_TIMEOUT_MS } from "../network/connection";
+import { dialPeer, RECONNECT_DIAL_TIMEOUT_MS } from "../network/connection";
 import { createPeerSession, type PeerSession } from "../network/peer";
 import type { P2PMessage } from "../network/protocol";
 import { WIRE_PROTOCOL_VERSION, legalActionsFromWire, legalActionsToWire } from "../network/protocol";
@@ -94,6 +94,7 @@ import i18n from "i18next";
  * handlers — the UI never sees wire types.
  */
 export type P2PAdapterEvent =
+  | { type: "playerLatencies"; latencies: Record<number, number | null> }
   | { type: "playerIdentity"; playerId: PlayerId; playerNames?: Record<number, string> }
   | { type: "roomCreated"; roomCode: string }
   | { type: "waitingForGuest" }
@@ -616,9 +617,8 @@ const RECONNECT_STEADY_STATE_MS = 60_000;
  *
  * Reachability precondition: tab A's PeerJS SIGNALING socket must have dropped
  * (freeing the peer id) while its WebRTC DataConnections stay up. That state is
- * durable — no `peer.on("disconnected")` handler and no `.reconnect()` call
- * exists repo-wide — and is produced by sleep, a network change, or mobile
- * backgrounding. Opening a second tab does NOT reach it on its own: `hostRoom`
+ * possible while signaling recovery retries after sleep, a network change,
+ * or mobile backgrounding. Opening a second tab does NOT reach it on its own: `hostRoom`
  * opens the peer before the adapter is constructed, so tab B fails
  * `unavailable-id` and never reaches `claimP2PHostLease`. The lease flip must
  * land inside the `submitAction` → `broadcastStateUpdateInner` window, so
@@ -882,6 +882,7 @@ export class P2PHostAdapter implements EngineAdapter {
   private readonly engineClaim = Symbol("p2p-host-engine-claim");
 
   private guestSessions = new Map<PlayerId, PeerSession>();
+  private sessionLatencies = new WeakMap<PeerSession, number | null>();
   /**
    * A reconnecting transport has proved its token but is not a game session
    * until its complete reconnect acknowledgement has been written. This is
@@ -1805,6 +1806,18 @@ export class P2PHostAdapter implements EngineAdapter {
     this.initialized = true;
   }
 
+  private publishPlayerLatencies(): void {
+    if (!this.ownsAuthority()) return;
+    const latencies: Record<number, number | null> = { 0: 0 };
+    for (const [pid, session] of this.guestSessions) {
+      latencies[pid] = this.sessionLatencies.get(session) ?? null;
+    }
+    this.emit({ type: "playerLatencies", latencies });
+    for (const session of this.guestSessions.values()) {
+      void this.send(session, { type: "player_latencies", latencies });
+    }
+  }
+
   private handleNewConnection(conn: DataConnection): void {
     if (!this.ownsAuthority()) {
       const session = createPeerSession(conn, {});
@@ -1815,7 +1828,13 @@ export class P2PHostAdapter implements EngineAdapter {
     // Reconnect path: the first message determines whether this is a fresh
     // join or a reconnect. We attach a one-shot pre-handler to peek at the
     // first message before wrapping in a PeerSession with full handlers.
+    let identified = false;
     const session = createPeerSession(conn, {
+      onLatency: (latencyMs) => {
+        if (![...this.guestSessions.values()].includes(session)) return;
+        this.sessionLatencies.set(session, latencyMs);
+        this.publishPlayerLatencies();
+      },
       onSessionEnd: () => {
         this.closedPregameSessions.add(session);
         // Find which seat this session belonged to (if any) and route to the
@@ -1828,9 +1847,23 @@ export class P2PHostAdapter implements EngineAdapter {
         }
         this.clearPendingReconnectReservation(session);
       },
+      onUndeliverableFrame: (cause) => {
+        // `identified` flips only inside the one-shot `onMessage` below, which
+        // runs only on a decodable frame — so the only discriminator between a
+        // token-bearing guest and a tokenless one is inside the frame this host
+        // could not read. Both get the terminal answer rather than leaving the
+        // tokenless one stranded. Send-then-close mirrors the invalid-first-
+        // message arm below.
+        if (identified) return;
+        void session.send({
+          type: "reconnect_rejected",
+          reason: `Undecodable first message (${cause})`,
+          reasonCode: "first_message_invalid",
+        });
+        session.close("Undecodable first message");
+      },
     });
 
-    let identified = false;
     const unsub = session.onMessage((msg) => {
       if (identified) return;
       identified = true;
@@ -1972,6 +2005,7 @@ export class P2PHostAdapter implements EngineAdapter {
       this.playerTokens.set(pid, token);
       this.guestSessions.set(pid, session);
       this.guestDecks.set(pid, guestDeck);
+      this.publishPlayerLatencies();
       if (displayName) this.guestNames.set(pid, displayName);
       this.pregameSeatState.seats[pid] = { type: "JoinedHuman" };
       this.pregameSeatState.tokens[pid] = token;
@@ -3298,6 +3332,7 @@ export class P2PHostAdapter implements EngineAdapter {
     if (this.disconnectedSeats.has(pid)) return;
 
     this.guestSessions.delete(pid);
+    this.publishPlayerLatencies();
 
     if (!this.gameStarted) {
       void this.enqueuePregameOp(async () => {
@@ -3492,6 +3527,7 @@ export class P2PHostAdapter implements EngineAdapter {
       this.disconnectedSeats.delete(pid);
       this.guestSessions.set(pid, session);
       session.onMessage((msg) => this.handleGuestMessage(pid, session, msg));
+      this.publishPlayerLatencies();
 
       for (const [otherPid, otherSession] of this.guestSessions) {
         if (otherPid !== pid) void this.send(otherSession, { type: "player_reconnected", playerId: pid });
@@ -3766,9 +3802,19 @@ export class P2PGuestAdapter implements EngineAdapter {
     { resolve: (preview: InteractionPreview) => void; reject: (error: Error) => void }
   >();
   private session: PeerSession | null = null;
+  private hostLatencies: Record<number, number | null> = {};
   /** The current transport becomes authenticated only after its setup ACK. */
   private authenticatedSession: PeerSession | null = null;
   private playerToken: string | null = null;
+  /**
+   * Undeliverable inbound frames since a frame decoded past
+   * `handleHostMessage`'s unauthenticated-discard guard, which is the sole
+   * reset point. Bound to the adapter, not the session, because the frame that
+   * exhausts the budget arrives on the session the first close created. It is
+   * deliberately NOT reset in `attachSession`: every retry re-enters that
+   * method, which would make the bound inert.
+   */
+  private undeliverableFramesSinceDecode = 0;
   private assignedPlayerId: PlayerId | null = null;
   /** Current host lease accepted from game_setup/reconnect_ack. */
   private authority: P2PAuthorityStamp | null = null;
@@ -3865,8 +3911,37 @@ export class P2PGuestAdapter implements EngineAdapter {
     }
     traceAdapter("Guest", "attach-session", { connOpen: conn.open });
     const session = createPeerSession(conn, {
+      onLatency: (latencyMs) => {
+        if (this.session !== session || latencyMs !== null) return;
+        this.hostLatencies = Object.fromEntries(Object.keys(this.hostLatencies).map((pid) => [pid, null]));
+        this.emit({ type: "playerLatencies", latencies: this.hostLatencies });
+      },
       onSessionEnd: () => {
         this.handleHostDisconnect(session);
+      },
+      onUndeliverableFrame: () => {
+        if (this.session !== session || this.terminated) return;
+        // A seated guest holds a token too, so preserve its existing drop
+        // policy before the first-contact retry logic below. The host resends
+        // state updates and terminal results; preview replies are not covered
+        // by that redelivery and their timeout policy is a separate concern.
+        if (this.authenticatedSession === session) return;
+        this.undeliverableFramesSinceDecode += 1;
+        // `reconnect_ack` IS re-requestable — `attemptReconnect` re-sends
+        // `reconnect` — so a token-bearing guest spends exactly one retry.
+        // `game_setup` is not re-requestable, and three of the causes here
+        // (unknown envelope byte, unknown type from a newer host, non-binary
+        // frame from an older bundle) are persistent, so re-dialling on the
+        // next one would hang silently forever instead of settling the waiter
+        // or surfacing the failure.
+        if (this.playerToken && this.undeliverableFramesSinceDecode === 1) {
+          session.close("Undecodable frame during reconnect");
+          return;
+        }
+        const reason = i18n.t("multiplayer:reconnectRejected.frameUndecodable");
+        this.terminate();
+        this.rejectGameSetup(reason);
+        this.emit({ type: "reconnectFailed", reason });
       },
     });
     this.rejectPendingSubmission(
@@ -4130,6 +4205,11 @@ export class P2PGuestAdapter implements EngineAdapter {
     ) {
       return;
     }
+    // Reset HERE, not at this function's entry: a decodable frame this guest
+    // cannot use (a `state_update` before authentication) reaches the entry and
+    // dies at the guard above, so it is no evidence that the decode path is
+    // readable.
+    this.undeliverableFramesSinceDecode = 0;
     traceAdapter("Guest", "host-message", { type: msg.type });
     // First-contact protocol-version check. `game_setup` and `reconnect_ack`
     // both carry `wireProtocolVersion`; if a future host bumps the version
@@ -4176,6 +4256,15 @@ export class P2PGuestAdapter implements EngineAdapter {
     }
     if (!this.acceptsHostAuthority(msg)) return;
     switch (msg.type) {
+      case "player_latencies": {
+        if (typeof msg.latencies !== "object" || msg.latencies === null || Array.isArray(msg.latencies)) return;
+        const entries = Object.entries(msg.latencies);
+        if (entries.some(([pid, ms]) => !Number.isSafeInteger(Number(pid)) || Number(pid) < 0
+          || (ms !== null && (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0)))) return;
+        this.hostLatencies = msg.latencies;
+        this.emit({ type: "playerLatencies", latencies: this.hostLatencies });
+        break;
+      }
       case "game_setup": {
         this.authenticatedSession = session;
         this.assignedPlayerId = msg.assignedPlayerId;
@@ -4664,7 +4753,7 @@ export class P2PGuestAdapter implements EngineAdapter {
       // reconnect channel comes up UNORDERED, and every revision guard
       // downstream assumes ordered delivery. The initial `joinRoom` dial has
       // always carried them; this one did not.
-      const conn = this.hostPeer.connect(this.hostPeerId, PEER_CONNECT_OPTIONS);
+      const conn = dialPeer(this.hostPeer, this.hostPeerId, RECONNECT_DIAL_TIMEOUT_MS);
       await new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(
           () => reject(new Error("connect timed out")),

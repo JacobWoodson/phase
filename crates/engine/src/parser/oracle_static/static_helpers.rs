@@ -491,6 +491,7 @@ pub(crate) fn try_parse_impose_additional_cost(
             // semantics — fall back to an untyped card filter.
             Some(ControllerRef::TargetOpponent) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetController) => TargetFilter::Typed(TypedFilter::card()),
+            Some(ControllerRef::EventTargetController) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetOwner) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::DefendingPlayer) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::SourceChosenPlayer) => TargetFilter::Typed(TypedFilter::card()),
@@ -851,6 +852,16 @@ pub(crate) fn try_parse_cost_modification(
         amount,
         spell_filter: spell_filter.clone(),
         dynamic_count: dynamic_count.clone(),
+        // CR 118.7b/c/d: "This effect reduces only the amount of colored mana you
+        // pay" overrides the default spillover of an unmatched colored reduction
+        // unit into generic mana (Morophon's {4}{R}{W}{W} → {4}{W} ruling). The
+        // rider is its own sentence appended after the reduction sentence, so it
+        // is scanned across the whole line rather than anchored.
+        reach: if line_reduces_colored_mana_only(lower) {
+            CostReductionReach::ColoredManaOnly
+        } else {
+            CostReductionReach::SpillsToGeneric
+        },
     };
 
     // Build the affected filter for the static definition.
@@ -877,6 +888,7 @@ pub(crate) fn try_parse_cost_modification(
             // semantics — fall back to an untyped card filter.
             Some(ControllerRef::TargetOpponent) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetController) => TargetFilter::Typed(TypedFilter::card()),
+            Some(ControllerRef::EventTargetController) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetOwner) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::DefendingPlayer) => TargetFilter::Typed(TypedFilter::card()),
             // CR 613.1: chosen-player scope is not emitted for cost statics.

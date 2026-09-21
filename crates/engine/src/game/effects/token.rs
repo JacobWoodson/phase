@@ -2437,8 +2437,9 @@ pub(crate) fn spec_emits_only_etb_pair(spec: &TokenSpec) -> bool {
 
 /// CR 603.6a + CR 111.1: The set of event keys a single produced token EMITS as
 /// it enters the battlefield, given its core types. Mirrors the event-side
-/// deriver exactly (`keys_from_event`, trigger_index.rs:462-468 for the ETB pair
-/// and :529-531 for `TokenCreated`): a token entering emits the broad
+/// deriver exactly (`keys_from_event` — the `to == Zone::Battlefield` branch of
+/// its `GameEvent::ZoneChanged` arm for the ETB pair, and its
+/// `GameEvent::TokenCreated` arm for `TokenCreated`): a token entering emits the broad
 /// `EnterBattlefield(None)`, one narrow `EnterBattlefield(Some(ct))` per core
 /// type, and `TokenCreated`. Kept in lockstep with the deriver so the §2.3a gate
 /// reasons about exactly the events siblings would observe.
@@ -3290,6 +3291,7 @@ fn classify_attach_host_authority(filter: &TargetFilter) -> AttachHostAuthority 
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
@@ -3799,7 +3801,7 @@ fn junk_ability() -> AbilityDefinition {
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
-                cast_cost_raise: None,
+                cast_cost_modifier: None,
                 alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             },
@@ -3868,6 +3870,7 @@ fn incubator_phyrexian_back_face() -> BackFaceData {
         parse_warnings: vec![],
         layout_kind: None,
         is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
     }
 }
 

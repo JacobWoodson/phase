@@ -2002,32 +2002,56 @@ pub(crate) fn parse_graveyard_permission_condition(
     Ok((rest, condition))
 }
 
+/// CR 614.1a + CR 607.1: The linked stack-exit destination sentence shared by
+/// every "cast this way" permission ("… If a spell cast this way would be put
+/// into your graveyard, exile it instead."). Single authority for the literal:
+/// both the all-consuming recognizer below and
+/// `restriction::split_exile_spell_cast_this_way_rider` (which peels the
+/// sentence off a rider run before the additional-cost parse) key on this text.
+pub(crate) const EXILE_SPELL_CAST_THIS_WAY_RIDER: &str =
+    "if a spell cast this way would be put into your graveyard, exile it instead";
+
+/// CR 614.1a + CR 607.1: Recognize the trailing "If a spell cast this way
+/// would be put into your graveyard, exile it instead." sentence as a
+/// whole-text suffix (leading period/space tolerated). The sentence is the
+/// CR 614.1a replacement of the stack→graveyard event, linked back to the
+/// cast permission by "this way" (CR 607.1).
 pub(crate) fn parse_exile_spell_cast_this_way_rider(input: &str) -> OracleResult<'_, ()> {
     all_consuming(preceded(
         terminated(opt(tag(".")), space0),
         value(
             (),
-            terminated(
-                tag("if a spell cast this way would be put into your graveyard, exile it instead"),
-                opt(tag(".")),
-            ),
+            terminated(tag(EXILE_SPELL_CAST_THIS_WAY_RIDER), opt(tag("."))),
         ),
     ))
     .parse(input)
 }
 
 pub(crate) fn parse_top_of_library_permission_condition(trailing: &str) -> Option<StaticCondition> {
+    let (rest, condition) = parse_top_of_library_permission_condition_and_rest(trailing)?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
+    if !rest.is_empty() {
+        return None;
+    }
+    Some(condition)
+}
+
+/// CR 611.3a: The gate-prefixed condition WITH the text that follows it — the
+/// sequencing form of [`parse_top_of_library_permission_condition`], for
+/// permission shapes whose trailing may carry a second clause after the gate
+/// (e.g. a CR 118.9 alt-cost rider). Single authority for the " as long as "
+/// marker and the condition grammar; the full-consumption form above delegates
+/// here, so the two cannot drift.
+pub(crate) fn parse_top_of_library_permission_condition_and_rest(
+    trailing: &str,
+) -> Option<(&str, StaticCondition)> {
     let (rest, condition) = preceded(
         tag::<_, _, OracleError<'_>>(" as long as "),
         nom_condition::parse_inner_condition,
     )
     .parse(trailing)
     .ok()?;
-    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
-    if !rest.is_empty() {
-        return None;
-    }
-    Some(condition)
+    Some((rest, condition))
 }
 
 /// CR 118.9 + CR 119.4: Helper to parse the optional alt-cost rider that may
@@ -2631,6 +2655,11 @@ pub(crate) fn try_parse_cost_floor(text: &str, lower: &str) -> Option<StaticDefi
         amount,
         spell_filter: None,
         dynamic_count: None,
+        // CR 601.2f: the cost floor is applied after every Reduce/Raise settles
+        // and only ever ADDS generic mana, so the CR 118.7b reach axis — which
+        // governs where an unmatched colored REDUCTION unit may go — never
+        // engages here. Present only because the field is shared with Reduce.
+        reach: CostReductionReach::SpillsToGeneric,
     })
     .description(text.to_string());
 

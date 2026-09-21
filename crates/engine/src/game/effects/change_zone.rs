@@ -790,6 +790,23 @@ pub fn resolve(
     let track_exiled_by_source =
         crate::game::exile_links::should_track_exiled_by_source(state, ability.source_id, ability);
 
+    // CR 608.2c + CR 609.3 (issue #8798): the immediate parent handed this
+    // "that card" move nothing to act on (an ExileTop/Dig on an empty library,
+    // an empty ChooseFromZone or reveal-choice). Resolve as a no-op here,
+    // before `resolved_targets`, whose unresolved-`ParentTarget` fallback would
+    // otherwise bind the ability's own source — an empty-library Tainted Pact
+    // would put itself into its controller's hand.
+    if matches!(target_filter, TargetFilter::ParentTarget)
+        && ability.parent_target_missing_reason.is_some()
+    {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(completed_result(0));
+    }
+
     // CR 608.2c + 603.10a: Resolve the subject across self-ref → event-context →
     // chosen-targets, the unified 3-tier dispatch shared by zone-change-style
     // effects whose subject can be the source itself, an event-context
@@ -1964,7 +1981,7 @@ pub fn resolve_all(
             properties: vec![],
         })
     } else {
-        crate::game::effects::resolved_object_filter(ability, &target_filter)
+        crate::game::effects::resolved_object_filter(state, ability, &target_filter)
     };
 
     // CR 603.7: Resolve the `TrackedSetId(0)` sentinel emitted by the parser for
@@ -10607,6 +10624,7 @@ mod tests {
             // Back face: Sorin, Ravenous Neonate — planeswalker with loyalty 3
             obj.back_face = Some(BackFaceData {
                 is_swap_snapshot: false,
+                trigger_printed_origins: Vec::new(),
                 name: "Sorin, Ravenous Neonate".to_string(),
                 power: None,
                 toughness: None,

@@ -7,8 +7,8 @@ use crate::types::ability::{DurationEvent, EffectKind, KeywordAction, TargetRef}
 use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::action_rejection::{ActionRejection, ActionRejectionCode};
 use crate::types::actions::{
-    DebugAction, GameAction, MayTriggerAutoChoiceOp, PriorityYieldOp, ResolveAllConsentDecision,
-    ResolveAllScope, TriggerOrderTemplateOp,
+    DebugAction, DebugCardCreationKind, GameAction, MayTriggerAutoChoiceOp, PriorityYieldOp,
+    ResolveAllConsentDecision, ResolveAllScope, TriggerOrderTemplateOp,
 };
 use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState};
 use crate::types::game_state::{
@@ -2357,8 +2357,7 @@ fn interactive_loop_bridge(state: &mut GameState, result: &mut ActionResult) {
             })
         };
         if drawn {
-            result.events.push(GameEvent::GameOver { winner: None });
-            state.waiting_for = WaitingFor::GameOver { winner: None };
+            super::elimination::end_game(state, None, &mut result.events);
             result.waiting_for = state.waiting_for.clone();
             match_flow::handle_game_over_transition(state);
             return;
@@ -9230,6 +9229,13 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
     let mut iteration = 0usize;
     let mut advanced = false;
     loop {
+        // CR 104.1: a game ends immediately when a player wins or the game is a
+        // draw. Once this action has recorded a result (`GameState::game_end`),
+        // pass for no one, even if a later step left a Priority wait behind;
+        // the caller's `reconcile_terminal_result` restores `WaitingFor::GameOver`.
+        if state.game_end.is_some() {
+            break;
+        }
         // CR 732.2: the iteration cap was exhausted while a mandatory cascade is
         // still in flight (priority unsettled, non-empty stack, no meaningful
         // action) — halt gracefully, the same way the growth ceilings do, rather
@@ -9339,9 +9345,8 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
                                 // repeated a prior state with no way to stop — a
                                 // draw. CR 801.16: limited-range partial draw N/A
                                 // while format_config.range_of_influence is None.
-                                result.events.push(GameEvent::GameOver { winner: None });
-                                result.waiting_for = WaitingFor::GameOver { winner: None };
-                                state.waiting_for = WaitingFor::GameOver { winner: None };
+                                super::elimination::end_game(state, None, &mut result.events);
+                                result.waiting_for = state.waiting_for.clone();
                                 match_flow::handle_game_over_transition(state);
                                 return advanced;
                             }
@@ -10986,7 +10991,55 @@ fn apply_non_priority_pass_action(
                 player,
                 object_id,
                 card_id,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => {
+            if state.priority_player
+                != turn_control::authorized_submitter_for_player(state, *player)
+            {
+                return Err(EngineError::NotYourPriority);
+            }
+            let permission_index = casting::current_resolution_cast_permission_index(
+                state,
+                *player,
+                *object_id,
+                *card_id,
+            )
+            .ok_or_else(|| {
+                EngineError::ActionNotAllowed(
+                    "Only a resolution-owned modal face election may be cancelled".to_string(),
+                )
+            })?;
+            let cleanup = casting::take_resolution_cast_cleanup(
+                state,
+                *player,
+                *object_id,
+                *card_id,
+                permission_index,
+            )
+            ?
+            .ok_or_else(|| {
+                EngineError::InvalidAction(
+                    "Resolution face choice permission provenance is stale or mismatched"
+                        .to_string(),
+                )
+            })?;
+            crate::game::engine_resolution_choices::abort_resolution_cast(
+                state,
+                *player,
+                *object_id,
+                cleanup,
+                &mut events,
+            )?
+        }
+        (
+            WaitingFor::ModalFaceChoice {
+                player,
+                object_id,
+                card_id,
                 payment_mode,
+                resolution_additional_cost,
             },
             GameAction::ChooseModalFace { back_face },
         ) => {
@@ -10995,6 +11048,49 @@ fn apply_non_priority_pass_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
+            let resolution_permission = casting::current_resolution_cast_permission_index(
+                state,
+                *player,
+                *object_id,
+                *card_id,
+            );
+            // Validate the exact indexed paid-cleanup root before changing the
+            // visible face or its election flags. A forged receipt must leave
+            // the prompt, object, permissions, triggers, journal, and events
+            // byte-for-byte untouched.
+            if let Some(permission_index) = resolution_permission {
+                let cleanup = state
+                    .objects
+                    .get(object_id)
+                    .and_then(|object| object.casting_permissions.get(permission_index.0))
+                    .and_then(|permission| match permission {
+                        crate::types::ability::CastingPermission::ExileWithAltCost {
+                            granted_to: Some(grantee),
+                            resolution_cleanup: Some(cleanup),
+                            ..
+                        } if *grantee == *player => Some(cleanup.clone()),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        EngineError::InvalidAction(
+                            "Resolution face choice permission provenance is stale or mismatched"
+                                .to_string(),
+                        )
+                    })?;
+                crate::game::engine_resolution_choices::validate_resolution_cast_cleanup_authority(
+                    *player, &cleanup,
+                )?;
+                crate::game::engine_resolution_choices::validate_resolution_cast_delayed_trigger_receipts(
+                    state, &cleanup,
+                )?;
+            }
+            // A resolution-owned election has not announced anything yet.  If
+            // the selected face later fails its exact permission policy, put
+            // the object (including the appended temporary permission) back
+            // exactly as the public prompt exposed it.
+            let resolution_object_before = resolution_permission
+                .as_ref()
+                .and_then(|_| state.objects.get(object_id).cloned());
             if let Some(obj) = state.objects.get_mut(object_id) {
                 if back_face {
                     // Swap to back face — the shared swap preserves the stored
@@ -11013,6 +11109,29 @@ fn apply_non_priority_pass_action(
                 // blind. Cleared on any zone change off the stack and on
                 // cancel.
                 obj.cast_face_committed = true;
+            }
+            if let Some(permission_index) = resolution_permission {
+                let result = casting::continue_resolution_modal_face_choice(
+                    state,
+                    *player,
+                    *object_id,
+                    casting::ResolutionModalFaceChoice {
+                        permission_index,
+                        payment_mode: *payment_mode,
+                        additional_cost: resolution_additional_cost.clone(),
+                    },
+                    &mut events,
+                );
+                if result.is_err() {
+                    if let Some(object) = resolution_object_before {
+                        state.objects.insert(*object_id, object);
+                    }
+                }
+                return result.map(|waiting_for| ActionResult {
+                    events: std::mem::take(&mut events),
+                    waiting_for,
+                    log_entries: Vec::new(),
+                });
             }
             // CR 712.12 / CR 712.11b: Route the re-entry by the now-active face's
             // type. A land face is put onto the battlefield via the play-land
@@ -11396,6 +11515,7 @@ fn apply_non_priority_pass_action(
                 player,
                 life_cost,
                 mana_reduction,
+                reach,
                 pending_cast,
             },
             GameAction::DecideOptionalCost { pay },
@@ -11405,11 +11525,42 @@ fn apply_non_priority_pass_action(
             *pending_cast.clone(),
             *life_cost,
             mana_reduction,
+            *reach,
             pay,
             &mut events,
         )?,
         (
             WaitingFor::DefilerPayment {
+                player,
+                pending_cast,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
+        // CR 601.2f: "If multiple cost reductions apply, the player may apply
+        // them in any order." The caster submits that order here.
+        (
+            WaitingFor::OrderCostReductions {
+                player,
+                reductions,
+                pending_cast,
+                ..
+            },
+            GameAction::OrderCostReductions {
+                order,
+                hybrid_announcement,
+            },
+        ) => engine_casting::handle_order_cost_reductions(
+            state,
+            *player,
+            *pending_cast.clone(),
+            &reductions.clone(),
+            &order,
+            &hybrid_announcement,
+            &mut events,
+        )?,
+        (
+            WaitingFor::OrderCostReductions {
                 player,
                 pending_cast,
                 ..
@@ -12088,7 +12239,7 @@ fn apply_non_priority_pass_action(
             &mut events,
         )?,
         (WaitingFor::CollectEvidenceChoice { player, resume, .. }, GameAction::CancelCast) => {
-            engine_casting::handle_collect_evidence_cancel(state, *player, resume, &mut events)
+            engine_casting::handle_collect_evidence_cancel(state, *player, resume, &mut events)?
         }
         // CR 702.180b: Player chose which creature to tap for harmonize cost reduction.
         // CR 601.2b: Creature is tapped as part of paying the total cost.
@@ -12477,9 +12628,9 @@ fn apply_non_priority_pass_action(
             let player = *player;
             let convoke_mode = *convoke_mode;
             if let Some(pending) = state.pending_cast.as_ref() {
-                // CR 602.2b + CR 601.2b/h: An activation's announced X must
-                // make its full cost payable before the announcement commits,
-                // whether or not the ability has deferred targets.
+                // CR 602.2b + CR 601.2b/f/h: Concretize {X} into generic mana in the cost structure.
+                // Payment restrictions ("Spend only [colors] mana on X") are carried as payment-allocation
+                // metadata in SpellMeta and enforced during mana payment.
                 let mut trial = pending.as_ref().clone();
                 trial.ability.set_chosen_x_recursive(value);
                 trial.cost.concretize_x(value);
@@ -12527,9 +12678,15 @@ fn apply_non_priority_pass_action(
                     }
                 }
             }
-            let pending = state.pending_cast.as_mut().ok_or_else(|| {
-                EngineError::InvalidAction("No pending cast awaiting X".to_string())
-            })?;
+            let pending = state
+                .pending_cast
+                .as_mut()
+                .ok_or_else(|| {
+                    EngineError::InvalidAction("No pending cast awaiting X".to_string())
+                })?;
+            // CR 601.2b + CR 601.2f + CR 601.2h: Concretize {X} into generic mana in the cost structure.
+            // Payment restrictions ("Spend only [colors] mana on X") are carried as payment-allocation
+            // metadata in SpellMeta and enforced during mana payment.
             pending.ability.set_chosen_x_recursive(value);
             pending.cost.concretize_x(value);
             let object_id = pending.object_id;
@@ -15185,12 +15342,25 @@ pub fn preflight_debug_action(
         zone,
         count,
         run_etb,
+        creation_kind,
         ..
     } = action
     {
         if !state.players.iter().any(|player| player.id == *owner) {
             return Err(EngineError::InvalidAction(
                 "Debug: invalid owner player id".into(),
+            ));
+        }
+        // CR 111.7 + CR 704.5d: debug card-tokens are battlefield fixtures.
+        // Reject impossible direct placement in another zone rather than
+        // returning a state in which a token survives where it should cease.
+        let token_outside_battlefield = match creation_kind {
+            DebugCardCreationKind::Card => false,
+            DebugCardCreationKind::Token => *zone != Zone::Battlefield,
+        };
+        if *count != 0 && token_outside_battlefield {
+            return Err(EngineError::InvalidAction(
+                "Debug::CreateCard tokens must be created on the battlefield".into(),
             ));
         }
         // Real entry can park a private parent frame while replacements or
@@ -16093,6 +16263,27 @@ fn finalize_committed_land_play(
     });
 }
 
+/// CR 305.1 + CR 603.2: Park a finalized `LandPlayed` event so it survives a
+/// paused land-entry continuation. The pre-entry shock/payment choice
+/// (`ReplacementResult::NeedsChoice`) and the delivery-tail counter-order choice
+/// (`ZoneDeliveryResult::NeedsChoice`) both hand back a non-`Priority` waiting
+/// state, so the `LandPlayed` occurrence `finalize_committed_land_play` emitted
+/// into the action's `events` is dropped before `process_triggers` can scan it.
+/// Parking a clone here lets the resume site flush it into the priority-time
+/// scan via `flush_deferred_entry_events_into_priority_scan` (issue #8738).
+fn park_land_played_for_deferred_entry(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    origin_zone: Zone,
+) {
+    state.deferred_entry_events.push(GameEvent::LandPlayed {
+        object_id,
+        player_id: player,
+        from_zone: origin_zone,
+    });
+}
+
 fn mark_land_played_from_zone(state: &mut GameState, object_id: ObjectId, zone: Zone) {
     if let Some(obj) = state.objects.get_mut(&object_id) {
         obj.played_from_zone = Some(zone);
@@ -16342,6 +16533,7 @@ fn handle_play_land(
                 object_id,
                 card_id,
                 payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+                resolution_additional_cost: None,
             });
         }
 
@@ -16488,6 +16680,10 @@ fn handle_play_land(
                             library_permission_src,
                             events,
                         );
+                        // CR 305.1 + CR 603.2: the delivery-tail counter-order
+                        // pause drops the `LandPlayed` occurrence emitted above,
+                        // so park a clone for the resume to replay (issue #8738).
+                        park_land_played_for_deferred_entry(state, player, object_id, origin_zone);
                         return Ok(state.waiting_for.clone());
                     }
                 }
@@ -16506,6 +16702,33 @@ fn handle_play_land(
             // the wrong controller context.
             if state.has_post_replacement_drain() {
                 state.clear_post_replacement_source();
+                // CR 305.1 + CR 603.2: Finalize the land play BEFORE dispatching
+                // the post-replacement continuation, so the `LandPlayed` event is
+                // already present in `events` when a mid-entry choice (as-enters
+                // "choose a color/creature type", enters-with-counter, or copy
+                // replacement) defers the entry events for later replay. The
+                // deferred-entry capture in `engine_replacement` clones both the
+                // entry `ZoneChanged` and the sibling `LandPlayed`, so "play a
+                // land" observers (City of Traitors) fire after the choice
+                // resolves instead of being dropped (issue #8738).
+                //
+                // The pre-entry `ReplacementResult::NeedsChoice` return (shock
+                // lands, "as this enters you may pay 2 life…") and the
+                // delivery-tail `ZoneDeliveryResult::NeedsChoice` return (entry
+                // counter-order pause) also emit `LandPlayed` and hand back a
+                // non-`Priority` waiting state, but they have no post-replacement
+                // drain, so no deferred capture runs here for them — each arm
+                // parks its own `LandPlayed` via `park_land_played_for_deferred_entry`.
+                finalize_committed_land_play(
+                    state,
+                    player,
+                    object_id,
+                    origin_zone,
+                    gy_permission_source,
+                    exile_play_authorization,
+                    library_permission_src,
+                    events,
+                );
                 if let Some(next_waiting_for) =
                     engine_replacement::apply_pending_post_replacement_effect(
                         state,
@@ -16515,18 +16738,9 @@ fn handle_play_land(
                         events,
                     )
                 {
-                    finalize_committed_land_play(
-                        state,
-                        player,
-                        object_id,
-                        origin_zone,
-                        gy_permission_source,
-                        exile_play_authorization,
-                        library_permission_src,
-                        events,
-                    );
                     return Ok(next_waiting_for);
                 }
+                return Ok(WaitingFor::Priority { player });
             }
         }
         super::replacement::ReplacementResult::Prevented => {
@@ -16549,6 +16763,10 @@ fn handle_play_land(
                 library_permission_src,
                 events,
             );
+            // CR 305.1 + CR 603.2: the pre-entry shock/payment pause drops the
+            // `LandPlayed` occurrence emitted above, so park a clone for the
+            // resume to replay once the land actually enters (issue #8738).
+            park_land_played_for_deferred_entry(state, player, object_id, origin_zone);
 
             return Ok(super::replacement::replacement_choice_waiting_for(
                 player, state,
@@ -18507,6 +18725,7 @@ mod priority_principal_tests {
             .unwrap()
             .back_face = Some(BackFaceData {
             is_swap_snapshot: false,
+            trigger_printed_origins: Vec::new(),
             name: "Blow Off Steam".to_string(),
             power: None,
             toughness: None,

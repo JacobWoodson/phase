@@ -371,6 +371,31 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         (WaitingFor::OrderTriggers { triggers, .. }, GameAction::OrderTriggers { order }) => {
             !crate::game::triggers::is_valid_permutation(order, triggers.len())
         }
+        // CR 601.2b + CR 601.2f: same strict-permutation check the engine
+        // handler enforces, plus the announcement's legality against the
+        // prompt's own hybrid symbols (CR 107.4e).
+        (
+            WaitingFor::OrderCostReductions {
+                reductions,
+                hybrid_symbols,
+                ..
+            },
+            GameAction::OrderCostReductions {
+                order,
+                hybrid_announcement,
+            },
+        ) => {
+            !crate::game::triggers::is_valid_permutation(order, reductions.len())
+                || (!hybrid_announcement.is_empty()
+                    && (hybrid_announcement.len() != hybrid_symbols.len()
+                        || hybrid_announcement.iter().zip(hybrid_symbols).any(
+                            |(announced, symbol)| {
+                                !symbol
+                                    .announceable_halves()
+                                    .is_some_and(|halves| halves.contains(announced))
+                            },
+                        )))
+        }
         (
             WaitingFor::CopyTargetChoice { valid_targets, .. },
             GameAction::ChooseTarget { target },
@@ -425,13 +450,7 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             },
             GameAction::ChooseActivationCostBranch { index },
         ) => costs.get(*index).is_none_or(|cost| {
-            !casting::can_pay_ability_cost_now(
-                state,
-                *player,
-                pending_cast.object_id,
-                cost,
-                pending_cast.activation_ability_index,
-            )
+            !casting::activation_one_of_branch_payable(state, *player, pending_cast, cost)
         }),
         (
             WaitingFor::DamageSourceChoice { options, .. },
@@ -1291,6 +1310,7 @@ fn classify_flat_priority_action(action: &GameAction) -> FlatPriorityActionClass
         | GameAction::ChooseReplacement { .. }
         | GameAction::ChooseEntryController { .. }
         | GameAction::OrderTriggers { .. }
+        | GameAction::OrderCostReductions { .. }
         | GameAction::CancelCast
         | GameAction::Equip { .. }
         | GameAction::CrewVehicle { .. }

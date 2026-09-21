@@ -275,7 +275,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         distribution: _,                 // concrete pre-assigned (TargetRef, u32) portions
         chosen_x: _,                     // concrete cast-time X
         cost_paid_object: _,             // concrete captured-object snapshot
-        cost_paid_object_ids: _,         // concrete captured-object ids
+        cost_paid_objects: _,            // concrete cost-paid membership records
         effect_context_object: _,        // concrete captured-object snapshot
         amassed_army_object: _,          // concrete captured-object snapshot
         ability_index: _,                // usize provenance
@@ -436,8 +436,11 @@ fn scan_target_selection_constraint(c: &TargetSelectionConstraint, mode: ScanMod
 /// `Direct` reads only the named zone, so only a battlefield population can
 /// grow with the loop class. `Tracked` and `Legacy` can instead consume the
 /// current resolution-chain set, whose producer is not visible at this local
-/// effect node; classify both fail-closed. This is intentionally separate from
-/// the choice filter, which is scanned by the caller.
+/// effect node; classify both fail-closed. `CostPaidObjects` reads the
+/// resolving ability's own cost-payment record plus live zone membership —
+/// neither is visible at this node either, so it is classified fail-closed
+/// alongside them rather than as a plain zone read. This is intentionally
+/// separate from the choice filter, which is scanned by the caller.
 fn scan_zone_choice_candidate_source(
     candidate_source: ZoneChoiceCandidateSource,
     zone: crate::types::zones::Zone,
@@ -457,6 +460,10 @@ fn scan_zone_choice_candidate_source(
         ZoneChoiceCandidateSource::Tracked | ZoneChoiceCandidateSource::Legacy => {
             Axes::CONSERVATIVE
         }
+        // CR 400.7j + CR 601.2h: the pool is the ability-bound cost-payment
+        // record, narrowed by live zone membership. Both are ability/state reads
+        // this local node cannot see; fail closed.
+        ZoneChoiceCandidateSource::CostPaidObjects => Axes::CONSERVATIVE,
     }
 }
 
@@ -1644,6 +1651,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             sacrifice_filter,
             total_power_cap,
             keeper_constraint,
+            keeper_counter,
             categories: _,
             chooser_scope: _,
         } => {
@@ -1655,6 +1663,10 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             }
             if let Some(KeeperConstraint::ExactCount { count }) = keeper_constraint {
                 acc = acc.or(scan_quantity_expr(count, mode));
+            }
+            // CR 608.2c + CR 122.1: the printed keeper mark's count.
+            if let Some(mark) = keeper_counter {
+                acc = acc.or(scan_quantity_expr(&mark.count, mode));
             }
             acc
         }
@@ -3295,6 +3307,14 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
             sibling: false,
             projected: false,
         },
+        // Engine classification: reads `DamageDealt.target` off the firing
+        // event, so it carries the same `event` walker axis as `EventTarget`
+        // and `TriggeringSourceController`. Not a rules decision.
+        TargetFilter::EventTargetController => Axes {
+            event: true,
+            sibling: false,
+            projected: false,
+        },
         TargetFilter::ParentTarget => Axes {
             event: true,
             sibling: false,
@@ -3393,6 +3413,10 @@ fn scan_object_scope(x: &ObjectScope) -> Axes {
         // CR 120.1: per-iteration batch source — a resolution-filtered object
         // with no event/sibling axis (mirrors Source/Target).
         ObjectScope::BatchSource => Axes::NONE,
+        // CR 601.2c: the chain-root spell's own declared target, carried on the
+        // resolving ability's context — no event/sibling projected axis
+        // (mirrors Target/Demonstrative).
+        ObjectScope::ChainRootTarget => Axes::NONE,
         ObjectScope::EventTarget => Axes {
             event: true,
             sibling: false,
@@ -4860,6 +4884,12 @@ fn scan_controller_ref(x: &ControllerRef) -> Axes {
             sibling: false,
             projected: false,
         },
+        // Engine classification: event-axis read, same as the sibling above.
+        ControllerRef::EventTargetController => Axes {
+            event: true,
+            sibling: false,
+            projected: false,
+        },
         ControllerRef::ParentTargetOwner => Axes {
             event: true,
             sibling: false,
@@ -5022,6 +5052,14 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
         sub_link: _,
         iteration_kind_binding: _,
         sibling_condition: _,
+        // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every
+        // deferred guard verdict before it hands a tree out, so this is `None` on
+        // every tree that pipeline produces — which is every tree a runtime walker
+        // sees — and expresses no resolution-time read. (NOT a universal claim about
+        // the field: `parse_effect_chain` outside the pipeline leaves marks intact,
+        // and no runtime path reaches such a tree. See
+        // `types::ability::UnloweredGuard`.)
+        unlowered_guard: _,
     } = def;
 
     let mut acc = scan_effect(effect, mode);
@@ -5428,6 +5466,7 @@ pub(crate) fn keyword_cost_reads_growing_class(kw: &Keyword) -> bool {
         | Keyword::Spectacle(_)
         | Keyword::SplitSecond
         | Keyword::Spree
+        | Keyword::Tiered
         | Keyword::Squad(_)
         | Keyword::Storm
         | Keyword::Surge(_)
@@ -5648,6 +5687,7 @@ fn scan_keyword(kw: &Keyword, mode: ScanMode) -> Axes {
         | Keyword::WebSlinging(_)
         | Keyword::Discover(_)
         | Keyword::Spree
+        | Keyword::Tiered
         | Keyword::Ravenous
         | Keyword::Daybound
         | Keyword::Nightbound

@@ -14,7 +14,7 @@ use crate::parser::oracle::{
     is_draft_matters_sentence, parse_strive_cost_line,
 };
 use crate::parser::oracle_casting::parse_casting_restriction_line;
-use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+use crate::parser::oracle_ir::diagnostic::{ClauseGap, OracleDiagnostic};
 use crate::parser::oracle_util::normalize_card_name_refs;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally,
@@ -39,7 +39,7 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
-use crate::types::statics::{CostModifyMode, StaticMode};
+use crate::types::statics::{CostModifyMode, CostReductionReach, StaticMode};
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::{EtbTapState, Zone};
 use nom::branch::alt;
@@ -168,7 +168,7 @@ pub(crate) fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // CR 509.1b: BlockRestriction carries the allowed-attacker filter.
             | StaticMode::BlockRestriction { .. }
             // CR 301.5 + CR 303.4 + CR 701.3a: AttachmentRestriction carries the
-            // `TargetFilter` of legal hosts (Strata Scythe, Konda's Banner).
+            // `TargetFilter` of legal hosts (O-Naginata, Konda's Banner).
             // Enforced via active static definitions in effects/attach.rs::attachment_illegality.
             | StaticMode::AttachmentRestriction { .. }
             // CR 602.5 + CR 603.2a: CantBeActivated carries `who` + `source_filter`.
@@ -657,13 +657,16 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::CostPaidObject => "cost-paid object".into(),
         // CR 701.47c: matches `ObjectScope::AmassedArmy`'s description string.
         TargetFilter::AmassedArmy => "amassed Army".into(),
-        TargetFilter::ChosenCard => "last chosen card".into(),
+        TargetFilter::ChosenCard => "the chosen object".into(),
         TargetFilter::TriggeringSpellController => "triggering spell's controller".into(),
         TargetFilter::TriggeringSpellOwner => "triggering spell's owner".into(),
         TargetFilter::TriggeringSourceController => "triggering source's controller".into(),
         TargetFilter::TriggeringPlayer => "triggering player".into(),
         TargetFilter::TriggeringSource => "triggering source".into(),
         TargetFilter::EventTarget => "object targeted by the triggering event".into(),
+        TargetFilter::EventTargetController => {
+            "controller of the object targeted by the triggering event".into()
+        }
         TargetFilter::DefendingPlayer => "defending player".into(),
         TargetFilter::ParentTarget => "parent target".into(),
         TargetFilter::ParentTargetSlot { index } => format!("parent target slot {index}"),
@@ -961,6 +964,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     ControllerRef::TargetPlayer => "target player's",
                     ControllerRef::TargetOpponent => "target opponent's",
                     ControllerRef::ParentTargetController => "parent target's",
+                    ControllerRef::EventTargetController => "the damaged object's controller's",
                     ControllerRef::ParentTargetOwner => "parent target owner's",
                     ControllerRef::DefendingPlayer => "defending player's",
                     ControllerRef::SourceChosenPlayer => "the chosen player's",
@@ -1151,6 +1155,9 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 ControllerRef::TargetPlayer => "target player",
                 ControllerRef::TargetOpponent => "target opponent",
                 ControllerRef::ParentTargetController => "parent target's controller",
+                ControllerRef::EventTargetController => {
+                    "controller of the object the triggering event targeted"
+                }
                 ControllerRef::ParentTargetOwner => "parent target's owner",
                 ControllerRef::DefendingPlayer => "defending player",
                 ControllerRef::SourceChosenPlayer => "the chosen player",
@@ -1228,6 +1235,9 @@ fn fmt_controller(ctrl: &ControllerRef) -> String {
         ControllerRef::TargetPlayer => "target player controls",
         ControllerRef::TargetOpponent => "target opponent controls",
         ControllerRef::ParentTargetController => "parent target's controller controls",
+        ControllerRef::EventTargetController => {
+            "the controller of the object the triggering event targeted controls"
+        }
         ControllerRef::ParentTargetOwner => "parent target's owner controls",
         ControllerRef::DefendingPlayer => "defending player controls",
         ControllerRef::SourceChosenPlayer => "the chosen player controls",
@@ -1467,6 +1477,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card",
                 ObjectScope::AmassedArmy => "amassed Army",
                 ObjectScope::BatchSource => "batch source",
+                ObjectScope::ChainRootTarget => "chain-root target",
             };
             match counter_type {
                 Some(ct) => format!("{} counters on {scope_str}", ct.as_str()),
@@ -1495,6 +1506,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card's power".into(),
             ObjectScope::AmassedArmy => "amassed Army's power".into(),
             ObjectScope::BatchSource => "batch source's power".into(),
+            ObjectScope::ChainRootTarget => "chain-root target's power".into(),
         },
         QuantityRef::BasePower { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1509,6 +1521,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card's base power".into(),
             ObjectScope::AmassedArmy => "amassed Army's base power".into(),
             ObjectScope::BatchSource => "batch source's base power".into(),
+            ObjectScope::ChainRootTarget => "chain-root target's base power".into(),
         },
         QuantityRef::Toughness { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1523,6 +1536,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card's toughness".into(),
             ObjectScope::AmassedArmy => "amassed Army's toughness".into(),
             ObjectScope::BatchSource => "batch source's toughness".into(),
+            ObjectScope::ChainRootTarget => "chain-root target's toughness".into(),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1537,6 +1551,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card's mana value".into(),
             ObjectScope::AmassedArmy => "amassed Army's mana value".into(),
             ObjectScope::BatchSource => "batch source's mana value".into(),
+            ObjectScope::ChainRootTarget => "chain-root target's mana value".into(),
         },
         QuantityRef::TargetObjectManaValue { .. } => "target object's mana value".into(),
         QuantityRef::ObjectColorCount { scope } => match scope {
@@ -1552,6 +1567,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card's colors".into(),
             ObjectScope::AmassedArmy => "amassed Army's colors".into(),
             ObjectScope::BatchSource => "batch source's colors".into(),
+            ObjectScope::ChainRootTarget => "chain-root target's colors".into(),
         },
         QuantityRef::ObjectTypelineComponentCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1568,6 +1584,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             }
             ObjectScope::AmassedArmy => "typeline components on amassed Army".into(),
             ObjectScope::BatchSource => "typeline components on batch source".into(),
+            ObjectScope::ChainRootTarget => "typeline components on chain-root target".into(),
         },
         QuantityRef::ObjectNameWordCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1582,6 +1599,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::OwnedLinkedExileCard => "words in owned linked-exiled card's name".into(),
             ObjectScope::AmassedArmy => "words in amassed Army's name".into(),
             ObjectScope::BatchSource => "words in batch source's name".into(),
+            ObjectScope::ChainRootTarget => "words in chain-root target's name".into(),
         },
         QuantityRef::ManaSymbolsInManaCost { scope, color } => {
             let scope_str = match scope {
@@ -1595,6 +1613,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card",
                 ObjectScope::AmassedArmy => "amassed Army",
                 ObjectScope::BatchSource => "batch source",
+                ObjectScope::ChainRootTarget => "chain-root target",
             };
             match color {
                 Some(c) => format!("{c:?} mana symbols in {scope_str}'s mana cost"),
@@ -5669,15 +5688,15 @@ fn append_effect_static_carrier_items(
     });
 }
 
-/// Build `ParsedItem` nodes for ability costs, only emitting items for
-/// composite or unimplemented costs (simple costs are not interesting).
+/// Build `ParsedItem` nodes for ability costs, emitting an unsupported item
+/// for every unpayable leaf in the tree.
+///
+/// Traversal delegates to [`AbilityCost::for_each_cost_node`], the single
+/// cost-tree shape authority, so this collector, the gap collector below, and
+/// `AbilityCost::contains_unimplemented` all see the same subtrees — including
+/// `OneOf`/`PerCounter` nesting and an `EffectCost`'s embedded effect.
 fn build_cost_item(cost: &AbilityCost, items: &mut Vec<ParsedItem>) {
-    match cost {
-        AbilityCost::Composite { costs } => {
-            for nested in costs {
-                build_cost_item(nested, items);
-            }
-        }
+    cost.for_each_cost_node(&mut |node| match node {
         AbilityCost::Unimplemented { description } => {
             items.push(ParsedItem {
                 category: ParseCategory::Cost,
@@ -5688,8 +5707,20 @@ fn build_cost_item(cost: &AbilityCost, items: &mut Vec<ParsedItem>) {
                 children: vec![],
             });
         }
+        AbilityCost::EffectCost { effect } => {
+            if let Effect::Unimplemented { name, description } = effect.as_ref() {
+                items.push(ParsedItem {
+                    category: ParseCategory::Cost,
+                    label: name.clone(),
+                    source_text: description.clone().or_else(|| Some(name.clone())),
+                    supported: false,
+                    details: vec![],
+                    children: vec![],
+                });
+            }
+        }
         _ => {}
-    }
+    });
 }
 
 /// Build `ParsedItem` nodes for additional costs (kicker, etc.).
@@ -5758,23 +5789,22 @@ fn build_additional_cost_items(additional_cost: &AdditionalCost, items: &mut Vec
 }
 
 /// Returns true if any leaf `AbilityCost` in the tree is `Unimplemented`.
+///
+/// Delegates to [`AbilityCost::contains_unimplemented`], the single
+/// containment authority over the cost tree. That method is a strict superset
+/// of the two former coverage-private `Composite`-only copies: it also
+/// recurses `OneOf` and `PerCounter`.
 fn additional_cost_has_unimplemented(additional_cost: &AdditionalCost) -> bool {
     match additional_cost {
         AdditionalCost::Optional { cost, .. } | AdditionalCost::Required(cost) => {
-            ability_cost_has_unimplemented(cost)
+            cost.contains_unimplemented()
         }
-        AdditionalCost::Kicker { costs, .. } => costs.iter().any(ability_cost_has_unimplemented),
+        AdditionalCost::Kicker { costs, .. } => {
+            costs.iter().any(AbilityCost::contains_unimplemented)
+        }
         AdditionalCost::Choice(first, second) => {
-            ability_cost_has_unimplemented(first) || ability_cost_has_unimplemented(second)
+            first.contains_unimplemented() || second.contains_unimplemented()
         }
-    }
-}
-
-fn ability_cost_has_unimplemented(cost: &AbilityCost) -> bool {
-    match cost {
-        AbilityCost::Unimplemented { .. } => true,
-        AbilityCost::Composite { costs } => costs.iter().any(ability_cost_has_unimplemented),
-        _ => false,
     }
 }
 
@@ -5796,7 +5826,7 @@ fn build_casting_option_item(option: &SpellCastingOption, items: &mut Vec<Parsed
     let supported = option
         .cost
         .as_ref()
-        .is_none_or(|c| !ability_cost_has_unimplemented(c));
+        .is_none_or(|c| !c.contains_unimplemented());
     items.push(ParsedItem {
         category: ParseCategory::Cost,
         label: format!("CastingOption:{kind_label}"),
@@ -5897,10 +5927,18 @@ pub fn parse_warning_pattern(
         OracleDiagnostic::SwallowedClause {
             detector,
             description,
+            gap,
             ..
         } => {
-            let excerpt = oracle_text
-                .and_then(|text| swallowed_clause_excerpt(detector, text))
+            // Prefer the engine's own typed verdict. The phrase the axis authority rejected
+            // is parens-stripped, it is bounded by the grammar's own clause bounds, and it is
+            // not subject to `description`'s 140-byte truncation. The excerpt and the
+            // whole-description fallbacks are unchanged, and a `gap: None` warning takes
+            // exactly the path it takes today.
+            let excerpt = gap
+                .as_ref()
+                .map(ClauseGap::phrase)
+                .or_else(|| oracle_text.and_then(|text| swallowed_clause_excerpt(detector, text)))
                 .unwrap_or(description.as_str());
             (
                 warning.category_name().to_string(),
@@ -6852,7 +6890,7 @@ pub fn card_face_has_unimplemented_parts(face: &CardFace) -> bool {
         || face
             .additional_cost
             .as_ref()
-            .is_some_and(additional_cost_has_unimplemented_parts)
+            .is_some_and(additional_cost_has_unimplemented)
         || face.triggers.iter().any(trigger_has_unimplemented_parts)
         || face
             .replacements
@@ -7937,7 +7975,7 @@ fn ability_definition_has_unimplemented_parts(
         || def
             .cost
             .as_ref()
-            .is_some_and(ability_cost_has_unimplemented_parts)
+            .is_some_and(|c| c.contains_unimplemented())
         || def.sub_ability.as_ref().is_some_and(|sub| {
             ability_definition_has_unimplemented_parts(sub, token_static_traversal)
         })
@@ -7998,29 +8036,6 @@ fn effect_static_carriers_have_unimplemented_parts(
                 modification_has_unimplemented_parts(modification, token_static_traversal);
         });
         has_unimplemented_parts
-    }
-}
-
-fn additional_cost_has_unimplemented_parts(additional_cost: &AdditionalCost) -> bool {
-    match additional_cost {
-        AdditionalCost::Optional { cost, .. } | AdditionalCost::Required(cost) => {
-            ability_cost_has_unimplemented_parts(cost)
-        }
-        AdditionalCost::Kicker { costs, .. } => {
-            costs.iter().any(ability_cost_has_unimplemented_parts)
-        }
-        AdditionalCost::Choice(first, second) => {
-            ability_cost_has_unimplemented_parts(first)
-                || ability_cost_has_unimplemented_parts(second)
-        }
-    }
-}
-
-fn ability_cost_has_unimplemented_parts(cost: &AbilityCost) -> bool {
-    match cost {
-        AbilityCost::Composite { costs } => costs.iter().any(ability_cost_has_unimplemented_parts),
-        AbilityCost::Unimplemented { .. } => true,
-        _ => false,
     }
 }
 
@@ -8534,21 +8549,29 @@ fn collect_source_texts(items: &[ParsedItem], out: &mut Vec<String>) {
     }
 }
 
+/// Collect the coverage gaps for an ability cost tree. Traversal delegates to
+/// [`AbilityCost::for_each_cost_node`], the single cost-tree shape authority,
+/// so the gap set cannot miss a subtree the containment predicate sees
+/// (`OneOf`/`PerCounter` nesting, and an `EffectCost` whose embedded effect is
+/// `Unimplemented`).
 fn collect_ability_cost_missing_parts(cost: &AbilityCost, missing: &mut Vec<String>) {
-    match cost {
-        AbilityCost::Composite { costs } => {
-            for nested_cost in costs {
-                collect_ability_cost_missing_parts(nested_cost, missing);
-            }
-        }
+    cost.for_each_cost_node(&mut |node| match node {
         AbilityCost::Unimplemented { description } => {
             let label = format!("Cost:{description}");
             if !missing.contains(&label) {
                 missing.push(label);
             }
         }
+        AbilityCost::EffectCost { effect } => {
+            if let Effect::Unimplemented { name, .. } = effect.as_ref() {
+                let label = format!("Cost:{name}");
+                if !missing.contains(&label) {
+                    missing.push(label);
+                }
+            }
+        }
         _ => {}
-    }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -9563,6 +9586,10 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardPower", Unhandled),
             ObjectScope::AmassedArmy => ("AmassedArmyPower", Handled),
             ObjectScope::BatchSource => ("BatchSourcePower", Handled),
+            // Fail-closed `=> 0` in `game/quantity.rs`: no card reads a
+            // chain-root target's characteristics yet (CR 601.2c referent is
+            // wired for `CountersOn` only).
+            ObjectScope::ChainRootTarget => ("ChainRootTargetPower", Unhandled),
         },
         QuantityRef::BasePower { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -9577,6 +9604,10 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardBasePower", Unhandled),
             ObjectScope::AmassedArmy => ("AmassedArmyBasePower", Handled),
             ObjectScope::BatchSource => ("BatchSourceBasePower", Handled),
+            // Fail-closed `=> 0` in `game/quantity.rs`: no card reads a
+            // chain-root target's characteristics yet (CR 601.2c referent is
+            // wired for `CountersOn` only).
+            ObjectScope::ChainRootTarget => ("ChainRootTargetBasePower", Unhandled),
         },
         QuantityRef::Toughness { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -9591,6 +9622,10 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardToughness", Unhandled),
             ObjectScope::AmassedArmy => ("AmassedArmyToughness", Handled),
             ObjectScope::BatchSource => ("BatchSourceToughness", Handled),
+            // Fail-closed `=> 0` in `game/quantity.rs`: no card reads a
+            // chain-root target's characteristics yet (CR 601.2c referent is
+            // wired for `CountersOn` only).
+            ObjectScope::ChainRootTarget => ("ChainRootTargetToughness", Unhandled),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -9605,6 +9640,10 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardManaValue", Handled),
             ObjectScope::AmassedArmy => ("AmassedArmyManaValue", Handled),
             ObjectScope::BatchSource => ("BatchSourceManaValue", Handled),
+            // Fail-closed `=> 0` in `game/quantity.rs`: no card reads a
+            // chain-root target's characteristics yet (CR 601.2c referent is
+            // wired for `CountersOn` only).
+            ObjectScope::ChainRootTarget => ("ChainRootTargetManaValue", Unhandled),
         },
         QuantityRef::TargetObjectManaValue { .. } => ("TargetObjectManaValue", Handled),
         QuantityRef::ObjectColorCount { scope } => match scope {
@@ -9623,6 +9662,10 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardColorCount", Handled),
             ObjectScope::AmassedArmy => ("AmassedArmyObjectColorCount", Handled),
             ObjectScope::BatchSource => ("BatchSourceObjectColorCount", Handled),
+            // Fail-closed `=> 0` in `game/quantity.rs`: no card reads a
+            // chain-root target's characteristics yet (CR 601.2c referent is
+            // wired for `CountersOn` only).
+            ObjectScope::ChainRootTarget => ("ChainRootTargetObjectColorCount", Unhandled),
         },
         QuantityRef::ObjectNameWordCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -9637,6 +9680,10 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardNameWordCount", Handled),
             ObjectScope::AmassedArmy => ("AmassedArmyObjectNameWordCount", Handled),
             ObjectScope::BatchSource => ("BatchSourceObjectNameWordCount", Handled),
+            // Fail-closed `=> 0` in `game/quantity.rs`: no card reads a
+            // chain-root target's characteristics yet (CR 601.2c referent is
+            // wired for `CountersOn` only).
+            ObjectScope::ChainRootTarget => ("ChainRootTargetObjectNameWordCount", Unhandled),
         },
         QuantityRef::ObjectTypelineComponentCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -9653,6 +9700,12 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             }
             ObjectScope::AmassedArmy => ("AmassedArmyObjectTypelineComponentCount", Handled),
             ObjectScope::BatchSource => ("BatchSourceObjectTypelineComponentCount", Handled),
+            // Fail-closed `=> 0` in `game/quantity.rs`: no card reads a
+            // chain-root target's characteristics yet (CR 601.2c referent is
+            // wired for `CountersOn` only).
+            ObjectScope::ChainRootTarget => {
+                ("ChainRootTargetObjectTypelineComponentCount", Unhandled)
+            }
         },
         QuantityRef::ManaSymbolsInManaCost { scope, .. } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -9669,6 +9722,10 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             }
             ObjectScope::AmassedArmy => ("AmassedArmyManaSymbolsInManaCost", Handled),
             ObjectScope::BatchSource => ("BatchSourceManaSymbolsInManaCost", Handled),
+            // Fail-closed `=> 0` in `game/quantity.rs`: no card reads a
+            // chain-root target's characteristics yet (CR 601.2c referent is
+            // wired for `CountersOn` only).
+            ObjectScope::ChainRootTarget => ("ChainRootTargetManaSymbolsInManaCost", Unhandled),
         },
         QuantityRef::SelfManaValue => ("SelfManaValue", Handled),
         QuantityRef::PropertyAggregate(_) => ("PropertyAggregate", Handled),
@@ -9868,7 +9925,16 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::And { .. } => ("And", Handled),
         StaticCondition::Or { .. } => ("Or", Handled),
         StaticCondition::Not { .. } => ("Not", Handled),
-        StaticCondition::DefendingPlayerControls { .. } => ("DefendingPlayerControls", Unhandled),
+        // CR 506.2 + CR 508.1c + CR 508.5: resolved at runtime by
+        // `layers::evaluate_condition_with_context`'s `DefendingPlayerControls` arm from
+        // `ConditionContext` — the attack target under validation during
+        // declare-attackers (before CR 508.1k records the attacker), else the recorded
+        // `AttackerInfo` for the RECIPIENT attacking creature (so a remote carrier such
+        // as Tanglewalker resolves per affected attacker rather than per carrier).
+        // Creature-level queries that cannot bind the anchor defer to
+        // `combat::attacker_can_attack_target` rather than guess. The board census is
+        // `filter::player_controls_matching` (CR 109.2 + CR 108.4).
+        StaticCondition::DefendingPlayerControls { .. } => ("DefendingPlayerControls", Handled),
         StaticCondition::SourceAttackingAlone => ("SourceAttackingAlone", Unhandled),
         // CR 508.1k / 509.1g / 509.1h: runtime-evaluated against the live combat
         // attacker/blocker sets (conditions.rs:81 / layers.rs:1118 / layers.rs:1123).
@@ -9901,8 +9967,8 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::OpponentPoisonAtLeast { .. } => ("OpponentPoisonAtLeast", Unhandled),
         StaticCondition::UnlessPay { .. } => ("UnlessPay", Handled),
         // CR 903.3d: the RUNTIME does evaluate this static
-        // (`layers::evaluate_static_condition`, layers.rs:1875, delegating both
-        // ownership arms to the single `game::commander` authority), so the
+        // (the `ControlsCommander` arm of `layers::evaluate_condition_with_context`,
+        // delegating both ownership arms to the single `game::commander` authority), so the
         // `Unhandled` tag below understates the resolver.
         //
         // It stays `Unhandled` DELIBERATELY, and must not be flipped as a rider on
@@ -9930,7 +9996,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::SourceIsMonstrous => ("SourceIsMonstrous", Handled),
         // SourceIsHarnessed resolved by layers::evaluate_condition (the ∞ gate).
         StaticCondition::SourceIsHarnessed => ("SourceIsHarnessed", Handled),
-        // SourceAttachedToCreature resolved by layers::evaluate_condition (layers.rs:1078)
+        // SourceAttachedToCreature resolved by `layers::evaluate_condition`
         StaticCondition::SourceAttachedToCreature => ("SourceAttachedToCreature", Handled),
         // SourceMatchesFilter resolved by layers::evaluate_condition (layers.rs:1104)
         StaticCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Handled),
@@ -11001,7 +11067,14 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 // Hogaak, Arisen Necropolis (issue #1095): "You can't spend mana
                 // to cast this spell" is parsed to CastingRestriction::CantSpendMana.
                 || lower.starts_with("you can't spend mana to cast ")
-                || lower.starts_with("you can\u{2019}t spend mana to cast "));
+                || lower.starts_with("you can\u{2019}t spend mana to cast ")
+                // CR 601.2b / CR 601.2h: "Spend only [colors] mana on X" is parsed to
+                // CastingRestriction::SpendOnlyOnX { colors }.
+                || (face
+                    .casting_restrictions
+                    .iter()
+                    .any(|r| matches!(r, crate::types::ability::CastingRestriction::SpendOnlyOnX { .. }))
+                    && crate::parser::oracle_casting::extract_spend_only_on_x_prefix(line).is_some()));
         // Casting option lines ("You may pay X rather than pay...", "If you control a
         // commander, you may cast this spell without paying its mana cost", etc.)
         let covered_by_casting_option = !face.casting_options.is_empty()
@@ -11090,9 +11163,19 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             // CR 601.2f: ReduceCost / RaiseCost / MinimumCost coverage markers,
             // discriminated by the `mode` axis. Trinisphere's "would cost less than"
             // distinguishes Minimum from Reduce ("less to cast") and Raise ("more").
-            StaticMode::ModifyCost { mode, .. } => match mode {
+            StaticMode::ModifyCost { mode, reach, .. } => match mode {
+                // CR 118.7b/c/d: a reduction line that PRINTS "this effect
+                // reduces only the amount of [colored] mana you pay" is only
+                // covered when the emitted reducer actually carries that reach.
+                // Without this arm a parser that silently drops the rider still
+                // reports the card supported while playing it wrong — which is
+                // exactly how Morophon shipped reducing generic mana (#8432).
                 CostModifyMode::Reduce => {
-                    effective_lower.contains("cost") && effective_lower.contains("less")
+                    effective_lower.contains("cost")
+                        && effective_lower.contains("less")
+                        && (!crate::parser::oracle_cost::line_reduces_colored_mana_only(
+                            &effective_lower,
+                        ) || matches!(reach, CostReductionReach::ColoredManaOnly))
                 }
                 CostModifyMode::Raise => {
                     effective_lower.contains("cost") && effective_lower.contains("more")
@@ -11178,6 +11261,7 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 color,
                 life_cost,
                 mana_reduction,
+                reach,
             } => {
                 let color_word = mana_color_word(*color);
                 let color_symbol = mana_color_symbol(*color);
@@ -11186,7 +11270,16 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 )) && effective_lower.contains(&format!("pay {life_cost} life"));
                 let reduction_line = effective_lower
                     .contains(&format!("those spells cost {color_symbol} less to cast"));
-                (life_line || reduction_line) && mana_cost_is_single_color(mana_reduction, *color)
+                // CR 118.7b/c/d: mirror the `ModifyCost` arm above — a Defiler
+                // line that PRINTS the colored-only rider is only covered when
+                // the emitted reducer carries that reach. Gated on the rider
+                // being present so a split/abbreviated line that never prints it
+                // still passes on the CR 118.7b default.
+                (life_line || reduction_line)
+                    && mana_cost_is_single_color(mana_reduction, *color)
+                    && (!crate::parser::oracle_cost::line_reduces_colored_mana_only(
+                        &effective_lower,
+                    ) || matches!(reach, CostReductionReach::ColoredManaOnly))
             }
             StaticMode::CantBeBlocked => effective_lower.contains("can't be blocked"),
             StaticMode::CantBeBlockedExceptBy { .. } => {
@@ -13533,6 +13626,8 @@ mod tests {
 
     use super::*;
     use crate::database::legality::{legalities_to_export_map, LegalityStatus};
+    use crate::database::mtgjson::{AtomicCard, AtomicIdentifiers};
+    use crate::database::synthesis::build_oracle_face;
     use crate::parser::oracle_ir::diagnostic::{CascadeSlot, OracleDiagnostic};
     use crate::types::ability::{
         AbilityCondition, AbilityKind, Comparator, ContinuousModification, ControllerRef,
@@ -14282,6 +14377,7 @@ mod tests {
         let warnings = vec![OracleDiagnostic::swallowed_clause(
             "APNAP",
             "Repeat the following process for each opponent in turn order.",
+            None,
         )];
         let gaps = merge_coverage_gaps(&[], vec![], &warnings);
         assert_eq!(gaps[0].handler, "Swallow:APNAP");
@@ -14293,6 +14389,7 @@ mod tests {
             crate::parser::oracle_ir::diagnostic::OracleDiagnostic::swallowed_clause(
                 "Condition_If",
                 "If foo, draw a card.",
+                None,
             ),
         ];
         let gaps = merge_coverage_gaps(&[], vec![], &warnings);
@@ -14330,7 +14427,7 @@ mod tests {
     /// cannot be smuggled in as a rider on an unrelated change.
     ///
     /// The runtime DOES evaluate `StaticCondition::ControlsCommander`
-    /// (`layers::evaluate_static_condition`, layers.rs:1875), so on the
+    /// (the `ControlsCommander` arm of `layers::evaluate_condition_with_context`), so on the
     /// resolver axis alone the tag understates the engine. But the tag is also
     /// the only thing keeping two demonstrably misparsed Lieutenant cards out
     /// of the supported set, so it must stay until those misparses register as
@@ -14509,6 +14606,75 @@ mod tests {
         assert!(missing.is_empty());
     }
 
+    /// The warning pattern prefers the engine's typed phrase, and falls back
+    /// to the sentence excerpt when there is none.
+    ///
+    /// The two halves are given the SAME `oracle_text` and the SAME detector, so `gap` is
+    /// the only variable, and each half is pinned to its own literal. Those two literals
+    /// differ, which is what stops either half from passing on a constant. The `None` half's
+    /// expected string is the excerpt path's output, i.e. exactly what this warning produced
+    /// before this field existed.
+    #[test]
+    fn swallowed_clause_pattern_prefers_the_gap_phrase_and_falls_back_without_one() {
+        const ORACLE: &str = "Whenever Aggressive Detective attacks, if all your commanders \
+have been revealed, Aggressive Detective deals 2 damage to each opponent.";
+        const DESCRIPTION: &str =
+            "Whenever Aggressive Detective attacks, if all your commanders have been revealed";
+
+        let with_gap = OracleDiagnostic::SwallowedClause {
+            detector: "Condition_If".to_string(),
+            description: DESCRIPTION.to_string(),
+            line_index: 0,
+            unit_span: None,
+            items: Vec::new(),
+            gap: Some(ClauseGap::Condition {
+                guard: "all your commanders have been revealed".to_string(),
+            }),
+        };
+        let without_gap = OracleDiagnostic::swallowed_clause("Condition_If", DESCRIPTION, None);
+
+        let preferred = parse_warning_pattern(&with_gap, Some(ORACLE));
+        let fallback = parse_warning_pattern(&without_gap, Some(ORACLE));
+
+        // The phrase the axis authority rejected, normalized, wins the chain head.
+        assert_eq!(
+            preferred,
+            (
+                "swallowed-clause".to_string(),
+                "Condition_If: all your commanders have been revealed".to_string()
+            )
+        );
+
+        // With no gap the excerpt path is untouched: the marker's whole sentence.
+        assert_eq!(
+            fallback,
+            (
+                "swallowed-clause".to_string(),
+                "Condition_If: if all your commanders have been revealed, aggressive detective \
+                 deals N damage to each opponent"
+                    .to_string()
+            )
+        );
+    }
+
+    /// A non-phrase detector's pattern is byte-identical to the value the phase-base
+    /// export records for it. The expected string is taken from that export's warning
+    /// patterns, an artifact, not from this code.
+    #[test]
+    fn non_phrase_detector_pattern_is_unchanged() {
+        const ORACLE: &str =
+            "Needle Drop deals 1 damage to any target that was dealt damage this turn.\nDraw a card.";
+        let warning = OracleDiagnostic::swallowed_clause("Duration_ThisTurn", ORACLE, None);
+
+        assert_eq!(
+            parse_warning_pattern(&warning, Some(ORACLE)),
+            (
+                "swallowed-clause".to_string(),
+                "Duration_ThisTurn: this turn".to_string()
+            )
+        );
+    }
+
     /// A fired `SwallowedClause` diagnostic must demote the card from
     /// "supported" via a `Swallow:{detector}` gap label (issue #2230 / #2243).
     /// The label format is a contract: parser tests in `oracle.rs` grep for
@@ -14518,6 +14684,7 @@ mod tests {
         let warnings = vec![OracleDiagnostic::swallowed_clause(
             "Condition_If",
             "if you control a creature, …",
+            None,
         )];
         let gaps = merge_coverage_gaps(&[], vec![], &warnings);
         assert_eq!(gaps[0].handler, "Swallow:Condition_If");
@@ -14531,8 +14698,13 @@ mod tests {
             OracleDiagnostic::swallowed_clause(
                 "DynamicQty",
                 "equal to the number of charge counters",
+                None,
             ),
-            OracleDiagnostic::swallowed_clause("DynamicQty", "equal to that card's mana value"),
+            OracleDiagnostic::swallowed_clause(
+                "DynamicQty",
+                "equal to that card's mana value",
+                None,
+            ),
         ];
         let gaps = merge_coverage_gaps(&[], vec![], &warnings);
         assert_eq!(gaps.len(), 1);
@@ -14548,6 +14720,7 @@ mod tests {
         let warnings = vec![OracleDiagnostic::swallowed_clause(
             "Optional_YouMay",
             "you may reveal that card and put it into your hand",
+            None,
         )];
         let gaps = merge_coverage_gaps(&[], vec![], &warnings);
         assert_eq!(gaps[0].handler, "Swallow:Optional_YouMay");
@@ -14770,6 +14943,227 @@ mod tests {
             .into_iter()
             .find(|card| card.card_name == card_name)
             .expect("coverage should include test card")
+    }
+
+    /// Build an `AtomicCard` for a FIN Tiered spell with its real MTGJSON
+    /// keyword array, so the tests exercise the production MTGJSON→face path.
+    fn tiered_atomic_card(name: &str, oracle: &str, keywords: &[&str]) -> AtomicCard {
+        AtomicCard {
+            name: name.to_string(),
+            mana_cost: Some("{1}{R}".to_string()),
+            colors: vec!["R".to_string()],
+            color_identity: vec!["R".to_string()],
+            power: None,
+            toughness: None,
+            loyalty: None,
+            defense: None,
+            text: Some(oracle.to_string()),
+            layout: "normal".to_string(),
+            type_line: Some("Instant".to_string()),
+            types: vec!["Instant".to_string()],
+            subtypes: vec![],
+            supertypes: vec![],
+            keywords: if keywords.is_empty() {
+                None
+            } else {
+                Some(keywords.iter().map(|k| (*k).to_string()).collect())
+            },
+            side: None,
+            face_name: None,
+            mana_value: 2.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: AtomicIdentifiers {
+                scryfall_oracle_id: Some(format!("{}-oracle", name.to_lowercase())),
+                scryfall_id: Some(format!("{}-face", name.to_lowercase())),
+            },
+            foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
+        }
+    }
+
+    const FIRE_MAGIC_ORACLE: &str = "Tiered (Choose one additional cost.)\n\
+        \u{2022} Fire \u{2014} {0} \u{2014} Fire Magic deals 1 damage to each creature.\n\
+        \u{2022} Fira \u{2014} {2} \u{2014} Fire Magic deals 2 damage to each creature.\n\
+        \u{2022} Firaga \u{2014} {5} \u{2014} Fire Magic deals 3 damage to each creature.";
+
+    /// CR 702.183a: the `Tiered` header line is a printed line the parser
+    /// represents as the typed `Keyword::Tiered` parse item (the MTGJSON keyword
+    /// array is the only source for it), which is exactly what closes the
+    /// cardinality gap that made the whole modal block a `SilentDrop` before the
+    /// variant landed. Faces are built through the production MTGJSON→face path
+    /// and reloaded through the serde-backed coverage harness.
+    ///
+    /// Vincent's Limit Break keeps its separate, deferred swallow seam:
+    /// `Swallow:Duration_UntilEndOfTurn` is its only residual gap. Update the
+    /// Vincent expectation when that duration-attribution seam is fixed.
+    #[test]
+    fn tiered_modal_blocks_are_not_silent_drops() {
+        // (name, verbatim Oracle text, real MTGJSON keywords, fully supported?)
+        let cases: &[(&str, &str, &[&str], bool)] = &[
+            (
+                "Fire Magic",
+                FIRE_MAGIC_ORACLE,
+                &["Fira", "Firaga", "Fire", "Tiered"],
+                true,
+            ),
+            (
+                "Ice Magic",
+                "Tiered (Choose one additional cost.)\n\
+                 \u{2022} Blizzard \u{2014} {0} \u{2014} Return target creature to its owner's hand.\n\
+                 \u{2022} Blizzara \u{2014} {2} \u{2014} Target creature's owner puts it on their choice of the top or bottom of their library.\n\
+                 \u{2022} Blizzaga \u{2014} {5}{U} \u{2014} Target creature's owner shuffles it into their library.",
+                &["Blizzaga", "Blizzara", "Blizzard", "Tiered"],
+                true,
+            ),
+            (
+                "Thunder Magic",
+                "Tiered (Choose one additional cost.)\n\
+                 \u{2022} Thunder \u{2014} {0} \u{2014} Thunder Magic deals 2 damage to target creature.\n\
+                 \u{2022} Thundara \u{2014} {3} \u{2014} Thunder Magic deals 4 damage to target creature.\n\
+                 \u{2022} Thundaga \u{2014} {5}{R} \u{2014} Thunder Magic deals 8 damage to target creature.",
+                &["Thundaga", "Thundara", "Thunder", "Tiered"],
+                true,
+            ),
+            (
+                "Cloud's Limit Break",
+                "Tiered (Choose one additional cost.)\n\
+                 \u{2022} Cross-Slash \u{2014} {0} \u{2014} Destroy target tapped creature.\n\
+                 \u{2022} Blade Beam \u{2014} {1} \u{2014} Destroy any number of target tapped creatures with different controllers.\n\
+                 \u{2022} Omnislash \u{2014} {3}{W} \u{2014} Destroy all tapped creatures.",
+                &["Blade Beam", "Cross-Slash", "Omnislash", "Tiered"],
+                true,
+            ),
+            (
+                "Tifa's Limit Break",
+                "Tiered (Choose one additional cost.)\n\
+                 \u{2022} Somersault \u{2014} {0} \u{2014} Target creature gets +2/+2 until end of turn.\n\
+                 \u{2022} Meteor Strikes \u{2014} {2} \u{2014} Double target creature's power and toughness until end of turn.\n\
+                 \u{2022} Final Heaven \u{2014} {6}{G} \u{2014} Triple target creature's power and toughness until end of turn.",
+                &[
+                    "Double",
+                    "Final Heaven",
+                    "Meteor Strikes",
+                    "Somersault",
+                    "Tiered",
+                    "Triple",
+                ],
+                true,
+            ),
+            (
+                "Restoration Magic",
+                "Tiered (Choose one additional cost.)\n\
+                 \u{2022} Cure \u{2014} {0} \u{2014} Target permanent gains hexproof and indestructible until end of turn.\n\
+                 \u{2022} Cura \u{2014} {1} \u{2014} Target permanent gains hexproof and indestructible until end of turn. You gain 3 life.\n\
+                 \u{2022} Curaga \u{2014} {3}{W} \u{2014} Permanents you control gain hexproof and indestructible until end of turn. You gain 6 life.",
+                &["Cura", "Curaga", "Cure", "Tiered"],
+                true,
+            ),
+            (
+                "Vincent's Limit Break",
+                "Tiered (Choose one additional cost.)\n\
+                 Until end of turn, target creature you control gains \"When this creature dies, return it to the battlefield tapped under its owner's control\" and has the chosen base power and toughness.\n\
+                 \u{2022} Galian Beast \u{2014} {0} \u{2014} 3/2.\n\
+                 \u{2022} Death Gigas \u{2014} {1} \u{2014} 5/2.\n\
+                 \u{2022} Hellmasker \u{2014} {3} \u{2014} 7/2.",
+                &["Death Gigas", "Galian Beast", "Hellmasker", "Tiered"],
+                false,
+            ),
+        ];
+
+        for (name, oracle, keywords, fully_supported) in cases {
+            let face = build_oracle_face(&tiered_atomic_card(name, oracle, keywords), None);
+            let mode_count = face
+                .modal
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} must parse as a Tiered modal"))
+                .mode_count;
+            let card = coverage_result_for_face(face);
+
+            assert!(
+                !card
+                    .gap_details
+                    .iter()
+                    .any(|gap| gap.handler.starts_with("SilentDrop")),
+                "{name} must not report a SilentDrop: {:?}",
+                card.gap_details
+            );
+
+            if *fully_supported {
+                assert!(
+                    card.gap_details.is_empty(),
+                    "{name} must be fully covered: {:?}",
+                    card.gap_details
+                );
+                assert!(card.supported, "{name} must be supported");
+            } else {
+                let handlers: Vec<&str> = card
+                    .gap_details
+                    .iter()
+                    .map(|gap| gap.handler.as_str())
+                    .collect();
+                assert_eq!(
+                    handlers,
+                    vec!["Swallow:Duration_UntilEndOfTurn"],
+                    "Vincent's only residual gap is the deferred duration-attribution \
+                     swallow seam; update this expectation when that seam is fixed"
+                );
+                assert!(!card.supported, "Vincent must remain unsupported");
+            }
+
+            // Positive reach-guard (non-vacuity): the Tiered header is
+            // represented by exactly one Keyword parse item, so the top-level
+            // parse-item count is one keyword plus one item per mode.
+            if *name == "Fire Magic" {
+                let tiered_items: Vec<&ParsedItem> = card
+                    .parse_details
+                    .iter()
+                    .filter(|item| {
+                        item.category == ParseCategory::Keyword && item.label == "Tiered"
+                    })
+                    .collect();
+                assert_eq!(
+                    tiered_items.len(),
+                    1,
+                    "exactly one typed Tiered keyword item: {:?}",
+                    card.parse_details
+                );
+                assert!(tiered_items[0].supported);
+                assert_eq!(
+                    card.parse_details.len(),
+                    1 + mode_count,
+                    "one Tiered keyword item plus one parse root per mode"
+                );
+            }
+        }
+    }
+
+    /// Paired negative: the same Fire Magic face built with **no** MTGJSON
+    /// keyword array still trips the silent-drop guard with the exact
+    /// pre-fix label. Proves the fix is the typed keyword item and that the
+    /// guard still bites when it is absent.
+    #[test]
+    fn tiered_block_without_mtgjson_keyword_still_reports_silent_drop() {
+        let face = build_oracle_face(
+            &tiered_atomic_card("Fire Magic", FIRE_MAGIC_ORACLE, &[]),
+            None,
+        );
+        let card = coverage_result_for_face(face);
+
+        assert!(
+            !card.supported,
+            "without the Tiered keyword item the card remains unsupported"
+        );
+        assert!(
+            card.gap_details
+                .iter()
+                .any(|gap| gap.handler == "SilentDrop:3_of_4"),
+            "expected SilentDrop:3_of_4, got {:?}",
+            card.gap_details
+        );
     }
 
     #[test]
@@ -15023,6 +15417,112 @@ mod tests {
         );
     }
 
+    /// CR 601.2b / CR 601.2h: "Spend only [colors] mana on X" is consumed into
+    /// `casting_restrictions`, so its line must not be classified as a silent drop.
+    #[test]
+    fn spend_only_on_x_casting_restriction_line_is_not_a_silent_drop() {
+        use crate::types::ability::CastingRestriction;
+        use crate::types::mana::ManaColor;
+
+        for (name, types, oracle, expected_restrictions, expected_unsupported_substring) in [
+            (
+                "Consume Spirit",
+                vec!["Sorcery".to_string()],
+                "Spend only black mana on X.\nConsume Spirit deals X damage to any target and you gain X life.",
+                vec![CastingRestriction::SpendOnlyOnX {
+                    colors: vec![ManaColor::Black],
+                }],
+                None,
+            ),
+            (
+                "Drain Life",
+                vec!["Sorcery".to_string()],
+                "Spend only black mana on X.\nDrain Life deals X damage to any target. You gain life equal to the damage dealt, but not more life than the player's life total before the damage was dealt, the planeswalker's loyalty before the damage was dealt, or the creature's toughness.",
+                vec![CastingRestriction::SpendOnlyOnX {
+                    colors: vec![ManaColor::Black],
+                }],
+                None,
+            ),
+            (
+                "Soul Burn",
+                vec!["Sorcery".to_string()],
+                "Spend only black and/or red mana on X.\nSoul Burn deals X damage to any target. You gain life equal to the damage dealt, but not more than the amount of {B} spent on X, the player\u{2019}s life total before the damage was dealt, the planeswalker\u{2019}s loyalty before the damage was dealt, or the creature\u{2019}s toughness.",
+                vec![CastingRestriction::SpendOnlyOnX {
+                    colors: vec![ManaColor::Black, ManaColor::Red],
+                }],
+                None,
+            ),
+            (
+                "Emblazoned Golem",
+                vec!["Artifact".to_string(), "Creature".to_string()],
+                "Kicker {X}\nSpend only colored mana on X. No more than one mana of each color may be spent this way.\nIf this creature was kicked, it enters with X +1/+1 counters on it.",
+                vec![CastingRestriction::SpendOnlyOnX {
+                    colors: vec![
+                        ManaColor::White,
+                        ManaColor::Blue,
+                        ManaColor::Black,
+                        ManaColor::Red,
+                        ManaColor::Green,
+                    ],
+                }],
+                Some("No more than one mana of each color"),
+            ),
+        ] {
+            let parsed = crate::parser::parse_oracle_text(oracle, name, &[], &types, &[]);
+            assert_eq!(
+                parsed.casting_restrictions, expected_restrictions,
+                "{name}: parsed casting restrictions must match exact typed AST"
+            );
+
+            let mut face = make_face();
+            face.name = name.to_string();
+            face.oracle_text = Some(oracle.to_string());
+            face.keywords = parsed.extracted_keywords;
+            face.abilities = parsed.abilities;
+            face.triggers = parsed.triggers;
+            face.static_abilities = parsed.statics;
+            face.replacements = parsed.replacements;
+            face.modal = parsed.modal;
+            face.additional_cost = parsed.additional_cost;
+            face.strive_cost = parsed.strive_cost;
+            face.casting_restrictions = parsed.casting_restrictions;
+            face.casting_options = parsed.casting_options;
+            face.solve_condition = parsed.solve_condition;
+            face.parse_warnings = parsed.parse_warnings;
+
+            let parse_details = build_parse_details_for_face(&face);
+            let mut missing = Vec::new();
+            check_silent_drops(
+                &Some(oracle.to_string()),
+                name,
+                &parse_details,
+                &mut missing,
+            );
+            assert!(
+                !missing.iter().any(|gap| gap.starts_with("SilentDrop:")),
+                "{name}: spend-only-on-X casting restriction line must not be classified as a silent drop, got {missing:?}"
+            );
+
+            if let Some(substring) = expected_unsupported_substring {
+                let has_unsupported_ability = face.abilities.iter().any(|a| {
+                    matches!(&*a.effect, crate::types::ability::Effect::Unimplemented { name, description }
+                        if name.contains(substring) || description.as_deref().is_some_and(|d| d.contains(substring)))
+                });
+                let has_unsupported_item = parse_details.iter().any(|item| {
+                    !item.supported
+                        && (item.source_text.as_deref().is_some_and(|t| t.contains(substring))
+                            || item.details.iter().any(|(_, v)| v.contains(substring)))
+                });
+                assert!(
+                    has_unsupported_ability || has_unsupported_item,
+                    "{name}: expected explicit unsupported remainder mentioning {substring:?}, got abilities={:?}, parse_details={:?}",
+                    face.abilities,
+                    parse_details
+                );
+            }
+        }
+    }
+
     /// The exclusion above must not become a blanket amnesty for anything that
     /// merely looks like a cost preamble. `parse_casting_restriction_line`
     /// returns `None` for an unrecognized cost, so Pie-Eating Contest's "gobble
@@ -15056,6 +15556,102 @@ mod tests {
             &mut missing,
         );
         assert_eq!(missing, vec!["SilentDrop:1_of_2"]);
+    }
+
+    /// Unrecognized spend-only lines (like "Spend only mana produced by basic lands to cast this spell")
+    /// must not be swallowed by a generic "spend only " prefix check when SpendOnlyOnX does not match.
+    ///
+    /// Tests both the `check_silent_drops` pipeline guard and the discriminating `audit_card_lines`
+    /// coverage authority at `crates/engine/src/game/coverage.rs:11058-11073` for supported and
+    /// unrecognized spend-only lines.
+    #[test]
+    fn unrecognized_spend_only_line_is_still_a_silent_drop() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, CastingRestriction, Effect, QuantityExpr, TargetFilter,
+        };
+        use crate::types::mana::ManaColor;
+
+        const UNRECOGNIZED_ORACLE: &str =
+            "Spend only mana produced by basic lands to cast this spell.\nDraw two cards.";
+
+        let mut unrecognized_face = make_face();
+        // Give face SpendOnlyOnX to prove that having a SpendOnlyOnX restriction does NOT
+        // grant blanket immunity to an unrecognized "Spend only" line.
+        unrecognized_face
+            .casting_restrictions
+            .push(CastingRestriction::SpendOnlyOnX {
+                colors: vec![ManaColor::Black],
+            });
+        unrecognized_face.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .description("Draw two cards.".to_string()),
+        );
+
+        // 1. Retain the existing check_silent_drops unrecognized-line guard
+        let parse_details = build_parse_details_for_face(&unrecognized_face);
+        let mut missing = Vec::new();
+        check_silent_drops(
+            &Some(UNRECOGNIZED_ORACLE.to_string()),
+            "Basic Spell",
+            &parse_details,
+            &mut missing,
+        );
+        assert_eq!(missing, vec!["SilentDrop:1_of_2"]);
+
+        // 2. Discriminating audit_card_lines assertion for the unrecognized line:
+        // Because extract_spend_only_on_x_prefix returns None for this unrecognized line,
+        // audit_card_lines must NOT treat it as covered_by_casting, and must emit SilentDrop.
+        // If audit_card_lines reverted to `lower.starts_with("spend only ")`, this assertion would fail.
+        let unrecognized_findings = audit_card_lines(UNRECOGNIZED_ORACLE, &unrecognized_face);
+        assert!(
+            unrecognized_findings.iter().any(|f| matches!(
+                f,
+                SemanticFinding::SilentDrop { oracle_line }
+                    if oracle_line == "Spend only mana produced by basic lands to cast this spell."
+            )),
+            "Unrecognized spend-only line must be emitted as SilentDrop by audit_card_lines: {unrecognized_findings:?}"
+        );
+
+        // 3. Discriminating audit_card_lines assertion for a supported SpendOnlyOnX line:
+        // A valid "Spend only [colors] mana on X" line with SpendOnlyOnX present on face
+        // must be recognized as covered_by_casting and not emitted as SilentDrop.
+        const SUPPORTED_ORACLE: &str = "Spend only black mana on X.\nDraw two cards.";
+        let mut supported_face = make_face();
+        supported_face
+            .casting_restrictions
+            .push(CastingRestriction::SpendOnlyOnX {
+                colors: vec![ManaColor::Black],
+            });
+        supported_face.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .description("Draw two cards.".to_string()),
+        );
+
+        let supported_findings = audit_card_lines(SUPPORTED_ORACLE, &supported_face);
+        assert!(
+            !supported_findings.iter().any(|f| matches!(
+                f,
+                SemanticFinding::SilentDrop { oracle_line }
+                    if oracle_line == "Spend only black mana on X."
+            )),
+            "Supported SpendOnlyOnX line must not be emitted as SilentDrop by audit_card_lines: {supported_findings:?}"
+        );
+        assert!(
+            supported_findings.is_empty(),
+            "Supported SpendOnlyOnX card should have no semantic findings: {supported_findings:?}"
+        );
     }
 
     #[test]
@@ -15192,6 +15788,7 @@ mod tests {
         let warnings = vec![OracleDiagnostic::swallowed_clause(
             "Condition_If",
             "If a condition is met, do something.",
+            None,
         )];
 
         let gaps = merge_coverage_gaps(&analysis, tree, &warnings);
@@ -18014,6 +18611,7 @@ mod tests {
                     shards: vec![ManaCostShard::Blue],
                     generic: 0,
                 },
+                reach: crate::types::statics::CostReductionReach::ColoredManaOnly,
             },
             affected: Some(TargetFilter::SelfRef),
             modifications: vec![],
@@ -18037,6 +18635,54 @@ mod tests {
         assert!(audit_card_lines(oracle, &face).is_empty());
     }
 
+    /// CR 118.7b/c/d: the reach guard for the arm above. A Defiler line that
+    /// PRINTS "This effect reduces only the amount of blue mana you pay" while
+    /// emitting the CR 118.7b default reach is the engine playing the card
+    /// wrong, so coverage must refuse to call it supported. Identical to
+    /// `defiler_cost_reduction_static_does_not_count_as_silent_drop` except for
+    /// the reach, so a regression that stops reading `reach` turns this red
+    /// while leaving that one green.
+    #[test]
+    fn defiler_cost_reduction_static_with_dropped_rider_counts_as_silent_drop() {
+        let mut face = make_face();
+        let oracle = "As an additional cost to cast blue permanent spells, you may pay 2 life. Those spells cost {U} less to cast if you paid life this way. This effect reduces only the amount of blue mana you pay.";
+        face.oracle_text = Some(oracle.to_string());
+        face.static_abilities.push(StaticDefinition {
+            mode: StaticMode::DefilerCostReduction {
+                color: ManaColor::Blue,
+                life_cost: 2,
+                mana_reduction: ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue],
+                    generic: 0,
+                },
+                reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
+            },
+            affected: Some(TargetFilter::SelfRef),
+            modifications: vec![],
+            condition: None,
+            per_player_condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            active_zones: vec![],
+            characteristic_defining: false,
+            description: Some(
+                "As an additional cost to cast blue permanent spells, you may pay 2 life. Those spells cost less to cast.".to_string(),
+            ),
+            attack_defended: None,
+            source_controller: None,
+            source_object: None,
+            bypass_beneficiary: None,
+            protection_does_not_remove: None,
+            room_door: None,
+        });
+
+        assert!(
+            !audit_card_lines(oracle, &face).is_empty(),
+            "a Defiler reducer that drops the printed colored-only rider must \
+             not be reported as covered"
+        );
+    }
+
     #[test]
     fn split_defiler_cost_reduction_static_does_not_count_as_silent_drop() {
         let mut face = make_face();
@@ -18050,6 +18696,7 @@ mod tests {
                     shards: vec![ManaCostShard::Blue],
                     generic: 0,
                 },
+                reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
             },
             affected: Some(TargetFilter::SelfRef),
             modifications: vec![],
@@ -18086,6 +18733,7 @@ mod tests {
                     shards: vec![ManaCostShard::Blue],
                     generic: 0,
                 },
+                reach: crate::types::statics::CostReductionReach::ColoredManaOnly,
             },
             affected: Some(TargetFilter::SelfRef),
             modifications: vec![],
@@ -18815,8 +19463,7 @@ mod tests {
     }
 
     /// Regression for PR #8012 (Bombur, Gentle Dreamer) — maintainer review
-    /// round 3, which cited this exact `is_static_supported` gate
-    /// (`coverage.rs:7794-7816` as of that review): a recipient-scoped
+    /// round 3, which cited this exact `is_static_supported` gate: a recipient-scoped
     /// `unless` tail with no runtime binding authority falls back to
     /// `Not(Unrecognized{..})`, a NESTED unrecognized leaf. Before the fix,
     /// `is_static_supported` matched only a TOP-LEVEL
@@ -18957,6 +19604,131 @@ mod tests {
                 options: vec![crate::types::card_type::CoreType::Artifact],
             }),
             "restricted card type"
+        );
+    }
+
+    /// The coverage walker delegates containment to
+    /// `AbilityCost::contains_unimplemented` — the single authority. The
+    /// `OneOf` case is revert-discriminating: the deleted `Composite`-only
+    /// private copy answered `false` for an `Unimplemented` nested under a
+    /// disjunction.
+    #[test]
+    fn additional_cost_unimplemented_delegates_to_ability_cost_authority() {
+        use crate::types::ability::{Effect, QuantityExpr};
+        use crate::types::mana::ManaCost;
+
+        let pay_life = || AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: 2 },
+        };
+        let unimplemented = || AbilityCost::Unimplemented {
+            description: "frobnicate".to_string(),
+        };
+
+        assert!(additional_cost_has_unimplemented(
+            &AdditionalCost::Required(AbilityCost::Composite {
+                costs: vec![pay_life(), unimplemented()],
+            }),
+        ));
+        assert!(additional_cost_has_unimplemented(
+            &AdditionalCost::Required(AbilityCost::OneOf {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::generic(1),
+                    },
+                    AbilityCost::Composite {
+                        costs: vec![unimplemented()],
+                    },
+                ],
+            }),
+        ));
+        assert!(additional_cost_has_unimplemented(
+            &AdditionalCost::Required(AbilityCost::EffectCost {
+                effect: Box::new(Effect::Unimplemented {
+                    name: "static_structure".to_string(),
+                    description: None,
+                }),
+            }),
+        ));
+    }
+
+    /// The parsed-item and gap collectors must traverse the same complete
+    /// cost-tree shape as `AbilityCost::contains_unimplemented` — including
+    /// `OneOf`/`PerCounter` nesting and an `EffectCost`'s embedded effect —
+    /// otherwise a nested unpayable cost is reported as supported.
+    #[test]
+    fn cost_tree_collectors_traverse_oneof_percounter_and_effect_cost() {
+        use crate::types::ability::{QuantityExpr, TargetFilter};
+        use crate::types::counter::CounterType;
+
+        let unimplemented = || AbilityCost::Unimplemented {
+            description: "frobnicate".to_string(),
+        };
+        let one_of = || AbilityCost::OneOf {
+            costs: vec![
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                },
+                unimplemented(),
+            ],
+        };
+        let per_counter = || AbilityCost::PerCounter {
+            counter: CounterType::Age,
+            target: TargetFilter::SelfRef,
+            base: Box::new(unimplemented()),
+        };
+        let effect_cost = || AbilityCost::EffectCost {
+            effect: Box::new(Effect::Unimplemented {
+                name: "unparsed_verb_arguments".to_string(),
+                description: None,
+            }),
+        };
+        let modeled = || AbilityCost::OneOf {
+            costs: vec![
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                },
+                AbilityCost::Mana {
+                    cost: crate::types::mana::ManaCost::generic(1),
+                },
+            ],
+        };
+
+        for (cost, expected_gap, expected_label) in [
+            (one_of(), "Cost:frobnicate", "frobnicate"),
+            (per_counter(), "Cost:frobnicate", "frobnicate"),
+            (
+                effect_cost(),
+                "Cost:unparsed_verb_arguments",
+                "unparsed_verb_arguments",
+            ),
+        ] {
+            let mut missing = Vec::new();
+            collect_ability_cost_missing_parts(&cost, &mut missing);
+            assert_eq!(
+                missing,
+                vec![expected_gap.to_string()],
+                "gap collector must see the nested unpayable leaf in {cost:?}"
+            );
+
+            let mut items = Vec::new();
+            build_cost_item(&cost, &mut items);
+            assert!(
+                items
+                    .iter()
+                    .any(|item| !item.supported && item.label == expected_label),
+                "parsed-item collector must emit the unsupported leaf for {cost:?}"
+            );
+        }
+
+        // Reach-guard: a fully modeled disjunction collects nothing.
+        let mut missing = Vec::new();
+        collect_ability_cost_missing_parts(&modeled(), &mut missing);
+        assert!(missing.is_empty(), "modeled tree must collect no gap");
+        let mut items = Vec::new();
+        build_cost_item(&modeled(), &mut items);
+        assert!(
+            items.is_empty(),
+            "modeled tree must emit no unsupported item"
         );
     }
 }

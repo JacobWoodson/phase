@@ -349,6 +349,20 @@ pub enum GameAction {
     OrderTriggers {
         order: Vec<usize>,
     },
+    /// CR 601.2b + CR 601.2f: Caster submits their cost-determination election.
+    /// `order` is a permutation of indices into the
+    /// `WaitingFor::OrderCostReductions.reductions` vec the caster was prompted
+    /// with; index 0 = applied first ("If multiple cost reductions apply, the
+    /// player may apply them in any order"). `hybrid_announcement` is the
+    /// announced nonhybrid equivalent for each entry of that prompt's
+    /// `hybrid_symbols` vec, in the same order ("the player announces the
+    /// nonhybrid equivalent cost they intend to pay"), or empty to announce
+    /// nothing and leave every hybrid symbol in the locked cost.
+    OrderCostReductions {
+        order: Vec<usize>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        hybrid_announcement: Vec<crate::types::mana::ManaCostShard>,
+    },
     CancelCast,
     Equip {
         equipment_id: ObjectId,
@@ -1113,6 +1127,17 @@ fn default_debug_create_count() -> u32 {
     1
 }
 
+/// Whether a sandbox Create Card request materializes a printed card object or
+/// a token with that card's printed characteristics.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+pub enum DebugCardCreationKind {
+    #[default]
+    Card,
+    Token,
+}
+
 /// Direct game-state manipulation actions for debugging, testing, and remediation.
 /// Bypasses `WaitingFor` validation — fires from any game state without disrupting
 /// the current prompt. Gated on `GameState::debug_mode`.
@@ -1161,6 +1186,11 @@ pub enum DebugAction {
         /// characteristics.
         #[serde(default)]
         nonlegendary: bool,
+        /// A token retains the card's printed copiable characteristics and
+        /// artwork while obeying token zone behavior once it leaves the
+        /// battlefield.
+        #[serde(default)]
+        creation_kind: DebugCardCreationKind,
     },
     /// Remove an object from the game entirely.
     RemoveObject { object_id: ObjectId },
@@ -1479,6 +1509,7 @@ impl DebugAction {
                 attach_to,
                 run_etb,
                 nonlegendary,
+                creation_kind,
             } => {
                 let attach_suffix = match attach_to {
                     Some(AttachTarget::Object(id)) => format!(" attached to {}", obj(*id)),
@@ -1489,8 +1520,12 @@ impl DebugAction {
                 };
                 let etb_suffix = if *run_etb { "" } else { " (no ETB)" };
                 let nonlegendary_suffix = if *nonlegendary { " (nonlegendary)" } else { "" };
+                let token_suffix = match creation_kind {
+                    DebugCardCreationKind::Card => "",
+                    DebugCardCreationKind::Token => " (token)",
+                };
                 format!(
-                    "CreateCard ({} ×{} for {} in {:?}{}{}{})",
+                    "CreateCard ({} ×{} for {} in {:?}{}{}{}{})",
                     card_name,
                     count,
                     player_label(*owner),
@@ -1498,6 +1533,7 @@ impl DebugAction {
                     attach_suffix,
                     etb_suffix,
                     nonlegendary_suffix,
+                    token_suffix,
                 )
             }
             DebugAction::RemoveObject { object_id } => {
@@ -1911,6 +1947,7 @@ impl GameAction {
             | Self::ChooseReplacement { .. }
             | Self::ChooseEntryController { .. }
             | Self::OrderTriggers { .. }
+            | Self::OrderCostReductions { .. }
             | Self::CancelCast
             | Self::SubmitSideboard { .. }
             | Self::ChoosePlayDraw { .. }
@@ -2250,6 +2287,7 @@ impl GameAction {
             | GameAction::ChooseReplacement { .. }
             | GameAction::ChooseEntryController { .. }
             | GameAction::OrderTriggers { .. }
+            | GameAction::OrderCostReductions { .. }
             | GameAction::CancelCast
             | GameAction::BackToManaPayment
             | GameAction::SubmitSideboard { .. }
