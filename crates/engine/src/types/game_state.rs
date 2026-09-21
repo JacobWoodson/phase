@@ -14782,6 +14782,36 @@ pub struct PendingLifelinkGain {
     pub amount: u32,
 }
 
+/// CR 510.2 + CR 615.13 + CR 120.3: the in-flight combat-damage prevention
+/// aggregate — prevented amount per shield AND per recipient, for the duration of
+/// one simultaneous batch. `PreventedDamageEntry` is the serialized `Vec` form the
+/// same data takes once the batch is parked or drained.
+pub type CombatPreventionTally = HashMap<(AppliedReplacementKey, TargetRef), i32>;
+
+/// CR 510.2 + CR 615.13 + CR 120.3: one simultaneous combat-damage batch's
+/// prevented amount, per shield AND per RECIPIENT.
+///
+/// The recipient is carried, never re-derived. A shield's own
+/// `damage_target_filter` is a PREDICATE over recipients ("damage that would be
+/// dealt to you and creatures you control"), not the recipient of any particular
+/// event, so one shield routinely prevents damage for several recipients in one
+/// CR 510.2 simultaneous batch. CR 120.3 makes "player or permanent" a
+/// load-bearing property of a damage event, so the aggregate must name the
+/// recipient the pipeline actually prevented damage for.
+///
+/// CR 615.13 still fixes the TRIGGER COUNT at one per prevention application:
+/// `fire_combat_prevention_riders` groups these by `key` and fires each shield's
+/// CR 615.5 rider exactly once, against the group's total.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreventedDamageEntry {
+    pub key: AppliedReplacementKey,
+    /// CR 120.3: the actual damage recipient, threaded from the replacement
+    /// applier that prevented the damage rather than inferred from the shield's
+    /// filter.
+    pub recipient: TargetRef,
+    pub amount: i32,
+}
+
 /// CR 510.2 + CR 616.1 + CR 702.15b: the unfinished tail of ONE simultaneous combat-damage batch,
 /// parked because a lifelink life-gain event met two or more co-applicable replacement effects
 /// and the gaining player must choose which applies first. CR 510.2 forbids *casting spells and
@@ -14819,8 +14849,12 @@ pub struct PendingCombatLifelink {
     /// CR 615.5 + CR 615.13: each shield's aggregate prevented amount, so the
     /// completion tail can fire every rider exactly once against the amount THIS
     /// batch prevented. A `Vec` rather than the producer's `HashMap`: an enum key
-    /// is not a JSON map key, and the record is serialized.
-    pub prevention_tally: Vec<(AppliedReplacementKey, i32)>,
+    /// is not a JSON map key, and the record is serialized. CR 120.3: the
+    /// RECIPIENT rides along in each entry, because one shield's filter is a
+    /// predicate over recipients and a single batch routinely prevents damage for
+    /// several of them; the entries are sorted so each shield's recipients stay
+    /// contiguous and the CR 615.5 rider can still fire once per shield.
+    pub prevention_tally: Vec<PreventedDamageEntry>,
     /// CR 732.2a: the pre-batch life totals the loop-detection ring keys on. Carried here rather
     /// than re-snapshotted at resume time, which is what buys the PAUSE-path guard call: the
     /// pause is reached under `PassPriority`, which `apply()` exempts from its blanket ring
@@ -20011,13 +20045,23 @@ declare_game_state! {
     /// Set to `Some(empty)` by `apply_combat_damage` for the duration of one
     /// simultaneous combat-damage batch. While `Some`, the `Prevention::All`
     /// branch of the damage-replacement applier accumulates each prevented
-    /// amount into this map (keyed by the shield's `ReplacementId`) instead of
-    /// stamping `last_effect_count` per source. After the batch, the combat
-    /// resolver reads the aggregate to fire each shield's `runtime_execute`
-    /// rider exactly once (CR 615.13). Always `None` at every `apply()`
-    /// boundary, so it is excluded from serialization and structural equality.
+    /// amount into this map (keyed by the shield's `ReplacementId` AND the
+    /// CR 120.3 recipient the damage was headed at) instead of stamping
+    /// `last_effect_count` per source. After the batch, the combat resolver reads
+    /// the aggregate to emit one `DamagePrevented` per recipient and fire each
+    /// shield's `runtime_execute` rider exactly once (CR 615.13). Always `None`
+    /// at every `apply()` boundary, so it is excluded from serialization and
+    /// structural equality.
     #[serde(skip)]
-    pub combat_prevention_tally: Option<HashMap<AppliedReplacementKey, i32>>,
+    ///
+    /// Spelled out rather than written as the `CombatPreventionTally` alias on
+    /// purpose: `deterministic_game_state_serde`'s owner census parses this file
+    /// with `syn` and classifies every field whose declared type names `HashMap`.
+    /// Behind an alias the field vanishes from that census and the exhaustiveness
+    /// test fails with "missing expected owner". The alias exists only where
+    /// clippy's `type_complexity` lint demands one — `replace_combat_damage_batch`'s
+    /// return type.
+    pub combat_prevention_tally: Option<HashMap<(AppliedReplacementKey, TargetRef), i32>>,
 }
 
 /// Selects the persistence contract for materializing raw game-state fields.
@@ -30164,13 +30208,17 @@ mod tests {
                 source_amounts: vec![(ObjectId(9_401), 3)],
                 total_damage: 3,
             }],
-            prevention_tally: vec![(
-                AppliedReplacementKey::Object {
+            prevention_tally: vec![PreventedDamageEntry {
+                key: AppliedReplacementKey::Object {
                     source: ObjectId(9_402),
                     index: 0,
                 },
-                2,
-            )],
+                // CR 120.3: a PLAYER recipient, which is exactly the axis the
+                // round trip below must preserve — a `TargetRef::Object` that
+                // silently replaced it would still deserialize.
+                recipient: TargetRef::Player(PlayerId(1)),
+                amount: 2,
+            }],
             lives_before: vec![20, 20],
             sub_step: CombatDamageSubStep::Regular,
         })
@@ -30235,14 +30283,17 @@ mod tests {
         );
         assert_eq!(
             parked.prevention_tally,
-            vec![(
-                AppliedReplacementKey::Object {
+            vec![PreventedDamageEntry {
+                key: AppliedReplacementKey::Object {
                     source: ObjectId(9_402),
                     index: 0,
                 },
-                2,
-            )],
-            "the prevention tally round-trips as a Vec — an enum key is not a JSON map key"
+                recipient: TargetRef::Player(PlayerId(1)),
+                amount: 2,
+            }],
+            "the prevention tally round-trips as a Vec — an enum key is not a JSON map key — \
+             and CR 120.3's recipient round-trips WITH it, so a parked batch resumes naming \
+             the player the damage was headed at rather than re-deriving one at drain time"
         );
     }
 
