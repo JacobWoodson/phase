@@ -1143,6 +1143,7 @@ mod selenia_vigilance_grant;
 mod self_attached_aura_token_host;
 mod self_destruct_target_power;
 mod self_exile_at_resolution_8721;
+mod selfless_squire_damage_prevented_trigger;
 mod sensei_golden_tail_5950;
 mod sentinel_sliver_vigilance_grant;
 mod serpent_society_ward_poison_cost;

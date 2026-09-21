@@ -14354,6 +14354,68 @@ fn try_parse_event(
     None
 }
 
+/// CR 120.3: which recipient the prevented damage was headed for.
+///
+/// A typed enum rather than a bool pair — the two cases are mutually exclusive
+/// and each maps to a different `TriggerDefinition` field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreventionRecipient {
+    /// "damage that would be dealt to you" — the ability's controller.
+    Controller,
+    /// "damage that would be dealt to ~" — the source permanent itself.
+    SelfObject,
+}
+
+/// CR 615.13: the standalone prevention-trigger condition. See the call site in
+/// `try_parse_named_trigger_mode` for the class measurement and the
+/// rider-exclusion rationale.
+///
+/// Composed by axis, not enumerated: one `alt` for the head voice, one `alt` for
+/// the recipient. Four phrasings from three combinators rather than four
+/// `tag("full string")` arms.
+///
+/// The recipient relative clause is REQUIRED, not optional, and this is a
+/// measured correctness constraint rather than a stylistic choice. By the time a
+/// trigger condition reaches `try_parse_named_trigger_mode`, an upstream stage
+/// has already stripped the `" this way"` back-reference from the
+/// prevented-this-way rider family, so New Way Forward's rider arrives here as
+/// the BARE string `"when damage is prevented"` — byte-identical to what an
+/// unscoped standalone trigger would look like. An `eof` terminator cannot tell
+/// them apart, because there is no remainder left to refuse. Accepting the bare
+/// form therefore steals the rider from the replacement path
+/// (`oracle_replacement::extract_prevention_followup`, whose doc comment warns
+/// against exactly this) and breaks New Way Forward's `PostReplacementSourceController`
+/// lowering. Requiring the recipient clause restores the discrimination: the one
+/// printed standalone card (Selfless Squire) arrives as
+/// `"whenever damage that would be dealt to you is prevented"` and is claimed,
+/// while the stripped rider is refused. Zero cards are printed in the bare
+/// unscoped shape, so this costs no coverage.
+fn parse_damage_prevented_trigger(input: &str) -> OracleResult<'_, PreventionRecipient> {
+    let (input, ()) = value(
+        (),
+        alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when "))),
+    )
+    .parse(input)?;
+    // No damage-kind qualifier is admitted here — see the call-site comment.
+    let (input, ()) = value((), tag("damage")).parse(input)?;
+    // REQUIRED — see the doc comment: the bare form is ambiguous with a stripped
+    // "prevented this way" rider and must not be claimed.
+    let (input, recipient) = preceded(
+        tag(" that would be dealt to "),
+        alt((
+            value(PreventionRecipient::Controller, tag("you")),
+            value(PreventionRecipient::SelfObject, tag("~")),
+        )),
+    )
+    .parse(input)?;
+    let (input, ()) = value((), tag(" is prevented")).parse(input)?;
+    // The trigger CONDITION is already split from the effect upstream, so a
+    // well-formed member consumes to end of input. This remainder check refuses
+    // any rider voice that still carries a trailing qualifier.
+    let (input, _) = eof(input)?;
+    Ok((input, recipient))
+}
+
 fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     let mut def = make_base();
 
@@ -14389,6 +14451,50 @@ fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefi
         def.mode = TriggerMode::ChaosEnsues;
         def.valid_card = Some(TargetFilter::SelfRef);
         return Some((TriggerMode::ChaosEnsues, def));
+    }
+
+    // CR 615.13 + CR 120.3: standalone damage-prevention trigger — "Whenever
+    // damage that would be dealt to you is prevented, ...".
+    //
+    // SCOPE, stated honestly: this is the STANDALONE family, the complement of
+    // the "prevented THIS WAY" riders. Measured over data/card-data.json at
+    // 0f1a35b4d (parenthesized reminder text stripped BEFORE matching, then each
+    // hit classified per prevention-sentence on whether that sentence contains
+    // "prevented this way"): 16 cards match "is prevented"; 15 are riders, 1 is
+    // standalone (Selfless Squire). Regenerate by scanning card-data.json for
+    // oracle_text matching "is prevented" with reminder text stripped, splitting
+    // each hit on ". ", and classifying a card as a rider iff EVERY sentence
+    // containing "is prevented" also contains "prevented this way".
+    //
+    // The REQUIRED recipient clause is what excludes the riders, and it is a
+    // measured constraint, not a stylistic one. An upstream stage strips
+    // " this way" before a condition reaches this function, so New Way Forward's
+    // rider arrives here as the bare "when damage is prevented" — byte-identical
+    // to an unscoped standalone trigger, with no remainder for `eof` to refuse.
+    // Requiring "that would be dealt to you|~" restores the discrimination. This
+    // is why this arm does NOT violate the guard documented at
+    // `oracle_replacement::extract_prevention_followup`: riders encode their
+    // firing condition in the prevention replacement's own execute hook, and this
+    // arm cannot claim them.
+    //
+    // No damage-kind qualifier is admitted. `GameEvent::DamagePrevented` carries
+    // no `is_combat` flag, so a "combat damage ... is prevented" line cannot have
+    // its qualifier honored; it stays `TriggerMode::Unknown` (honestly red)
+    // rather than being accepted with its semantics dropped. Zero cards are
+    // printed in that shape today.
+    if let Ok((_, recipient)) = parse_damage_prevented_trigger(lower) {
+        def.mode = TriggerMode::DamagePreventedOnce;
+        match recipient {
+            // CR 120.3: "dealt to you" — the ability's controller.
+            PreventionRecipient::Controller => {
+                def.valid_target = Some(TargetFilter::Controller);
+            }
+            // CR 120.3: "dealt to ~" — the source permanent itself.
+            PreventionRecipient::SelfObject => {
+                def.valid_card = Some(TargetFilter::SelfRef);
+            }
+        }
+        return Some((TriggerMode::DamagePreventedOnce, def));
     }
 
     // CR 701.31d: "Whenever you planeswalk away from ~" — fires when this
@@ -21544,5 +21650,184 @@ mod saga_chapter_ability_trigger_tests {
                 scope: ObjectScope::EventSource
             }
         );
+    }
+}
+
+/// CR 615.13 + CR 120.3: the standalone damage-prevention trigger family
+/// (Selfless Squire), and the rider family it must NOT claim.
+#[cfg(test)]
+mod damage_prevented_trigger_tests {
+    use super::{parse_damage_prevented_trigger, parse_trigger_line, PreventionRecipient};
+    use crate::parser::oracle_trigger::parse_trigger_lines;
+    use crate::types::ability::TargetFilter;
+    use crate::types::triggers::TriggerMode;
+
+    /// V1 — Selfless Squire's verbatim second line yields the mode AND the
+    /// recipient scope.
+    ///
+    /// Revert-failing: without the parser arm the mode is `Unknown(...)`. The
+    /// `valid_target` assertion is the second, independent leg — assigning the
+    /// mode while dropping "dealt to you" would pass a mode-only assertion and
+    /// ship a trigger that fires when ANY player's damage is prevented.
+    #[test]
+    fn selfless_squire_prevention_trigger_parses_mode_and_recipient() {
+        let def = parse_trigger_line(
+            "Whenever damage that would be dealt to you is prevented, put that many +1/+1 counters on this creature.",
+            "Selfless Squire",
+        );
+        assert_eq!(def.mode, TriggerMode::DamagePreventedOnce);
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Controller),
+            "\"dealt to you\" must scope the trigger to its controller (CR 120.3)"
+        );
+        assert_eq!(def.valid_card, None);
+    }
+
+    /// Sibling phrasings: the "when" voice and the self-object recipient, plus
+    /// the deliberate refusal of the bare unscoped form. One arm, two head voices
+    /// × two recipients — this is the class check.
+    #[test]
+    fn prevention_trigger_covers_the_phrasing_class() {
+        // "When" voice.
+        let when_voice = parse_trigger_line(
+            "When damage that would be dealt to you is prevented, draw a card.",
+            "Test",
+        );
+        assert_eq!(when_voice.mode, TriggerMode::DamagePreventedOnce);
+        assert_eq!(when_voice.valid_target, Some(TargetFilter::Controller));
+
+        // Self-object recipient: `normalize_card_name_refs` rewrites the card's
+        // own name to `~` before trigger parsing.
+        let self_ref = parse_trigger_line(
+            "Whenever damage that would be dealt to ~ is prevented, draw a card.",
+            "Test",
+        );
+        assert_eq!(self_ref.mode, TriggerMode::DamagePreventedOnce);
+        assert_eq!(self_ref.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(self_ref.valid_target, None);
+
+        // The bare unscoped form is deliberately NOT claimed — see
+        // `bare_prevention_condition_is_refused_because_it_is_a_stripped_rider`.
+        // Zero cards are printed in that shape, and it is ambiguous with a
+        // "prevented this way" rider whose back-reference was stripped upstream.
+        let bare = parse_trigger_line("Whenever damage is prevented, draw a card.", "Test");
+        assert_ne!(bare.mode, TriggerMode::DamagePreventedOnce);
+    }
+
+    /// V8 — the 15-card "prevented THIS WAY" rider family must NOT grow a trigger
+    /// node. Those riders encode their firing condition in the prevention
+    /// replacement's own execute hook; a trigger here would double-fire.
+    ///
+    /// Revert-failing: dropping the `eof` terminator from the combinator lets the
+    /// rider's trailing " this way..." through and every one of these gains a
+    /// bogus trigger.
+    #[test]
+    fn prevented_this_way_riders_produce_no_prevention_trigger() {
+        // Two distinct printed rider voices plus a source-qualified one.
+        let riders = [
+            "If damage would be dealt to you this turn, prevent that damage. When damage is prevented this way, Selfless Squire deals that much damage to target creature.",
+            "Prevent the next 3 damage that would be dealt to you this turn. If damage is prevented this way, you gain that much life.",
+            "Prevent all damage that would be dealt to you this turn by a black or red source. If damage is prevented this way, put a +1/+1 counter on target creature.",
+        ];
+        for text in riders {
+            let modes: Vec<_> = parse_trigger_lines(text, "Test")
+                .into_iter()
+                .map(|d| d.mode)
+                .collect();
+            assert!(
+                !modes.contains(&TriggerMode::DamagePreventedOnce),
+                "rider text must not mint a standalone prevention trigger: {text}\ngot {modes:?}"
+            );
+        }
+    }
+
+    /// Combat-qualified prevention is REFUSED by design, not silently accepted.
+    ///
+    /// `GameEvent::DamagePrevented` carries no `is_combat` field, so the qualifier
+    /// cannot be honored. Accepting the text and dropping the qualifier would be
+    /// the "text accepted, semantics dropped" failure. Zero cards are printed in
+    /// this shape; the refusal is a forward correctness guard.
+    #[test]
+    fn combat_qualified_prevention_is_refused_and_stays_unknown() {
+        for text in [
+            "whenever combat damage that would be dealt to you is prevented",
+            "whenever noncombat damage that would be dealt to you is prevented",
+        ] {
+            assert!(
+                parse_damage_prevented_trigger(text).is_err(),
+                "combat-qualified prevention must not be claimed by this arm: {text}"
+            );
+        }
+        // Paired positive reach-guard: the unqualified sibling IS claimed, so the
+        // refusal above is a real discrimination and not a dead combinator.
+        assert_eq!(
+            parse_damage_prevented_trigger(
+                "whenever damage that would be dealt to you is prevented"
+            )
+            .expect("the unqualified form must parse")
+            .1,
+            PreventionRecipient::Controller
+        );
+    }
+
+    /// REGRESSION GUARD for the measured rider-collision this arm nearly shipped.
+    ///
+    /// An upstream stage strips `" this way"` from the prevented-this-way rider
+    /// family before the condition reaches `try_parse_named_trigger_mode`, so New
+    /// Way Forward's rider arrives as the BARE string `"when damage is
+    /// prevented"` — with no remainder, so `eof` cannot refuse it. Claiming the
+    /// bare form stole the rider from the replacement path and broke New Way
+    /// Forward's `PostReplacementSourceController` lowering
+    /// (`oracle_replacement::tests::new_way_forward_rider_folds_into_the_prevention_shield`).
+    ///
+    /// Requiring the recipient clause is the fix. Reverting it to `opt(..)` makes
+    /// the first assertion below fail AND re-breaks the New Way Forward test.
+    #[test]
+    fn bare_prevention_condition_is_refused_because_it_is_a_stripped_rider() {
+        // The exact post-strip string New Way Forward's rider produces.
+        assert!(
+            parse_damage_prevented_trigger("when damage is prevented").is_err(),
+            "the bare form is ambiguous with a stripped rider and must be refused"
+        );
+        assert!(
+            parse_damage_prevented_trigger("whenever damage is prevented").is_err(),
+            "the bare form is ambiguous with a stripped rider and must be refused"
+        );
+
+        // Paired positive reach-guard: the recipient-scoped form IS still claimed,
+        // so the refusals above are a real discrimination, not a dead combinator.
+        assert_eq!(
+            parse_damage_prevented_trigger(
+                "whenever damage that would be dealt to you is prevented"
+            )
+            .expect("the recipient-scoped form must still parse")
+            .1,
+            PreventionRecipient::Controller
+        );
+    }
+
+    /// Hostile negatives at the combinator level: adjacent grammars and every
+    /// rider voice must be refused.
+    #[test]
+    fn prevention_combinator_refuses_adjacent_grammars() {
+        for text in [
+            // Rider voices that still carry a remainder — refused by `eof`.
+            "when damage is prevented this way",
+            "if damage is prevented this way",
+            "whenever damage that would be dealt to you is prevented this way",
+            "when damage from a creature is prevented this way",
+            // Adjacent damage grammars that belong to other modes.
+            "whenever damage is dealt to you",
+            "whenever you're dealt damage",
+            "whenever a creature is prevented",
+            // Wrong recipient token.
+            "whenever damage that would be dealt to target creature is prevented",
+        ] {
+            assert!(
+                parse_damage_prevented_trigger(text).is_err(),
+                "must refuse: {text}"
+            );
+        }
     }
 }
