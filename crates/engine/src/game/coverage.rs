@@ -8846,6 +8846,12 @@ fn extract_card_features(face: &CardFace, features: &mut HashMap<String, Feature
     for repl in &face.replacements {
         visit_replacement_ability_payloads(repl, |token_static_traversal, payload| {
             extract_ability_features_with_token_statics(payload, features, token_static_traversal);
+            if delayed_trigger_strands_a_tracked_set(payload) {
+                emit_structural(
+                    features,
+                    StructuralFeature::TrackedSetReturnAfterBattlefieldExit,
+                );
+            }
         });
     }
     // Static abilities and all definitions they grant.
@@ -8944,6 +8950,18 @@ fn scan_stranded_tracked_set(def: &AbilityDefinition, inside_unbound_delayed: bo
             _ => inside_unbound_delayed,
         };
         found |= scan_stranded_tracked_set(payload, payload_state);
+    });
+    // Replacement-owned payloads carry the same executable bodies: an unbound
+    // delayed tracked-set return nested in an `AddTargetReplacement` body
+    // strands its objects exactly like one in a direct payload (see
+    // `visit_effect_replacement_ability_payloads`: the inner replacement is
+    // registered for a later event, but its bodies stay on the card's
+    // coverage surface). Reuses that visitor — the single authority for
+    // effect-owned replacement edges — rather than matching the variant here.
+    // State passes through unchanged: entering a replacement body neither
+    // enters nor exits a delayed trigger.
+    visit_effect_replacement_ability_payloads(&def.effect, |_, payload| {
+        found |= scan_stranded_tracked_set(payload, inside_unbound_delayed);
     });
 
     found
@@ -12920,6 +12938,118 @@ pub fn format_semantic_audit_markdown(summary: &SemanticAuditSummary) -> String 
 
 #[cfg(test)]
 mod tests {
+    /// Fixture shared by the replacement-payload stranding tests: an unbound
+    /// delayed tracked-set return nested in an `AddTargetReplacement` execute
+    /// body — the minimal carrier for the shape CodeRabbit's Major flagged as
+    /// invisible to the census.
+    fn replacement_owned_tracked_return(
+        uses_tracked_set: bool,
+    ) -> crate::types::ability::AbilityDefinition {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect, ReplacementDefinition,
+            TargetFilter,
+        };
+        use crate::types::identifiers::TrackedSetId;
+        use crate::types::phase::Phase;
+        use crate::types::replacements::ReplacementEvent;
+        use crate::types::zones::{EtbTapState, Zone};
+
+        let inner = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Battlefield,
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        );
+        let mid = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(inner),
+                uses_tracked_set,
+            },
+        );
+        let repl = ReplacementDefinition {
+            execute: Some(Box::new(mid)),
+            ..ReplacementDefinition::new(ReplacementEvent::DamageDone)
+        };
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::AddTargetReplacement {
+                replacement: Box::new(repl),
+                target: TargetFilter::Any,
+            },
+        )
+    }
+
+    /// CodeRabbit Major on the pushed head: the census never descended into
+    /// replacement-owned payloads. Without the `visit_effect_replacement_`
+    /// edge in the scan, this returns false and the card reports support it
+    /// does not have.
+    #[test]
+    fn replacement_owned_unbound_delayed_tracked_return_is_stranded() {
+        assert!(
+            super::delayed_trigger_strands_a_tracked_set(&replacement_owned_tracked_return(false)),
+            "unbound delayed tracked-set return inside a replacement execute body must strand"
+        );
+    }
+
+    /// PAIRED GUARD: the bound flag is the discriminator, not the shape. Same
+    /// carrier with `uses_tracked_set: true` must not strand — otherwise the
+    /// assertion above could pass because the detector is true-by-default.
+    #[test]
+    fn replacement_owned_bound_delayed_tracked_return_is_not_stranded() {
+        assert!(
+            !super::delayed_trigger_strands_a_tracked_set(&replacement_owned_tracked_return(true)),
+            "bound delayed trigger rebinds the set eagerly, so nothing strands"
+        );
+    }
+
+    /// The `face.replacements` census loop runs the same detector over
+    /// replacement execute/decline payloads: a stranded shape on a face must
+    /// surface the structural tag, and a clean face must not.
+    #[test]
+    fn face_replacement_payloads_emit_the_stranded_tracked_set_tag() {
+        use crate::types::card::CardFace;
+        use std::collections::HashMap;
+
+        const TAG: &str = "structural:tracked_set_return_after_battlefield_exit";
+        let stranded = match &replacement_owned_tracked_return(false).effect.as_ref() {
+            crate::types::ability::Effect::AddTargetReplacement { replacement, .. } => {
+                (**replacement).clone()
+            }
+            other => panic!("fixture must be AddTargetReplacement, got {other:?}"),
+        };
+        let face = CardFace {
+            replacements: vec![stranded],
+            ..Default::default()
+        };
+        let mut features = HashMap::new();
+        super::extract_card_features(&face, &mut features);
+        assert!(
+            features.contains_key(TAG),
+            "a stranded return in a face replacement payload must emit the tag"
+        );
+        let mut clean_features = HashMap::new();
+        super::extract_card_features(&CardFace::default(), &mut clean_features);
+        assert!(
+            !clean_features.contains_key(TAG),
+            "reach-guard: a face with no replacements must not emit the tag"
+        );
+    }
 
     /// The coverage receipt exists so a reviewer can see a parser/semantic
     /// change at card granularity. A formatter that drops a behavior-bearing
