@@ -1269,6 +1269,7 @@ mod tales_of_the_ancestors_catch_up_draw;
 mod talon_gates_from_hand_activation;
 mod tap_cost_another_self_exclusion;
 mod target_choice_kind_7692;
+mod target_player_zone_count_slot_6856;
 mod targeted_exchange_preview_budget;
 mod targeted_player_mass_library_shuffle;
 mod tchaka_venerable_king;

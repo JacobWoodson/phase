@@ -28657,6 +28657,7 @@ fn cut_your_losses_mill_half_their_library_rounded_down() {
                     inner: Box::new(QuantityExpr::Ref {
                         qty: QuantityRef::TargetZoneCardCount {
                             zone: ZoneRef::Library,
+                            scope: ControllerRef::TargetPlayer,
                         },
                     }),
                     divisor: 2,
@@ -65781,9 +65782,9 @@ fn a_cast_this_way_gate_defers_a_consequence_but_never_a_casting_property() {
 /// Issue #6856 contract pin: "Draw cards equal to the number of cards in
 /// target opponent's hand" (Recurring Insight) lowers to a controller-drawn
 /// `Draw` whose count reads the ability's player target
-/// (`TargetZoneCardCount { Hand }`). The opponent slot itself is surfaced at
-/// runtime by `quantity_ref_target_slot_spec` (ability_utils) — this test
-/// pins the shape that contract relies on.
+/// (`TargetZoneCardCount { Hand, TargetOpponent }`). The opponent slot itself
+/// is surfaced at runtime by `quantity_ref_target_slot_spec` (ability_utils)
+/// — this test pins the shape that contract relies on.
 #[test]
 fn recurring_insight_draw_count_reads_target_opponents_hand() {
     let def = parse_effect_chain(
@@ -65800,6 +65801,7 @@ fn recurring_insight_draw_count_reads_target_opponents_hand() {
             QuantityExpr::Ref {
                 qty: QuantityRef::TargetZoneCardCount {
                     zone: ZoneRef::Hand,
+                    scope: ControllerRef::TargetOpponent,
                 },
             }
         ),
@@ -65832,6 +65834,7 @@ fn tibalt_fiend_blooded_minus_four_targets_announced_player() {
             QuantityExpr::Ref {
                 qty: QuantityRef::TargetZoneCardCount {
                     zone: ZoneRef::Hand,
+                    scope: ControllerRef::TargetPlayer,
                 },
             }
         ),

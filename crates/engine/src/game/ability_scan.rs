@@ -2343,7 +2343,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             ));
             acc
         }
-        QuantityRef::TargetZoneCardCount { zone: _ } => Axes::NONE,
+        QuantityRef::TargetZoneCardCount { zone: _, scope: _ } => Axes::NONE,
         QuantityRef::Devotion { .. } => Axes {
             event: false,
             sibling: true,

@@ -101,6 +101,7 @@ fn mana_recipient_and_count_source_resolve_from_their_own_slots() {
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::TargetZoneCardCount {
                         zone: ZoneRef::Hand,
+                        scope: ControllerRef::TargetOpponent,
                     },
                 },
             },
@@ -223,6 +224,7 @@ fn mana_color_prompt_keeps_recipient_context_separate_from_count_context() {
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::TargetZoneCardCount {
                         zone: ZoneRef::Hand,
+                        scope: ControllerRef::TargetOpponent,
                     },
                 },
                 filter: TargetFilter::Typed(
@@ -345,6 +347,7 @@ fn count_source_only_deposits_into_the_controller_and_surfaces_one_slot() {
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::TargetZoneCardCount {
                         zone: ZoneRef::Hand,
+                        scope: ControllerRef::TargetOpponent,
                     },
                 },
             },
@@ -454,6 +457,7 @@ fn illegal_count_source_fails_to_determine_instead_of_counting_the_recipient() {
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::TargetZoneCardCount {
                         zone: ZoneRef::Hand,
+                        scope: ControllerRef::TargetOpponent,
                     },
                 },
             },

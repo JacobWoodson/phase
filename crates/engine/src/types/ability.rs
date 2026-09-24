@@ -9046,7 +9046,24 @@ pub enum QuantityRef {
     /// Card count in a specific zone of the first targeted player.
     /// Generalized for library, graveyard, exile, etc.
     /// Used for "half of target player's library" and similar patterns.
-    TargetZoneCardCount { zone: ZoneRef },
+    TargetZoneCardCount {
+        zone: ZoneRef,
+        /// CR 109.4 + CR 115.1 / CR 102.2: which announced player the count
+        /// reads — `TargetPlayer` ("target player's ...", "their ...", "that
+        /// player's ...") or `TargetOpponent` ("target opponent's ...").
+        /// Runtime resolution is identical for both (the first
+        /// `TargetRef::Player` in `ability.targets`); the scope exists ONLY
+        /// to size the companion slot's legal-target set, mirroring the
+        /// `ControllerRef::{TargetPlayer, TargetOpponent}` legality-scope
+        /// pair. The parser always emits one of the two `Target*` values;
+        /// `TargetOpponent` is the serde default so pre-scope payloads keep
+        /// their opponent-slot behavior.
+        #[serde(
+            default = "target_zone_count_scope_default",
+            skip_serializing_if = "is_target_zone_count_scope_default"
+        )]
+        scope: ControllerRef,
+    },
     /// CR 700.5: Devotion to one or more colors.
     Devotion { colors: DevotionColors },
     /// CR 205.2a: Count distinct card types (CoreType) across a parameterized
@@ -10529,6 +10546,14 @@ fn is_player_relation_all(relation: &PlayerRelation) -> bool {
     matches!(relation, PlayerRelation::All)
 }
 
+fn target_zone_count_scope_default() -> ControllerRef {
+    ControllerRef::TargetOpponent
+}
+
+fn is_target_zone_count_scope_default(scope: &ControllerRef) -> bool {
+    matches!(scope, ControllerRef::TargetOpponent)
+}
+
 /// CR 108.3 + CR 109.4: Which possession relation binds a player to an object.
 ///
 /// A parameter, not a variant pair. The codebase already proliferates this axis
@@ -11179,32 +11204,19 @@ impl QuantityExpr {
     /// `QuantityRef::TargetZoneCardCount` anywhere in its tree — i.e. its
     /// value is the number of cards in a zone of the ability's announced
     /// player target ("the number of cards in target opponent's hand",
-    /// Recurring Insight). Mirrors `contains_x`: the match is exhaustive so
-    /// a new `QuantityExpr` variant forces every consumer to reconsider
-    /// target-bound-zone dependence rather than silently defaulting to
-    /// false. Used by the damage parser (CR 115.1 recipient rebind) and the
-    /// target-slot builder to prove a clause declares a player target.
+    /// Recurring Insight). Delegates to `any_ref`, which visits every
+    /// expression form exhaustively — a new `QuantityExpr` variant forces
+    /// `any_ref` (and therefore this predicate) to account for it rather
+    /// than silently defaulting to false. Used by the damage parser (CR
+    /// 115.1 recipient rebind) and the target-slot builder to prove a
+    /// clause declares a player target.
     pub fn contains_target_zone_card_count(&self) -> bool {
-        match self {
-            QuantityExpr::Ref {
-                qty: QuantityRef::TargetZoneCardCount { .. },
-            } => true,
-            QuantityExpr::Offset { inner, .. }
-            | QuantityExpr::ClampMin { inner, .. }
-            | QuantityExpr::Multiply { inner, .. }
-            | QuantityExpr::DivideRounded { inner, .. }
-            | QuantityExpr::UpTo { max: inner }
-            | QuantityExpr::Power {
-                exponent: inner, ..
-            } => inner.contains_target_zone_card_count(),
-            QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => exprs
-                .iter()
-                .any(QuantityExpr::contains_target_zone_card_count),
-            QuantityExpr::Difference { left, right } => {
-                left.contains_target_zone_card_count() || right.contains_target_zone_card_count()
-            }
-            QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => false,
-        }
+        self.any_ref(&mut |reference| {
+            matches!(
+                reference,
+                QuantityRef::TargetZoneCardCount { .. }
+            )
+        })
     }
 
     /// Construct an `UpTo { max }` expression, debug-asserting the
@@ -35712,6 +35724,7 @@ mod tests {
         let direct = QuantityExpr::Ref {
             qty: QuantityRef::TargetZoneCardCount {
                 zone: ZoneRef::Hand,
+                scope: ControllerRef::TargetPlayer,
             },
         };
         assert!(direct.contains_target_zone_card_count());

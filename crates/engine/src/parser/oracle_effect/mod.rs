@@ -32672,7 +32672,7 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
                         player: PlayerScope::ScopedPlayer,
                     }
                 }
-                QuantityRef::TargetZoneCardCount { zone } => match zone {
+                QuantityRef::TargetZoneCardCount { zone, .. } => match zone {
                     crate::types::ability::ZoneRef::Hand => {
                         *qty = QuantityRef::HandSize {
                             player: PlayerScope::ScopedPlayer,
@@ -32863,7 +32863,7 @@ pub(crate) fn rewrite_player_quantity_refs_to_source_chosen(def: &mut AbilityDef
                 {
                     *player = PlayerScope::SourceChosenPlayer;
                 }
-                QuantityRef::TargetZoneCardCount { zone } => match zone {
+                QuantityRef::TargetZoneCardCount { zone, .. } => match zone {
                     ZoneRef::Hand => {
                         *qty = QuantityRef::HandSize {
                             player: PlayerScope::SourceChosenPlayer,
@@ -32924,7 +32924,7 @@ pub(crate) fn rewrite_event_player_quantity_refs_to_scoped(def: &mut AbilityDefi
                 {
                     *player = PlayerScope::ScopedPlayer;
                 }
-                QuantityRef::TargetZoneCardCount { zone } => match zone {
+                QuantityRef::TargetZoneCardCount { zone, .. } => match zone {
                     ZoneRef::Hand => {
                         *qty = QuantityRef::HandSize {
                             player: PlayerScope::ScopedPlayer,

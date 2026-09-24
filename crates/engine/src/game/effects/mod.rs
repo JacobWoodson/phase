@@ -5243,6 +5243,7 @@ fn quantity_ref_reads_graveyard_card_count(qty: &QuantityRef) -> bool {
         QuantityRef::GraveyardSize { .. }
             | QuantityRef::TargetZoneCardCount {
                 zone: crate::types::ability::ZoneRef::Graveyard,
+                ..
             }
             | QuantityRef::ZoneCardCount {
                 zone: crate::types::ability::ZoneRef::Graveyard,
@@ -40681,6 +40682,7 @@ mod tests {
         }));
         assert!(reads_graveyard(QuantityRef::TargetZoneCardCount {
             zone: crate::types::ability::ZoneRef::Graveyard,
+            scope: crate::types::ability::ControllerRef::TargetPlayer,
         }));
         assert!(reads_graveyard(QuantityRef::ZoneCardCount {
             zone: crate::types::ability::ZoneRef::Graveyard,

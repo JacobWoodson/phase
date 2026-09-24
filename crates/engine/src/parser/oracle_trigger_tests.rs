@@ -4883,7 +4883,7 @@ fn trigger_attacks() {
 /// quantity parser to mill the targeted player's library.
 #[test]
 fn trigger_attacks_target_player_mills_half_their_library_rounded_up() {
-    use crate::types::ability::{RoundingMode, ZoneRef};
+    use crate::types::ability::{ControllerRef, RoundingMode, ZoneRef};
 
     let def = parse_trigger_line(
         "Whenever this creature attacks, target player mills half their library, rounded up.",
@@ -4907,6 +4907,7 @@ fn trigger_attacks_target_player_mills_half_their_library_rounded_up() {
                     inner: Box::new(QuantityExpr::Ref {
                         qty: QuantityRef::TargetZoneCardCount {
                             zone: ZoneRef::Library,
+                            scope: ControllerRef::TargetPlayer,
                         },
                     }),
                     divisor: 2,
@@ -4923,7 +4924,7 @@ fn trigger_attacks_target_player_mills_half_their_library_rounded_up() {
 /// mode, ensuring both arms of the `RoundingMode` axis are verified.
 #[test]
 fn trigger_attacks_target_player_mills_half_their_library_rounded_down() {
-    use crate::types::ability::{RoundingMode, ZoneRef};
+    use crate::types::ability::{ControllerRef, RoundingMode, ZoneRef};
 
     let def = parse_trigger_line(
         "Whenever this creature attacks, target player mills half their library, rounded down.",
@@ -4946,6 +4947,7 @@ fn trigger_attacks_target_player_mills_half_their_library_rounded_down() {
                     inner: Box::new(QuantityExpr::Ref {
                         qty: QuantityRef::TargetZoneCardCount {
                             zone: ZoneRef::Library,
+                            scope: ControllerRef::TargetPlayer,
                         },
                     }),
                     divisor: 2,

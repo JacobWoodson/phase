@@ -5062,7 +5062,9 @@ fn resolve_ref(
                     .unwrap_or(0)
             }
         },
-        QuantityRef::TargetZoneCardCount { zone } => {
+        QuantityRef::TargetZoneCardCount { zone, scope: _ } => {
+            // The scope sizes the announcement slot only (ability_utils);
+            // resolution always reads the announced player target.
             let target_player = targets.iter().find_map(|t| {
                 if let TargetRef::Player(pid) = t {
                     Some(*pid)

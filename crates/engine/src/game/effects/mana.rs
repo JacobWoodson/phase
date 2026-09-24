@@ -1404,7 +1404,7 @@ mod tests {
     /// controller's.
     #[test]
     fn context_ref_recipient_with_real_count_source_reads_the_count_slot() {
-        use crate::types::ability::{ManaProduction, ManaTargetRole, ZoneRef};
+        use crate::types::ability::{ControllerRef, ManaProduction, ManaTargetRole, ZoneRef};
 
         let mut state = GameState::new_two_player(42);
         let source = create_object(
@@ -1435,6 +1435,7 @@ mod tests {
                     count: QuantityExpr::Ref {
                         qty: QuantityRef::TargetZoneCardCount {
                             zone: ZoneRef::Hand,
+                            scope: ControllerRef::TargetOpponent,
                         },
                     },
                 },
@@ -1562,6 +1563,7 @@ mod tests {
             count: QuantityExpr::Ref {
                 qty: QuantityRef::TargetZoneCardCount {
                     zone: ZoneRef::Hand,
+                    scope: ControllerRef::TargetPlayer,
                 },
             },
             color_options: vec![ManaColor::Blue],
