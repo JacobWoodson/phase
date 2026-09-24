@@ -224,6 +224,23 @@ pub(crate) fn should_defer_spell_to_effect(lower: &str) -> bool {
         return true;
     }
 
+    // CR 611.2 + CR 109.5: "…sacrifices the rest. Each of those creatures can't
+    // attack you … for as long as it has a vow counter on it" (Promise of
+    // Loyalty) matches the generic "can't attack" arm of
+    // `STATIC_CONTAINS_PATTERNS`, so Priority 7 claims the whole two-sentence
+    // line and emits a degenerate whole-line
+    // `StaticDefinition { mode: CantAttack, affected: SelfRef, modifications: [] }`
+    // whose description is both sentences verbatim.
+    // The instruction is a resolving SPELL's one-shot chain, not a static on a
+    // permanent. Defer it to the effect-chain parser, whose keeper-dispose
+    // recognizer owns the sentence. The predicate is that recognizer's own head
+    // combinator INCLUDING its supported-combination gate — the parser is the
+    // detector — so a line the recognizer would refuse (Covetous Elegy, Divine
+    // Reckoning) keeps its current routing.
+    if super::oracle_effect::is_keeper_dispose_head(lower) {
+        return true;
+    }
+
     if is_self_spell_cost_modification(lower) {
         return false;
     }
@@ -704,7 +721,16 @@ fn is_static_compound_pattern(lower: &str) -> bool {
             // the ExileCastPermission line routes to the static parser instead
             // of the Priority-8 replacement gate. Narrowly widens the exile
             // anchor to accept the ownership infix.
-            || scan_contains(lower, "from among cards you own exiled with"))
+            || scan_contains(lower, "from among cards you own exiled with")
+            // CR 601.2a + CR 400.7: the graveyard-side mirror of the exile
+            // anchors above — "cast a creature spell from among cards in your
+            // graveyard that were put there from anywhere other than the
+            // battlefield this turn" (Banon, the Returners' Leader; Kagha,
+            // Shadow Archdruid). The bare "from your graveyard" anchor on the
+            // first line of this disjunction does not match the pool form, so
+            // without this the line never reaches `parse_static_line` and the
+            // whole permission lowers to an `Unimplemented` gap.
+            || scan_contains(lower, "from among cards in your graveyard"))
     {
         return true;
     }
