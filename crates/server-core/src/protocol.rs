@@ -268,6 +268,11 @@ pub struct TerminalBootstrapRequest {
     pub request_id: String,
 }
 
+// clippy::large_enum_variant: `CreateGameWithSettings` is the outlier. This
+// enum is a short-lived per-frame deserialize target that is matched and
+// destructured at once, never stored or queued, so boxing that variant's fields
+// buys nothing but call-site churn.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ClientMessage {
@@ -380,6 +385,13 @@ pub enum ClientMessage {
         /// Enable ranked rating updates for this room.
         #[serde(default)]
         ranked: bool,
+        /// Room code pre-minted by a caller (the Discord LFG bot) that the host
+        /// claims instead of a server-minted one; `None` keeps server minting.
+        /// Twin of the lobby field added in lobby protocol 10. A server that
+        /// predates it ignores it and mints its own, which the client detects
+        /// as `GameCreated.game_code != requested`.
+        #[serde(default)]
+        requested_code: Option<String>,
         /// Host-private Cube draft source for a native Full-server game. This
         /// deliberately belongs to the Full session, never the lobby broker.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -623,6 +635,11 @@ pub enum ClientMessage {
         code: String,
         role: TournamentRole,
         token: String,
+        /// Mirrors `rotation_nonce` on the lobby variant: the client-minted,
+        /// per-attempt nonce that lets a lost renewal reply be recovered by an
+        /// idempotent replay. `#[serde(default)]` for the same wire tolerance.
+        #[serde(default)]
+        rotation_nonce: String,
     },
 }
 
@@ -1105,10 +1122,10 @@ impl ServerMessage {
         }
     }
 
-    pub fn deck_rejected(message: impl Into<String>) -> Self {
+    pub fn error_with_code(code: ServerErrorCode, message: impl Into<String>) -> Self {
         Self::Error {
             message: message.into(),
-            code: Some(ServerErrorCode::DeckRejected),
+            code: Some(code),
         }
     }
 }
@@ -1588,6 +1605,7 @@ mod tests {
             draft_metadata: None,
             start_when_full: true,
             ranked: false,
+            requested_code: None,
             booster_pack_pool: Some(vec![
                 "Cube Card".into(),
                 "Cube Card".into(),
@@ -2148,6 +2166,7 @@ mod tests {
             draft_metadata: None,
             start_when_full: true,
             ranked: false,
+            requested_code: None,
             booster_pack_pool: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -2511,6 +2530,7 @@ mod tests {
             draft_metadata: None,
             start_when_full: true,
             ranked: false,
+            requested_code: None,
             booster_pack_pool: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -2518,6 +2538,58 @@ mod tests {
         match parsed {
             ClientMessage::CreateGameWithSettings { host_peer_id, .. } => {
                 assert_eq!(host_peer_id, Some("peer-host-abc".to_string()));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn create_game_with_settings_requested_code_roundtrips() {
+        let msg = ClientMessage::CreateGameWithSettings {
+            deck: DeckData::default(),
+            display_name: "Alice".to_string(),
+            public: true,
+            password: None,
+            timer_seconds: None,
+            player_count: 2,
+            match_config: MatchConfig::default(),
+            ai_seats: vec![],
+            format_config: None,
+            room_name: None,
+            host_peer_id: None,
+            draft_metadata: None,
+            start_when_full: true,
+            ranked: false,
+            requested_code: Some("AB12CD".to_string()),
+            booster_pack_pool: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::CreateGameWithSettings { requested_code, .. } => {
+                assert_eq!(requested_code.as_deref(), Some("AB12CD"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn create_game_with_settings_missing_requested_code_defaults_to_none() {
+        let json = r#"{
+          "type":"CreateGameWithSettings",
+          "data":{
+            "deck":{"main_deck":["Forest"],"sideboard":[]},
+            "display_name":"Alice",
+            "public":true,
+            "password":null,
+            "timer_seconds":null,
+            "player_count":2
+          }
+        }"#;
+        let parsed: ClientMessage = serde_json::from_str(json).unwrap();
+        match parsed {
+            ClientMessage::CreateGameWithSettings { requested_code, .. } => {
+                assert_eq!(requested_code, None);
             }
             _ => panic!("wrong variant"),
         }
@@ -2888,6 +2960,9 @@ mod tests {
                 },
             },
             launch_capability: DraftLaunchCapability::None,
+            // Read off the same procedure the kind above names, so the fixture
+            // stays a view the engine could actually have built.
+            distribution: DraftKind::Sealed.procedure().distribution,
             commanders_required: 0,
             current_pack_number: 0,
             pick_number: 2,
@@ -2921,6 +2996,13 @@ mod tests {
             pod_policy: PodPolicy::Competitive,
             pairings: Vec::new(),
             match_config: DraftKind::Sealed.match_config(),
+            // Sealed has no shared stack and no Winston play/draw election, so
+            // both are `None` -- which makes this round trip a free
+            // byte-compatibility assertion: with `skip_serializing_if` on both
+            // fields, this message's JSON is byte-identical to the pre-Winston
+            // wire shape.
+            shared_stack: None,
+            play_first_chooser: None,
         };
         let msg = ServerMessage::DraftStateUpdate { view: view.clone() };
         let json = serde_json::to_string(&msg).unwrap();
@@ -3216,6 +3298,9 @@ mod tests {
             match_config: DraftKind::Premier.match_config(),
             pools: None,
             current_packs: None,
+            // Premier has no shared stack; `skip_serializing_if` keeps this
+            // frame byte-identical to the pre-Winston wire shape.
+            shared_stack: None,
         };
         let msg = ServerMessage::DraftSpectatorView { view };
         let json = serde_json::to_string(&msg).unwrap();
@@ -3230,18 +3315,18 @@ mod tests {
         }
     }
 
-    /// The bump this number is at: `OutsideGameChoiceSource::BoosterPack`
-    /// replaced `set_code` with a required `origin: PackOrigin`, so an opened
-    /// pack's `WaitingFor::OutsideGameChoice` is a shape a v69 peer cannot
-    /// decode and must be refused before it receives one.
+    /// `Duration::UntilEvent` and `TransientContinuousEffect`'s
+    /// `duration_event_source` are new in serialized full-game state; a v77
+    /// peer cannot parse the new duration tag, so it must be refused before it
+    /// receives v78 state.
     ///
     /// The name embeds the numeral deliberately: `assert_eq!(PROTOCOL_VERSION,
     /// <n>)` under a function named for `<n-1>` is green, so
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_70_for_booster_pack_origin() {
-        assert_eq!(PROTOCOL_VERSION, 70);
+    fn protocol_version_is_78_for_event_deadline_duration() {
+        assert_eq!(PROTOCOL_VERSION, 78);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3252,7 +3337,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_70_for_booster_pack_origin` stays
+    /// `protocol_version_is_78_for_event_deadline_duration` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

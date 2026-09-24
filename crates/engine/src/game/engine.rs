@@ -1467,6 +1467,10 @@ fn apply_action_boundary_core(
     let recovered_terminal_rest_boundary = sweep_and_recover_priority_boundary_rest(state);
     let recovered_stale_priority_pass =
         recovered_terminal_rest_boundary && matches!(&action, GameAction::PassPriority);
+    // A completed hidden-search audience is an event-filtering sidecar for the
+    // immediately preceding action. Drop it before a new outer action starts;
+    // the active search itself remains the sole authority during the prompt.
+    state.clear_completed_hidden_search_audiences();
     let boundary_snapshot = state.clone();
     let journal_start = state.resolved_rules_journal.entries().len();
     let is_actor_scoped_preference = action.is_actor_scoped_preference();
@@ -8739,6 +8743,32 @@ struct PriorityPassPipelineOutcome {
     consumed_stack_entries: u32,
 }
 
+// Test-only reach signal for the production Cleanup-deferral seam. It is not
+// part of release consumers or serialized game state.
+#[cfg(test)]
+mod cleanup_deferred_probe {
+    use std::cell::Cell;
+
+    std::thread_local! {
+        static REACHED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(super) fn record() {
+        REACHED.with(|reached| reached.set(true));
+    }
+
+    pub(super) fn take() -> bool {
+        REACHED.with(|reached| reached.replace(false))
+    }
+}
+
+/// Consume the test-only signal that the production priority pipeline observed
+/// `cleanup_deferred`. This does not alter game state or release behavior.
+#[cfg(test)]
+pub fn take_cleanup_deferred_probe_for_test() -> bool {
+    cleanup_deferred_probe::take()
+}
+
 fn pass_priority_once_with_pipeline(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -8777,7 +8807,38 @@ fn pass_priority_once_with_pipeline(
         events,
         stack_resolution_limit,
     );
+    let cleanup_deferred = priority_outcome.cleanup_deferred;
+    #[cfg(test)]
+    if cleanup_deferred {
+        cleanup_deferred_probe::record();
+    }
     sync_waiting_for(state, &priority_outcome.waiting_for);
+
+    // The continuation and post-action drains are fallible. Keep a rollback
+    // boundary only for passes that can actually enter resolution-owned work;
+    // ordinary priority handoffs should not clone the whole GameState. The
+    // stack, continuation, and pending-trigger predicates cover both the
+    // Cleanup retry and non-Cleanup trigger-target selection errors.
+    let needs_boundary_rollback = priority_outcome.consumed_stack_entries > 0
+        || cleanup_deferred
+        || !state.stack.is_empty()
+        || !state.deferred_triggers.is_empty()
+        || !state.pending_trigger_event_batch.is_empty()
+        || state.pending_trigger.is_some()
+        || state.pending_trigger_entry.is_some()
+        || state.pending_trigger_order.is_some()
+        || state.pending_replacement.is_some()
+        || state.pending_phase_transition_progress.is_some()
+        || state.deferred_step_trigger_resume.is_some()
+        || state.active_ability_continuation().is_some()
+        || state.resolving_stack_entry.is_some()
+        || state.pending_deferred_life_cost_resume.is_some()
+        || state.pending_cost_move_resume.is_some()
+        || state.pending_resolution_completion.is_some()
+        || state.pending_liminal_entry_resume.is_some()
+        || state.pending_token_battlefield_entry.is_some();
+    let boundary_snapshot = needs_boundary_rollback.then(|| state.clone());
+    let event_start = events.len();
 
     // CR 608.2 + CR 117.4: Drain any pending continuation queued during the
     // priority pass (e.g. effects that chain a sub-resolution after the parent
@@ -8785,19 +8846,50 @@ fn pass_priority_once_with_pipeline(
     // this drain, a continuation queued after a no-choice effect would sit
     // until an unrelated action, by which point referenced stack objects may
     // have left the stack.
-    resume_pending_continuation_if_priority(state, events)?;
+    if let Err(error) = resume_pending_continuation_if_priority(state, events) {
+        if let Some(snapshot) = boundary_snapshot.as_ref() {
+            *state = snapshot.clone();
+            events.truncate(event_start);
+        }
+        return Err(error);
+    }
 
     let skip_triggers =
         stack_was_empty && !state.stack.is_empty() && state.phase == Phase::CombatDamage;
 
-    let wf = engine_priority::run_post_action_pipeline(
+    let mut wf = match engine_priority::run_post_action_pipeline(
         state,
         events,
         &state.waiting_for.clone(),
         skip_triggers,
         false,
-    )?;
+    ) {
+        Ok(waiting_for) => waiting_for,
+        Err(error) => {
+            if let Some(snapshot) = boundary_snapshot.as_ref() {
+                *state = snapshot.clone();
+                events.truncate(event_start);
+            }
+            return Err(error);
+        }
+    };
     sync_waiting_for(state, &wf);
+
+    // The priority reducer deliberately returned the still-live Priority
+    // window when Cleanup wrapped with an unsettled carrier.  Once the shared
+    // continuation and post-action pipelines have completed, retry the same
+    // turn-interpreter unit exactly once.  Do not re-run cleanup while the
+    // carrier is still live or while the pipeline opened new stack work.
+    if cleanup_deferred
+        && state.phase == Phase::Cleanup
+        && matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && state.stack.is_empty()
+        && !turns::phase_transition_requires_settlement(state)
+    {
+        let waiting_for = turns::auto_advance(state, events);
+        sync_waiting_for(state, &waiting_for);
+        wf = waiting_for;
+    }
 
     // PR-3 (Option C) CR 732.2a loop-shortcut window accumulation — relocated here
     // (PR3 Defect-1 fix). The refilling trigger is placed by
@@ -9202,6 +9294,31 @@ fn auto_pass_loop_max_iterations(state: &GameState) -> usize {
 #[path = "engine_auto_pass_decision_tests.rs"]
 mod auto_pass_decision_tests;
 
+/// Whether the next automatic pass can enter a fallible continuation,
+/// resolution, post-action, or trigger-target boundary. Ordinary passes do not
+/// clone the state; only a beat that can cross one of these boundaries gets a
+/// local checkpoint so an error cannot be swallowed as a successful boundary.
+fn priority_pass_needs_checkpoint(state: &GameState) -> bool {
+    !state.stack.is_empty()
+        || !super::stack::priority_checkpoint_is_settled(state)
+        || turns::phase_transition_requires_settlement(state)
+        || !state.deferred_triggers.is_empty()
+        || state.pending_trigger.is_some()
+        || state.pending_trigger_order.is_some()
+        || state.pending_replacement.is_some()
+        || state.pending_deferred_life_cost_resume.is_some()
+        || state.pending_cost_move_resume.is_some()
+        || state.pending_triggered_mana_resume.is_some()
+        || state.pending_phase_transition_progress.is_some()
+        || triggers::is_pending_trigger_construction_active(state)
+        || priority_pass_will_close_window(state)
+}
+
+fn priority_pass_will_close_window(state: &GameState) -> bool {
+    let participants = super::topology::priority_pass_participants(state);
+    !participants.is_empty() && state.priority_passes.len().saturating_add(1) >= participants.len()
+}
+
 /// Auto-pass loop: when a player has an auto-pass flag and receives priority,
 /// automatically pass for them until the goal condition is met or interrupted.
 fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool {
@@ -9298,6 +9415,11 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
                 };
 
                 let mut events = Vec::new();
+                let checkpoint = if priority_pass_needs_checkpoint(state) {
+                    Some((state.clone(), events.len()))
+                } else {
+                    None
+                };
                 match pass_priority_once_with_pipeline(state, &mut events, stack_resolution_limit) {
                     Ok(outcome) => {
                         advanced = true;
@@ -9386,7 +9508,13 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
                             break;
                         }
                     }
-                    Err(_) => break,
+                    Err(_) => {
+                        if let Some((checkpoint, event_start)) = checkpoint {
+                            *state = checkpoint;
+                            events.truncate(event_start);
+                        }
+                        break;
+                    }
                 }
             }
 
@@ -10991,7 +11119,55 @@ fn apply_non_priority_pass_action(
                 player,
                 object_id,
                 card_id,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => {
+            if state.priority_player
+                != turn_control::authorized_submitter_for_player(state, *player)
+            {
+                return Err(EngineError::NotYourPriority);
+            }
+            let permission_index = casting::current_resolution_cast_permission_index(
+                state,
+                *player,
+                *object_id,
+                *card_id,
+            )
+            .ok_or_else(|| {
+                EngineError::ActionNotAllowed(
+                    "Only a resolution-owned modal face election may be cancelled".to_string(),
+                )
+            })?;
+            let cleanup = casting::take_resolution_cast_cleanup(
+                state,
+                *player,
+                *object_id,
+                *card_id,
+                permission_index,
+            )
+            ?
+            .ok_or_else(|| {
+                EngineError::InvalidAction(
+                    "Resolution face choice permission provenance is stale or mismatched"
+                        .to_string(),
+                )
+            })?;
+            crate::game::engine_resolution_choices::abort_resolution_cast(
+                state,
+                *player,
+                *object_id,
+                cleanup,
+                &mut events,
+            )?
+        }
+        (
+            WaitingFor::ModalFaceChoice {
+                player,
+                object_id,
+                card_id,
                 payment_mode,
+                resolution_additional_cost,
             },
             GameAction::ChooseModalFace { back_face },
         ) => {
@@ -11000,6 +11176,49 @@ fn apply_non_priority_pass_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
+            let resolution_permission = casting::current_resolution_cast_permission_index(
+                state,
+                *player,
+                *object_id,
+                *card_id,
+            );
+            // Validate the exact indexed paid-cleanup root before changing the
+            // visible face or its election flags. A forged receipt must leave
+            // the prompt, object, permissions, triggers, journal, and events
+            // byte-for-byte untouched.
+            if let Some(permission_index) = resolution_permission {
+                let cleanup = state
+                    .objects
+                    .get(object_id)
+                    .and_then(|object| object.casting_permissions.get(permission_index.0))
+                    .and_then(|permission| match permission {
+                        crate::types::ability::CastingPermission::ExileWithAltCost {
+                            granted_to: Some(grantee),
+                            resolution_cleanup: Some(cleanup),
+                            ..
+                        } if *grantee == *player => Some(cleanup.clone()),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        EngineError::InvalidAction(
+                            "Resolution face choice permission provenance is stale or mismatched"
+                                .to_string(),
+                        )
+                    })?;
+                crate::game::engine_resolution_choices::validate_resolution_cast_cleanup_authority(
+                    *player, &cleanup,
+                )?;
+                crate::game::engine_resolution_choices::validate_resolution_cast_delayed_trigger_receipts(
+                    state, &cleanup,
+                )?;
+            }
+            // A resolution-owned election has not announced anything yet.  If
+            // the selected face later fails its exact permission policy, put
+            // the object (including the appended temporary permission) back
+            // exactly as the public prompt exposed it.
+            let resolution_object_before = resolution_permission
+                .as_ref()
+                .and_then(|_| state.objects.get(object_id).cloned());
             if let Some(obj) = state.objects.get_mut(object_id) {
                 if back_face {
                     // Swap to back face — the shared swap preserves the stored
@@ -11018,6 +11237,29 @@ fn apply_non_priority_pass_action(
                 // blind. Cleared on any zone change off the stack and on
                 // cancel.
                 obj.cast_face_committed = true;
+            }
+            if let Some(permission_index) = resolution_permission {
+                let result = casting::continue_resolution_modal_face_choice(
+                    state,
+                    *player,
+                    *object_id,
+                    casting::ResolutionModalFaceChoice {
+                        permission_index,
+                        payment_mode: *payment_mode,
+                        additional_cost: resolution_additional_cost.clone(),
+                    },
+                    &mut events,
+                );
+                if result.is_err() {
+                    if let Some(object) = resolution_object_before {
+                        state.objects.insert(*object_id, object);
+                    }
+                }
+                return result.map(|waiting_for| ActionResult {
+                    events: std::mem::take(&mut events),
+                    waiting_for,
+                    log_entries: Vec::new(),
+                });
             }
             // CR 712.12 / CR 712.11b: Route the re-entry by the now-active face's
             // type. A land face is put onto the battlefield via the play-land
@@ -11401,6 +11643,7 @@ fn apply_non_priority_pass_action(
                 player,
                 life_cost,
                 mana_reduction,
+                reach,
                 pending_cast,
             },
             GameAction::DecideOptionalCost { pay },
@@ -11410,11 +11653,42 @@ fn apply_non_priority_pass_action(
             *pending_cast.clone(),
             *life_cost,
             mana_reduction,
+            *reach,
             pay,
             &mut events,
         )?,
         (
             WaitingFor::DefilerPayment {
+                player,
+                pending_cast,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
+        // CR 601.2f: "If multiple cost reductions apply, the player may apply
+        // them in any order." The caster submits that order here.
+        (
+            WaitingFor::OrderCostReductions {
+                player,
+                reductions,
+                pending_cast,
+                ..
+            },
+            GameAction::OrderCostReductions {
+                order,
+                hybrid_announcement,
+            },
+        ) => engine_casting::handle_order_cost_reductions(
+            state,
+            *player,
+            *pending_cast.clone(),
+            &reductions.clone(),
+            &order,
+            &hybrid_announcement,
+            &mut events,
+        )?,
+        (
+            WaitingFor::OrderCostReductions {
                 player,
                 pending_cast,
                 ..
@@ -12093,7 +12367,7 @@ fn apply_non_priority_pass_action(
             &mut events,
         )?,
         (WaitingFor::CollectEvidenceChoice { player, resume, .. }, GameAction::CancelCast) => {
-            engine_casting::handle_collect_evidence_cancel(state, *player, resume, &mut events)
+            engine_casting::handle_collect_evidence_cancel(state, *player, resume, &mut events)?
         }
         // CR 702.180b: Player chose which creature to tap for harmonize cost reduction.
         // CR 601.2b: Creature is tapped as part of paying the total cost.
@@ -12482,9 +12756,9 @@ fn apply_non_priority_pass_action(
             let player = *player;
             let convoke_mode = *convoke_mode;
             if let Some(pending) = state.pending_cast.as_ref() {
-                // CR 602.2b + CR 601.2b/h: An activation's announced X must
-                // make its full cost payable before the announcement commits,
-                // whether or not the ability has deferred targets.
+                // CR 602.2b + CR 601.2b/f/h: Concretize {X} into generic mana in the cost structure.
+                // Payment restrictions ("Spend only [colors] mana on X") are carried as payment-allocation
+                // metadata in SpellMeta and enforced during mana payment.
                 let mut trial = pending.as_ref().clone();
                 trial.ability.set_chosen_x_recursive(value);
                 trial.cost.concretize_x(value);
@@ -12532,9 +12806,15 @@ fn apply_non_priority_pass_action(
                     }
                 }
             }
-            let pending = state.pending_cast.as_mut().ok_or_else(|| {
-                EngineError::InvalidAction("No pending cast awaiting X".to_string())
-            })?;
+            let pending = state
+                .pending_cast
+                .as_mut()
+                .ok_or_else(|| {
+                    EngineError::InvalidAction("No pending cast awaiting X".to_string())
+                })?;
+            // CR 601.2b + CR 601.2f + CR 601.2h: Concretize {X} into generic mana in the cost structure.
+            // Payment restrictions ("Spend only [colors] mana on X") are carried as payment-allocation
+            // metadata in SpellMeta and enforced during mana payment.
             pending.ability.set_chosen_x_recursive(value);
             pending.cost.concretize_x(value);
             let object_id = pending.object_id;
@@ -15854,6 +16134,7 @@ pub(super) fn begin_pending_trigger_target_selection(
                 }
                 return Ok(Some(WaitingFor::OptionalEffectChoice {
                     player,
+                    decision_subject_id: None,
                     source_id,
                     description: trigger_description,
                     may_trigger_key,
@@ -16381,6 +16662,7 @@ fn handle_play_land(
                 object_id,
                 card_id,
                 payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+                resolution_additional_cost: None,
             });
         }
 
@@ -21902,7 +22184,7 @@ mod stage2_injector_tests {
 
         assert_eq!(
             producers.len() + readers.len() + in_test,
-            46,
+            53,
             "CR 603.5 prompt census drifted. A new PRODUCER must have its recipient bound \
              somewhere — the mint's conjunct (a) covers exactly ONE of them. A new READER is \
              the benign case (U4's own consumption arm was one).\n\
@@ -21910,22 +22192,20 @@ mod stage2_injector_tests {
         );
         assert_eq!(
             (producers.len(), readers.len(), in_test),
-            (5, 9, 32),
-            "the partition, not just the total: five PRODUCTION producers, nine PRODUCTION \
-             readers (they read `state.waiting_for` and never write it), 32 `#[cfg(test)]` lines \
-             (the 31st is `sba.rs`'s paused-resolution fixture for the CR 704.4 safety-net guard; \
-             the 32nd is `triggers.rs`'s positive reach-guard row for \
-             `resolution_frame_is_live_off_priority`).\nproducers={producers:#?}\n\
+            (5, 11, 37),
+            "the partition, not just the total: five PRODUCTION producers, eleven PRODUCTION \
+             readers (including the two new optional-subject projection reads), and 37 \
+             `#[cfg(test)]` lines.\nproducers={producers:#?}\n\
              readers={readers:#?}"
         );
         assert_eq!(
             producers,
             vec![
-                "game/effects/mod.rs::drive_sequential_repeated_optional_payment {player:ability.controller,source_id:ability.source_id,description:ability.description.clone(),may_trigger_key:None,same_card_may_trigger_choice_available:false}".to_string(),
-                "game/effects/mod.rs::resolve_chain_body {player:prompt_player,source_id:ability.source_id,description,may_trigger_key,same_card_may_trigger_choice_available}".to_string(),
-                "game/effects/mod.rs::resolve_repeated_optional_payment_choice {player,source_id,description,may_trigger_key:None,same_card_may_trigger_choice_available:false}".to_string(),
-                "game/effects/scoped_library_search.rs::advance_acceptance {player,source_id,description,may_trigger_key:None,same_card_may_trigger_choice_available:false}".to_string(),
-                "game/engine.rs::begin_pending_trigger_target_selection {player,source_id,description:trigger_description,may_trigger_key,same_card_may_trigger_choice_available}".to_string(),
+                "game/effects/mod.rs::drive_sequential_repeated_optional_payment {player:ability.controller,decision_subject_id:None,source_id:ability.source_id,description:ability.description.clone(),may_trigger_key:None,same_card_may_trigger_choice_available:false}".to_string(),
+                "game/effects/mod.rs::resolve_chain_body {player:prompt_player,decision_subject_id,source_id:ability.source_id,description,may_trigger_key,same_card_may_trigger_choice_available}".to_string(),
+                "game/effects/mod.rs::resolve_repeated_optional_payment_choice {player,decision_subject_id:None,source_id,description,may_trigger_key:None,same_card_may_trigger_choice_available:false}".to_string(),
+                "game/effects/scoped_library_search.rs::advance_acceptance {player,decision_subject_id:None,source_id,description,may_trigger_key:None,same_card_may_trigger_choice_available:false}".to_string(),
+                "game/engine.rs::begin_pending_trigger_target_selection {player,decision_subject_id:None,source_id,description:trigger_description,may_trigger_key,same_card_may_trigger_choice_available}".to_string(),
             ],
             "the five production producers, each keyed by its ENCLOSING FUNCTION and the \
              CONSTRUCTION it mints, compared as a sorted MULTISET, so a sixth mint inside one \
@@ -22396,6 +22676,7 @@ mod stage2_injector_tests {
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: asked,
+            decision_subject_id: None,
             source_id: src,
             description: None,
             may_trigger_key: None,
@@ -24994,14 +25275,18 @@ mod bounded_offer_conjunct_tests {
 #[cfg(test)]
 mod resolving_carrier_settle_tests {
     use super::{
-        resolving_carrier_parity_is_coherent, resolving_stack_entry_can_settle,
+        apply, resolving_carrier_parity_is_coherent, resolving_stack_entry_can_settle,
         settle_resolving_stack_entry_after_continuation_resume,
+        take_cleanup_deferred_probe_for_test,
     };
-    use crate::types::ability::{Effect, ResolvedAbility, TargetFilter};
+    use crate::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
+    use crate::types::actions::GameAction;
+    use crate::types::events::GameEvent;
     use crate::types::game_state::{
         GameState, PendingContinuation, StackEntry, StackEntryKind, WaitingFor,
     };
     use crate::types::identifiers::{ObjectId, TriggerFiring};
+    use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
 
     const SOURCE: ObjectId = ObjectId(60);
@@ -25170,6 +25455,68 @@ mod resolving_carrier_settle_tests {
                 "{described}"
             );
         }
+    }
+
+    /// Production-path regression for the #9194 shape: a triggered ability has
+    /// already popped from the stack, its next two instructions are parked as
+    /// a continuation, and the final Cleanup pass must drain both instructions
+    /// before the turn interpreter is allowed to call `start_next_turn`.
+    #[test]
+    fn cleanup_priority_pass_drains_triggered_multistep_carrier_before_turn_wrap() {
+        let mut state = GameState::new_two_player(0x9194);
+        state.phase = Phase::Cleanup;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.priority_passes.insert(PlayerId(1));
+        state.priority_pass_count = 1;
+
+        state.resolving_stack_entry = Some(carrier(triggered_kind()));
+        state.resolving_trigger_firing = Some(TriggerFiring::Ordinary);
+
+        let gain_life = |amount| {
+            ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: amount },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                SOURCE,
+                PlayerId(0),
+            )
+        };
+        let chain = gain_life(1).sub_ability(gain_life(1));
+        state.park_ability_continuation(PendingContinuation::new(Box::new(chain), &state));
+
+        let starting_turn = state.turn_number;
+        let starting_life = state.players[0].life;
+        let _ = take_cleanup_deferred_probe_for_test();
+        let result = apply(&mut state, PlayerId(0), GameAction::PassPriority)
+            .expect("the final Cleanup pass must settle the continuation");
+
+        assert!(
+            take_cleanup_deferred_probe_for_test(),
+            "the production priority pipeline must observe Cleanup deferral before retrying the boundary"
+        );
+        assert_eq!(state.turn_number, starting_turn + 1);
+        assert_eq!(state.active_player, PlayerId(1));
+        assert!(matches!(state.phase, Phase::Untap | Phase::Upkeep));
+        assert_eq!(state.players[0].life, starting_life + 2);
+        assert!(state.stack.is_empty());
+        assert!(state.resolution_stack.is_empty());
+        assert!(state.resolving_stack_entry.is_none());
+        assert!(state.resolving_trigger_firing.is_none());
+        assert_eq!(
+            result
+                .events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::TurnStarted { .. }))
+                .count(),
+            1,
+            "the settled continuation must cross exactly one turn boundary"
+        );
     }
 }
 
