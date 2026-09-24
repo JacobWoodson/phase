@@ -18034,7 +18034,7 @@ mod tests {
                 Some(TargetFilter::Typed(
                     TypedFilter::default().controller(ControllerRef::Opponent),
                 )),
-                "TargetZoneCardCount{TargetOpponent} must surface an Opponent-scoped slot",
+                "TargetZoneCardCount{{TargetOpponent}} must surface an Opponent-scoped slot",
             );
             assert_eq!(
                 quantity_ref_target_slot_spec(&QuantityRef::TargetZoneCardCount {
@@ -18042,7 +18042,7 @@ mod tests {
                     scope: ControllerRef::TargetPlayer,
                 }),
                 Some(TargetFilter::Player),
-                "TargetZoneCardCount{TargetPlayer} must surface the any-player slot",
+                "TargetZoneCardCount{{TargetPlayer}} must surface the any-player slot",
             );
         }
     }
@@ -18079,7 +18079,7 @@ mod tests {
                 count: zone_count(ControllerRef::TargetPlayer),
                 target: TargetFilter::Controller,
             }),
-            "Draw{{TargetZoneCardCount{TargetPlayer}, Controller}} needs the any-player slot",
+            "Draw{{TargetZoneCardCount{{TargetPlayer}}, Controller}} needs the any-player slot",
         );
         // Gerrard Capashen shape: gainer is the controller.
         assert!(
