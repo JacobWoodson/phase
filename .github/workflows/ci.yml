@@ -840,6 +840,13 @@ jobs:
           java-version: 17
 
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+        with:
+          # The action's default package list includes the long-removed `tools`
+          # SDK package, which makes sdkmanager exit 1. Pin only a valid
+          # package; platform, build-tools, and NDK are installed pinned
+          # in the next step.
+          packages: |
+            platform-tools
 
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
