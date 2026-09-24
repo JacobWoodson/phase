@@ -73,7 +73,7 @@ use crate::parser::oracle_static::parse_passive_cant_be_cast_spell_filter;
 #[cfg(test)]
 use crate::parser::oracle_trigger::parse_trigger_line;
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_till, take_until};
+use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::{anychar, multispace0, multispace1, space1};
 use nom::combinator::{
     all_consuming, eof, map, map_opt, not, opt, peek, recognize, rest, value, verify,
@@ -101,8 +101,9 @@ use super::oracle_target::{
     resolve_singular_exiled_card_target, TargetSyntax,
 };
 use super::oracle_util::{
-    contains_possessive, has_unconsumed_conditional, parse_count_expr, parse_creature_subtype,
-    parse_mana_symbols, parse_number, split_around, starts_with_possessive, strip_after, TextPair,
+    contains_possessive, first_sentence, has_unconsumed_conditional, parse_count_expr,
+    parse_creature_subtype, parse_mana_symbols, parse_number, split_around, starts_with_possessive,
+    strip_after, TextPair,
 };
 use crate::game::triggers;
 use crate::parser::oracle_effect::subject::parse_subject_application;
@@ -1680,9 +1681,7 @@ pub(crate) fn scan_at_random(text: &str) -> Option<(&str, &str)> {
 /// On `Some`, only the qualifier is removed — every other byte, including any
 /// following sentence, is preserved.
 pub(crate) fn excise_selection_qualifier(clause: &str) -> Option<String> {
-    let sentence = take_till::<_, _, OracleError<'_>>(|c| c == '.')
-        .parse(clause)
-        .map_or(clause, |(_, head)| head);
+    let sentence = first_sentence(clause);
     let (before, after) = scan_at_random(sentence)?;
     Some(format!(
         "{}{}{}",

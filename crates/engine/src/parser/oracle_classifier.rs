@@ -9,7 +9,7 @@ use nom::Parser;
 use super::oracle_nom::condition::parse_reflexive_entry_this_way_rider;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::scan_contains;
-use super::oracle_util::parse_mana_symbols;
+use super::oracle_util::{first_sentence, parse_mana_symbols};
 use crate::parser::oracle_effect::{
     excise_selection_qualifier, split_leading_conditional, try_parse_named_choice,
     try_parse_named_choice_conjunction,
@@ -1220,9 +1220,20 @@ fn is_as_enters_choose_pattern(lower: &str) -> bool {
             // builder must derive the SAME object phrase — a local copy of this
             // arithmetic here is the very drift the second disjunct exists to
             // close.
+            //
+            // The builder additionally retries on the choice's OWN SENTENCE,
+            // so the classifier must accept the sentence-bounded rungs too:
+            // a two-sentence line (Haktos's "choose 2, 3, or 4 at random.
+            // Haktos has protection…") is otherwise rejected here before the
+            // builder that would parse it ever runs. Both rungs go through
+            // the shared `first_sentence`, so the two layers can never name
+            // different phrases again.
             try_parse_named_choice(i).is_some()
-                || excise_selection_qualifier(i)
-                    .is_some_and(|excised| try_parse_named_choice(&excised).is_some())
+                || try_parse_named_choice(first_sentence(i).trim()).is_some()
+                || excise_selection_qualifier(i).is_some_and(|excised| {
+                    try_parse_named_choice(&excised).is_some()
+                        || try_parse_named_choice(first_sentence(&excised).trim()).is_some()
+                })
         })
         .parse(i)
     })
@@ -1831,6 +1842,33 @@ mod as_enters_choose_qualifier_classification_tests {
         );
     }
 
+    /// THE REVIEWER'S CASE, full two-sentence lines: Haktos's choice sentence
+    /// followed by its protection continuation on the SAME line. The object
+    /// table's `all_consuming` numeric arm declines the protection tail, and
+    /// the qualifier excision preserves it — only the sentence-bounded rungs
+    /// restore agreement with the builder, which parses the choice's own
+    /// sentence. Without them the classifier rejects a line the builder
+    /// accepts, and the line never reaches `parse_replacement_line` at all.
+    #[test]
+    fn haktos_full_two_sentence_line_classifies() {
+        assert!(
+            is_as_enters_choose_pattern(
+                "as ~ enters, choose 2, 3, or 4 at random. ~ has protection from each mana value other than the chosen number."
+            ),
+            "the full two-sentence Haktos line must classify — the classifier retries on the choice's own sentence"
+        );
+        // Qualifier-free two-sentence shape: no printed card drives it, but
+        // the builder's sentence retry is unconditional, so the classifier's
+        // unexcised first-sentence rung must agree too. Same justification as
+        // the creature-type case above — the axis is sentences, not Haktos.
+        assert!(
+            is_as_enters_choose_pattern(
+                "as ~ enters, choose 2, 3, or 4. ~ has protection from each mana value other than the chosen number."
+            ),
+            "a qualifier-free two-sentence enumeration must classify on its first sentence"
+        );
+    }
+
     /// The prefix-`tag` half of the table, which already worked, must keep
     /// working — the excision is additive, not a replacement.
     #[test]
@@ -1889,9 +1927,9 @@ mod as_enters_choose_qualifier_classification_tests {
     /// HOSTILE FIXTURE — the qualifier belongs to a LATER SENTENCE and must not
     /// be excised from this choice's object phrase.
     ///
-    /// FIRST PRODUCTION BRANCH REACHED: the sentence-bounding
-    /// `take_till(|c| c == '.')` inside `excise_selection_qualifier`, before
-    /// `scan_at_random` ever runs. The line still classifies (its object
+    /// FIRST PRODUCTION BRANCH REACHED: the sentence-bounding `first_sentence`
+    /// inside `excise_selection_qualifier`, before `scan_at_random` ever runs.
+    /// The line still classifies (its object
     /// is a plain prefix arm), so this pins the BOUNDING, and the builder-side
     /// test pins that the exported mode stays `Chosen`.
     #[test]

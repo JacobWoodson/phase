@@ -23460,7 +23460,7 @@ impl Effect {
             Effect::FlipCoinUntilLose { win_effect } => {
                 f(NestedDefinitionEdge::FlipCoinUntilLoseWin, win_effect)
             }
-            // CR 601.2b: each mode's body.
+            // CR 608.2d: each choice's body, offered while applying the effect.
             Effect::ChooseOneOf { branches, .. } => {
                 for branch in branches {
                     f(NestedDefinitionEdge::ChooseOneOfBranch, branch);

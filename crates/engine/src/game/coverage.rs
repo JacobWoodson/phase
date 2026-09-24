@@ -8996,37 +8996,19 @@ impl StructuralFeature {
 /// via exhaustive matches on the source enum, so adding a new variant is a
 /// compile error until it is explicitly classified.
 fn extract_card_features(face: &CardFace, features: &mut HashMap<String, FeatureSupport>) {
+    // The stranded tracked-set detector runs inside the shared ability walk
+    // (`extract_ability_features_with_token_statics`), so printed abilities,
+    // trigger executes, replacement payloads, AND granted payloads are all
+    // covered with no per-loop call.
     for def in face.abilities.iter() {
         extract_ability_features(def, features);
-        if delayed_trigger_strands_a_tracked_set(def) {
-            emit_structural(
-                features,
-                StructuralFeature::TrackedSetReturnAfterBattlefieldExit,
-            );
-        }
     }
     for trig in &face.triggers {
         extract_trigger_features(trig, features, TokenStaticTraversal::Include);
-        if trig
-            .execute
-            .as_deref()
-            .is_some_and(delayed_trigger_strands_a_tracked_set)
-        {
-            emit_structural(
-                features,
-                StructuralFeature::TrackedSetReturnAfterBattlefieldExit,
-            );
-        }
     }
     for repl in &face.replacements {
         visit_replacement_ability_payloads(repl, |token_static_traversal, payload| {
             extract_ability_features_with_token_statics(payload, features, token_static_traversal);
-            if delayed_trigger_strands_a_tracked_set(payload) {
-                emit_structural(
-                    features,
-                    StructuralFeature::TrackedSetReturnAfterBattlefieldExit,
-                );
-            }
         });
     }
     // Static abilities and all definitions they grant.
@@ -9083,6 +9065,16 @@ fn extract_card_features(face: &CardFace, features: &mut HashMap<String, Feature
 /// Sudden Disappearance — same publisher, same singular-`ChangeZone` consumer —
 /// was measured WORKING. Marking a working card red is the same honesty
 /// violation as leaving a broken one green.
+///
+/// The counts above were measured when the detector was introduced; the
+/// card-data coverage gate re-verifies them on every head.
+///
+/// EMISSION: the detector runs at the top of the shared ability walk
+/// (`extract_ability_features_with_token_statics`), so granted payloads
+/// (GrantAbility/GrantTrigger/GrantReplacement bodies) strand exactly like
+/// printed ones. An explicit non-battlefield `ChangeZone` origin is excluded:
+/// the resolver scans the origin zone, so those returns retrieve their
+/// objects.
 /// TRAVERSAL: every executable payload edge, with the enclosing "inside an
 /// unbound delayed trigger" state propagated through all of them.
 ///
@@ -9096,13 +9088,18 @@ fn extract_card_features(face: &CardFace, features: &mut HashMap<String, Feature
 /// IMMEDIATE effect: a return nested in the body's `sub_ability` (or in any
 /// payload beneath it) strands its objects exactly the same way.
 fn scan_stranded_tracked_set(def: &AbilityDefinition, inside_unbound_delayed: bool) -> bool {
+    // An explicit non-battlefield origin is NOT stranded: the resolver scans
+    // the origin zone (change_zone.rs:980-994), so Exile- or Graveyard-origin
+    // returns still retrieve their objects. Only the battlefield-dependent
+    // shapes strand — the `None` default and an explicit `Battlefield`, both
+    // of which scan where the members no longer are.
     if inside_unbound_delayed
         && matches!(
             &*def.effect,
-            Effect::ChangeZone { target, .. } if matches!(
+            Effect::ChangeZone { target, origin, .. } if matches!(
                 target,
                 TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
-            )
+            ) && matches!(origin, None | Some(Zone::Battlefield))
         )
     {
         return true;
@@ -9267,6 +9264,19 @@ fn extract_ability_features_with_token_statics(
     features: &mut HashMap<String, FeatureSupport>,
     token_static_traversal: TokenStaticTraversal,
 ) {
+    // TRACKED-SET-RETURN-DEFECT: run the stranded-set detector on EVERY
+    // ability definition this walk reaches — including GrantAbility,
+    // GrantTrigger, and GrantReplacement payloads reached through static
+    // carriers — not just top-level abilities. Emitting here (one tag key,
+    // idempotent) keeps a single authority instead of one call per census
+    // loop; a stranded return nested in a granted trigger must strand.
+    if delayed_trigger_strands_a_tracked_set(def) {
+        emit_structural(
+            features,
+            StructuralFeature::TrackedSetReturnAfterBattlefieldExit,
+        );
+    }
+
     // Condition
     if let Some(ref cond) = def.condition {
         emit_structural(features, StructuralFeature::Condition);
@@ -13125,22 +13135,21 @@ mod tests {
     /// delayed tracked-set return nested in an `AddTargetReplacement` execute
     /// body — the minimal carrier for the shape CodeRabbit's Major flagged as
     /// invisible to the census.
-    fn replacement_owned_tracked_return(
+    fn tracked_return_mid(
         uses_tracked_set: bool,
+        origin: Option<Zone>,
     ) -> crate::types::ability::AbilityDefinition {
         use crate::types::ability::{
-            AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect, ReplacementDefinition,
-            TargetFilter,
+            AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect, TargetFilter,
         };
         use crate::types::identifiers::TrackedSetId;
         use crate::types::phase::Phase;
-        use crate::types::replacements::ReplacementEvent;
         use crate::types::zones::{EtbTapState, Zone};
 
         let inner = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
-                origin: None,
+                origin,
                 destination: Zone::Battlefield,
                 target: TargetFilter::TrackedSet {
                     id: TrackedSetId(0),
@@ -13157,14 +13166,26 @@ mod tests {
                 enters_modified_if: None,
             },
         );
-        let mid = AbilityDefinition::new(
+        AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::CreateDelayedTrigger {
                 condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
                 effect: Box::new(inner),
                 uses_tracked_set,
             },
-        );
+        )
+    }
+
+    fn replacement_owned_tracked_return(
+        uses_tracked_set: bool,
+        origin: Option<Zone>,
+    ) -> crate::types::ability::AbilityDefinition {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, TargetFilter,
+        };
+        use crate::types::replacements::ReplacementEvent;
+
+        let mid = tracked_return_mid(uses_tracked_set, origin);
         let repl = ReplacementDefinition {
             execute: Some(Box::new(mid)),
             ..ReplacementDefinition::new(ReplacementEvent::DamageDone)
@@ -13185,7 +13206,9 @@ mod tests {
     #[test]
     fn replacement_owned_unbound_delayed_tracked_return_is_stranded() {
         assert!(
-            super::delayed_trigger_strands_a_tracked_set(&replacement_owned_tracked_return(false)),
+            super::delayed_trigger_strands_a_tracked_set(&replacement_owned_tracked_return(
+                false, None
+            )),
             "unbound delayed tracked-set return inside a replacement execute body must strand"
         );
     }
@@ -13196,7 +13219,9 @@ mod tests {
     #[test]
     fn replacement_owned_bound_delayed_tracked_return_is_not_stranded() {
         assert!(
-            !super::delayed_trigger_strands_a_tracked_set(&replacement_owned_tracked_return(true)),
+            !super::delayed_trigger_strands_a_tracked_set(&replacement_owned_tracked_return(
+                true, None
+            )),
             "bound delayed trigger rebinds the set eagerly, so nothing strands"
         );
     }
@@ -13210,7 +13235,10 @@ mod tests {
         use std::collections::HashMap;
 
         const TAG: &str = "structural:tracked_set_return_after_battlefield_exit";
-        let stranded = match &replacement_owned_tracked_return(false).effect.as_ref() {
+        let stranded = match &replacement_owned_tracked_return(false, None)
+            .effect
+            .as_ref()
+        {
             crate::types::ability::Effect::AddTargetReplacement { replacement, .. } => {
                 (**replacement).clone()
             }
@@ -13248,7 +13276,10 @@ mod tests {
         use std::collections::HashMap;
 
         const TAG: &str = "structural:tracked_set_return_after_battlefield_exit";
-        let decline_only = match &replacement_owned_tracked_return(false).effect.as_ref() {
+        let decline_only = match &replacement_owned_tracked_return(false, None)
+            .effect
+            .as_ref()
+        {
             Effect::AddTargetReplacement { replacement, .. } => {
                 let mut decline_only = (**replacement).clone();
                 let stranded = decline_only.execute.take();
@@ -13276,6 +13307,78 @@ mod tests {
         assert!(
             features.contains_key(TAG),
             "a stranded return in a face replacement decline payload must emit the tag"
+        );
+    }
+
+    /// Review MED (explicit origin): the resolver scans an explicit origin
+    /// zone (change_zone.rs:980-994), so an Exile-origin tracked-set return
+    /// retrieves its objects and must NOT strand. Removing the origin guard
+    /// from the scan flips this assertion; it differs from the unbound test
+    /// in exactly one field.
+    #[test]
+    fn explicit_origin_tracked_set_return_is_not_stranded() {
+        assert!(
+            !super::delayed_trigger_strands_a_tracked_set(&tracked_return_mid(
+                false,
+                Some(crate::types::zones::Zone::Exile)
+            )),
+            "an explicit Exile origin retrieves its objects, so nothing strands"
+        );
+    }
+
+    /// Review HIGH (granted payloads): the stranded-set detector runs inside
+    /// the shared ability walk, so a stranded return nested in a GRANTED
+    /// trigger's execute body strands exactly like a printed one. Removing
+    /// the walk-top detector call flips the first assertion while the bound
+    /// control stays green.
+    #[test]
+    fn granted_trigger_stranding_is_detected_and_tagged() {
+        use crate::types::ability::{ContinuousModification, StaticDefinition, TriggerDefinition};
+        use crate::types::card::CardFace;
+        use crate::types::statics::StaticMode;
+        use crate::types::triggers::TriggerMode;
+        use std::collections::HashMap;
+
+        fn granted_face(uses_tracked_set: bool) -> CardFace {
+            let mut trigger = TriggerDefinition::new(TriggerMode::StateCondition);
+            trigger.execute = Some(Box::new(tracked_return_mid(uses_tracked_set, None)));
+            CardFace {
+                static_abilities: vec![StaticDefinition {
+                    mode: StaticMode::Continuous,
+                    affected: None,
+                    modifications: vec![ContinuousModification::GrantTrigger {
+                        trigger: Box::new(trigger),
+                    }],
+                    condition: None,
+                    per_player_condition: None,
+                    affected_zone: None,
+                    effect_zone: None,
+                    active_zones: vec![],
+                    characteristic_defining: false,
+                    description: None,
+                    attack_defended: None,
+                    source_controller: None,
+                    source_object: None,
+                    bypass_beneficiary: None,
+                    protection_does_not_remove: None,
+                    room_door: None,
+                }],
+                ..Default::default()
+            }
+        }
+
+        const TAG: &str = "structural:tracked_set_return_after_battlefield_exit";
+        let mut features = HashMap::new();
+        super::extract_card_features(&granted_face(false), &mut features);
+        assert!(
+            features.contains_key(TAG),
+            "a stranded return in a granted trigger execute body must emit the tag"
+        );
+        let mut bound_features = HashMap::new();
+        super::extract_card_features(&granted_face(true), &mut bound_features);
+        assert!(
+            !bound_features.contains_key(TAG),
+            "bound control: a bound granted return must not emit the tag"
         );
     }
 

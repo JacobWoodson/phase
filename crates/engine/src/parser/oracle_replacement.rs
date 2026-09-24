@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, tag_no_case, take_till, take_until, take_while1};
+use nom::bytes::complete::{tag, tag_no_case, take_until, take_while1};
 use nom::character::complete::{anychar, char, multispace0, multispace1};
 use nom::combinator::{all_consuming, eof, map_opt, opt, peek, recognize, rest, value};
 use nom::multi::{many_till, separated_list1};
@@ -38,8 +38,8 @@ use super::oracle_target::{
     parse_declared_damage_source_target, parse_target, parse_type_phrase_folding,
 };
 use super::oracle_util::{
-    normalize_card_name_refs, parse_count_expr, parse_number, parse_ordinal, strip_after,
-    strip_reminder_text, TextPair,
+    first_sentence, normalize_card_name_refs, parse_count_expr, parse_number, parse_ordinal,
+    strip_after, strip_reminder_text, TextPair,
 };
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, CombatDamageScope,
@@ -2264,11 +2264,10 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
     let choice_type = match parse_named_choice_object(choose_object.as_ref()) {
         Some(choice_type) => choice_type,
         None => {
-            let object_phrase = choose_object.as_ref();
-            let sentence = take_till::<_, _, OracleError<'_>>(|c| c == '.')
-                .parse(object_phrase)
-                .map_or(object_phrase, |(_, head)| head)
-                .trim();
+            // The choice's OWN SENTENCE via the shared helper — the same
+            // `first_sentence` the classifier retry uses, so both layers
+            // derive the identical object phrase.
+            let sentence = first_sentence(choose_object.as_ref()).trim();
             parse_named_choice_object(sentence)?
         }
     };
@@ -28687,8 +28686,8 @@ mod as_enters_at_random_selection_tests {
     /// Row 1.G HOSTILE FIXTURE — the choice object is non-random, but a LATER
     /// SENTENCE on the same line contains "at random".
     ///
-    /// FIRST PRODUCTION BRANCH REACHED: the sentence-bounding `take_till(. )` in
-    /// `parse_as_enters_choose`, BEFORE the scan ever runs. An unbounded
+    /// FIRST PRODUCTION BRANCH REACHED: the sentence-bounding `first_sentence`
+    /// in `parse_as_enters_choose`, BEFORE the scan ever runs. An unbounded
     /// whole-tail scan — which `choose_object` invites, because it runs to the
     /// end of the LINE — would let the later sentence retarget this choice.
     #[test]
