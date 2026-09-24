@@ -1102,6 +1102,7 @@ mod rage_reflection_double_strike_grant;
 mod random_discard_cost_replacement_resume;
 mod raubahn_bull_of_ala_mhigo;
 mod raw_resolution_stack_restore;
+mod recurring_insight_6856;
 mod refurbished_familiar;
 mod relic_of_progenitus_6446;
 mod render_silent_cant_cast;

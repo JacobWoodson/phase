@@ -5213,8 +5213,54 @@ fn effect_needs_parent_target_combat_relation_slot(effect: &Effect) -> bool {
 }
 
 fn effect_needs_target_creature_quantity_slot(effect: &Effect) -> bool {
-    effect_target_slot_filter(effect).is_some()
-        && !effect_primary_target_supplies_creature_target(effect)
+    // Despite the legacy name (kept to avoid churning every slot-mapping site),
+    // this gate covers player-typed quantity slots too (the
+    // `CardsDiscardedThisTurn { Target }` arm below surfaces an opponent slot).
+    let Some(slot_filter) = effect_target_slot_filter(effect) else {
+        return false;
+    };
+    if effect_primary_target_supplies_creature_target(effect) {
+        return false;
+    }
+    // CR 115.1 + CR 601.2c: a player-typed quantity slot (the targeted
+    // opponent's zone count, discards, ...) whose effect already declares a
+    // player choice reads that same choice — surfacing a second player slot
+    // would demand one target too many ("Target player mills half their
+    // library" declares exactly one). Object-typed quantity slots keep the
+    // existing behavior: a `Player` primary does not supply the object a
+    // `Power { Target }` magnitude reads.
+    if quantity_slot_filter_selects_players(&slot_filter)
+        && effect_primary_target_supplies_player_target(effect)
+    {
+        return false;
+    }
+    true
+}
+
+/// CR 115.1: whether a count-derived slot filter enumerates players (a bare
+/// `Player`/`Opponent` choice, or an object-typeless `Typed` constrained to a
+/// controller) rather than objects. A typeless `Typed` with no controller
+/// ("target player controls" population filters) or with object properties is
+/// object-side and answers false.
+fn quantity_slot_filter_selects_players(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Player | TargetFilter::Opponent => true,
+        TargetFilter::Typed(typed) => {
+            typed.type_filters.is_empty()
+                && typed.controller.is_some()
+                && typed.properties.is_empty()
+        }
+        _ => false,
+    }
+}
+
+/// CR 115.1 + CR 601.2c: the effect's primary target already declares a player
+/// choice, so a player-typed quantity magnitude reads that choice. Mirrors the
+/// generic slot path's authority (`triggers::extract_target_filter_from_effect`)
+/// so "declares a choice" means exactly what slot collection means by it.
+fn effect_primary_target_supplies_player_target(effect: &Effect) -> bool {
+    triggers::extract_target_filter_from_effect(effect)
+        .is_some_and(quantity_slot_filter_selects_players)
 }
 
 /// CR 608.2c + CR 115.1: Chained riders like Swords to Plowshares ("Exile target
@@ -5590,6 +5636,26 @@ fn quantity_ref_target_slot_spec(qty: &QuantityRef) -> Option<TargetFilter> {
             TypedFilter::default().controller(ControllerRef::Opponent),
         )),
         QuantityRef::CardsDiscardedThisTurn { .. } => None,
+        // CR 115.1 + CR 115.7 + CR 402.1 + CR 601.2c: a zone count bound to the
+        // ability's player target ("the number of cards in target opponent's
+        // hand") needs its own Opponent-scoped slot when the effect's primary
+        // target declares no player choice. Recurring Insight is the class:
+        // the drawer is the controller (`Draw { target: Controller }` supplies
+        // no slot), so without this arm no prompt appears and the count reads
+        // empty `ability.targets`, resolving to 0 (issue #6856). The slot is
+        // Opponent-scoped (enumerable, mirroring the `CardsDiscardedThisTurn {
+        // Target }` arm above): every printed divergent-recipient card in this
+        // class reads "target opponent's ..." (Recurring Insight, Borrowed
+        // Knowledge mode 1, Gerrard Capashen). Recipient==counted cards whose
+        // primary already declares the player ("Target player mills half
+        // their library"; Tibalt's -4, whose dead `TriggeringPlayer`
+        // recipient the damage parser rebinds to `Player`) keep working
+        // through that `Player` slot via the
+        // `effect_primary_target_supplies_player_target` guard on the shared
+        // gate above.
+        QuantityRef::TargetZoneCardCount { .. } => Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent),
+        )),
         // CR 115.1 + CR 109.4: surface an OPPONENT-scoped PLAYER slot (enumerable);
         // TargetPlayer is non-enumerable (targeting.rs fails closed) since
         // ability.targets is empty at selection. The derived slot must be a BARE
@@ -17649,6 +17715,99 @@ mod tests {
             quantity_ref_target_slot_spec(&opponents_damage),
             None,
             "non-targeted 'your opponents' DamageDealtThisTurn must surface NO slot",
+        );
+
+        // CR 115.1 + CR 115.7 + CR 402.1: a zone count bound to the ability's
+        // player target ("the number of cards in target opponent's hand",
+        // Recurring Insight, issue #6856) surfaces an Opponent-scoped slot
+        // (enumerable), for every zone the target-possessive parser produces.
+        for zone in [
+            crate::types::ability::ZoneRef::Hand,
+            crate::types::ability::ZoneRef::Library,
+            crate::types::ability::ZoneRef::Graveyard,
+            crate::types::ability::ZoneRef::Exile,
+        ] {
+            assert_eq!(
+                quantity_ref_target_slot_spec(&QuantityRef::TargetZoneCardCount { zone }),
+                Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                )),
+                "TargetZoneCardCount must surface an Opponent-scoped slot",
+            );
+        }
+    }
+
+    /// Issue #6856: the target-bound zone-count slot matrix. A magnitude that
+    /// reads the ability's player target needs its own opponent slot exactly
+    /// when the effect's primary target declares no player choice
+    /// (Recurring Insight draws; Gerrard Capashen gains). Recipient==counted
+    /// effects ("Target player mills half their library") read their primary
+    /// `Player` slot — no second prompt. Object-typed magnitudes keep their
+    /// creature slot even under a `Player` primary.
+    #[test]
+    fn target_zone_card_count_slot_matrix() {
+        let zone_count = || QuantityExpr::Ref {
+            qty: QuantityRef::TargetZoneCardCount {
+                zone: crate::types::ability::ZoneRef::Hand,
+            },
+        };
+        // Recurring Insight shape: drawer is the controller, counted player
+        // is the target — the slot must fire.
+        assert!(
+            effect_needs_target_creature_quantity_slot(&Effect::Draw {
+                count: zone_count(),
+                target: TargetFilter::Controller,
+            }),
+            "Draw{{TargetZoneCardCount, Controller}} (Recurring Insight) needs the opponent slot",
+        );
+        // Gerrard Capashen shape: gainer is the controller.
+        assert!(
+            effect_needs_target_creature_quantity_slot(&Effect::GainLife {
+                amount: zone_count(),
+                player: TargetFilter::Controller,
+            }),
+            "GainLife{{TargetZoneCardCount, Controller}} (Gerrard Capashen) needs the opponent slot",
+        );
+        // Cut Your Losses shape: the milled player IS the announced target —
+        // the magnitude reads the primary slot, so no second prompt.
+        assert!(
+            !effect_needs_target_creature_quantity_slot(&Effect::Mill {
+                count: zone_count(),
+                target: TargetFilter::Player,
+                destination: Zone::Graveyard,
+            }),
+            "Mill{{TargetZoneCardCount, Player}} (Cut Your Losses) must NOT add a second slot",
+        );
+        // Same recipient==counted guard for damage.
+        assert!(
+            !effect_needs_target_creature_quantity_slot(&Effect::DealDamage {
+                amount: zone_count(),
+                target: TargetFilter::Player,
+                damage_source: None,
+                excess: None,
+            }),
+            "DealDamage{{TargetZoneCardCount, Player}} must NOT add a second slot",
+        );
+        // Object-typed magnitudes are unaffected by a Player primary: the
+        // creature slot is still needed.
+        assert!(
+            effect_needs_target_creature_quantity_slot(&Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Target,
+                    },
+                },
+                target: TargetFilter::Player,
+            }),
+            "Draw{{Power{{Target}}, Player}} keeps its creature slot under a Player primary",
+        );
+        // Baseline: no quantity target, no slot.
+        assert!(
+            !effect_needs_target_creature_quantity_slot(&Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+            }),
+            "plain Divination-shape Draw must NOT need a slot",
         );
     }
 

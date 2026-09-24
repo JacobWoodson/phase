@@ -10196,6 +10196,38 @@ impl QuantityExpr {
         }
     }
 
+    /// Returns true if this expression reads a
+    /// `QuantityRef::TargetZoneCardCount` anywhere in its tree — i.e. its
+    /// value is the number of cards in a zone of the ability's announced
+    /// player target ("the number of cards in target opponent's hand",
+    /// Recurring Insight). Mirrors `contains_x`: the match is exhaustive so
+    /// a new `QuantityExpr` variant forces every consumer to reconsider
+    /// target-bound-zone dependence rather than silently defaulting to
+    /// false. Used by the damage parser (CR 115.1 recipient rebind) and the
+    /// target-slot builder to prove a clause declares a player target.
+    pub fn contains_target_zone_card_count(&self) -> bool {
+        match self {
+            QuantityExpr::Ref {
+                qty: QuantityRef::TargetZoneCardCount { .. },
+            } => true,
+            QuantityExpr::Offset { inner, .. }
+            | QuantityExpr::ClampMin { inner, .. }
+            | QuantityExpr::Multiply { inner, .. }
+            | QuantityExpr::DivideRounded { inner, .. }
+            | QuantityExpr::UpTo { max: inner }
+            | QuantityExpr::Power {
+                exponent: inner, ..
+            } => inner.contains_target_zone_card_count(),
+            QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => exprs
+                .iter()
+                .any(QuantityExpr::contains_target_zone_card_count),
+            QuantityExpr::Difference { left, right } => {
+                left.contains_target_zone_card_count() || right.contains_target_zone_card_count()
+            }
+            QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => false,
+        }
+    }
+
     /// Construct an `UpTo { max }` expression, debug-asserting the
     /// non-nesting invariant. Always use this rather than the raw struct
     /// literal.
@@ -33446,6 +33478,29 @@ mod tests {
             .count_expr()
             .expect("count slot present")
             .contains_vote_count());
+    }
+
+    #[test]
+    fn contains_target_zone_card_count_finds_nested_ref() {
+        let direct = QuantityExpr::Ref {
+            qty: QuantityRef::TargetZoneCardCount {
+                zone: ZoneRef::Hand,
+            },
+        };
+        assert!(direct.contains_target_zone_card_count());
+        let wrapped = QuantityExpr::DivideRounded {
+            inner: Box::new(direct),
+            divisor: 2,
+            rounding: RoundingMode::Down,
+        };
+        assert!(wrapped.contains_target_zone_card_count());
+        assert!(!QuantityExpr::Fixed { value: 3 }.contains_target_zone_card_count());
+        assert!(!QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        }
+        .contains_target_zone_card_count());
     }
 
     #[test]
