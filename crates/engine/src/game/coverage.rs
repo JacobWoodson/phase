@@ -13051,6 +13051,51 @@ mod tests {
         );
     }
 
+    /// The review's "execute/decline" half: the visitor yields decline bodies
+    /// through the same edge, so a stranded return living ONLY in a decline
+    /// payload must strand and tag exactly like one in an execute body.
+    /// Removing the decline arm from `visit_replacement_ability_payloads`
+    /// flips both assertions.
+    #[test]
+    fn replacement_decline_payload_stranding_is_detected_and_tagged() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, Effect, ReplacementMode, TargetFilter,
+        };
+        use crate::types::card::CardFace;
+        use std::collections::HashMap;
+
+        const TAG: &str = "structural:tracked_set_return_after_battlefield_exit";
+        let decline_only = match &replacement_owned_tracked_return(false).effect.as_ref() {
+            Effect::AddTargetReplacement { replacement, .. } => {
+                let mut decline_only = (**replacement).clone();
+                let stranded = decline_only.execute.take();
+                decline_only.mode = ReplacementMode::Optional { decline: stranded };
+                decline_only
+            }
+            other => panic!("fixture must be AddTargetReplacement, got {other:?}"),
+        };
+        assert!(
+            super::delayed_trigger_strands_a_tracked_set(&AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::AddTargetReplacement {
+                    replacement: Box::new(decline_only.clone()),
+                    target: TargetFilter::Any,
+                },
+            )),
+            "a stranded return in a decline-only payload must strand"
+        );
+        let face = CardFace {
+            replacements: vec![decline_only],
+            ..Default::default()
+        };
+        let mut features = HashMap::new();
+        super::extract_card_features(&face, &mut features);
+        assert!(
+            features.contains_key(TAG),
+            "a stranded return in a face replacement decline payload must emit the tag"
+        );
+    }
+
     /// The coverage receipt exists so a reviewer can see a parser/semantic
     /// change at card granularity. A formatter that drops a behavior-bearing
     /// field silently defeats that: two predicates the runtime treats
