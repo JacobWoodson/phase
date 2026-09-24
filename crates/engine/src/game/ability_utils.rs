@@ -5216,25 +5216,23 @@ fn effect_needs_target_creature_quantity_slot(effect: &Effect) -> bool {
     // Despite the legacy name (kept to avoid churning every slot-mapping site),
     // this gate covers player-typed quantity slots too (the
     // `CardsDiscardedThisTurn { Target }` arm below surfaces an opponent slot).
+    // CR 115.1 + CR 601.2c: classify the slot FIRST, then apply only the
+    // matching primary-target guard. A player-typed slot (the targeted
+    // opponent's zone count, discards, ...) is supplied only by a declared
+    // player choice ("Target player mills half their library" declares
+    // exactly one — no second prompt); an object primary does NOT supply it,
+    // so e.g. "deals damage to target creature equal to the number of cards
+    // in target opponent's hand" still gets its opponent slot instead of
+    // resolving the count to 0. Symmetrically, an object-typed slot
+    // (`Power { Target }`) is supplied only by a declared object choice: a
+    // `Player` primary does not supply the object the magnitude reads.
     let Some(slot_filter) = effect_target_slot_filter(effect) else {
         return false;
     };
-    if effect_primary_target_supplies_creature_target(effect) {
-        return false;
+    if quantity_slot_filter_selects_players(&slot_filter) {
+        return !effect_primary_target_supplies_player_target(effect);
     }
-    // CR 115.1 + CR 601.2c: a player-typed quantity slot (the targeted
-    // opponent's zone count, discards, ...) whose effect already declares a
-    // player choice reads that same choice — surfacing a second player slot
-    // would demand one target too many ("Target player mills half their
-    // library" declares exactly one). Object-typed quantity slots keep the
-    // existing behavior: a `Player` primary does not supply the object a
-    // `Power { Target }` magnitude reads.
-    if quantity_slot_filter_selects_players(&slot_filter)
-        && effect_primary_target_supplies_player_target(effect)
-    {
-        return false;
-    }
-    true
+    !effect_primary_target_supplies_creature_target(effect)
 }
 
 /// CR 115.1: whether a count-derived slot filter enumerates players (a bare
@@ -17800,6 +17798,18 @@ mod tests {
                 target: TargetFilter::Player,
             }),
             "Draw{{Power{{Target}}, Player}} keeps its creature slot under a Player primary",
+        );
+        // Upstream review follow-up (#9280): an object primary does NOT supply
+        // a player-typed slot — the opponent slot is still required, otherwise
+        // the count silently resolves to 0 on the object-primary branch.
+        assert!(
+            effect_needs_target_creature_quantity_slot(&Effect::DealDamage {
+                amount: zone_count(),
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                damage_source: None,
+                excess: None,
+            }),
+            "DealDamage{{TargetZoneCardCount, Typed(creature)}} needs the opponent slot",
         );
         // Baseline: no quantity target, no slot.
         assert!(

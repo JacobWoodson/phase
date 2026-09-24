@@ -1236,6 +1236,7 @@ mod thoughtweft_trample_regression;
 mod thousand_moons_smithy;
 mod throne_of_eldraine_mana_riders;
 mod throw_instead_tail_class;
+mod tibalt_fiend_blooded_6856;
 mod timely_ward_regression;
 mod tinybones_joins_up_multi_target;
 mod tinybones_pocket_nuisance;
