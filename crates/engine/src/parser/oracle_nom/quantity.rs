@@ -27,10 +27,11 @@ use crate::parser::oracle_target::{
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AggregateFunction, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, Comparator,
-    ControllerRef, CountScope, DamageChannel, DamageKindFilter, DevotionColors, FilterProp,
-    ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate,
-    PtStat, QuantityExpr, QuantityRef, RoundingMode, SharedQuality, SubtypeExclusion, TargetFilter,
-    ThisWayCause, TrackedAnaphorSource, TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
+    ControllerRef, CountBinding, CountScope, DamageChannel, DamageKindFilter, DevotionColors,
+    FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation, PlayerScope,
+    PropertyAggregate, PtStat, QuantityExpr, QuantityRef, RoundingMode, SharedQuality,
+    SubtypeExclusion, TargetFilter, ThisWayCause, TrackedAnaphorSource, TurnJournalKind,
+    TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::Keyword;
@@ -301,7 +302,7 @@ pub fn parse_max_quantity(input: &str) -> OracleResult<'_, QuantityExpr> {
 /// The inner expression is any quantity this module can recognize — either a
 /// standard [`parse_quantity_ref`] (e.g. `"its power"`, `"your life total"`) or
 /// a possessive reference resolved against the current target (e.g.
-/// `"their library"` → `TargetZoneCardCount { zone: Library, scope: TargetPlayer }`). The parser
+/// `"their library"` → `TargetZoneCardCount { zone: Library, scope: TargetPlayer, binding: Anaphoric }`). The parser
 /// accepts an optional `, rounded up` / `, rounded down` / `, round up` /
 /// `, round down` suffix. If absent, the expression defaults to
 /// [`RoundingMode::Down`] as a safe fallback — CR 107.1a requires Oracle text
@@ -382,7 +383,7 @@ fn parse_half_rounded_inner(input: &str) -> OracleResult<'_, QuantityExpr> {
 ///
 /// | Possessive | Quantity | Maps to |
 /// |------------|----------|---------|
-/// | "their"    | library/hand/graveyard | `TargetZoneCardCount { zone, scope: TargetPlayer }` |
+/// | "their"    | library/hand/graveyard | `TargetZoneCardCount { zone, scope: TargetPlayer, binding: Anaphoric }` |
 /// | "their"    | life total / life      | `TargetLifeTotal` |
 /// | "his or her" | life total / life    | `TargetLifeTotal` |
 /// | "your"     | library/hand/graveyard | `ZoneCardCount` (Controller scope) |
@@ -414,6 +415,7 @@ fn parse_their_tail(input: &str) -> OracleResult<'_, QuantityRef> {
             QuantityRef::TargetZoneCardCount {
                 zone: ZoneRef::Library,
                 scope: ControllerRef::TargetPlayer,
+                binding: CountBinding::Anaphoric,
             },
             tag("library"),
         ),
@@ -421,6 +423,7 @@ fn parse_their_tail(input: &str) -> OracleResult<'_, QuantityRef> {
             QuantityRef::TargetZoneCardCount {
                 zone: ZoneRef::Hand,
                 scope: ControllerRef::TargetPlayer,
+                binding: CountBinding::Anaphoric,
             },
             tag("hand"),
         ),
@@ -428,6 +431,7 @@ fn parse_their_tail(input: &str) -> OracleResult<'_, QuantityRef> {
             QuantityRef::TargetZoneCardCount {
                 zone: ZoneRef::Graveyard,
                 scope: ControllerRef::TargetPlayer,
+                binding: CountBinding::Anaphoric,
             },
             tag("graveyard"),
         ),
@@ -541,6 +545,7 @@ fn parse_cards_in_possessive_zone(input: &str) -> OracleResult<'_, QuantityRef> 
             QuantityRef::TargetZoneCardCount {
                 zone,
                 scope: ControllerRef::TargetPlayer,
+                binding: CountBinding::Anaphoric,
             }
         }),
         map(preceded(tag("your "), parse_zone_ref_singular), |zone| {
@@ -2591,6 +2596,7 @@ fn parse_number_of_cards_in_target_zone(input: &str) -> OracleResult<'_, Quantit
         QuantityRef::TargetZoneCardCount {
             zone,
             scope: ControllerRef::TargetPlayer,
+            binding: CountBinding::Anaphoric,
         }
     })
     .parse(rest)
@@ -2626,7 +2632,14 @@ fn parse_target_player_possessive_zone(input: &str) -> OracleResult<'_, Quantity
     ))
     .parse(input)?;
     let (rest, zone) = parse_zone_ref_singular(rest)?;
-    Ok((rest, QuantityRef::TargetZoneCardCount { zone, scope }))
+    Ok((
+        rest,
+        QuantityRef::TargetZoneCardCount {
+            zone,
+            scope,
+            binding: CountBinding::Explicit,
+        },
+    ))
 }
 
 /// CR 115.1: the target possessive's restriction survives
@@ -2643,6 +2656,7 @@ fn target_player_possessive_zone_preserves_opponent_vs_player_scope() {
         QuantityRef::TargetZoneCardCount {
             zone: ZoneRef::Hand,
             scope: crate::types::ability::ControllerRef::TargetOpponent,
+            binding: CountBinding::Explicit,
         }
     );
     let (rest, player_qty) =
@@ -2653,6 +2667,7 @@ fn target_player_possessive_zone_preserves_opponent_vs_player_scope() {
         QuantityRef::TargetZoneCardCount {
             zone: ZoneRef::Graveyard,
             scope: crate::types::ability::ControllerRef::TargetPlayer,
+            binding: CountBinding::Explicit,
         }
     );
 }
@@ -10077,6 +10092,7 @@ mod tests {
             QuantityRef::TargetZoneCardCount {
                 zone: ZoneRef::Hand,
                 scope: crate::types::ability::ControllerRef::TargetPlayer,
+                binding: CountBinding::Anaphoric,
             }
         );
         assert_eq!(rest, "");
@@ -10090,6 +10106,7 @@ mod tests {
             QuantityRef::TargetZoneCardCount {
                 zone: ZoneRef::Hand,
                 scope: crate::types::ability::ControllerRef::TargetPlayer,
+                binding: CountBinding::Anaphoric,
             }
         );
         assert_eq!(rest, "");
@@ -12090,6 +12107,7 @@ mod tests {
                     qty: QuantityRef::TargetZoneCardCount {
                         zone: ZoneRef::Library,
                         scope: crate::types::ability::ControllerRef::TargetPlayer,
+                        binding: CountBinding::Anaphoric,
                     },
                 }),
                 divisor: 2,
@@ -12226,6 +12244,7 @@ mod tests {
                     qty: QuantityRef::TargetZoneCardCount {
                         zone: ZoneRef::Library,
                         scope: crate::types::ability::ControllerRef::TargetPlayer,
+                        binding: CountBinding::Anaphoric,
                     },
                 }),
                 divisor: 2,
@@ -12271,6 +12290,7 @@ mod tests {
             QuantityRef::TargetZoneCardCount {
                 zone: ZoneRef::Hand,
                 scope: crate::types::ability::ControllerRef::TargetPlayer,
+                binding: CountBinding::Anaphoric,
             }
         );
         assert_eq!(rest, "");

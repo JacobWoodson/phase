@@ -17989,6 +17989,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         let (name, support) = quantity_ref_feature(&QuantityRef::TargetZoneCardCount {
             zone: ZoneRef::Library,
             scope: ControllerRef::TargetPlayer,
+            binding: crate::types::ability::CountBinding::Explicit,
         });
 
         assert_eq!(name, "TargetZoneCardCount");

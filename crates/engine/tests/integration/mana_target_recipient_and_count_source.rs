@@ -28,8 +28,8 @@
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::EffectKind;
 use engine::types::ability::{
-    ControllerRef, Effect, ManaContribution, ManaProduction, ManaTargetRole, QuantityExpr,
-    QuantityRef, TargetFilter, TargetRef, TypedFilter, ZoneRef,
+    ControllerRef, CountBinding, Effect, ManaContribution, ManaProduction, ManaTargetRole,
+    QuantityExpr, QuantityRef, TargetFilter, TargetRef, TypedFilter, ZoneRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
@@ -102,6 +102,7 @@ fn mana_recipient_and_count_source_resolve_from_their_own_slots() {
                     qty: QuantityRef::TargetZoneCardCount {
                         zone: ZoneRef::Hand,
                         scope: ControllerRef::TargetOpponent,
+                        binding: CountBinding::Explicit,
                     },
                 },
             },
@@ -225,6 +226,7 @@ fn mana_color_prompt_keeps_recipient_context_separate_from_count_context() {
                     qty: QuantityRef::TargetZoneCardCount {
                         zone: ZoneRef::Hand,
                         scope: ControllerRef::TargetOpponent,
+                        binding: CountBinding::Explicit,
                     },
                 },
                 filter: TargetFilter::Typed(
@@ -348,6 +350,7 @@ fn count_source_only_deposits_into_the_controller_and_surfaces_one_slot() {
                     qty: QuantityRef::TargetZoneCardCount {
                         zone: ZoneRef::Hand,
                         scope: ControllerRef::TargetOpponent,
+                        binding: CountBinding::Explicit,
                     },
                 },
             },
@@ -458,6 +461,7 @@ fn illegal_count_source_fails_to_determine_instead_of_counting_the_recipient() {
                     qty: QuantityRef::TargetZoneCardCount {
                         zone: ZoneRef::Hand,
                         scope: ControllerRef::TargetOpponent,
+                        binding: CountBinding::Explicit,
                     },
                 },
             },

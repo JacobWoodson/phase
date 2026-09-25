@@ -34,8 +34,8 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     AttackSubject, CastCostModifier, CastFromZoneDriver, CastPermissionConstraint,
     CastingPermission, CombatHistoryScope, Comparator, ConjureSource, ContinuousModification,
-    ControllerRef, DamageChannel, DamageSource, DelayedTriggerCondition, Duration, Effect,
-    EffectScope, ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition,
+    ControllerRef, CountBinding, DamageChannel, DamageSource, DelayedTriggerCondition, Duration,
+    Effect, EffectScope, ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition,
     ManaSpendPermission, MultiTargetSpec, ObjectScope, PermissionGrantee, PlayerFilter,
     PreventionAmount, PreventionScope, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope,
     RoundingMode, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
@@ -9207,15 +9207,27 @@ pub(super) fn parse_contextual_bare_card_aggregate(
 /// targets `Player` (any player): the only printed card in this shape reads
 /// "target player's ...". Gated to non-trigger contexts: inside a trigger
 /// body "that player" is the live event player and must stay event-bound.
+///
+/// Instance sharing: the recipient anaphor inherits the count's target
+/// instance — one announcement, read by both halves — so every `Explicit`
+/// count in the amount flips to `Anaphoric` (shared). Without the flip the
+/// slot gate would surface a second slot for a single CR 601.2c instance.
 fn rebind_dead_event_player_damage_recipient(
     target: TargetFilter,
-    amount: &QuantityExpr,
+    amount: &mut QuantityExpr,
     ctx: &ParseContext,
 ) -> TargetFilter {
     if matches!(target, TargetFilter::TriggeringPlayer)
         && !ctx.in_trigger
         && amount.contains_target_zone_card_count()
     {
+        super::each_quantity_ref_mut(amount, &mut |qty| {
+            if let QuantityRef::TargetZoneCardCount { binding, .. } = qty {
+                if *binding == CountBinding::Explicit {
+                    *binding = CountBinding::Anaphoric;
+                }
+            }
+        });
         TargetFilter::Player
     } else {
         target
@@ -9444,7 +9456,8 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                     parse_event_context_ref_with_ctx(target_phrase, ctx)
                 {
                     let (target, ecr_rem) = refine_damage_target_remainder(target, ecr_rem);
-                    let target = rebind_dead_event_player_damage_recipient(target, &qty, ctx);
+                    let mut qty = qty;
+                    let target = rebind_dead_event_player_damage_recipient(target, &mut qty, ctx);
                     #[cfg(debug_assertions)]
                     assert_no_compound_remainder(ecr_rem, target_phrase);
                     return Some((
@@ -9723,7 +9736,8 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
     // CR 608.2k: Check for event-context references before standard target parsing.
     if let Some((target, ecr_rem)) = parse_event_context_ref_with_ctx(after_to, ctx) {
         let (target, ecr_rem) = refine_damage_target_remainder(target, ecr_rem);
-        let target = rebind_dead_event_player_damage_recipient(target, &amount, ctx);
+        let mut amount = amount;
+        let target = rebind_dead_event_player_damage_recipient(target, &mut amount, ctx);
         return Some((
             Effect::DealDamage {
                 amount: amount.clone(),

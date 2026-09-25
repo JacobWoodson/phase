@@ -3413,6 +3413,7 @@ mod tests {
                         qty: QuantityRef::TargetZoneCardCount {
                             zone: ZoneRef::Hand,
                             scope: ControllerRef::TargetOpponent,
+                            binding: crate::types::ability::CountBinding::Explicit,
                         }
                     },
                 );
@@ -3451,6 +3452,7 @@ mod tests {
                 qty: QuantityRef::TargetZoneCardCount {
                     zone: ZoneRef::Hand,
                     scope: ControllerRef::TargetPlayer,
+                    binding: crate::types::ability::CountBinding::Explicit,
                 }
             },
         );

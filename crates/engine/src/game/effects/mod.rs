@@ -40683,6 +40683,7 @@ mod tests {
         assert!(reads_graveyard(QuantityRef::TargetZoneCardCount {
             zone: crate::types::ability::ZoneRef::Graveyard,
             scope: crate::types::ability::ControllerRef::TargetPlayer,
+            binding: crate::types::ability::CountBinding::Explicit,
         }));
         assert!(reads_graveyard(QuantityRef::ZoneCardCount {
             zone: crate::types::ability::ZoneRef::Graveyard,

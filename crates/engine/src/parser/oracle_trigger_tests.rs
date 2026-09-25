@@ -4908,6 +4908,7 @@ fn trigger_attacks_target_player_mills_half_their_library_rounded_up() {
                         qty: QuantityRef::TargetZoneCardCount {
                             zone: ZoneRef::Library,
                             scope: ControllerRef::TargetPlayer,
+                            binding: crate::types::ability::CountBinding::Anaphoric,
                         },
                     }),
                     divisor: 2,
@@ -4948,6 +4949,7 @@ fn trigger_attacks_target_player_mills_half_their_library_rounded_down() {
                         qty: QuantityRef::TargetZoneCardCount {
                             zone: ZoneRef::Library,
                             scope: ControllerRef::TargetPlayer,
+                            binding: crate::types::ability::CountBinding::Anaphoric,
                         },
                     }),
                     divisor: 2,
@@ -30724,6 +30726,46 @@ fn sword_of_war_and_peace_their_hand_rewrites_to_scoped_player() {
             );
         }
         other => panic!("Sword sub-ability must be GainLife, got {other:?}"),
+    }
+}
+
+/// MED2 (issue #9280 review): the event-anchored rewrite must NOT erase an
+/// explicit target binding. Synthetic Sword-shape trigger with "target
+/// player's hand": the count declares its own CR 601.2c instance, so it
+/// survives as `TargetZoneCardCount` for the slot machinery while the
+/// recipient stays event-bound. Companion to the Sword pin above (anaphoric
+/// "their hand" rewrites); zero printed cards pair an event-bound recipient
+/// with an explicit count, so this shape is synthetic-only.
+#[test]
+fn damage_trigger_explicit_target_count_survives_scoped_rewrite() {
+    let def = parse_trigger_line(
+        "Whenever equipped creature deals combat damage to a player, Test Blade deals damage to that player equal to the number of cards in target player's hand.",
+        "Test Blade",
+    );
+    assert_eq!(def.mode, TriggerMode::DamageDone);
+    let execute = def.execute.as_ref().expect("execute must be Some");
+    match &*execute.effect {
+        Effect::DealDamage { amount, target, .. } => {
+            assert_eq!(
+                target,
+                &TargetFilter::TriggeringPlayer,
+                "recipient must stay event-bound, got {target:?}",
+            );
+            assert!(
+                matches!(
+                    amount,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::TargetZoneCardCount {
+                            zone: ZoneRef::Hand,
+                            scope: ControllerRef::TargetPlayer,
+                            binding: crate::types::ability::CountBinding::Explicit,
+                        },
+                    }
+                ),
+                "explicit count must survive the rewrite, got {amount:?}",
+            );
+        }
+        other => panic!("effect must be DealDamage, got {other:?}"),
     }
 }
 

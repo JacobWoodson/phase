@@ -2,7 +2,7 @@
 use crate::types::ability::TapStateChange;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, AttachSelection,
-    CardTypeSetSource, CastManaSpentMetric, CombatRelationSubject, ControllerRef,
+    CardTypeSetSource, CastManaSpentMetric, CombatRelationSubject, ControllerRef, CountBinding,
     CounterMoveSelection, DamageSource, EachDamageRecipient, Effect, EffectKind, EffectScope,
     FilterProp, GameRestriction, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint,
     MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
@@ -3673,7 +3673,8 @@ fn collect_target_slots_inner(
             && !one_sided_fight_source_supplies_quantity_creature(&ability.effect)
         {
             let filter = effect_target_slot_filter(&ability.effect)
-                .expect("slot filter present when gate true");
+                .expect("slot filter present when gate true")
+                .filter;
             let legal_targets =
                 legal_targets_for_ability_filter(state, ability, &filter, &acc.slots);
             if legal_targets.is_empty() && !ability.optional_targeting {
@@ -4784,7 +4785,7 @@ fn effect_references_target_opponent(effect: &Effect) -> bool {
     effect_bound_filter_matches(effect, filter_references_target_opponent)
 }
 
-fn ability_needs_companion_target_player_slot(ability: &ResolvedAbility) -> bool {
+pub(crate) fn ability_needs_companion_target_player_slot(ability: &ResolvedAbility) -> bool {
     // Triggered abilities carry an exact trigger source. Hellkite-style
     // GainControlAll uses "that player" from the triggering event, not a
     // declared target player, so surfacing a stack target here makes it fizzle.
@@ -4799,6 +4800,45 @@ fn ability_needs_companion_target_player_slot(ability: &ResolvedAbility) -> bool
             .unless_pay
             .as_ref()
             .is_some_and(|m| payer_is_declared_target(&m.payer))
+}
+
+/// CR 115.1 + CR 601.2c: the player-target ordinal serving a separately
+/// announced quantity slot — the single authority shared by magnitude
+/// resolution (`game/quantity.rs`) and damage-recipient resolution
+/// (`effects/deal_damage.rs`) so both read the same slot identity.
+///
+/// `None` when the effect constructed no separate player-typed quantity slot:
+/// an anaphoric count shares the primary slot (nothing to skip or exclude),
+/// an object-typed slot (`Power { Target }`) consumes no player entry, and
+/// anything else has no player count to serve. `Some(k)` is the k-th player
+/// entry of the announced targets: the fast path pins `0` for fewer than two
+/// player targets, otherwise the companion rule skips a companion slot pushed
+/// ahead of the quantity slot (construction order companion → quantity →
+/// primary, pinned by `target_zone_card_count_slot_matrix`).
+pub(crate) fn quantity_slot_player_ordinal(
+    targets: &[TargetRef],
+    ability: Option<&ResolvedAbility>,
+) -> Option<usize> {
+    let ability = ability?;
+    if !effect_needs_target_creature_quantity_slot(&ability.effect) {
+        return None;
+    }
+    // Object-typed quantity slots consume an object entry, not a player one.
+    let derived = effect_target_slot_filter(&ability.effect)?;
+    if !quantity_slot_filter_selects_players(&derived.filter) {
+        return None;
+    }
+    let multiple_players = targets
+        .iter()
+        .filter(|t| matches!(t, TargetRef::Player(_)))
+        .nth(1)
+        .is_some();
+    if !multiple_players {
+        return Some(0);
+    }
+    Some(usize::from(ability_needs_companion_target_player_slot(
+        ability,
+    )))
 }
 
 /// CR 608.2c + CR 109.4: Tree-walks a `TargetFilter` and returns true if any
@@ -5399,10 +5439,15 @@ fn effect_needs_target_creature_quantity_slot(effect: &Effect) -> bool {
     // resolving the count to 0. Symmetrically, an object-typed slot
     // (`Power { Target }`) is supplied only by a declared object choice: a
     // `Player` primary does not supply the object the magnitude reads.
-    let Some(slot_filter) = effect_target_slot_filter(effect) else {
+    // An `Explicit` count is exempt from both guards: it declares its own
+    // CR 601.2c instance, announced separately from any primary choice.
+    let Some(derived) = effect_target_slot_filter(effect) else {
         return false;
     };
-    if quantity_slot_filter_selects_players(&slot_filter) {
+    if quantity_slot_filter_selects_players(&derived.filter) {
+        if derived.binding == Some(CountBinding::Explicit) {
+            return true;
+        }
         return !effect_primary_target_supplies_player_target(effect);
     }
     !effect_primary_target_supplies_creature_target(effect)
@@ -5630,7 +5675,7 @@ fn target_filter_can_supply_creature_quantity(filter: &TargetFilter) -> bool {
 /// returning the FIRST `Some`. `Some(filter)` means the effect's magnitude/scope
 /// references a value that requires its own surfaced target slot whose legal
 /// candidates are `filter`; `None` means no count-derived slot is needed.
-fn effect_target_slot_filter(effect: &Effect) -> Option<TargetFilter> {
+fn effect_target_slot_filter(effect: &Effect) -> Option<QuantitySlotDerivation> {
     if let Some(filter) = effect.target_filter().and_then(filter_target_slot_filter) {
         return Some(filter);
     }
@@ -5672,7 +5717,7 @@ fn effect_target_slot_filter(effect: &Effect) -> Option<TargetFilter> {
     }
 }
 
-fn filter_target_slot_filter(filter: &TargetFilter) -> Option<TargetFilter> {
+fn filter_target_slot_filter(filter: &TargetFilter) -> Option<QuantitySlotDerivation> {
     match filter {
         TargetFilter::Typed(TypedFilter { properties, .. }) => {
             properties.iter().find_map(filter_prop_target_slot_filter)
@@ -5700,12 +5745,14 @@ fn filter_target_slot_filter(filter: &TargetFilter) -> Option<TargetFilter> {
 /// that rule has nothing to say about target-slot extraction, and a citation
 /// that does not support its code is worse than none because it reads as
 /// evidence the behavior was checked against the rules.
-fn characteristic_source_target_slot_filter(source: &CardTypeSetSource) -> Option<TargetFilter> {
+fn characteristic_source_target_slot_filter(
+    source: &CardTypeSetSource,
+) -> Option<QuantitySlotDerivation> {
     // FIRST match wins, preserving the previous `find_map` semantics: the walker
     // visits members in declaration order, and later members do not overwrite an
     // earlier hit. Truncation needs no conservative branch here — this returns a
     // slot to wire, and inventing one would be worse than finding none.
-    let mut found: Option<TargetFilter> = None;
+    let mut found: Option<QuantitySlotDerivation> = None;
     source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
         if found.is_some() {
             return;
@@ -5726,7 +5773,7 @@ fn characteristic_source_target_slot_filter(source: &CardTypeSetSource) -> Optio
 
 fn filter_prop_target_slot_filter(
     prop: &crate::types::ability::FilterProp,
-) -> Option<TargetFilter> {
+) -> Option<QuantitySlotDerivation> {
     match prop {
         crate::types::ability::FilterProp::Counters { count, .. }
         | crate::types::ability::FilterProp::Cmc { value: count, .. }
@@ -5755,7 +5802,7 @@ fn filter_prop_target_slot_filter(
     }
 }
 
-fn quantity_expr_target_slot_filter(expr: &QuantityExpr) -> Option<TargetFilter> {
+fn quantity_expr_target_slot_filter(expr: &QuantityExpr) -> Option<QuantitySlotDerivation> {
     match expr {
         QuantityExpr::Ref { qty } => quantity_ref_target_slot_spec(qty),
         QuantityExpr::Offset { inner, .. }
@@ -5775,13 +5822,24 @@ fn quantity_expr_target_slot_filter(expr: &QuantityExpr) -> Option<TargetFilter>
     }
 }
 
+/// CR 115.1 + CR 601.2c: A target slot derived from a count `QuantityRef` —
+/// the slot's legality filter plus, for `TargetZoneCardCount`, the count's
+/// announcement binding (which decides whether the slot is a separately
+/// declared CR 601.2c instance or rides the primary's choice). `None`
+/// binding = legacy refs without the axis (today's gate behavior applies).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QuantitySlotDerivation {
+    filter: TargetFilter,
+    binding: Option<CountBinding>,
+}
+
 /// CR 115.1: The single authority mapping a count `QuantityRef` to the
 /// `TargetFilter` of the target slot that count requires (if any). A `Some`
 /// result means this ref references a TARGET object/player and the surfaced
 /// slot's legal candidates are the returned filter; the slot filter is DERIVED
 /// from the ref itself, never assumed to be "creature". `None` means the ref
 /// reads a value that needs no target slot.
-fn quantity_ref_target_slot_spec(qty: &QuantityRef) -> Option<TargetFilter> {
+fn quantity_ref_target_slot_spec(qty: &QuantityRef) -> Option<QuantitySlotDerivation> {
     match qty {
         // CR 208.1: power/toughness are creature numbers — the target slot is a creature.
         QuantityRef::Power {
@@ -5792,20 +5850,27 @@ fn quantity_ref_target_slot_spec(qty: &QuantityRef) -> Option<TargetFilter> {
         }
         | QuantityRef::Toughness {
             scope: ObjectScope::Target,
-        } => Some(TargetFilter::Typed(TypedFilter::creature())),
+        } => Some(QuantitySlotDerivation {
+            filter: TargetFilter::Typed(TypedFilter::creature()),
+            binding: None,
+        }),
         QuantityRef::Power { .. }
         | QuantityRef::BasePower { .. }
         | QuantityRef::Toughness { .. } => None,
         // CR 202.3 + CR 115.1: the ref carries its own slot filter.
-        QuantityRef::TargetObjectManaValue { filter } => Some((**filter).clone()),
+        QuantityRef::TargetObjectManaValue { filter } => Some(QuantitySlotDerivation {
+            filter: (**filter).clone(),
+            binding: None,
+        }),
         // CR 701.9 + CR 115.1: cards a single targeted opponent discarded this
         // turn (Discard keyword action; NOT 121.1, which is Draw). Other player
         // scopes are not target-bearing and fall through.
         QuantityRef::CardsDiscardedThisTurn {
             player: PlayerScope::Target,
-        } => Some(TargetFilter::Typed(
-            TypedFilter::default().controller(ControllerRef::Opponent),
-        )),
+        } => Some(QuantitySlotDerivation {
+            filter: TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            binding: None,
+        }),
         QuantityRef::CardsDiscardedThisTurn { .. } => None,
         // CR 115.1 + CR 402.1 + CR 601.2c: a zone count bound to the
         // ability's player target needs its own slot when the effect's
@@ -5824,18 +5889,24 @@ fn quantity_ref_target_slot_spec(qty: &QuantityRef) -> Option<TargetFilter> {
         // whose dead `TriggeringPlayer` recipient the damage parser rebinds
         // to `Player`) keep working through that `Player` slot via the
         // `effect_primary_target_supplies_player_target` guard on the shared
-        // gate above.
-        QuantityRef::TargetZoneCardCount { scope, .. } => Some(match scope {
-            // CR 109.4 + CR 102.2: "target opponent's ..." — opponent-only.
-            ControllerRef::TargetOpponent => TargetFilter::Typed(
-                TypedFilter::default().controller(ControllerRef::Opponent),
-            ),
-            // CR 109.4 + CR 115.1: "target player's ..." (and the anaphoric
-            // "their"/"that player's") — any announced player. Other scopes
-            // are parser-unreachable here; the widest slot keeps the count
-            // reading an announced choice instead of 0.
-            _ => TargetFilter::Player,
-        }),
+        // gate above. An `Explicit` count is exempt from that guard: it
+        // declares its own CR 601.2c instance and always surfaces its slot.
+        QuantityRef::TargetZoneCardCount { scope, binding, .. } => {
+            Some(QuantitySlotDerivation {
+                filter: match scope {
+                    // CR 109.4 + CR 102.2: "target opponent's ..." — opponent-only.
+                    ControllerRef::TargetOpponent => TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::Opponent),
+                    ),
+                    // CR 109.4 + CR 115.1: "target player's ..." (and the anaphoric
+                    // "their"/"that player's") — any announced player. Other scopes
+                    // are parser-unreachable here; the widest slot keeps the count
+                    // reading an announced choice instead of 0.
+                    _ => TargetFilter::Player,
+                },
+                binding: Some(*binding),
+            })
+        }
         // CR 115.1 + CR 109.4: surface an OPPONENT-scoped PLAYER slot (enumerable);
         // TargetPlayer is non-enumerable (targeting.rs fails closed) since
         // ability.targets is empty at selection. The derived slot must be a BARE
@@ -5852,9 +5923,12 @@ fn quantity_ref_target_slot_spec(qty: &QuantityRef) -> Option<TargetFilter> {
         QuantityRef::DamageDealtThisTurn { target, .. }
             if relative_controller_kind(target) == Some(ControllerRef::TargetPlayer) =>
         {
-            Some(TargetFilter::Typed(
-                TypedFilter::default().controller(ControllerRef::Opponent),
-            ))
+            Some(QuantitySlotDerivation {
+                filter: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                ),
+                binding: None,
+            })
         }
         // CR 120.9: a DamageDealtThisTurn whose source or target embeds a
         // target-creature quantity (e.g. aggregate over "target creature") still
@@ -6164,7 +6238,8 @@ fn collect_target_slot_specs(
             *next_instance += 1;
             specs.push(TargetSlotSpec {
                 filter: effect_target_slot_filter(&ability.effect)
-                    .expect("slot filter present when gate true"),
+                    .expect("slot filter present when gate true")
+                    .filter,
                 optional: ability.optional_targeting,
                 instance: id,
             });
@@ -9584,7 +9659,7 @@ fn node_slot_filters(ability: &ResolvedAbility) -> NodeSlotFilters {
         && !one_sided_fight_source_supplies_quantity_creature(&ability.effect)
     {
         match effect_target_slot_filter(&ability.effect) {
-            Some(f) => lead.push(f),
+            Some(f) => lead.push(f.filter),
             // The cast path `expect`s here; the retarget path must never panic
             // on a shape the cast path tolerated differently, so it fails
             // closed instead.
@@ -17907,7 +17982,7 @@ mod tests {
         let live = QuantityRef::EnteredThisTurn { filter };
 
         assert_eq!(
-            quantity_ref_target_slot_spec(&ledger),
+            quantity_ref_target_slot_spec(&ledger).map(|d| d.filter),
             Some(TargetFilter::Typed(TypedFilter::creature())),
             "CR 608.2i: the ledger variant must surface the nested target slot",
         );
@@ -17928,7 +18003,8 @@ mod tests {
         assert_eq!(
             quantity_ref_target_slot_spec(&QuantityRef::Power {
                 scope: ObjectScope::Target,
-            }),
+            })
+            .map(|d| d.filter),
             Some(TargetFilter::Typed(TypedFilter::creature())),
             "Power {{ Target }} must surface a creature slot",
         );
@@ -17943,7 +18019,8 @@ mod tests {
         assert_eq!(
             quantity_ref_target_slot_spec(&QuantityRef::TargetObjectManaValue {
                 filter: Box::new(artifact_or_creature.clone()),
-            }),
+            })
+            .map(|d| d.filter),
             Some(artifact_or_creature),
             "TargetObjectManaValue must surface the filter it carries verbatim",
         );
@@ -17953,7 +18030,8 @@ mod tests {
         assert_eq!(
             quantity_ref_target_slot_spec(&QuantityRef::CardsDiscardedThisTurn {
                 player: PlayerScope::Target,
-            }),
+            })
+            .map(|d| d.filter),
             Some(TargetFilter::Typed(
                 TypedFilter::default().controller(ControllerRef::Opponent),
             )),
@@ -17987,7 +18065,8 @@ mod tests {
             channel: DamageChannel::Total,
         };
         let spec = quantity_ref_target_slot_spec(&targeted_damage)
-            .expect("targeted DamageDealtThisTurn must surface a slot");
+            .expect("targeted DamageDealtThisTurn must surface a slot")
+            .filter;
         // The rewritten slot filter must be Opponent-scoped (enumerable), never
         // TargetPlayer (which fails closed at enumeration → legal_actions=0 hang).
         assert_eq!(
@@ -18027,24 +18106,35 @@ mod tests {
             crate::types::ability::ZoneRef::Exile,
         ] {
             assert_eq!(
-                // `zone` is reused by the TargetPlayer assertion below.
                 quantity_ref_target_slot_spec(&QuantityRef::TargetZoneCardCount {
                     zone: zone.clone(),
                     scope: ControllerRef::TargetOpponent,
+                    binding: CountBinding::Explicit,
                 }),
-                Some(TargetFilter::Typed(
-                    TypedFilter::default().controller(ControllerRef::Opponent),
-                )),
+                Some(QuantitySlotDerivation {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::Opponent),
+                    ),
+                    binding: Some(CountBinding::Explicit),
+                }),
                 "TargetZoneCardCount{{TargetOpponent}} must surface an Opponent-scoped slot",
             );
-            assert_eq!(
-                quantity_ref_target_slot_spec(&QuantityRef::TargetZoneCardCount {
-                    zone,
-                    scope: ControllerRef::TargetPlayer,
-                }),
-                Some(TargetFilter::Player),
-                "TargetZoneCardCount{{TargetPlayer}} must surface the any-player slot",
-            );
+            // Legality comes from scope alone: both bindings surface the
+            // any-player slot, and the binding propagates for the gate.
+            for binding in [CountBinding::Explicit, CountBinding::Anaphoric] {
+                assert_eq!(
+                    quantity_ref_target_slot_spec(&QuantityRef::TargetZoneCardCount {
+                        zone: zone.clone(),
+                        scope: ControllerRef::TargetPlayer,
+                        binding,
+                    }),
+                    Some(QuantitySlotDerivation {
+                        filter: TargetFilter::Player,
+                        binding: Some(binding),
+                    }),
+                    "TargetZoneCardCount{{TargetPlayer}} must surface the any-player slot",
+                );
+            }
         }
     }
 
@@ -18055,20 +18145,23 @@ mod tests {
     /// count's scope. Recipient==counted effects ("Target player mills half
     /// their library") read their primary `Player` slot — no second prompt.
     /// Object-typed magnitudes keep their creature slot even under a
-    /// `Player` primary.
+    /// `Player` primary. An `Explicit` count always surfaces its slot, even
+    /// under a `Player` primary (separate CR 601.2c instances); only
+    /// anaphoric counts ride the primary's choice.
     #[test]
     fn target_zone_card_count_slot_matrix() {
-        let zone_count = |scope| QuantityExpr::Ref {
+        let zone_count = |(scope, binding)| QuantityExpr::Ref {
             qty: QuantityRef::TargetZoneCardCount {
                 zone: crate::types::ability::ZoneRef::Hand,
                 scope,
+                binding,
             },
         };
         // Recurring Insight shape: drawer is the controller, counted player
         // is the target — the slot must fire.
         assert!(
             effect_needs_target_creature_quantity_slot(&Effect::Draw {
-                count: zone_count(ControllerRef::TargetOpponent),
+                count: zone_count((ControllerRef::TargetOpponent, CountBinding::Explicit)),
                 target: TargetFilter::Controller,
             }),
             "Draw{{TargetZoneCardCount, Controller}} (Recurring Insight) needs the opponent slot",
@@ -18077,7 +18170,7 @@ mod tests {
         // slot (any-player legality comes from the slot spec, pinned above).
         assert!(
             effect_needs_target_creature_quantity_slot(&Effect::Draw {
-                count: zone_count(ControllerRef::TargetPlayer),
+                count: zone_count((ControllerRef::TargetPlayer, CountBinding::Explicit)),
                 target: TargetFilter::Controller,
             }),
             "Draw{{TargetZoneCardCount{{TargetPlayer}}, Controller}} needs the any-player slot",
@@ -18085,7 +18178,7 @@ mod tests {
         // Gerrard Capashen shape: gainer is the controller.
         assert!(
             effect_needs_target_creature_quantity_slot(&Effect::GainLife {
-                amount: zone_count(ControllerRef::TargetOpponent),
+                amount: zone_count((ControllerRef::TargetOpponent, CountBinding::Explicit)),
                 player: TargetFilter::Controller,
             }),
             "GainLife{{TargetZoneCardCount, Controller}} (Gerrard Capashen) needs the opponent slot",
@@ -18094,7 +18187,7 @@ mod tests {
         // the magnitude reads the primary slot, so no second prompt.
         assert!(
             !effect_needs_target_creature_quantity_slot(&Effect::Mill {
-                count: zone_count(ControllerRef::TargetPlayer),
+                count: zone_count((ControllerRef::TargetPlayer, CountBinding::Anaphoric)),
                 target: TargetFilter::Player,
                 destination: Zone::Graveyard,
             }),
@@ -18103,12 +18196,42 @@ mod tests {
         // Same recipient==counted guard for damage.
         assert!(
             !effect_needs_target_creature_quantity_slot(&Effect::DealDamage {
-                amount: zone_count(ControllerRef::TargetPlayer),
+                amount: zone_count((ControllerRef::TargetPlayer, CountBinding::Anaphoric)),
                 target: TargetFilter::Player,
                 damage_source: None,
                 excess: None,
             }),
             "DealDamage{{TargetZoneCardCount, Player}} must NOT add a second slot",
+        );
+        // MED1 (issue #9280 review): an Explicit count declares its own
+        // CR 601.2c instance, announced separately from a Player primary —
+        // even when both scopes are TargetPlayer (scope cannot tell one
+        // instance from two).
+        assert!(
+            effect_needs_target_creature_quantity_slot(&Effect::DealDamage {
+                amount: zone_count((ControllerRef::TargetOpponent, CountBinding::Explicit)),
+                target: TargetFilter::Player,
+                damage_source: None,
+                excess: None,
+            }),
+            "DealDamage{{Explicit TargetZoneCardCount, Player}} needs the count slot",
+        );
+        assert!(
+            effect_needs_target_creature_quantity_slot(&Effect::DealDamage {
+                amount: zone_count((ControllerRef::TargetPlayer, CountBinding::Explicit)),
+                target: TargetFilter::Player,
+                damage_source: None,
+                excess: None,
+            }),
+            "same-scope Explicit count still needs its slot (scope is not instance identity)",
+        );
+        assert!(
+            effect_needs_target_creature_quantity_slot(&Effect::Mill {
+                count: zone_count((ControllerRef::TargetPlayer, CountBinding::Explicit)),
+                target: TargetFilter::Player,
+                destination: Zone::Graveyard,
+            }),
+            "Mill{{Explicit TargetZoneCardCount, Player}} needs the count slot",
         );
         // Sword of War and Peace shape (issue #9280 follow-up): the trigger
         // rewrite lowers the event-anchored "their hand" to a scoped-player
@@ -18146,7 +18269,7 @@ mod tests {
         // the count silently resolves to 0 on the object-primary branch.
         assert!(
             effect_needs_target_creature_quantity_slot(&Effect::DealDamage {
-                amount: zone_count(ControllerRef::TargetOpponent),
+                amount: zone_count((ControllerRef::TargetOpponent, CountBinding::Explicit)),
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 damage_source: None,
                 excess: None,
@@ -18160,6 +18283,66 @@ mod tests {
                 target: TargetFilter::Controller,
             }),
             "plain Divination-shape Draw must NOT need a slot",
+        );
+    }
+
+    /// MED1 (issue #9280 review): slot ORDER is load-bearing for quantity
+    /// resolution — the count reads its own slot's choice, and the quantity
+    /// slot precedes the primary slot in both builders and the specs mirror.
+    /// Reordering either fails this pin. The two specs also carry distinct
+    /// `TargetInstanceId`s: separate CR 601.2c instances.
+    #[test]
+    fn target_zone_card_count_two_player_slots_order_and_instances() {
+        let state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::TargetZoneCardCount {
+                        zone: crate::types::ability::ZoneRef::Hand,
+                        scope: ControllerRef::TargetOpponent,
+                        binding: CountBinding::Explicit,
+                    },
+                },
+                target: TargetFilter::Player,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+
+        let slots = build_target_slots(&state, &ability).expect("should build");
+        assert_eq!(
+            slots.len(),
+            2,
+            "explicit count + Player primary = two slots"
+        );
+        // Quantity slot first (opponent-only legality), primary second
+        // (any player).
+        assert_eq!(slots[0].legal_targets.len(), 1);
+        assert!(slots[0]
+            .legal_targets
+            .contains(&TargetRef::Player(PlayerId(1))));
+        assert_eq!(slots[1].legal_targets.len(), 2);
+        assert!(slots[1]
+            .legal_targets
+            .contains(&TargetRef::Player(PlayerId(0))));
+        assert!(slots[1]
+            .legal_targets
+            .contains(&TargetRef::Player(PlayerId(1))));
+
+        let specs = target_slot_specs(&state, &ability);
+        assert_eq!(specs.len(), 2, "specs mirror the two slots");
+        assert_eq!(
+            specs[0].filter,
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            "quantity spec precedes the primary spec",
+        );
+        assert_eq!(specs[1].filter, TargetFilter::Player);
+        assert_ne!(
+            specs[0].instance, specs[1].instance,
+            "the two slots are separate CR 601.2c instances",
         );
     }
 
