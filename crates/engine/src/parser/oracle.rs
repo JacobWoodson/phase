@@ -113,7 +113,7 @@ use super::oracle_replacement::{
     lower_as_enters_or_face_up_counters, lower_replacement_ir,
     parse_bidirectional_damage_prevention, parse_oneshot_damage_replacement,
     parse_replacement_line, parse_replacement_line_ir, parse_whenever_you_cast_enters_with_outcome,
-    CastEntersWithOutcome,
+    parse_windowed_graveyard_redirect_install, CastEntersWithOutcome,
 };
 use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
 use super::oracle_spacecraft::parse_spacecraft_threshold_lines;
@@ -8393,6 +8393,21 @@ fn resolve_guards_in_ability(def: &mut AbilityDefinition, parent: Option<&Effect
              clause_text,
          }| {
             (reading == GuardReading::Event && !guard_owner(&def.effect, parent)).then(|| {
+                // Before gapping, attempt the whole-body graveyard-redirect
+                // authority (`parse_windowed_graveyard_redirect_install`): a
+                // chain-position "If <subject> would be put into <graveyard>
+                // ..., exile it instead" sentence (Magus of the Will's one-line
+                // activated body) never reaches the line-level replacement
+                // dispatcher, so without this attempt it gaps here while the
+                // identical sentence on its own line lowers. The authority's
+                // own mandatory grammar is the single recognition gate —
+                // anything outside the class still gaps below. (Sibling attempt
+                // serves the legacy `parse_effect_chain` path at
+                // `oracle_effect::lower_clause_ast`; a clause resolved there
+                // carries no mark here, so the populations are disjoint.)
+                if let Some(effect) = parse_windowed_graveyard_redirect_install(&clause_text) {
+                    return effect;
+                }
                 // CR 614.1a: nothing on the assembled tree consumes the body in the dropped
                 // guard's stead, so the whole "if <guard>, <body>" clause is recorded as one
                 // honest gap. The EVENT reading is the replacement reading, so the kind is

@@ -517,15 +517,16 @@ fn v5_will_cycle_permission_body_is_no_longer_refused() {
     // as much a failure as a missing one.
     for (text, name, types, expected_installs) in [
         // The two Sorceries expose their line-2 clause to the card-level line
-        // dispatch; Magus does not, because its line 2 is inside an activated
-        // ability's effect text.
+        // dispatch; Magus carries the same sentence inside its activated
+        // ability's effect chain, where the chain-position redirect authority
+        // lowers it — same install count, different route.
         (YAWGMOTHS_WILL, "Yawgmoth's Will", &["Sorcery"][..], 1usize),
         (GAEAS_WILL, "Gaea's Will", &["Sorcery"][..], 1usize),
         (
             MAGUS_OF_THE_WILL,
             "Magus of the Will",
             &["Creature"][..],
-            0usize,
+            1usize,
         ),
     ] {
         let parsed = parse_with_types(text, name, types);
@@ -554,10 +555,11 @@ fn v5_will_cycle_permission_body_is_no_longer_refused() {
         );
         // (i-b) POSITIVE SHAPE, paired with the absence check above.
         //
-        // Assertion (i) is a negative, and for the Magus fixture so are (ii) and
-        // (iii) — its `expected_installs` is 0 because line 2 sits inside an
-        // activated ability's effect text. An empty or wholly failed parse would
-        // therefore satisfy every assertion in this loop body for that row.
+        // Assertion (i) is a negative, and for the Magus fixture so is (ii).
+        // An empty or wholly failed parse would therefore satisfy (i) and (ii)
+        // for that row — while (i-b) and the `expected_installs` count below
+        // (1 on all three arrival shapes) require the parse to actually
+        // deliver.
         //
         // Pin the delivered grant BY ITS MODE so the row cannot pass on an
         // unrelated `GenericEffect`: the permission must actually be installed,
@@ -586,9 +588,10 @@ fn v5_will_cycle_permission_body_is_no_longer_refused() {
         // card-hosted definition was never consulted; the resolution install
         // (CR 611.2a) is where it can actually apply.
         //
-        // Magus of the Will produces neither, because its line 2 sits INSIDE an
-        // activated ability's effect text, which the card-level line dispatch
-        // does not reach.
+        // Magus of the Will produces its install through the effect chain
+        // rather than the card-level line dispatch, because its sentence sits
+        // INSIDE an activated ability's effect text: the chain-position
+        // redirect authority lowers it as the delivered grant's tail.
         //
         // The load-bearing invariant is that NOTHING PERMANENT escapes. Every
         // replacement these cards produce, by EITHER route and however many
@@ -634,8 +637,8 @@ fn v5_will_cycle_permission_body_is_no_longer_refused() {
     );
 
     // REACH-GUARD (beta) for assertion (iii): the install path IS live for this
-    // exact sentence in isolation, so Magus's absence is a real absence rather
-    // than a dead instrument.
+    // exact sentence in isolation, so every row's count measures its own
+    // route rather than a dead instrument.
     let live = parse_sorcery(CASE_B, "Window Probe");
     assert_eq!(
         windowed_installs(&live).len(),

@@ -28,6 +28,9 @@
 
 use engine::game::casting::graveyard_lands_playable_by_permission;
 use engine::game::scenario::{GameRunner, GameScenario};
+use engine::types::ability::AbilityKind;
+use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -38,6 +41,11 @@ const YAWGMOTHS_WILL: &str = "Until end of turn, you may play lands and cast spe
 /// Gaea's Will arrives behind a Suspend line — a different ARRIVAL SHAPE for the
 /// same sentence, so the grant must not key on being the first line.
 const GAEAS_WILL: &str = "Suspend 4—{G}\nUntil end of turn, you may play lands and cast spells from your graveyard.\nIf a card would be put into your graveyard from anywhere this turn, exile that card instead.";
+
+/// Magus of the Will, verbatim Oracle text: an ACTIVATED ability with a
+/// `{2}{B}, {T}, Exile this creature` cost wrapping the same two sentences.
+/// Runtime rows activate this; g3 parses it.
+const MAGUS_OF_THE_WILL: &str = "{2}{B}, {T}, Exile this creature: Until end of turn, you may play lands and cast spells from your graveyard. If a card would be put into your graveyard from anywhere this turn, exile that card instead.";
 
 fn on_big_stack<T, F>(f: F) -> T
 where
@@ -275,11 +283,9 @@ fn g2_a_grant_with_no_stated_window_is_not_delivered() {
 /// delivered AND the replacement clause survives.
 #[test]
 fn g3_the_magus_replacement_clause_survives_the_rewrite() {
-    const MAGUS: &str = "{2}{B}, {T}, Exile this creature: Until end of turn, you may play lands and cast spells from your graveyard. If a card would be put into your graveyard from anywhere this turn, exile that card instead.";
-
     let parsed = on_big_stack(move || {
         engine::parser::parse_oracle_text(
-            MAGUS,
+            MAGUS_OF_THE_WILL,
             "Magus of the Will",
             &[],
             &["Creature".to_string()],
@@ -306,12 +312,18 @@ fn g3_the_magus_replacement_clause_survives_the_rewrite() {
     );
 
     // (iii) The replacement tail is REATTACHED rather than merely present
-    // somewhere: it must hang off the ability whose head is the delivered grant.
+    // somewhere: it must hang off the ability whose head is the delivered grant,
+    // AND it must be the lowered graveyard redirect — an `is_some` check alone
+    // passes on an `Unimplemented` stub, which installs nothing at runtime.
     assert!(
         parsed.abilities.iter().any(|ability| {
-            ability_grants_graveyard_permission(ability) && ability.sub_ability.is_some()
+            ability_grants_graveyard_permission(ability)
+                && matches!(
+                    ability.sub_ability.as_deref().map(|sub| &*sub.effect),
+                    Some(engine::types::ability::Effect::AddTargetReplacement { .. })
+                )
         }),
-        "the cast node must be spliced out and its tail reattached, not truncated"
+        "the cast node must be spliced out and its replacement tail reattached, not truncated"
     );
 }
 
@@ -341,4 +353,83 @@ fn ability_grants_graveyard_permission(
             )
         })
     })
+}
+
+/// END-TO-END ACTIVATION: Magus of the Will through the production activation
+/// and zone pipelines (CR 602 + CR 614.1a).
+///
+/// g3 pins the PARSE shape (permission granted, replacement tail reattached).
+/// This row pins the RUNTIME branch g3 cannot reach: `resolve_will` casts a
+/// sorcery, so it never announces Magus's activated ability, pays its
+/// self-exile cost, or drives the replacement through a production zone move.
+/// After the cost Magus is in exile while the player-scoped permission stays
+/// live (CR 611.2c: bound to the grantee, not the source).
+#[test]
+fn d5_magus_activation_survives_self_exile_and_its_replacement_exiles() {
+    on_big_stack(|| {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        // The `{2}{B}` leg of the cost from the pool; the `{T}` and self-exile
+        // legs are paid by the engine from the permanent itself.
+        scenario.with_mana_pool(
+            PlayerId(0),
+            vec![
+                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, Vec::new()),
+                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, Vec::new()),
+                ManaUnit::new(ManaType::Black, ObjectId(0), false, Vec::new()),
+            ],
+        );
+        // The permission witness: covered only if activation delivery installs
+        // the grant.
+        let land = scenario.add_land_to_graveyard(PlayerId(0), "Forest").id();
+        // Seed the library so the probe's draw cannot deck its caster.
+        scenario.with_library_top(PlayerId(0), &["Library Card"]);
+        let magus = scenario
+            .add_creature_from_oracle(PlayerId(0), "Magus of the Will", 3, 3, MAGUS_OF_THE_WILL)
+            .id();
+        // Probe: a targetless spell whose CR 608.2n resolution move (stack to
+        // graveyard) the replacement tail must redirect to exile.
+        let probe = scenario
+            .add_spell_to_hand_from_oracle(PlayerId(0), "Probe", false, "Draw a card.")
+            .id();
+
+        let mut runner = scenario.build();
+        let idx = runner.state().objects[&magus]
+            .abilities
+            .iter()
+            .position(|a| matches!(a.kind, AbilityKind::Activated))
+            .expect("Magus of the Will must expose its activated ability");
+
+        runner.activate(magus, idx).pay_with(&[magus]).resolve();
+        runner.advance_until_stack_empty();
+
+        // (i) The self-exile cost moved through the production cost pipeline:
+        // Magus paid itself.
+        assert_eq!(
+            runner.state().objects[&magus].zone,
+            Zone::Exile,
+            "CR 602: paying Magus's \"Exile this creature\" cost must leave it in exile"
+        );
+
+        // (ii) The permission is live even though its source is gone.
+        let playable = graveyard_lands_playable_by_permission(runner.state(), PlayerId(0));
+        assert!(
+            playable.iter().any(|(object_id, _)| *object_id == land),
+            "CR 611.2c: after Magus's activation resolves from exile, the graveyard land must be \
+             playable through the production permission consumer, got {playable:?}"
+        );
+
+        // (iii) The replacement tail, through the production resolution move.
+        // A single applicable replacement applies without a choice prompt
+        // (CR 616.1 orders two or more); the declared index is inert unless the
+        // engine asks.
+        let _ = runner.cast(probe).replacement_choice(0).resolve();
+        runner.advance_until_stack_empty();
+        assert_eq!(
+            runner.state().objects[&probe].zone,
+            Zone::Exile,
+            "CR 614.1a: with the Will's \"exile that card instead\" replacement live, the \
+             resolving probe must be exiled rather than put into the graveyard"
+        );
+    });
 }
