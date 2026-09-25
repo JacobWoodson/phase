@@ -9072,9 +9072,8 @@ fn extract_card_features(face: &CardFace, features: &mut HashMap<String, Feature
 /// EMISSION: the detector runs at the top of the shared ability walk
 /// (`extract_ability_features_with_token_statics`), so granted payloads
 /// (GrantAbility/GrantTrigger/GrantReplacement bodies) strand exactly like
-/// printed ones. An explicit non-battlefield `ChangeZone` origin is excluded:
-/// the resolver scans the origin zone, so those returns retrieve their
-/// objects.
+/// printed ones. An explicit `ChangeZone` origin selects the scan zone but
+/// cannot preserve which tracked set the delayed return refers to.
 /// TRAVERSAL: every executable payload edge, with the enclosing "inside an
 /// unbound delayed trigger" state propagated through all of them.
 ///
@@ -9088,18 +9087,16 @@ fn extract_card_features(face: &CardFace, features: &mut HashMap<String, Feature
 /// IMMEDIATE effect: a return nested in the body's `sub_ability` (or in any
 /// payload beneath it) strands its objects exactly the same way.
 fn scan_stranded_tracked_set(def: &AbilityDefinition, inside_unbound_delayed: bool) -> bool {
-    // An explicit non-battlefield origin is NOT stranded: the resolver scans
-    // the origin zone (change_zone.rs:980-994), so Exile- or Graveyard-origin
-    // returns still retrieve their objects. Only the battlefield-dependent
-    // shapes strand — the `None` default and an explicit `Battlefield`, both
-    // of which scan where the members no longer are.
+    // An explicit origin fixes the scan zone, but an unbound delayed return
+    // still resolves its sentinel against the latest set when it fires. A
+    // later publisher can replace the set the creating effect meant.
     if inside_unbound_delayed
         && matches!(
             &*def.effect,
-            Effect::ChangeZone { target, origin, .. } if matches!(
+            Effect::ChangeZone { target, .. } if matches!(
                 target,
                 TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
-            ) && matches!(origin, None | Some(Zone::Battlefield))
+            )
         )
     {
         return true;
@@ -13310,19 +13307,23 @@ mod tests {
         );
     }
 
-    /// Review MED (explicit origin): the resolver scans an explicit origin
-    /// zone (change_zone.rs:980-994), so an Exile-origin tracked-set return
-    /// retrieves its objects and must NOT strand. Removing the origin guard
-    /// from the scan flips this assertion; it differs from the unbound test
-    /// in exactly one field.
+    /// An explicit Exile origin can retrieve the intended set when it is still
+    /// the latest, but does not preserve that identity across a later publisher.
     #[test]
-    fn explicit_origin_tracked_set_return_is_not_stranded() {
+    fn explicit_origin_unbound_tracked_set_return_is_unsupported() {
         assert!(
-            !super::delayed_trigger_strands_a_tracked_set(&tracked_return_mid(
+            super::delayed_trigger_strands_a_tracked_set(&tracked_return_mid(
                 false,
                 Some(crate::types::zones::Zone::Exile)
             )),
-            "an explicit Exile origin retrieves its objects, so nothing strands"
+            "an explicit Exile origin does not preserve the intended tracked set"
+        );
+        assert!(
+            !super::delayed_trigger_strands_a_tracked_set(&tracked_return_mid(
+                true,
+                Some(crate::types::zones::Zone::Exile)
+            )),
+            "a bound delayed return preserves its intended tracked set"
         );
     }
 
