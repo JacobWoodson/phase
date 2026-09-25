@@ -32971,6 +32971,84 @@ pub(crate) fn rewrite_event_player_quantity_refs_to_scoped(def: &mut AbilityDefi
     }
 }
 
+/// CR 603.2 + CR 608.2c + CR 115.1: Lower an event-anchored anaphoric zone
+/// count to a scoped-player read. In a damage-done trigger whose recipient is
+/// the event player ("... deals damage to that player equal to the number of
+/// cards in their hand" — Sword of War and Peace), "their" is bound to the
+/// damaged player by the triggering event: no player choice is announced, so
+/// the count must not surface a companion announcement slot (the slot builder
+/// reads `TargetZoneCardCount` as proof of a declared target, and an
+/// any-player slot with more than one legal player stalls the trigger at
+/// target selection). Only counts with the anaphoric `TargetPlayer` scope are
+/// rewritten — "target opponent's ..." (`TargetOpponent`) always demands a
+/// real announcement and stays for the slot machinery — and only inside
+/// effects whose own player anchor is the event player (`TriggeringPlayer`),
+/// so a genuinely announced recipient keeps its slot. Zone mapping mirrors
+/// `rewrite_event_player_quantity_refs_to_scoped` (exile has no scoped
+/// equivalent and is left as-is).
+pub(crate) fn rewrite_event_anchored_zone_counts_to_scoped(def: &mut AbilityDefinition) {
+    use crate::types::ability::{ControllerRef, CountScope, PlayerScope, QuantityRef, ZoneRef};
+
+    fn rewrite_qty(expr: &mut QuantityExpr) {
+        match expr {
+            QuantityExpr::Ref { qty } => match qty {
+                QuantityRef::TargetZoneCardCount { zone, scope }
+                    if *scope == ControllerRef::TargetPlayer =>
+                {
+                    match zone {
+                        ZoneRef::Hand => {
+                            *qty = QuantityRef::HandSize {
+                                player: PlayerScope::ScopedPlayer,
+                            }
+                        }
+                        ZoneRef::Library | ZoneRef::Graveyard => {
+                            *qty = QuantityRef::ZoneCardCount {
+                                zone: zone.clone(),
+                                card_types: Vec::new(),
+                                scope: CountScope::ScopedPlayer,
+                                filter: None,
+                            };
+                        }
+                        // No scoped-player equivalent for exile counts; leave as-is.
+                        ZoneRef::Exile => {}
+                    }
+                }
+                _ => {}
+            },
+            QuantityExpr::DivideRounded { inner, .. }
+            | QuantityExpr::Multiply { inner, .. }
+            | QuantityExpr::ClampMin { inner, .. }
+            | QuantityExpr::Offset { inner, .. } => rewrite_qty(inner),
+            QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+                for inner in exprs {
+                    rewrite_qty(inner);
+                }
+            }
+            QuantityExpr::UpTo { max } => rewrite_qty(max),
+            QuantityExpr::Power { exponent, .. } => rewrite_qty(exponent),
+            QuantityExpr::Difference { left, right } => {
+                rewrite_qty(left);
+                rewrite_qty(right);
+            }
+            QuantityExpr::Fixed { .. } => {}
+        }
+    }
+
+    fn rewrite_effect(effect: &mut Effect) {
+        if matches!(effect.target_filter(), Some(TargetFilter::TriggeringPlayer)) {
+            each_quantity_expr_mut(effect, &mut rewrite_qty);
+        }
+    }
+
+    rewrite_effect(&mut def.effect);
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_event_anchored_zone_counts_to_scoped(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        rewrite_event_anchored_zone_counts_to_scoped(else_branch);
+    }
+}
+
 /// CR 122.1 + CR 603.4 + CR 603.10a: The deferred count placeholder emitted for
 /// a bare anaphoric "the difference" whose two operands live on the trigger's
 /// hoisted intervening-if comparison rather than the effect clause ("Whenever a

@@ -18110,6 +18110,24 @@ mod tests {
             }),
             "DealDamage{{TargetZoneCardCount, Player}} must NOT add a second slot",
         );
+        // Sword of War and Peace shape (issue #9280 follow-up): the trigger
+        // rewrite lowers the event-anchored "their hand" to a scoped-player
+        // read, which needs no announcement slot — the damaged player comes
+        // from the triggering event, and a slot here would stall the trigger
+        // at target selection.
+        assert!(
+            !effect_needs_target_creature_quantity_slot(&Effect::DealDamage {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: crate::types::ability::PlayerScope::ScopedPlayer,
+                    },
+                },
+                target: TargetFilter::TriggeringPlayer,
+                damage_source: None,
+                excess: None,
+            }),
+            "DealDamage{{HandSize{{ScopedPlayer}}, TriggeringPlayer}} (Sword of War and Peace) must NOT add a slot",
+        );
         // Object-typed magnitudes are unaffected by a Player primary: the
         // creature slot is still needed.
         assert!(
