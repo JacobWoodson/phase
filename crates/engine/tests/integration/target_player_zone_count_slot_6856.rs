@@ -35,13 +35,15 @@ fn target_players_hand_count_draws_announced_players_hand_size() {
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
     let spell = scenario
-        .add_spell_to_hand_from_oracle(P0, "Target Player's Insight", false, TARGET_PLAYERS_INSIGHT_ORACLE)
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Target Player's Insight",
+            false,
+            TARGET_PLAYERS_INSIGHT_ORACLE,
+        )
         .with_mana_cost(ManaCost::zero())
         .id();
-    scenario.with_cards_in_hand(
-        P0,
-        &["Self One", "Self Two", "Self Three", "Self Four"],
-    );
+    scenario.with_cards_in_hand(P0, &["Self One", "Self Two", "Self Three", "Self Four"]);
     scenario.with_cards_in_hand(P1, &["Lone"]);
     scenario.with_cards_in_hand(P2, &["Other One", "Other Two"]);
     scenario.with_library_top(P0, &["One", "Two", "Three", "Four", "Five"]);

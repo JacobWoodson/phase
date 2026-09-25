@@ -2629,33 +2629,33 @@ fn parse_target_player_possessive_zone(input: &str) -> OracleResult<'_, Quantity
     Ok((rest, QuantityRef::TargetZoneCardCount { zone, scope }))
 }
 
-    /// CR 115.1: the target possessive's restriction survives
-    /// lowering — "target opponent's ..." scopes to the announced opponent,
-    /// "target player's ..." to any announced player. Runtime resolution is
-    /// identical for both; only the companion slot's legality differs.
-    #[test]
-    fn target_player_possessive_zone_preserves_opponent_vs_player_scope() {
-        let (rest, opponent_qty) =
-            parse_target_player_possessive_zone("target opponent's hand").unwrap();
-        assert_eq!(rest, "");
-        assert_eq!(
-            opponent_qty,
-            QuantityRef::TargetZoneCardCount {
-                zone: ZoneRef::Hand,
-                scope: crate::types::ability::ControllerRef::TargetOpponent,
-            }
-        );
-        let (rest, player_qty) =
-            parse_target_player_possessive_zone("target player's graveyard").unwrap();
-        assert_eq!(rest, "");
-        assert_eq!(
-            player_qty,
-            QuantityRef::TargetZoneCardCount {
-                zone: ZoneRef::Graveyard,
-                scope: crate::types::ability::ControllerRef::TargetPlayer,
-            }
-        );
-    }
+/// CR 115.1: the target possessive's restriction survives
+/// lowering — "target opponent's ..." scopes to the announced opponent,
+/// "target player's ..." to any announced player. Runtime resolution is
+/// identical for both; only the companion slot's legality differs.
+#[test]
+fn target_player_possessive_zone_preserves_opponent_vs_player_scope() {
+    let (rest, opponent_qty) =
+        parse_target_player_possessive_zone("target opponent's hand").unwrap();
+    assert_eq!(rest, "");
+    assert_eq!(
+        opponent_qty,
+        QuantityRef::TargetZoneCardCount {
+            zone: ZoneRef::Hand,
+            scope: crate::types::ability::ControllerRef::TargetOpponent,
+        }
+    );
+    let (rest, player_qty) =
+        parse_target_player_possessive_zone("target player's graveyard").unwrap();
+    assert_eq!(rest, "");
+    assert_eq!(
+        player_qty,
+        QuantityRef::TargetZoneCardCount {
+            zone: ZoneRef::Graveyard,
+            scope: crate::types::ability::ControllerRef::TargetPlayer,
+        }
+    );
+}
 
 /// CR 303.4m + CR 613.4c: Parse recipient-relative hand counts such as
 /// "card in its controller's hand". In layer-evaluated Aura/Equipment statics,

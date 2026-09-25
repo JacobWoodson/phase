@@ -18027,8 +18027,9 @@ mod tests {
             crate::types::ability::ZoneRef::Exile,
         ] {
             assert_eq!(
+                // `zone` is reused by the TargetPlayer assertion below.
                 quantity_ref_target_slot_spec(&QuantityRef::TargetZoneCardCount {
-                    zone,
+                    zone: zone.clone(),
                     scope: ControllerRef::TargetOpponent,
                 }),
                 Some(TargetFilter::Typed(

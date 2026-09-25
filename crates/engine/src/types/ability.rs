@@ -11211,12 +11211,7 @@ impl QuantityExpr {
     /// 115.1 recipient rebind) and the target-slot builder to prove a
     /// clause declares a player target.
     pub fn contains_target_zone_card_count(&self) -> bool {
-        self.any_ref(&mut |reference| {
-            matches!(
-                reference,
-                QuantityRef::TargetZoneCardCount { .. }
-            )
-        })
+        self.any_ref(&mut |reference| matches!(reference, QuantityRef::TargetZoneCardCount { .. }))
     }
 
     /// Construct an `UpTo { max }` expression, debug-asserting the
