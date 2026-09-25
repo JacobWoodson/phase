@@ -303,7 +303,8 @@
     "lostCoinFlip": "{{name}}がコインフリップに敗北",
     "turnOrder": "ターン順",
     "turnOrderItem": "{{turn}}ターン目: {{name}}",
-    "youTakeTurn": "あなたの{{turn}}ターン目"
+    "youTakeTurn": "あなたの{{turn}}ターン目",
+    "ignoredDie": "無視"
   },
   "chrome": {
     "back": "戻る",

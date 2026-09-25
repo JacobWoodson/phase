@@ -2149,6 +2149,7 @@ pub(crate) fn extract_target_object_from_event(
         | GameEvent::CityBlessingGained { .. }
         | GameEvent::EnduringStoryGained { .. }
         | GameEvent::DieRolled { .. }
+        | GameEvent::DieRollIgnored { .. }
         | GameEvent::StartingPlayerContest { .. }
         | GameEvent::CoinFlipped { .. }
         | GameEvent::RingTemptsYou { .. }
