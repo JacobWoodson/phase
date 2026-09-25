@@ -2071,7 +2071,28 @@ export interface PendingCast {
   // skip_serializing_if = "Option::is_none")]` — absent when neither axis was
   // ever observable for this cast.
   cost_reduction_election?: CostReductionElection;
+  // CR 601.2f + CR 602.2b: an activation's cost-modifier carrier.
+  // `#[serde(default, skip_serializing_if = "Option::is_none")]` — absent for
+  // spells and for activations that have not reached their fold.
+  activation_cost_snapshot?: ActivationCostSnapshot;
 }
+
+/// CR 601.2f + CR 602.2b: every cost modifier that applied to one activation,
+/// captured once, and whether its total is locked. Engine-authored; the
+/// frontend renders from it and computes nothing.
+export interface ActivationCostSnapshot {
+  base_cost: SerializedAbilityCost;
+  raise_total?: number;
+  reductions?: CostReductionEntry[];
+  lock:
+    | { type: "Open"; data: { point?: ActivationCostLockPoint } }
+    | {
+        type: "Locked";
+        data: { point?: ActivationCostLockPoint; order?: ReductionProvenance[] };
+      };
+}
+
+export type ActivationCostLockPoint = "Announcement" | "XAnnounced";
 
 /// CR 601.2b + CR 601.2f: the caster's announced nonhybrid equivalents and the
 /// order their reductions are applied in, as one recorded election.
@@ -2090,7 +2111,11 @@ export type ReductionProvenance =
   | { type: "Defiler" }
   | { type: "PendingOneShot"; data: { index: number } }
   | { type: "Affinity" }
-  | { type: "Undaunted" };
+  | { type: "Undaunted" }
+  // CR 602.2b: the activating ability's own "costs {N} less" rider.
+  | { type: "AbilityCostRider" }
+  // CR 611.2: a duration-scoped continuous reduction (The Dining Car).
+  | { type: "TransientEffect"; data: { effect: number; ordinal: number } };
 
 /// CR 601.2f: one cost reduction, snapshotted at the lock seam. `amount` ×
 /// `multiplier` is the effective reduction — every dynamic count is already
@@ -2101,6 +2126,10 @@ export interface CostReductionEntry {
   reach?: CostReductionReach;
   provenance: ReductionProvenance;
   display_name: string;
+  // CR 601.2f: "can't reduce the mana in that cost to less than N mana".
+  // `#[serde(default, skip_serializing_if = "is_zero")]` — absent when
+  // unfloored, which every spell reduction is.
+  minimum_mana?: number;
 }
 
 /// CR 601.2b + CR 601.2f: one legal outcome — a representative election (the
@@ -2408,7 +2437,7 @@ export type WaitingFor =
   | { type: "SpellbookDraft"; data: { player: PlayerId; source_id: ObjectId; options: string[]; destination: Zone; tapped?: boolean } }
   | { type: "DamageSourceChoice"; data: { player: PlayerId; source_filter: TargetFilter; options: ObjectId[] } }
   | { type: "ModeChoice"; data: { player: PlayerId; modal: ModalChoice; pending_cast: PendingCast; unavailable_modes?: number[] } }
-  | { type: "AbilityModeChoice"; data: { player: PlayerId; modal: ModalChoice; source_id: ObjectId; mode_abilities: unknown[]; is_activated: boolean; ability_index?: number; ability_cost?: unknown; unavailable_modes?: number[] } }
+  | { type: "AbilityModeChoice"; data: { player: PlayerId; modal: ModalChoice; source_id: ObjectId; mode_abilities: unknown[]; is_activated: boolean; ability_index?: number; ability_cost?: unknown; activation_cost_snapshot?: ActivationCostSnapshot; unavailable_modes?: number[] } }
   | { type: "DiscardToHandSize"; data: { player: PlayerId; count: number; cards: ObjectId[] } }
   | { type: "OptionalCostChoice"; data: { player: PlayerId; cost: AdditionalCost; times_kicked: number; origin?: string; gift_kind?: { type: string }; pending_cast: PendingCast } }
   | { type: "CostTypeChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; pending_cast: PendingCast } }
@@ -3722,6 +3751,8 @@ export interface DerivedViews {
    * matters on the battlefield. Keyed by ObjectId-as-string.
    */
   battlefield_keyword_badges?: Record<string, Keyword[]>;
+  /** CR 400.7 + CR 607.2a: cards currently exiled with each battlefield permanent, keyed by ObjectId-as-string. */
+  linked_exile_ids?: Record<string, ObjectId[]>;
   /**
    * CR 509.1b: live, until-end-of-turn `CantBeBlocked` grants keyed by
    * recipient ObjectId-as-string. A null value means the grant remains live
@@ -3963,21 +3994,22 @@ export type DayNight = "Day" | "Night";
 
 /**
  * Mirrors engine `ExileLinkKind` (`crates/engine/src/types/game_state.rs`).
- * Unit variants serialize as bare strings; the two struct variants serialize
- * as a single-key object under serde's default external tagging. Only
- * `HideawayLookable` is currently read on the client (the exile-visibility
- * gate in `viewmodel/gameStateView.ts`) — the rest are kept so `exile_links`
- * round-trips the full wire shape rather than widening it to `unknown`.
+ * Unit variants serialize as bare strings; the struct variants serialize as a
+ * single-key object under serde's default external tagging. The client reads
+ * no kind; the union mirrors the wire so `exile_links` round-trips.
  */
 export type ExileLinkKind =
   | "TrackedBySource"
   | "Cipher"
   | "Haunt"
-  | "HideawayLookable"
+  | { HideawayLookable: { grant: LookGrant; lookers: PlayerId[]; source_incarnation: number } }
   | "CraftMaterial"
   | { UntilSourceLeaves: { return_zone: Zone } }
   | { UntilOpponentBecomesMonarch: { return_zone: Zone; controller: PlayerId } }
   | { ParadigmSource: { player: PlayerId } };
+
+/** Mirrors engine `LookGrant`: whom a face-down exile look link's live rule admits. */
+export type LookGrant = "SourceController" | { Player: { player: PlayerId } };
 
 export interface GameState {
   turn_number: number;
@@ -4633,6 +4665,14 @@ export interface ViewerSnapshot {
    */
   stuckDiagnostic?: StuckDecisionDiagnostic;
   viewerInteraction?: ViewerInteraction;
+}
+
+/**
+ * ViewerSnapshot paired with the engine-filtered events from the same
+ * transition. The legacy state-only snapshot remains unchanged.
+ */
+export interface ViewerTransitionSnapshot extends ViewerSnapshot {
+  events: GameEvent[];
 }
 
 /**
