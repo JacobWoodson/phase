@@ -106,6 +106,12 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  63 — game_setup and state_update carry GameState, whose FormatConfig gains
+ *       allow_experimental_dungeons, the per-session flag behind the
+ *       experimental dungeon pool. A v62 peer would fail the flag closed and
+ *       run the game without the pool the host chose, so first contact
+ *       rejects the skew instead. Bumped in lockstep with full-game
+ *       protocol 81.
  *  62 — game_setup and state_update carry GameState, whose exile look links
  *       now carry { grant, lookers, source_incarnation }, and DerivedViews
  *       gains linked_exile_ids, which the board renders directly. Bumped in
@@ -420,7 +426,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 62 as const;
+export const WIRE_PROTOCOL_VERSION = 63 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

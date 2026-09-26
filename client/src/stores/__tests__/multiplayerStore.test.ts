@@ -857,6 +857,7 @@ describe("multiplayerStore", () => {
       sideboard_policy: { type: "Limited", data: 15 },
       default_deck_copy_limit: { type: "UpTo", data: 4 },
       allow_debug_actions: false,
+      allow_experimental_dungeons: false,
       custom_rules: {
         id: 0,
         structural: {

@@ -685,6 +685,15 @@ pub struct FormatConfig {
     /// Immutable for the life of the session.
     #[serde(default)]
     pub allow_debug_actions: bool,
+    /// Capability flag: when true, the experimental dungeon pool is offered —
+    /// Baldur's Gate Wilderness joins the AFR trio on a normal venture
+    /// (CR 701.49a), and taking the initiative (CR 726.2) offers the
+    /// Wilderness as an alternative to Undercity instead of auto-entering
+    /// the Undercity. Off by default. Orthogonal to format — a game with
+    /// experimental dungeons plays exactly like a normal game with one
+    /// additional choice. Immutable for the life of the session.
+    #[serde(default)]
+    pub allow_experimental_dungeons: bool,
     /// Present only when `format == GameFormat::Custom(id)` (and then `id`
     /// must equal `custom_rules.id` — see
     /// `custom_format::validate_custom_rules_consistency`). `None` for every
@@ -829,7 +838,7 @@ pub fn validate_starting_life_bounds(config: &FormatConfig) -> Result<(), String
 /// and the seat count no CR fixes (CR 100.1a / CR 100.1b / CR 800.1 fix only
 /// that a game begins with two players or with more than two). Re-derive the
 /// authoritative config with `FormatConfig::for_format` and check every one
-/// of this struct's 17 fields against it under one of six verdicts:
+/// of this struct's 18 fields against it under one of six verdicts:
 ///
 /// - Locked: must equal the registry value exactly.
 /// - NoLooserThan: must be no more permissive than the registry value,
@@ -1166,6 +1175,9 @@ fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), Strin
     // allow_debug_actions: HostChoice — session capability, orthogonal to
     // format. Free.
 
+    // allow_experimental_dungeons: HostChoice — session capability,
+    // orthogonal to format. Free.
+
     // custom_rules: Locked (None) — the built-in arm is defined by
     // custom_rules == None; the biconditional is established upstream by
     // validate_custom_rules_consistency.
@@ -1209,11 +1221,14 @@ impl<'de> Deserialize<'de> for FormatConfig {
                     ));
                 }
                 let mut expected = FormatConfig::for_custom_rules(rules);
-                // `allow_debug_actions` is the one field the resolver cannot
-                // derive: it is a session capability (sandbox debug actions),
-                // orthogonal to format, chosen per game rather than declared
-                // by the ruleset. Every other field must match exactly.
+                // `allow_debug_actions` and `allow_experimental_dungeons` are
+                // the two fields the resolver cannot derive: they are session
+                // capabilities (sandbox debug actions; the experimental
+                // dungeon pool), orthogonal to format, chosen per game rather
+                // than declared by the ruleset. Every other field must match
+                // exactly.
                 expected.allow_debug_actions = config.allow_debug_actions;
+                expected.allow_experimental_dungeons = config.allow_experimental_dungeons;
                 if config != expected {
                     // Reports the derived target values rather than dumping
                     // both whole structs: `custom_rules.legality`'s
@@ -1222,7 +1237,8 @@ impl<'de> Deserialize<'de> for FormatConfig {
                     return Err(serde::de::Error::custom(format!(
                         "FormatConfig for {} contradicts its own custom_rules.structural — every \
                          runtime field must be exactly what FormatConfig::for_custom_rules \
-                         derives from the declared rules (allow_debug_actions excepted). Derived: \
+                         derives from the declared rules (allow_debug_actions and \
+                         allow_experimental_dungeons excepted). Derived: \
                          starting_life {}, players {}-{}, deck_size {:?}, singleton {}, \
                          command_zone {}, commander_damage_threshold {:?}, uses_commander {}, \
                          team_based {}, archenemy_player {:?}, supplies_fixed_deck {}, \
@@ -1262,9 +1278,9 @@ impl<'de> Deserialize<'de> for FormatConfig {
             // NoLooserThan, Derived, HostChoice, ShapeLocked, and
             // HostChoiceWithin). `built_in_axes_no_looser_than_rules`
             // re-derives the authoritative config via `FormatConfig::for_format`
-            // and checks every one of this struct's 17 fields against it —
+            // and checks every one of this struct's 18 fields against it —
             // absorbing what was previously a single ad hoc
-            // `default_deck_copy_limit` check as one of its 17 rows, rather
+            // `default_deck_copy_limit` check as one of its 18 rows, rather
             // than adding a parallel second check. `range_of_influence`'s row
             // is a documented `Deferred` non-check (see that function's own
             // comment on the field), not an omission.
@@ -2611,6 +2627,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::Standard.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            allow_experimental_dungeons: false,
             custom_rules: None,
         }
     }
@@ -2633,6 +2650,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::Commander.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            allow_experimental_dungeons: false,
             custom_rules: None,
         }
     }
@@ -2672,6 +2690,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::CommanderDraft.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            allow_experimental_dungeons: false,
             custom_rules: None,
         }
     }
@@ -2766,6 +2785,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::TinyLeaders.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            allow_experimental_dungeons: false,
             custom_rules: None,
         }
     }
@@ -2792,6 +2812,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::Oathbreaker.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            allow_experimental_dungeons: false,
             custom_rules: None,
         }
     }
@@ -2853,6 +2874,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::FreeformCommander.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            allow_experimental_dungeons: false,
             custom_rules: None,
         }
     }
@@ -2877,6 +2899,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::Brawl.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            allow_experimental_dungeons: false,
             custom_rules: None,
         }
     }
@@ -2910,6 +2933,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::FreeForAll.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            allow_experimental_dungeons: false,
             custom_rules: None,
         }
     }
@@ -2934,6 +2958,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::Limited.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            allow_experimental_dungeons: false,
             custom_rules: None,
         }
     }
@@ -2961,6 +2986,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::Momir.default_deck_copy_limit(),
             supplies_fixed_deck: true,
             allow_debug_actions: false,
+            allow_experimental_dungeons: false,
             custom_rules: None,
         }
     }
@@ -2983,6 +3009,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::TwoHeadedGiant.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            allow_experimental_dungeons: false,
             custom_rules: None,
         }
     }
@@ -3008,6 +3035,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::Planechase.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            allow_experimental_dungeons: false,
             custom_rules: None,
         }
     }
@@ -3032,6 +3060,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::Archenemy.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            allow_experimental_dungeons: false,
             custom_rules: None,
         }
     }
@@ -3198,6 +3227,7 @@ impl FormatConfig {
             sideboard_policy: structural.sideboard_policy,
             default_deck_copy_limit: structural.default_deck_copy_limit,
             allow_debug_actions: false,
+            allow_experimental_dungeons: false,
             custom_rules: Some(Box::new(rules.clone())),
         }
     }
@@ -3321,6 +3351,7 @@ mod tests {
             sideboard_policy: _,
             default_deck_copy_limit: _,
             allow_debug_actions: _,
+            allow_experimental_dungeons: _,
             custom_rules: _,
         } = config;
     }

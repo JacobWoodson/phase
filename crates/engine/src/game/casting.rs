@@ -11417,6 +11417,24 @@ fn battlefield_cost_modifier_applies_before_targets(
     })
 }
 
+/// CR 604.1: presence gate for transient (duration-scoped) `ModifyCost`
+/// grants. The O(1) `static_mode_presence` index tracks only battlefield /
+/// command-zone printed statics, never TCE-borne `GrantStaticAbility` modes,
+/// so this small scan of `transient_continuous_effects` is the gate for the
+/// transient side — mirroring the split presence gate in
+/// `collect_static_activated_ability_cost_modifiers`.
+fn transient_modify_cost_present(state: &GameState) -> bool {
+    state.transient_continuous_effects.iter().any(|tce| {
+        tce.modifications.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::GrantStaticAbility { definition }
+                    if matches!(definition.mode, StaticMode::ModifyCost { .. })
+            )
+        })
+    })
+}
+
 fn collect_battlefield_cost_modifiers(
     state: &GameState,
     caster: PlayerId,
@@ -11448,8 +11466,16 @@ fn collect_battlefield_cost_modifiers(
     // a reduction's `saturating_sub` floor can never clamp generic to 0 ahead of a
     // later increase (which would overcharge the spell, order-dependently).
     let mut collected = Vec::new();
-    // CR 604.1: O(1) presence gate — no ModifyCost static means no cost modifiers.
-    if !static_kind_present(state, StaticModeKind::ModifyCost) {
+    // CR 604.1: presence gate — nothing to do unless a printed ModifyCost
+    // static (CR 611.3) OR a duration-scoped continuous ModifyCost grant
+    // (CR 611.2 — Moonrise Towers' transient "spells you cast this turn cost
+    // {3} less") is present. The O(1) `static_mode_presence` index covers only
+    // battlefield/command-zone printed statics, so the transient authority
+    // needs its own small TCE scan — the same split gate the activation-side
+    // collector uses for transient `ReduceAbilityCost`.
+    let has_static = static_kind_present(state, StaticModeKind::ModifyCost);
+    let has_transient = transient_modify_cost_present(state);
+    if !has_static && !has_transient {
         return collected;
     }
     crate::game::perf_counters::record_static_full_scan();
@@ -11566,6 +11592,166 @@ fn collect_battlefield_cost_modifiers(
                 },
                 display_name: src_obj.name.clone(),
             });
+        }
+    }
+
+    // CR 611.2 + CR 601.2f: duration-scoped continuous ModifyCost grants
+    // (Moonrise Towers' "spells you cast this turn cost {3} less"; Rowan/Will,
+    // Scion of ...'s "spells you cast this turn cost ... less"). Installed by
+    // a resolving ability as a GenericEffect grant and read here, off the
+    // TCE, through the SAME gates as battlefield statics — there is no
+    // parallel reduction pathway. Mirrors the activation-side transient
+    // collector; the spell path simply never had one, so these grants
+    // silently did nothing. No zone gate: a transient effect functions until
+    // its duration expires regardless of its source's zone (CR 611.2c), and
+    // room-ability grants have no battlefield source at all. TCE presence in
+    // the list is liveness: expired durations are pruned at cleanup (CR 514.2).
+    if has_transient {
+        for tce in &state.transient_continuous_effects {
+            let grants =
+                tce.modifications
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(ordinal, modification)| match modification {
+                        ContinuousModification::GrantStaticAbility { definition } => {
+                            match &definition.mode {
+                                StaticMode::ModifyCost { .. } => Some((ordinal, definition)),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    });
+            for (ordinal, definition) in grants {
+                // CR 611.2c + CR 604.1: dedupe against the static pass above.
+                // An object-bound grant (Rowan/Will resolving while its source
+                // is on the battlefield) is grafted onto the recipient by the
+                // layer-6 apply, so `game_functioning_statics` already yields
+                // it and the static pass owns it — applying it here too
+                // double-counts (Will X=2 reducing {3} to {0}). Skip iff the
+                // affected object sits on a functioning zone AND currently
+                // yields a structurally-equal definition (the same equality
+                // the graft uses for idempotency). Player-bound grants
+                // (Moonrise Towers) are never grafted and always fall through;
+                // so does an object-bound grant whose recipient left the
+                // battlefield (CR 611.2c: the duration-scoped effect outlives
+                // its source — strictly better than the pre-pass behavior,
+                // which dropped it).
+                if let TargetFilter::SpecificObject { id } = &tce.affected {
+                    let grafted_live = (state.battlefield.contains(id)
+                        || state.command_zone.contains(id))
+                        && state.objects.get(id).is_some_and(|obj| {
+                            super::functioning_abilities::object_functioning_statics(obj)
+                                .any(|sd| sd == definition.as_ref())
+                        });
+                    if grafted_live {
+                        continue;
+                    }
+                }
+                let Some(modifier) = definition.board_wide_cost_modifier() else {
+                    continue;
+                };
+                if !super::layers::transient_gate_conditions(tce).all(|condition| {
+                    super::layers::evaluate_condition(
+                        state,
+                        condition,
+                        tce.controller,
+                        tce.source_id,
+                    )
+                }) {
+                    continue;
+                }
+                if definition.condition.as_ref().is_some_and(|condition| {
+                    !evaluate_cost_mod_static_condition(
+                        state,
+                        condition,
+                        caster,
+                        tce.controller,
+                        tce.source_id,
+                        casting_variant,
+                    )
+                }) {
+                    continue;
+                }
+                if !modifier.caster_scope.admits(caster, tce.controller) {
+                    continue;
+                }
+                let BoardWideCostModifier {
+                    mode,
+                    amount,
+                    spell_filter,
+                    dynamic_count,
+                    caster_scope: _,
+                    condition: _,
+                    reach,
+                } = modifier;
+                let is_raise = matches!(mode, CostModifyMode::Raise);
+                // The spell itself is the filter context, not the TCE source:
+                // the matcher requires an existing source object and a
+                // sourceless grant (dungeon sentinel) has none, while the
+                // spell exists by construction and its controller IS the
+                // caster — which the caster-scope gate above already bound to
+                // the grantor. So "you" resolves to the right player either
+                // way, with no stale-source dependency.
+                let filter_analysis = spell_filter.map_or(
+                    PreTargetCostFilterAnalysis::TargetIndependentRelevant,
+                    |filter| {
+                        analyze_cost_filter_before_targets_for(
+                            state, caster, spell_id, filter, spell_id, fused,
+                        )
+                    },
+                );
+                if target_sensitive_only && !filter_analysis.is_target_dependent() {
+                    continue;
+                }
+                if selected_ability.is_none() && filter_analysis.is_target_dependent() {
+                    continue;
+                }
+                if let Some(filter) = spell_filter {
+                    let matches = if let Some(ability) = selected_ability {
+                        spell_matches_cost_filter_with_selected_targets_for(
+                            state, caster, spell_id, filter, spell_id, ability, fused,
+                        )
+                    } else {
+                        spell_matches_cost_filter_for(
+                            state, caster, spell_id, filter, spell_id, fused,
+                        )
+                    };
+                    if !matches {
+                        continue;
+                    }
+                }
+                let base_amount = amount.clone();
+                let multiplier = if let Some(qty_ref) = dynamic_count {
+                    let qty_expr = crate::types::ability::QuantityExpr::Ref {
+                        qty: qty_ref.clone(),
+                    };
+                    super::quantity::resolve_quantity(
+                        state,
+                        &qty_expr,
+                        tce.controller,
+                        tce.source_id,
+                    )
+                    .max(0) as u32
+                } else {
+                    1
+                };
+                let display_name = state
+                    .objects
+                    .get(&tce.source_id)
+                    .map(|obj| obj.name.clone())
+                    .unwrap_or_default();
+                collected.push(CostModification {
+                    is_raise,
+                    amount: base_amount,
+                    multiplier,
+                    reach,
+                    provenance: ReductionProvenance::TransientEffect {
+                        effect: tce.id,
+                        ordinal: ordinal.min(u8::MAX as usize) as u8,
+                    },
+                    display_name,
+                });
+            }
         }
     }
 

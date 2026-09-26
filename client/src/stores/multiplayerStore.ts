@@ -2389,6 +2389,10 @@ function normalizeBuiltInHostConfig(
     allow_debug_actions: typeof storedFormatConfig.allow_debug_actions === "boolean"
       ? storedFormatConfig.allow_debug_actions
       : defaults.allow_debug_actions,
+    allow_experimental_dungeons:
+      typeof storedFormatConfig.allow_experimental_dungeons === "boolean"
+        ? storedFormatConfig.allow_experimental_dungeons
+        : defaults.allow_experimental_dungeons,
   };
   return finalizeRememberedHostConfig(persisted, format, formatConfig, null);
 }

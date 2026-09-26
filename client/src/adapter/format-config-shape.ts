@@ -195,6 +195,7 @@ export function isFormatConfigShape(value: unknown): value is FormatConfig {
     || !isSideboardPolicy(value.sideboard_policy)
     || !isDeckCopyLimit(value.default_deck_copy_limit)
     || typeof value.allow_debug_actions !== "boolean"
+    || typeof value.allow_experimental_dungeons !== "boolean"
   ) {
     return false;
   }

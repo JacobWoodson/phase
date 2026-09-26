@@ -210,6 +210,14 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 81 — FormatConfig gains `allow_experimental_dungeons`, the per-session
+ *      capability flag behind the experimental dungeon pool (Baldur's Gate
+ *      Wilderness joins the normal venture options and the initiative choice
+ *      when set). A CAPABILITY bump like 24 and 50: the field is
+ *      #[serde(default)], so a v80 peer parses a v81 GameState — and then
+ *      runs the game without the pool the host chose. The exact-match version
+ *      check at connect refuses the pairing. P2P moves in lockstep (wire 63);
+ *      lobby carriers move too, see LOBBY_PROTOCOL_VERSION 13 below.
  * 80 — ExileLinkKind.HideawayLookable carries { grant, lookers,
  *      source_incarnation } in serialized GameState, and
  *      DerivedViews.linked_exile_ids is new and rendered directly. The
@@ -553,7 +561,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      activation_cost_snapshot fields are additive and skipped when empty, so
  *      every spell frame is byte-identical to v78.
  */
-export const PROTOCOL_VERSION = 80;
+export const PROTOCOL_VERSION = 81;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -584,6 +592,14 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * PROTOCOL_VERSION moved twice for GameState-only changes and the derived lobby
  * window went disjoint from the deployed broker's.
  *
+ * 13 — FormatConfig gains `allow_experimental_dungeons` (#[serde(default)]) —
+ *      the "a lobby field is added" trigger — on its three lobby carriers:
+ *      CreateGameWithSettings (client → broker), JoinTargetInfo and PeerInfo
+ *      (broker → client). A CAPABILITY bump like 3, not a parse bump, so
+ *      MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL stays at 2: against a pre-13
+ *      broker the flag is absent and this client classifies JoinTargetInfo
+ *      frames without it, while a v12 client keeps creating and joining
+ *      games that simply never carry the override.
  * 12 — JoinTargetInfo gains an optional `draft_metadata`, the shape LobbyGame
  *      already carries — the "a lobby field is added" trigger.
  *      MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL stays at 2 and no capability floor is
@@ -702,7 +718,7 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * 1 — Initial lobby-owned version, covering the lobby variant set unchanged
  *     since #1880.
  */
-export const LOBBY_PROTOCOL_VERSION = 12;
+export const LOBBY_PROTOCOL_VERSION = 13;
 
 /**
  * Lowest broker LOBBY_PROTOCOL_VERSION this client accepts.
