@@ -67,9 +67,13 @@ export function DungeonChoiceModal({ data }: { data: ChooseDungeon["data"] }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const [selected, setSelected] = useState<DungeonId | null>(null);
-  // The option whose full card is previewed. Hover on desktop; focus covers
-  // keyboard users and touch taps (a tap focuses the button as it selects).
-  const [previewed, setPreviewed] = useState<DungeonId | null>(null);
+  // Hover and focus are tracked separately: a keyboard user tabs to an option
+  // (focus opens its preview) and the preview must survive the pointer
+  // brushing across and off the button. Hover wins while present; focus is
+  // the fallback. Touch taps focus the button as they select, which is the
+  // only preview gesture those inputs have.
+  const [hovered, setHovered] = useState<DungeonId | null>(null);
+  const [focused, setFocused] = useState<DungeonId | null>(null);
   const buttonEls = useRef(new Map<DungeonId, HTMLButtonElement>());
 
   const handleConfirm = useCallback(() => {
@@ -78,6 +82,7 @@ export function DungeonChoiceModal({ data }: { data: ChooseDungeon["data"] }) {
     }
   }, [dispatch, selected]);
 
+  const previewed = hovered ?? focused;
   const previewOption =
     previewed !== null
       ? (data.options.find((option) => option.dungeon === previewed) ?? null)
@@ -110,10 +115,10 @@ export function DungeonChoiceModal({ data }: { data: ChooseDungeon["data"] }) {
               animate={{ opacity: 1, y: 0, scale: 1 }}
               transition={{ delay: 0.05 + index * 0.03, duration: 0.25 }}
               whileHover={{ scale: 1.05 }}
-              onMouseEnter={() => setPreviewed(option.dungeon)}
-              onMouseLeave={() => setPreviewed(null)}
-              onFocus={() => setPreviewed(option.dungeon)}
-              onBlur={() => setPreviewed(null)}
+              onMouseEnter={() => setHovered(option.dungeon)}
+              onMouseLeave={() => setHovered(null)}
+              onFocus={() => setFocused(option.dungeon)}
+              onBlur={() => setFocused(null)}
               onClick={() => setSelected(isSelected ? null : option.dungeon)}
             >
               {/* CR 309.4a: the entry room fires the moment this dungeon is
@@ -126,7 +131,7 @@ export function DungeonChoiceModal({ data }: { data: ChooseDungeon["data"] }) {
       {/* The panel portals to `document.body` above the modal (z-130 over the
           overlay's z-50), so DOM placement here is only about lifecycle. */}
       {previewOption !== null && anchorEl !== null ? (
-        <DungeonMapPopover anchorEl={anchorEl} view={previewView(previewOption)} />
+        <DungeonMapPopover anchorEl={anchorEl} view={previewView(previewOption)} announceAllRooms />
       ) : null}
     </ChoiceOverlay>
   );

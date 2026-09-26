@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { DungeonPreview, GameState, WaitingFor } from "../../../adapter/types.ts";
@@ -262,11 +262,24 @@ function optionButton(entryText: string): HTMLElement {
   return button;
 }
 
+/** Distinct art per engine identity: the preview must resolve each dungeon's
+ *  own card, so the mock answers by oracle id and fails anything else rather
+ *  than serving one image for every request. */
+const ART_BY_ORACLE_ID: Record<string, string> = {
+  "5c446a7f-0301-4343-b0df-146cf2db605b":
+    "https://cards.scryfall.io/normal/front/5/9/59b11ff8.jpg",
+  "d2ea2605-0ca0-4782-851d-e706bd0114e4":
+    "https://cards.scryfall.io/normal/front/7/0/70b284bd.jpg",
+};
+
 describe("DungeonChoiceModal preview", () => {
   beforeEach(() => {
     dispatchMock.mockClear();
-    fetchCardImageAssetByOracleId.mockResolvedValue({
-      src: "https://cards.scryfall.io/normal/front/5/9/59b11ff8.jpg",
+    fetchCardImageAssetByOracleId.mockImplementation((oracleId: string) => {
+      const src = ART_BY_ORACLE_ID[oracleId];
+      return src
+        ? Promise.resolve({ src })
+        : Promise.reject(new Error(`unexpected oracle id ${oracleId}`));
     });
     fetchTokenImageByRef.mockResolvedValue(null);
   });
@@ -367,5 +380,69 @@ describe("DungeonChoiceModal preview", () => {
 
     fireEvent.blur(tomb);
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  // Keyboard focus opens the preview; brushing the pointer across and off the
+  // button must not close what focus opened.
+  it("keeps a focused option's preview open across mouse leave", async () => {
+    mount(chooseDungeon);
+    const tomb = optionButton("Each player loses 1 life.");
+
+    fireEvent.focus(tomb);
+    expect(
+      await screen.findByRole("dialog", { name: /Tomb of Annihilation/ }),
+    ).toBeInTheDocument();
+
+    fireEvent.mouseEnter(tomb);
+    fireEvent.mouseLeave(tomb);
+    expect(screen.getByRole("dialog", { name: /Tomb of Annihilation/ })).toBeInTheDocument();
+
+    fireEvent.blur(tomb);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  // The preview announces every room, not just the entry: a screen-reader
+  // user compares dungeons by their rooms. "Goblin Lair" appears nowhere on
+  // the Lost Mine button, so it can only come from the announced list.
+  it("announces every room of the previewed dungeon", async () => {
+    mount(chooseDungeon);
+
+    fireEvent.mouseEnter(optionButton("Scry 1."));
+    expect(
+      await screen.findByRole("dialog", { name: /Lost Mine of Phandelver/ }),
+    ).toBeInTheDocument();
+
+    const list = screen.getByRole("list");
+    expect(list).toHaveClass("sr-only");
+    expect(within(list).getByText(/Goblin Lair/)).toBeInTheDocument();
+    expect(
+      within(list).getByText(/Create a 1\/1 red Goblin creature token\./),
+    ).toBeInTheDocument();
+    expect(within(list).getByText(/Cave Entrance/)).toBeInTheDocument();
+  });
+
+  // The preview resolves art by the hovered dungeon's engine-provided
+  // identity — hovering another option must swap the image, not reuse it.
+  it("resolves each preview's art from that dungeon's own identity", async () => {
+    mount(chooseDungeon);
+    const lostMine = optionButton("Scry 1.");
+    const tomb = optionButton("Each player loses 1 life.");
+
+    fireEvent.mouseEnter(lostMine);
+    expect(await screen.findByRole("img", { name: "Lost Mine of Phandelver" })).toHaveAttribute(
+      "src",
+      "https://cards.scryfall.io/large/front/5/9/59b11ff8.jpg",
+    );
+
+    fireEvent.mouseEnter(tomb);
+    expect(await screen.findByRole("img", { name: "Tomb of Annihilation" })).toHaveAttribute(
+      "src",
+      "https://cards.scryfall.io/large/front/7/0/70b284bd.jpg",
+    );
+    expect(fetchCardImageAssetByOracleId).toHaveBeenCalledWith(
+      "d2ea2605-0ca0-4782-851d-e706bd0114e4",
+      "Tomb of Annihilation",
+      "normal",
+    );
   });
 });
