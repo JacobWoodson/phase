@@ -209,6 +209,16 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 71 — WaitingFor.ChooseDungeon options (DungeonPreview) gained required
+ *      `card`, `rooms`, and `room_count`: the whole dungeon behind each
+ *      choice, so the prompt previews each card instead of describing only
+ *      its entry room. A PARSE bump like 67, not a capability bump like 24:
+ *      none of the fields is serde-optional, so a v70 peer fails
+ *      deserialization on a snapshot paused at the dungeon choice, and the
+ *      reverse skew throws in render — this client reads `card`
+ *      unconditionally to resolve the preview art. Saved games still load
+ *      through the choice-preview migration. P2P moves in lockstep; lobby
+ *      messages are unchanged.
  * 70 — OutsideGameChoiceSource.BoosterPack replaced set_code with a required
  *      origin: PackOrigin ({ type: "Set", data } or { type: "Cube" }), so an
  *      opened pack's OutsideGameChoice no longer decodes on a v69 peer and a
@@ -469,7 +479,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 70;
+export const PROTOCOL_VERSION = 71;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

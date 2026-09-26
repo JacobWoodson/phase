@@ -106,6 +106,16 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  54 — WaitingFor.ChooseDungeon options gained required `card`, `rooms`, and
+ *       `room_count`: the whole dungeon behind each choice, so the prompt
+ *       previews each card instead of describing only its entry room. A PARSE
+ *       bump like 50: none of the fields carries a serde default, so a v53
+ *       peer cannot parse a snapshot paused at the dungeon choice, and the
+ *       reverse skew throws in render — this client reads `card`
+ *       unconditionally when resolving the preview art. Since game_setup and
+ *       reconnect_ack carry GameState, first contact rejects the skew instead
+ *       of allowing either failure. Bumped in lockstep with full-game
+ *       protocol 71.
  *  53 — game_setup and state_update carry GameState, whose OutsideGameChoice
  *       for an opened booster pack now names a required origin: PackOrigin in
  *       place of set_code. First contact therefore rejects a v52 peer before
@@ -377,7 +387,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 53 as const;
+export const WIRE_PROTOCOL_VERSION = 54 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

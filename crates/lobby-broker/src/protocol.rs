@@ -56,6 +56,19 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 71 — `WaitingFor::ChooseDungeon` options (`DungeonPreview`) gained required
+///      `card` (`DungeonCardView`), `rooms` (`Vec<DungeonRoomNodeView>`), and
+///      `room_count` fields, publishing the whole dungeon behind each choice —
+///      the card's Scryfall identity plus every room with its outgoing edges
+///      and its position on the card face — so the prompt can preview each
+///      card instead of describing only its entry room. A PARSE bump like 67,
+///      not a silent capability loss like 24: none of the fields carries a
+///      serde default, so a v70 peer cannot deserialize a snapshot paused at
+///      the dungeon choice. The break is symmetric — a v71 client reading a
+///      v70 host's option finds no `card` and throws in render rather than
+///      degrading. Saved games still load: the choice-preview migration
+///      rebuilds protocol-70 options from their `dungeon` key. P2P moves in
+///      lockstep; lobby messages are unchanged.
 /// 70 — `OutsideGameChoiceSource::BoosterPack` replaced its `set_code: String`
 ///      with a required `origin: PackOrigin` (`Set(code)` or `Cube`), so a
 ///      `WaitingFor::OutsideGameChoice` for an opened pack no longer decodes
@@ -432,7 +445,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 70;
+pub const PROTOCOL_VERSION: u32 = 71;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -1508,12 +1521,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 70);
+        assert_eq!(PROTOCOL_VERSION, 71);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 69);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 70);
     }
 
     #[test]
