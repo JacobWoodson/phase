@@ -54,7 +54,13 @@
 //!     `reflecting_shields_still_emit_per_damage_event` characterizes it so it
 //!     cannot change silently. CR 615.5 binds each reflection to its own damage
 //!     source, so it cannot simply be batched;
-//!   * `PreventionAmount::Next(N)` / `AllBut(N)` likewise never enter the tally.
+//!   * `PreventionAmount::Next(N)` / `AllBut(N)` likewise never enter the tally —
+//!     populations (1)/(2) of the three per-event-bypass populations documented
+//!     in `replacement.rs`. `depletion_shields_still_emit_per_damage_event`
+//!     characterizes the `Next(N)` member the same way the `reflecting_...` row
+//!     covers population (3), so it cannot change silently either. CR 615.7's
+//!     simultaneous-damage choice is about WHICH damage the shield prevents,
+//!     not about emitting per event, so it does not defend the shape.
 //!
 //! The positive tests are discriminating: reverting the matcher
 //! (`match_damage_prevented` → `match_unimplemented`) or the parser arm (mode →
@@ -66,7 +72,9 @@
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{DamageTargetFilter, DamageTargetPlayerScope, TargetRef};
+use engine::types::ability::{
+    DamageTargetFilter, DamageTargetPlayerScope, PreventionAmount, ShieldKind, TargetRef,
+};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
@@ -117,6 +125,16 @@ const FOG_TEXT: &str = "Prevent all combat damage that would be dealt this turn.
 /// Verbatim Comeuppance. Per-source-reflecting, so it bypasses the batch tally
 /// entirely and keeps the pre-existing per-damage-event emission.
 const COMEUPPANCE_TEXT: &str = "Prevent all damage that would be dealt to you and planeswalkers you control this turn by sources you don't control. If damage from a creature source is prevented this way, Comeuppance deals that much damage to that creature. If damage from a noncreature source is prevented this way, Comeuppance deals that much damage to the source's controller.";
+
+/// SYNTHETIC minimal depletion shield. No printed card carries exactly this
+/// line; the SHAPE is grammar-real — `PreventionAmount::Next` with a
+/// controller-relative "dealt to you" target — composed from two parser-handled
+/// halves: Test of Faith's "Prevent the next 3 damage" amount grammar and Riot
+/// Control's "dealt to you" target grammar. `Next(7)` overcovers the 2-and-3
+/// batch with 2 to spare, so no CR 615.7 apportionment choice can be blamed for
+/// anything the characterization row observes.
+const DEPLETION_BULWARK_TEXT: &str =
+    "Prevent the next 7 damage that would be dealt to you this turn.";
 
 fn free_cost() -> ManaCost {
     ManaCost::Cost {
@@ -807,6 +825,106 @@ fn an_unfiltered_shield_names_every_recipient_not_a_sentinel_object() {
 }
 
 // ---------------------------------------------------------------------------
+// V5(b) — prevention in BOTH combat-damage steps (the hostile case for a latch)
+// ---------------------------------------------------------------------------
+
+/// CR 510.4 + CR 702.4b + CR 615.13: first-strike and regular damage are two
+/// separate combat-damage steps, each its own CR 510.2 simultaneous batch and
+/// therefore its own prevention APPLICATION — so the Squire's trigger fires once
+/// per step, each firing reading its own step's amount.
+///
+/// A 2/2 double-striker and a vanilla 3/3 both go unblocked at the shielded
+/// player: the first-strike step prevents 2, the regular step prevents 2 + 3 = 5,
+/// and the Squire ends on 2 + 5 = 7.
+///
+/// This is the Squire-level count the non-combat
+/// `two_separate_preventions_each_read_their_own_amount` row cannot supply: a
+/// naive once-per-turn latch in the matcher (or a dedup keyed on the turn rather
+/// than on the prevention application) fires only for the first step and strands
+/// the Squire on 2. The differing per-step amounts (2 then 5, mirroring the
+/// 3-then-8 non-combat row) additionally reject an amount bleed: resolving both
+/// firings against the first step's amount gives 2 + 2 = 4, against the last
+/// gives 5 + 5 = 10.
+///
+/// The EVENT count per step is pinned at the building-block level by
+/// `combat_damage.rs`'s `test_inkshield_double_strike_fires_rider_per_combat_step`;
+/// this row pins the SQUIRE-level trigger count and per-step amount provenance.
+///
+/// Revert-catches: a once-per-turn latch in `match_damage_prevented` (2 counters,
+/// caught by the final assertion); any cross-step dedup of the trigger; an
+/// amount bleed in either direction (4 or 10 counters).
+#[test]
+fn double_strike_prevention_fires_once_per_combat_damage_step() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    stock_libraries(&mut scenario);
+
+    let squire = add_squire(&mut scenario, P0);
+    let shield = add_shield_enchantment(&mut scenario, P0, "Energy Field", ENERGY_FIELD_TEXT);
+    let striker = {
+        let mut b = scenario.add_creature(P1, "Double Striker", 2, 2);
+        b.double_strike();
+        b.id()
+    };
+    let bear = scenario.add_creature(P1, "Bear", 3, 3).id();
+    let mut runner = scenario.build();
+
+    runner.cast(shield).resolve();
+    assert_eq!(counters_on(&runner, squire), 0, "reach-guard: pre-combat");
+
+    // Hand the turn to P1 so it can attack.
+    let crossed = pass_turn_to(&mut runner, P1);
+    assert!(
+        crossed,
+        "stall guard: the turn must actually have passed to P1"
+    );
+
+    // CLASS reach-guard: the same printed Controller-scoped population as V1, so
+    // a regression to the filter-derived recipient cannot hide behind the one
+    // scope that always worked.
+    assert_eq!(
+        runner.state().objects[&shield].replacement_definitions[0].damage_target_filter,
+        Some(DamageTargetFilter::Player {
+            player: DamageTargetPlayerScope::Controller
+        }),
+        "the printed 'dealt to you' shield is Controller-scoped, not Specific"
+    );
+
+    let life_before = runner.state().players[P0.0 as usize].life;
+    let (ran, events) = run_combat_collecting(&mut runner, P1, &[striker, bear], P0, &[], None);
+    assert!(ran, "combat reach-guard: the attack must actually have run");
+
+    // Reach-guard: all 7 really was prevented across the two steps (2 in the
+    // first-strike step, 2 + 3 in the regular step). Without this, "7 counters"
+    // is also what combat-never-happened looks like.
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        life_before,
+        "all 7 combat damage must have been prevented by the shield"
+    );
+
+    // CR 510.4 + CR 615.13: two steps, two batches, two applications — one event
+    // per step IN STEP ORDER, each carrying its own step's amount. Exact list,
+    // length included, so a collapsed single event or a spurious third entry
+    // reddens this row.
+    assert_eq!(
+        prevented_pairs(&events),
+        vec![(TargetRef::Player(P0), 2), (TargetRef::Player(P0), 5)],
+        "one prevention application per combat-damage step: 2 (first-strike) then 5 (regular)"
+    );
+
+    // CR 615.13: one firing per application, each reading its own step's amount.
+    // A once-per-turn latch strands this at 2; a first-amount bleed gives 4; a
+    // last-amount bleed gives 10.
+    assert_eq!(
+        counters_on(&runner, squire),
+        7,
+        "2 (first-strike step) + 5 (regular step) — explicitly NOT 2, which is \
+         what a naive once-per-turn latch in the matcher would leave"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // V6 — the Squire's own canonical play pattern (charter row 2)
 // ---------------------------------------------------------------------------
 
@@ -1020,6 +1138,113 @@ fn reflecting_shields_still_emit_per_damage_event() {
         "CHARACTERIZATION, not an endorsement: a per-source-reflecting shield \
          bypasses the batch tally and emits one event PER DAMAGE EVENT, so the \
          CR 615.13 trigger count is wrong (2 firings where the rules say 1)"
+    );
+    assert_eq!(
+        counters_on(&runner, squire),
+        5,
+        "two firings of 2 and 3 — outcome-neutral here only because 'that many' \
+         is linear in the amount"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// V11-companion — characterization: depletion shields keep emitting per damage event
+// ---------------------------------------------------------------------------
+
+/// CHARACTERIZATION of a PRE-EXISTING residual that is out of this change's
+/// scope, pinned so it cannot move silently. Sibling to
+/// `reflecting_shields_still_emit_per_damage_event` (V11, population (3)); this
+/// row covers population (1)/(2) of the three per-event-bypass populations
+/// documented in `replacement.rs`: `PreventionAmount::Next(N)` — and, by the
+/// same never-sets-`accumulated_in_batch` code path, `AllBut(N)` — never enter
+/// the combat batch tally.
+///
+/// A `Next(7)` player shield facing a simultaneous 2-and-3 batch therefore emits
+/// ONE `DamagePrevented` per damage event, and the Squire fires TWICE.
+///
+/// Under CR 615.13 that OVER-FIRES the trigger: one prevention effect applied to
+/// one or more simultaneous damage events is ONE trigger — and CR 615.7's choice
+/// ("the shielded player chooses which damage the shield prevents") is about
+/// WHICH damage, expressly "the number of events or sources dealing it doesn't
+/// matter", so it is not a defense of per-event emission. Like the V11 sibling,
+/// it is outcome-neutral for Selfless Squire only because its effect is linear
+/// in the amount (2 + 3 = 5 either way); a non-linear consumer would expose it.
+///
+/// Revert-catches: routing depletion shields THROUGH the tally (the eventual
+/// fix) collapses these to one event and reddens this row — at which point the
+/// row must be CONVERTED to the fixed expectation, not deleted.
+#[test]
+fn depletion_shields_still_emit_per_damage_event() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    stock_libraries(&mut scenario);
+
+    let squire = add_squire(&mut scenario, P0);
+    let bulwark = add_instant_from_oracle(
+        &mut scenario,
+        P0,
+        "Depletion Bulwark",
+        DEPLETION_BULWARK_TEXT,
+    );
+    let attacker_a = scenario.add_creature(P1, "Bear A", 2, 2).id();
+    let attacker_b = scenario.add_creature(P1, "Bear B", 3, 3).id();
+    let mut runner = scenario.build();
+
+    assert_eq!(counters_on(&runner, squire), 0, "reach-guard: pre-combat");
+
+    let crossed = pass_turn_to(&mut runner, P1);
+    assert!(
+        crossed,
+        "stall guard: the turn must actually have passed to P1"
+    );
+
+    let life_before = runner.state().players[P0.0 as usize].life;
+    let (ran, events) = run_combat_collecting(
+        &mut runner,
+        P1,
+        &[attacker_a, attacker_b],
+        P0,
+        &[],
+        Some(bulwark),
+    );
+    assert!(ran, "combat reach-guard: the attack must actually have run");
+
+    // CLASS reach-guard: this row must exercise the depletion population, not
+    // accidentally land on an `All` shield. A resolution-created instant shield
+    // floats in `pending_damage_replacements`, and CR 615.7 depletion arithmetic
+    // (7 − 2 − 3) must have left exactly `Next(2)` behind — still installed,
+    // since the shield was not used up.
+    let depletion = runner
+        .state()
+        .pending_damage_replacements
+        .iter()
+        .find(|r| r.shield_kind.is_shield())
+        .expect("reach guard: the depletion shield must be installed");
+    assert_eq!(
+        depletion.shield_kind,
+        ShieldKind::Prevention {
+            amount: PreventionAmount::Next(2)
+        },
+        "this row must exercise PreventionAmount::Next, the population that \
+         bypasses the tally — 7 minus the 2-and-3 batch leaves Next(2)"
+    );
+
+    // Reach-guard: all 5 really was prevented. Without this, "5 counters" is
+    // also what combat-never-happened looks like.
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        life_before,
+        "reach-guard: all 5 really was prevented"
+    );
+
+    let mut expected = vec![(TargetRef::Player(P0), 2), (TargetRef::Player(P0), 3)];
+    expected.sort();
+    assert_eq!(
+        sorted_prevented_pairs(&events),
+        expected,
+        "CHARACTERIZATION, not an endorsement: a depletion shield bypasses the \
+         batch tally and emits one event PER DAMAGE EVENT, so the CR 615.13 \
+         trigger count is wrong (2 firings where the rules say 1)"
     );
     assert_eq!(
         counters_on(&runner, squire),
