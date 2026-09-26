@@ -10993,11 +10993,12 @@ pub(crate) fn resolve_player_for_context_ref(
     // chain target-propagation (resolve_ability_chain) inherits parent targets
     // into a sub-ability with empty targets, so a sub Draw whose filter is
     // `Controller` would otherwise pick up the parent's Player target.
+    // CR 601.2c: the read skips a separately announced quantity slot, so the
+    // primary target keeps its distinct slot identity.
     if !target_filter.is_context_ref() {
-        if let Some(player) = ability.targets.iter().find_map(|target| match target {
-            TargetRef::Player(player) => Some(*player),
-            _ => None,
-        }) {
+        if let Some(player) =
+            crate::game::ability_utils::primary_announced_player(&ability.targets, ability)
+        {
             return player;
         }
     }

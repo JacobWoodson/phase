@@ -4841,6 +4841,43 @@ pub(crate) fn quantity_slot_player_ordinal(
     )))
 }
 
+/// CR 115.1 + CR 601.2c: the effect's primary announced player — the first
+/// player entry EXCLUDING a separately announced quantity slot. Recipient
+/// selection for Mill, Draw, and life changes resolves through here (via
+/// `resolve_player_for_context_ref` and `resolve_life_loss_target`) so the
+/// primary target keeps its distinct slot identity: the count-source serves
+/// the magnitude, never receipt.
+///
+/// Fewer than two player entries (every printed card) reads the first without
+/// consulting slot construction — identical to the legacy read. With two or
+/// more entries and no quantity slot, likewise the first. Only a constructed
+/// quantity slot shifts the read, and then by player-ordinal (never identity),
+/// so CR 115.3 same-player-both-instances still resolves each instance.
+pub(crate) fn primary_announced_player(
+    targets: &[TargetRef],
+    ability: &ResolvedAbility,
+) -> Option<PlayerId> {
+    let mut players = targets.iter().filter_map(|target| match target {
+        TargetRef::Player(player) => Some(*player),
+        TargetRef::Object(_) => None,
+    });
+    let first = players.next()?;
+    if players.next().is_none() {
+        return Some(first);
+    }
+    match quantity_slot_player_ordinal(targets, Some(ability)) {
+        None => Some(first),
+        Some(excluded) => targets
+            .iter()
+            .filter_map(|target| match target {
+                TargetRef::Player(player) => Some(*player),
+                TargetRef::Object(_) => None,
+            })
+            .enumerate()
+            .find_map(|(index, player)| (index != excluded).then_some(player)),
+    }
+}
+
 /// CR 608.2c + CR 109.4: Tree-walks a `TargetFilter` and returns true if any
 /// `TypedFilter` inside it is scoped to `ControllerRef::ChosenPlayer`. Such a
 /// filter resolves against a player chosen *during* resolution (an earlier

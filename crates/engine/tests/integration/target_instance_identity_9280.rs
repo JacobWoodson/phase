@@ -3,12 +3,14 @@
 //! NOTE ON /card-test's verbatim-Oracle-text rule: these tests use SYNTHETIC
 //! cards. A corpus query over all 35,804 cards in `data/card-data.json`
 //! finds zero printed cards pairing a separately announced recipient with a
-//! separate count-source target (MED1), and zero damage triggers pairing an
-//! event-bound recipient with an explicit "target player's/opponent's" zone
-//! count (MED2). Verbatim Oracle text cannot cover either branch; the
-//! sentences below are genuine Oracle grammar exercising the production
-//! possessive parsers, the same way Recurring Insight's sentence exercises
-//! the opponent branch.
+//! separate count-source target (MED1, MED3): every printed Explicit count
+//! (Recurring Insight, Jeska's Will, Gerrard Capashen, Borrowed Knowledge,
+//! Rousing Refrain) pairs with a Controller primary or no player target at
+//! all. It likewise finds zero damage triggers pairing an event-bound
+//! recipient with an explicit "target player's/opponent's" zone count (MED2).
+//! Verbatim Oracle text cannot cover these branches; the sentences below are
+//! genuine Oracle grammar exercising the production possessive parsers, the
+//! same way Recurring Insight's sentence exercises the opponent branch.
 
 use engine::game::effects::attach::attach_to;
 use engine::game::layers::evaluate_layers;
@@ -32,6 +34,11 @@ const SEPARATE_INSTANCES_ORACLE: &str =
 
 // Synthetic Sword-shape trigger with an explicit count binding.
 const EXPLICIT_TRIGGER_COUNT_ORACLE: &str = "Whenever equipped creature deals combat damage to a player, Test Blade deals damage to that player equal to the number of cards in target player's hand.";
+
+// Synthetic Cut-Your-Losses word order ("mills <count>") with the count and
+// the recipient as SEPARATE instances of "target".
+const SEPARATE_MILL_INSTANCES_ORACLE: &str =
+    "Target player mills cards equal to the number of cards in target opponent's hand.";
 
 /// CR 601.2c + CR 115.3 (MED1): recipient and count source are separate
 /// instances of "target", announced separately. Three divergent hands prove
@@ -174,5 +181,82 @@ fn explicit_trigger_count_reads_announced_player_not_event_player() {
         damaged_life, 15,
         "trigger must deal the announced player's hand size (4); got {damaged_life} \
          (18 would mean it counted the damaged player's 1-card hand)"
+    );
+}
+
+/// CR 601.2c + CR 115.3 + CR 701.17a (MED3): non-damage recipient selection
+/// honors the primary target's distinct slot identity. Recipient P1 mills
+/// exactly the count-source P2's hand size (5); the count-source's own
+/// library is untouched. Reading the first player slot for the recipient
+/// would mill P2 instead of P1.
+#[test]
+fn explicit_mill_count_reads_count_source_but_mills_recipient() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Separate Mills", false, SEPARATE_MILL_INSTANCES_ORACLE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    scenario.with_cards_in_hand(P0, &["Caster One"]);
+    scenario.with_cards_in_hand(P1, &["Recipient One", "Recipient Two"]);
+    scenario.with_cards_in_hand(
+        P2,
+        &[
+            "Count One",
+            "Count Two",
+            "Count Three",
+            "Count Four",
+            "Count Five",
+        ],
+    );
+    scenario.with_library_top(
+        P1,
+        &[
+            "Mill One",
+            "Mill Two",
+            "Mill Three",
+            "Mill Four",
+            "Mill Five",
+            "Mill Six",
+        ],
+    );
+    scenario.with_library_top(P2, &["Untouched One", "Untouched Two", "Untouched Three"]);
+    let mut runner = scenario.build();
+    let p1_library_before = runner.state().players[P1.0 as usize].library.len();
+    let p1_graveyard_before = runner.state().players[P1.0 as usize].graveyard.len();
+    let p2_library_before = runner.state().players[P2.0 as usize].library.len();
+    let p2_graveyard_before = runner.state().players[P2.0 as usize].graveyard.len();
+
+    // Slot order is quantity-first: count source, then recipient.
+    let outcome = runner.cast(spell).target_players(&[P2, P1]).resolve();
+
+    // CR 701.17a: P1 mills exactly 5 (count-source P2's hand).
+    let p1_library = runner.state().players[P1.0 as usize].library.len();
+    let p1_graveyard = runner.state().players[P1.0 as usize].graveyard.len();
+    assert_eq!(
+        p1_library_before - p1_library,
+        5,
+        "recipient P1 must mill 5 cards, library went {p1_library_before} -> {p1_library}"
+    );
+    assert_eq!(
+        p1_graveyard - p1_graveyard_before,
+        5,
+        "milled cards land in P1's graveyard, went {p1_graveyard_before} -> {p1_graveyard}"
+    );
+    // The count-source is not the recipient: P2's library is untouched.
+    let p2_library = runner.state().players[P2.0 as usize].library.len();
+    let p2_graveyard = runner.state().players[P2.0 as usize].graveyard.len();
+    assert_eq!(
+        p2_library, p2_library_before,
+        "count-source P2's library must be untouched, went {p2_library_before} -> {p2_library}"
+    );
+    assert_eq!(
+        p2_graveyard, p2_graveyard_before,
+        "count-source P2's graveyard must be untouched, went {p2_graveyard_before} -> {p2_graveyard}"
+    );
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "no further prompt after resolution, got {:?}",
+        outcome.final_waiting_for()
     );
 }
