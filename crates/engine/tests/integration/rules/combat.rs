@@ -2697,6 +2697,7 @@ fn temporary_attack_prohibition_bars_only_the_protected_player() {
                 activity: ProhibitedActivity::Attack {
                     defended: AttackTargetFilter::PlayerOrPlaneswalker,
                     protected_player: None,
+                    protected_scope: None,
                 },
             });
         park_3p_declare(&mut runner, &[attacker]);

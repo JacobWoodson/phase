@@ -149,6 +149,7 @@ fn board_with_restriction() -> (GameState, ObjectId, ObjectId, ObjectId, ObjectI
                 activity: ProhibitedActivity::Attack {
                     defended: AttackTargetFilter::PlayerOrPermanents,
                     protected_player: None,
+                    protected_scope: None,
                 },
             },
         },
@@ -368,6 +369,7 @@ fn legacy_willie_planeswalker_only_restriction_snapshots_selected_player() {
             activity: ProhibitedActivity::Attack {
                 defended: AttackTargetFilter::Planeswalker,
                 protected_player: Some(PROTECTED),
+                protected_scope: None,
             },
         }] if *stored_source == source
     ));

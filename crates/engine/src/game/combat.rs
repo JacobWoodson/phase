@@ -4374,6 +4374,11 @@ fn attack_passes_temporary_prohibition(
                 crate::types::ability::ProhibitedActivity::Attack {
                     defended,
                     protected_player,
+                    // MECHANICAL: the scope-selection field is parser→resolver
+                    // metadata consumed solely by `add_restriction` at creation;
+                    // enforcement reads only the snapshotted player. No behavior
+                    // change.
+                    protected_scope: _,
                 },
             ..
         } = restriction

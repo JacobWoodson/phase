@@ -5331,6 +5331,7 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
                     activity: ProhibitedActivity::Attack {
                         defended,
                         protected_player: None,
+                        protected_scope: None,
                     },
                 },
             },
@@ -5413,6 +5414,7 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
                 activity: ProhibitedActivity::Attack {
                     defended,
                     protected_player: None,
+                    protected_scope: None,
                 },
             },
         },
@@ -5424,6 +5426,111 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
         optional: false,
         unless_pay: None,
     })
+}
+
+/// CR 508.1c + CR 109.5 + CR 608.2c: inverse-voice temporary attack
+/// prohibition — "you can't attack that player this turn" (Call for Aid).
+/// Unlike the legacy `try_parse_that_player_cant_attack_prohibition` voice
+/// ("that player can't attack you"), the RESTRICTED player is the source's
+/// controller (`affected_players: SourceController`, lowered to the resolving
+/// controller at creation) while the PROTECTED player is the spell's
+/// already-chosen player target (the "that player" anaphor,
+/// `protected_scope: ParentTargetedPlayer`, snapshotted by
+/// `add_restriction::fill_runtime_fields`). The defended scope is bare (the
+/// player only) — the sole instance carries no extended "or planeswalkers"
+/// scope. Nom-only; full-consumption guard so partial prefixes stay
+/// `Unimplemented`.
+fn try_parse_you_cant_attack_targeted_player_prohibition(
+    tp: TextPair<'_>,
+) -> Option<ParsedEffectClause> {
+    use crate::types::triggers::AttackTargetFilter;
+
+    let (_, rest_orig) = nom_on_lower(tp.original, tp.lower, |input| {
+        let (input, _) = tag("you ").parse(input)?;
+        let (input, _) =
+            preceded(alt((tag("can't"), tag("cannot"))), tag(" attack")).parse(input)?;
+        let (input, _) = tag(" that player").parse(input)?;
+        let (input, _) = tag(" this turn").parse(input)?;
+        Ok((input, ()))
+    })?;
+    if !rest_orig.trim_matches(['.', ' ']).is_empty() {
+        return None;
+    }
+
+    Some(ParsedEffectClause {
+        effect: Effect::AddRestriction {
+            restriction: GameRestriction::ProhibitActivity {
+                source: ObjectId(0),
+                affected_players: RestrictionPlayerScope::SourceController,
+                // CR 514.2: end-of-current-turn cleanup for "this turn".
+                expiry: RestrictionExpiry::EndOfTurn,
+                activity: ProhibitedActivity::Attack {
+                    defended: AttackTargetFilter::Player,
+                    protected_player: None,
+                    protected_scope: Some(RestrictionPlayerScope::ParentTargetedPlayer),
+                },
+            },
+        },
+        duration: None,
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
+/// CR 701.21 + CR 611.2c: duration-bound multi-object sacrifice prohibition
+/// over a snapshotted set — "you can't sacrifice those creatures this turn"
+/// (Call for Aid). Shape-C construction (`Continuous` + `AddStaticMode`, the
+/// Stilt-Man shape): the TCE pins each member as `SpecificObject` and the
+/// pre-existing sacrifice chokepoint in `game::sacrifice` reads the grant.
+///
+/// This arm constructs shape C directly and must NOT route through
+/// `build_restriction_clause` / `try_parse_subjectless_cant` — both gate
+/// `AddStaticMode` on `static_mode_needs_grant_propagation`, which returns
+/// false for `CantBeSacrificed` and would emit dead shape B.
+///
+/// V0 verdict (measured at base, phase-fit Entry 22): the haste sibling
+/// misbinds to an inert `SpecificPlayer{P1}` via positional fan-out
+/// (`generic_effect_affected_uses_inherited_targets(ParentTarget)` is true
+/// while only the player target propagates), so mirroring the sibling with
+/// `affected: ParentTarget` is UNSOUND here. DEFAULT branch: `affected:
+/// TrackedSet{0}` via the broadcast arm (`effect.rs` broadcast scan after
+/// `resolve_tracked_set_sentinel`; the gain-control head publishes the set),
+/// which carries the committed multi-object fan-out proof. Nom-only;
+/// full-consumption guard so partial prefixes stay `Unimplemented`.
+fn try_parse_you_cant_sacrifice_those_creatures(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+    let (_, rest_orig) = nom_on_lower(tp.original, tp.lower, |input| {
+        let (input, _) = tag("you ").parse(input)?;
+        let (input, _) =
+            preceded(alt((tag("can't"), tag("cannot"))), tag(" sacrifice")).parse(input)?;
+        let (input, _) = tag(" those creatures").parse(input)?;
+        let (input, _) = tag(" this turn").parse(input)?;
+        Ok((input, ()))
+    })?;
+    if !rest_orig.trim_matches(['.', ' ']).is_empty() {
+        return None;
+    }
+
+    let mode = StaticMode::Other("CantBeSacrificed".to_string());
+    let def = StaticDefinition::new(StaticMode::Continuous)
+        .affected(TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        })
+        .modifications(vec![ContinuousModification::AddStaticMode { mode }]);
+    let mut clause = parsed_clause(Effect::GenericEffect {
+        static_abilities: vec![def],
+        duration: Some(Duration::UntilEndOfTurn),
+        target: None,
+        end_cost: None,
+    });
+    // The grant lapses at end of turn — set the clause duration so
+    // `register_transient_effect` builds an UntilEndOfTurn transient
+    // continuous effect (mirrors the Pardic Miner restriction idiom).
+    clause.duration = Some(Duration::UntilEndOfTurn);
+    Some(clause)
 }
 
 fn try_parse_self_name_exile(
@@ -7885,6 +7992,22 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
         .trim();
     let prohibition_probe_lower = prohibition_probe.to_lowercase();
     if let Some(clause) = try_parse_that_player_cant_attack_prohibition(TextPair::new(
+        prohibition_probe,
+        &prohibition_probe_lower,
+    )) {
+        return attach_unless_slots(clause, unless_condition, unless_pay_deferred);
+    }
+    // Call for Aid's inverse-voice riders own their "this turn" duration like
+    // the legacy prohibition above, so they dispatch from the same pre-shell
+    // probe. Disjoint heads ("you can't attack that player …" / "you can't
+    // sacrifice those creatures …") — neither shadows the legacy arm.
+    if let Some(clause) = try_parse_you_cant_attack_targeted_player_prohibition(TextPair::new(
+        prohibition_probe,
+        &prohibition_probe_lower,
+    )) {
+        return attach_unless_slots(clause, unless_condition, unless_pay_deferred);
+    }
+    if let Some(clause) = try_parse_you_cant_sacrifice_those_creatures(TextPair::new(
         prohibition_probe,
         &prohibition_probe_lower,
     )) {

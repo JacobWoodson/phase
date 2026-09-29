@@ -4086,6 +4086,16 @@ pub enum ProhibitedActivity {
         /// battlefield. `None` preserves the legacy source-controller lookup.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         protected_player: Option<PlayerId>,
+        /// CR 109.5 + CR 608.2c: scope-SELECTION for the protected player,
+        /// resolved by `add_restriction::fill_runtime_fields` at creation.
+        /// `None` is the legacy contract (snapshot the resolving ability's
+        /// controller — the controller-relative "you"); every shipped user
+        /// carries `None`. `Some(ParentTargetedPlayer)` snapshots the
+        /// spell/ability's already-chosen player target instead (Call for
+        /// Aid's "that player" anaphor reuses the declared target slot without
+        /// declaring a second one).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        protected_scope: Option<RestrictionPlayerScope>,
     },
     /// CR 116.2a + CR 305.1 + CR 601.2a: Prohibit *playing* (casting a spell OR
     /// playing a land) cards located in `zone` for the affected players.
