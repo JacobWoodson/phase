@@ -136,6 +136,7 @@ mod burning_eye_zubera_damage_threshold;
 mod cait_sith_fortune_teller;
 mod calamity_of_the_titans_reveal_cost;
 mod call_damage_control_modal_return;
+mod call_for_aid_phase2;
 mod call_forth_tempest_and_rootha;
 mod captain_america_throw;
 mod captain_marvel_apex_avenger;
