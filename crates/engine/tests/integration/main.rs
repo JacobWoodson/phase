@@ -872,6 +872,7 @@ mod issue_6431_lava_dart_flashback_control_turn;
 mod issue_6435_mosswort_bridge_hideaway_play;
 mod issue_6437_fight_rigging_exiled_card_target;
 mod issue_6440_mockingbird_uncast_copy_ceiling;
+mod issue_6457_anti_venom_damage_counters;
 mod issue_6459_scheming_symmetry;
 mod issue_6461_ephemerate_rebound_timing;
 mod issue_6473_wrath_of_the_skies;
