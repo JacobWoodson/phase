@@ -759,9 +759,10 @@ fn call_for_aid_covers_snapshotted_set_only() {
 
     // Behavioral close: edicts take each free creature; the covered member
     // survives both. P1 controls only the flickered creature (singleton fast
-    // path); P0 controls the covered member plus the late arrival (the
-    // prohibited member is not a candidate, so the late arrival is taken via
-    // the singleton fast path).
+    // path); P0 controls the covered member plus the late arrival (both
+    // members are listed -- prohibited creatures are not filtered from
+    // candidates -- so the harness explicitly chooses the free late arrival
+    // via EffectZoneChoice).
     hand_priority_to_p1(&mut stage.runner);
     stage.runner.cast(stage.edict).target_player(P1).resolve();
     assert_eq!(
