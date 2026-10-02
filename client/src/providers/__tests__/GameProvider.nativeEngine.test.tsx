@@ -1645,6 +1645,9 @@ describe("GameProvider native AI routing", () => {
     });
     expect(nativeAdapters).toHaveLength(0);
     expect(gameStoreState.initGame).not.toHaveBeenCalled();
+    expect(ensureNativeEngine).not.toHaveBeenCalled();
+    expect(multiplayerState.showToast).not.toHaveBeenCalled();
+    expect(saveActiveGame).not.toHaveBeenCalled();
   });
 
   it("lets pinned seats bypass an empty cEDH pool", async () => {

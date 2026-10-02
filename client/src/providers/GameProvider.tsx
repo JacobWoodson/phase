@@ -1886,14 +1886,21 @@ export function GameProvider({
               return;
             }
 
-            deckList = await buildLocalAiDeckList(
-              tRef.current,
-              randomPlayerDeck ? null : (parsedDeck ?? EMPTY_PARSED_DECK),
-              playerCount ?? 2,
-              formatConfig,
-              matchConfig?.match_type,
-              loadActiveDeckBracket(),
-            );
+            try {
+              deckList = await buildLocalAiDeckList(
+                tRef.current,
+                randomPlayerDeck ? null : (parsedDeck ?? EMPTY_PARSED_DECK),
+                playerCount ?? 2,
+                formatConfig,
+                matchConfig?.match_type,
+                loadActiveDeckBracket(),
+              );
+            } catch (deckErr) {
+              if (!cancelled) {
+                onNoDeckRef.current?.(deckErr instanceof Error ? deckErr.message : String(deckErr));
+              }
+              return;
+            }
             if (cancelled) return;
           }
 
