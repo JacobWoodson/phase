@@ -23,8 +23,8 @@ export interface AiRandomPoolOptions {
  * Restrict the AI Random pool to the table's bracket constraint.
  *
  * Single source of truth shared by the setup page (`AiOpponentConfig` pool
- * preview) and game start (`GameProvider` deck resolution), so the "Random
- * (N decks)" count and the actual draw can never disagree:
+ * preview) and game start (`GameProvider` deck resolution), so both sides
+ * apply the same restriction:
  *
  * - Non-Commander formats (or no format): brackets are Commander-family
  *   metadata only — no constraint, pool unchanged.

@@ -387,10 +387,10 @@ function pickOpponentDeck(
     if (pinned) return pinned;
   }
 
-  // Random seats draw from the bracket-restricted pool (which equals the full
-  // catalog when no bracket constraint applies). Archetype + coverage are
-  // soft preferences that fall back to the pool — never to decks the bracket
-  // constraint excluded.
+  // Random seats draw from `pool`: the bracket-restricted pool when it is
+  // non-empty, else the full legal catalog (an empty restriction warns at
+  // setup, so reaching here means the fallback was accepted). Archetype +
+  // coverage are soft preferences applied within that pool.
   const filtered = pool.filter((candidate) =>
     candidatePassesFilters(candidate, archetypeFilter, coverageFloor)
   );

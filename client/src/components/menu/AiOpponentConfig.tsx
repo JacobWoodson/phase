@@ -118,8 +118,8 @@ export function AiOpponentConfig({
   // considering, not which deck ends up assigned — a concept that doesn't
   // vary per seat.
   // The bracket/cEDH restriction is shared with game start
-  // (`restrictAiPoolByBracket`) so the previewed pool and the actual Random
-  // draw can never disagree; archetype + coverage apply within that pool.
+  // (`restrictAiPoolByBracket`) so both sides apply the same rule;
+  // archetype + coverage apply within that pool.
   const bracketPool = useMemo(
     () =>
       restrictAiPoolByBracket(candidates, {
