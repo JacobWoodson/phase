@@ -33004,3 +33004,384 @@ fn tawnos_the_toymaker_copy_is_an_artifact() {
     );
     assert_no_unimplemented(execute.as_ref());
 }
+
+// Phase 3 (call-aid-34a46f), commit 1 — base characterization of the
+// "at the beginning of combat on <opponent-possessive> turn" family. CR 603.1
+// + CR 500.1: each family card's Oracle licenses ONLY opponents' BeginCombat
+// steps, but at base the suffix scan matches only "on your turn", so all five
+// parse `constraint: None` (branch (b)). Every family/guard test asserts BOTH
+// the trigger-line parse AND the full-text parse — the oracle_trigger.rs:2164
+// `modifiers.constraint.or(def.constraint)` precedence adds nothing at base.
+
+/// CR 603.1 + CR 500.1 (branch-(b) characterization): Sentinel of the Eternal
+/// Watch licenses only opponents' turns but parses `None` at base, line and
+/// full text alike. Commit 2 flips both legs to `OnlyDuringOpponentsTurn`.
+#[test]
+fn sentinel_begin_combat_opponent_turn_constraint_null_at_base() {
+    let line = "At the beginning of combat on each opponent's turn, tap target creature that player controls.";
+    let def = parse_trigger_line(line, "Sentinel of the Eternal Watch");
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::BeginCombat));
+    assert_eq!(
+        def.constraint, None,
+        "Sentinel trigger line must parse null at base"
+    );
+
+    let parsed = parse_oracle_text(
+        "Vigilance (Attacking doesn't cause this creature to tap.)\nAt the beginning of combat on each opponent's turn, tap target creature that player controls.",
+        "Sentinel of the Eternal Watch",
+        &["Vigilance".to_string()],
+        &["Creature".to_string()],
+        &["Giant".to_string(), "Soldier".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.phase == Some(Phase::BeginCombat))
+        .expect("Sentinel full text must yield its BeginCombat trigger");
+    assert_eq!(
+        trigger.constraint, None,
+        "Sentinel full text must parse null at base (:2164 adds nothing)"
+    );
+}
+
+/// CR 603.1 + CR 500.1 (branch-(b) characterization + canary): Citadel Siege's
+/// Khans mode already routes to `OnlyDuringYourTurn` while its Dragons mode
+/// parses `None` at base. One-description rule: Khans is triggers[0], Dragons
+/// is triggers[1]. Commit 2 flips Dragons only; Khans is UNCHANGED.
+#[test]
+fn citadel_siege_mode_split_khans_your_turn_dragons_null_at_base() {
+    use crate::types::ability::TriggerConstraint;
+    let khans = parse_trigger_line(
+        "At the beginning of combat on your turn, put two +1/+1 counters on target creature you control.",
+        "Citadel Siege",
+    );
+    assert_eq!(khans.phase, Some(Phase::BeginCombat));
+    assert_eq!(
+        khans.constraint,
+        Some(TriggerConstraint::OnlyDuringYourTurn),
+        "Citadel Khans line already parses YourTurn at base"
+    );
+    let dragons = parse_trigger_line(
+        "At the beginning of combat on each opponent's turn, tap target creature that player controls.",
+        "Citadel Siege",
+    );
+    assert_eq!(dragons.phase, Some(Phase::BeginCombat));
+    assert_eq!(
+        dragons.constraint, None,
+        "Citadel Dragons line must parse null at base"
+    );
+
+    let parsed = parse_oracle_text(
+        "As this enchantment enters, choose Khans or Dragons.\n• Khans — At the beginning of combat on your turn, put two +1/+1 counters on target creature you control.\n• Dragons — At the beginning of combat on each opponent's turn, tap target creature that player controls.",
+        "Citadel Siege",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    assert_eq!(
+        parsed.triggers.len(),
+        2,
+        "Citadel full text must yield exactly the two mode triggers"
+    );
+    assert_eq!(
+        parsed.triggers[0].constraint,
+        Some(TriggerConstraint::OnlyDuringYourTurn),
+        "Citadel triggers[0] (Khans) stays YourTurn"
+    );
+    assert_eq!(
+        parsed.triggers[1].constraint, None,
+        "Citadel triggers[1] (Dragons) must parse null at base"
+    );
+}
+
+/// CR 603.1 + CR 500.1 (branch-(b) characterization): Fight or Flight licenses
+/// only opponents' turns but parses `None` at base. Commit 2 flips both legs
+/// to `OnlyDuringOpponentsTurn`.
+#[test]
+fn fight_or_flight_begin_combat_opponent_turn_constraint_null_at_base() {
+    let line = "At the beginning of combat on each opponent's turn, separate all creatures that player controls into two piles. Only creatures in the pile of their choice can attack this turn.";
+    let def = parse_trigger_line(line, "Fight or Flight");
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::BeginCombat));
+    assert_eq!(
+        def.constraint, None,
+        "Fight or Flight trigger line must parse null at base"
+    );
+
+    let parsed = parse_oracle_text(
+        line,
+        "Fight or Flight",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.phase == Some(Phase::BeginCombat))
+        .expect("Fight or Flight full text must yield its BeginCombat trigger");
+    assert_eq!(
+        trigger.constraint, None,
+        "Fight or Flight full text must parse null at base"
+    );
+}
+
+/// CR 603.1 + CR 500.1 (branch-(b) characterization): Web of Inertia licenses
+/// only opponents' turns but parses `None` at base. Commit 2 flips both legs
+/// to `OnlyDuringOpponentsTurn`.
+#[test]
+fn web_of_inertia_begin_combat_opponent_turn_constraint_null_at_base() {
+    let line = "At the beginning of combat on each opponent's turn, that player may exile a card from their graveyard. If the player doesn't, creatures they control can't attack you this turn.";
+    let def = parse_trigger_line(line, "Web of Inertia");
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::BeginCombat));
+    assert_eq!(
+        def.constraint, None,
+        "Web of Inertia trigger line must parse null at base"
+    );
+
+    let parsed = parse_oracle_text(
+        line,
+        "Web of Inertia",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.phase == Some(Phase::BeginCombat))
+        .expect("Web of Inertia full text must yield its BeginCombat trigger");
+    assert_eq!(
+        trigger.constraint, None,
+        "Web of Inertia full text must parse null at base"
+    );
+}
+
+/// CR 603.1 + CR 500.1 (branch-(b) characterization): Champions of Minas
+/// Tirith licenses only opponents' turns but parses `None` at base (the
+/// already-parsed IsMonarch intervening-if is orthogonal and out of scope).
+/// Commit 2 flips both legs to `OnlyDuringOpponentsTurn`.
+#[test]
+fn champions_begin_combat_opponent_turn_constraint_null_at_base() {
+    let line = "At the beginning of combat on each opponent's turn, if you're the monarch, that opponent may pay {X}, where X is the number of cards in their hand. If they don't, they can't attack you this combat.";
+    let def = parse_trigger_line(line, "Champions of Minas Tirith");
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::BeginCombat));
+    assert_eq!(
+        def.constraint, None,
+        "Champions trigger line must parse null at base"
+    );
+
+    let parsed = parse_oracle_text(
+        "When this creature enters, you become the monarch.\nAt the beginning of combat on each opponent's turn, if you're the monarch, that opponent may pay {X}, where X is the number of cards in their hand. If they don't, they can't attack you this combat.",
+        "Champions of Minas Tirith",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Soldier".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.phase == Some(Phase::BeginCombat))
+        .expect("Champions full text must yield its BeginCombat trigger");
+    assert_eq!(
+        trigger.constraint, None,
+        "Champions full text must parse null at base"
+    );
+}
+
+/// Guard (UNCHANGED in commit 2): Kitt Kanto's "each player's turn" stem is
+/// absent from the turn-spec table, so it stays `null` — every turn, licensed.
+#[test]
+fn kitt_kanto_each_player_turn_stays_null_at_base() {
+    let line = "At the beginning of combat on each player's turn, you may tap two untapped creatures you control. When you do, target creature that player controls gets +2/+2 and gains trample until end of turn. Goad that creature.";
+    let def = parse_trigger_line(line, "Kitt Kanto, Mayhem Diva");
+    assert_eq!(def.phase, Some(Phase::BeginCombat));
+    assert_eq!(
+        def.constraint, None,
+        "Kitt Kanto must stay null (every turn is licensed)"
+    );
+
+    let parsed = parse_oracle_text(
+        "When Kitt Kanto enters, create a 1/1 green and white Citizen creature token.\nAt the beginning of combat on each player's turn, you may tap two untapped creatures you control. When you do, target creature that player controls gets +2/+2 and gains trample until end of turn. Goad that creature.",
+        "Kitt Kanto, Mayhem Diva",
+        &[],
+        &["Creature".to_string()],
+        &["Cat".to_string(), "Bard".to_string(), "Druid".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.phase == Some(Phase::BeginCombat))
+        .expect("Kitt full text must yield its BeginCombat trigger");
+    assert_eq!(
+        trigger.constraint, None,
+        "Kitt Kanto full text must stay null"
+    );
+}
+
+/// Guard (UNCHANGED in commit 2): Overencumbered's "enchanted opponent's turn"
+/// stem is absent from the turn-spec table, so it stays `null` — the opponent
+/// constraint would be WRONG here (enchanted turn, not all opponents' turns).
+#[test]
+fn overencumbered_enchanted_opponent_turn_stays_null_at_base() {
+    let line = "At the beginning of combat on enchanted opponent's turn, that player may pay {1} for each artifact they control. If they don't, creatures can't attack this combat.";
+    let def = parse_trigger_line(line, "Overencumbered");
+    assert_eq!(def.phase, Some(Phase::BeginCombat));
+    assert_eq!(
+        def.constraint, None,
+        "Overencumbered must stay null (enchanted turn, not opponents' turns)"
+    );
+
+    let parsed = parse_oracle_text(
+        "Enchant opponent\nWhen this Aura enters, enchanted opponent creates a Clue token, a Food token, and a Junk token.\nAt the beginning of combat on enchanted opponent's turn, that player may pay {1} for each artifact they control. If they don't, creatures can't attack this combat.",
+        "Overencumbered",
+        &[],
+        &["Enchantment".to_string()],
+        &["Aura".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.phase == Some(Phase::BeginCombat))
+        .expect("Overencumbered full text must yield its BeginCombat trigger");
+    assert_eq!(
+        trigger.constraint, None,
+        "Overencumbered full text must stay null"
+    );
+}
+
+/// Row-8 second-caller guard (UNCHANGED in commit 2): Tolls of War reaches
+/// `parse_turn_constraint` through the sacrifice path, whose stripped body
+/// never carries the `"on "` prefix the commit-2 arm requires — so the stored
+/// `OncePerTurn` ("triggers only once each turn") must not flip.
+#[test]
+fn tolls_of_war_sacrifice_trigger_stores_once_per_turn() {
+    use crate::types::ability::TriggerConstraint;
+    let parsed = parse_oracle_text(
+        "When this enchantment enters, create a Clue token. (It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")\nWhenever you sacrifice a permanent during your turn, create a 1/1 white Ally creature token. This ability triggers only once each turn.",
+        "Tolls of War",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::Sacrificed)
+        .expect("Tolls of War full text must yield its sacrifice trigger");
+    assert_eq!(
+        trigger.constraint,
+        Some(TriggerConstraint::OncePerTurn),
+        "Tolls of War sacrifice trigger must store OncePerTurn"
+    );
+}
+
+/// Row-4 corpus pin (UNCHANGED in commit 2): Abhorrent Oculus — the "each
+/// opponent's" stem routes via the possessive-prefix path. Reminder text
+/// dropped; the trigger clause is verbatim.
+#[test]
+fn abhorrent_oculus_each_opponent_upkeep_constraint_pinned() {
+    use crate::types::ability::TriggerConstraint;
+    let def = parse_trigger_line(
+        "At the beginning of each opponent's upkeep, manifest dread.",
+        "Abhorrent Oculus",
+    );
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::Upkeep));
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "Abhorrent Oculus must stay OnlyDuringOpponentsTurn"
+    );
+}
+
+/// Row-4 corpus pin (UNCHANGED in commit 2): Archfiend of Depravity — the
+/// "each opponent's" stem routes via the possessive-prefix path.
+#[test]
+fn archfiend_of_depravity_each_opponent_end_step_constraint_pinned() {
+    use crate::types::ability::TriggerConstraint;
+    let def = parse_trigger_line(
+        "At the beginning of each opponent's end step, that player chooses up to two creatures they control, then sacrifices the rest.",
+        "Archfiend of Depravity",
+    );
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::End));
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "Archfiend of Depravity must stay OnlyDuringOpponentsTurn"
+    );
+}
+
+/// Row-4 corpus pin (UNCHANGED in commit 2): Because I Have Willed It — the
+/// "your opponents'" stem routes via the possessive-prefix path.
+#[test]
+fn because_i_have_willed_it_opponents_end_step_constraint_pinned() {
+    use crate::types::ability::TriggerConstraint;
+    let def = parse_trigger_line(
+        "At the beginning of your opponents' end step, if they cast four or more spells this turn, abandon this scheme.",
+        "Because I Have Willed It",
+    );
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::End));
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "Because I Have Willed It must stay OnlyDuringOpponentsTurn"
+    );
+}
+
+/// Row-4 corpus pin (UNCHANGED in commit 2): Bow to My Command — the "your
+/// opponents'" stem routes via the possessive-prefix path.
+#[test]
+fn bow_to_my_command_opponents_end_step_constraint_pinned() {
+    use crate::types::ability::TriggerConstraint;
+    let def = parse_trigger_line(
+        "At the beginning of your opponents' end step, they may tap any number of untapped creatures they control with total power 8 or greater. If they do, abandon this scheme.",
+        "Bow to My Command",
+    );
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::End));
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "Bow to My Command must stay OnlyDuringOpponentsTurn"
+    );
+}
+
+/// Row-4 corpus pin (UNCHANGED in commit 2): Breath of the Sleepless — the
+/// "during an opponent's" stem routes via the during path.
+#[test]
+fn breath_of_the_sleepless_during_opponent_turn_constraint_pinned() {
+    use crate::types::ability::TriggerConstraint;
+    let def = parse_trigger_line(
+        "Whenever you cast a creature spell during an opponent's turn, tap up to one target creature.",
+        "Breath of the Sleepless",
+    );
+    assert_eq!(def.mode, TriggerMode::SpellCast);
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "Breath of the Sleepless must stay OnlyDuringOpponentsTurn"
+    );
+}
+
+/// Row-4 corpus pin (UNCHANGED in commit 2): Brineborn Cutthroat — the "during
+/// an opponent's" stem routes via the during path.
+#[test]
+fn brineborn_cutthroat_during_opponent_turn_constraint_pinned() {
+    use crate::types::ability::TriggerConstraint;
+    let def = parse_trigger_line(
+        "Whenever you cast a spell during an opponent's turn, put a +1/+1 counter on this creature.",
+        "Brineborn Cutthroat",
+    );
+    assert_eq!(def.mode, TriggerMode::SpellCast);
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "Brineborn Cutthroat must stay OnlyDuringOpponentsTurn"
+    );
+}
