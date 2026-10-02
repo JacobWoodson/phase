@@ -118,7 +118,7 @@
     "bracket": "Poziom",
     "bracketHint": "Losowe AI wybiera z tych poziomów. Talie bez tagów są wykluczane podczas filtrowania.",
     "bracketPoolEmpty": "Żadne talie nie odpowiadają wybranym poziomom. Losowe AI będzie dobierać ze wszystkich dozwolonych talii.",
-    "cedhPoolEmpty": "Brak talii poziomu 5. Losowe AI będzie dobierać ze wszystkich dozwolonych talii.",
+    "cedhPoolEmpty": "Brak talii poziomu 5. Nie można przydzielić talii losowemu AI.",
     "opponentLabel": "Przeciwnik {{number}}",
     "deck": "Talia",
     "difficulty": "Poziom trudności",

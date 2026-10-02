@@ -28,7 +28,7 @@ import {
   loadActiveDeck,
   loadSavedDeckBracket,
 } from "../constants/storage";
-import type { CommanderBracket } from "../types/bracket";
+import { isCommanderFamilyFormat, type CommanderBracket } from "../types/bracket";
 import type { CommanderBracketTier } from "../types/bracketEstimate";
 import type { AiDeckCandidate } from "../services/aiDeckCatalog";
 import { buildLegalAiDeckCatalog } from "../services/aiDeckCatalog";
@@ -485,10 +485,30 @@ async function buildLocalAiDeckList(
     selectedFormat: formatConfig?.format ?? null,
   });
   // An empty pool means the table's bracket constraint excluded every legal
-  // deck (the catalog itself is non-empty here). The setup page warns about
-  // this — a soft gate, Start stays enabled — so a game that reaches here
-  // with an empty pool was explicitly accepted: Random seats fall back to
-  // the full legal catalog rather than failing.
+  // deck (the catalog itself is non-empty here). In cEDH mode the engine
+  // rejects any non-bracket-5 deck at init (`validate_cedh_bracket`, gated
+  // on CEDH AI difficulties), so there is no legal fallback: fail fast
+  // unless every seat is pinned to an explicit deck. Otherwise (manual
+  // filter) any legal deck plays fine — the setup page warns about the
+  // empty pool (soft gate, Start stays enabled), so fall back to the full
+  // legal catalog.
+  const effectiveCedhMode = cedhMode && isCommanderFamilyFormat(formatConfig?.format ?? undefined);
+  if (bracketPool.length === 0 && effectiveCedhMode) {
+    const opponentCount = Math.max(1, playerCount - 1);
+    const needsRandomSeat = Array.from(
+      { length: opponentCount },
+      (_, i) => aiSeats[i]?.deckId ?? AI_DECK_RANDOM,
+    ).some((requestedDeckId) =>
+      requestedDeckId === AI_DECK_RANDOM || !catalog.candidates.some((c) => c.id === requestedDeckId),
+    );
+    if (needsRandomSeat) {
+      throw new Error(
+        formatConfig?.format
+          ? t("gameProvider.noLegalAiDecks.withFormat", { format: formatConfig.format })
+          : t("gameProvider.noLegalAiDecks.generic"),
+      );
+    }
+  }
   const randomPool = bracketPool.length > 0 ? bracketPool : catalog.candidates;
 
   const excludeIds = new Set<string>();

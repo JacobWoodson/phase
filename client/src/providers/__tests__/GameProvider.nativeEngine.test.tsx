@@ -1617,6 +1617,67 @@ describe("GameProvider native AI routing", () => {
     expect(onNoDeck).not.toHaveBeenCalled();
   });
 
+  it("fails game start when cEDH mode has no bracket-5 decks to draw", async () => {
+    // Unlike the manual filter, cEDH has no legal fallback: the engine
+    // rejects any non-bracket-5 deck at init (validate_cedh_bracket), so a
+    // Random seat with an empty B5 pool must fail here, not draw elsewhere.
+    preferences.aiSeats = [{ difficulty: "Medium", deckId: "Random" }];
+    preferences.cedhMode = true;
+    preferences.aiBracketFilter = [];
+    vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({
+      candidates: [aiCandidate("saved:B4 Deck", ["B4-Card"], 4)],
+    });
+    const onNoDeck = vi.fn();
+
+    render(
+      <GameProvider
+        gameId="cedh-empty-pool"
+        mode="ai"
+        formatConfig={COMMANDER_FORMAT_CONFIG}
+        onNoDeck={onNoDeck}
+      >
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(onNoDeck).toHaveBeenCalledTimes(1);
+    });
+    expect(nativeAdapters).toHaveLength(0);
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+  });
+
+  it("lets pinned seats bypass an empty cEDH pool", async () => {
+    preferences.aiSeats = [{ difficulty: "Medium", deckId: "saved:B4 Deck" }];
+    preferences.cedhMode = true;
+    preferences.aiBracketFilter = [];
+    vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({
+      candidates: [aiCandidate("saved:B4 Deck", ["B4-Card"], 4)],
+    });
+    const onNoDeck = vi.fn();
+
+    render(
+      <GameProvider
+        gameId="cedh-pinned-bypass"
+        mode="ai"
+        formatConfig={COMMANDER_FORMAT_CONFIG}
+        onNoDeck={onNoDeck}
+      >
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(gameStoreState.setEngineMode).toHaveBeenCalledWith("native");
+      expect(nativeAdapters).toHaveLength(1);
+    });
+
+    // The pinned deck plays as-is; whether a non-B5 pin survives cEDH
+    // engine validation is the engine's call at init, as with the human seat.
+    expect(nativeAdapters[0]!.nativeAiOptions?.aiSeats[0]?.deck.main_deck).toEqual(["B4-Card"]);
+    expect(onNoDeck).not.toHaveBeenCalled();
+  });
+
   it("lets pinned seats bypass an empty bracket pool", async () => {
     preferences.aiSeats = [{ difficulty: "Medium", deckId: "saved:B4 Deck" }];
     preferences.aiBracketFilter = [1];

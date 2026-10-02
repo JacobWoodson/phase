@@ -262,7 +262,7 @@ describe("AiOpponentConfig — bracket filter", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByText("No bracket-5 decks available. Random AI will draw from all legal decks."),
+        screen.getByText("No bracket-5 decks available. Random AI seats cannot be filled."),
       ).toBeInTheDocument();
     });
   });
