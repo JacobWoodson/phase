@@ -1140,7 +1140,8 @@ fn palantir_life_loss_uses_milled_chain_set_and_targeted_opponent() {
                     crate::types::ability::ObjectProperty::ManaValue,
                     crate::types::ability::CardTypeSetSource::TrackedSet {
                         set: crate::types::ability::TrackedAnaphorSource::ChainSet,
-                        caused_by: None
+                        caused_by: None,
+                        filter: None
                     }
                 )
                 .expect("statically valid property aggregate")
@@ -1534,7 +1535,8 @@ fn combustible_gearhulk_damage_uses_milled_chain_set() {
         aggregate.source(),
         crate::types::ability::CardTypeSetSource::TrackedSet {
             set: crate::types::ability::TrackedAnaphorSource::ChainSet,
-            caused_by: None
+            caused_by: None,
+            filter: None
         }
     ));
     assert!(matches!(target, TargetFilter::ScopedPlayer));
