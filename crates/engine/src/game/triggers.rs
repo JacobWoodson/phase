@@ -12395,7 +12395,8 @@ fn card_type_set_source_binding_diverges(source: &CardTypeSetSource) -> bool {
                 }
                 // CR 607.2a + CR 608.2i: the same two resolution-scoped
                 // populations `CardsExiledBySource` / `TrackedSetSize` are
-                // declined for.
+                // declined for. Declining is fail-closed; a member filter
+                // cannot make the hoist safe.
                 CardTypeSetSource::ExiledBySource | CardTypeSetSource::TrackedSet { .. } => true,
                 // Unrolled by the walker; never reaches this arm.
                 CardTypeSetSource::AnyOf { .. } => false,
@@ -16809,9 +16810,11 @@ fn characteristic_source_references_cost_paid_object(source: &CardTypeSetSource)
                 CardTypeSetSource::TurnJournal { filter, .. } => filter
                     .as_ref()
                     .is_some_and(TargetFilter::references_cost_paid_object),
+                CardTypeSetSource::TrackedSet { filter, .. } => filter
+                    .as_ref()
+                    .is_some_and(TargetFilter::references_cost_paid_object),
                 CardTypeSetSource::Zone { .. }
                 | CardTypeSetSource::ExiledBySource
-                | CardTypeSetSource::TrackedSet { .. }
                 | CardTypeSetSource::AnyOf { .. } => false,
             };
         });
@@ -23969,6 +23972,7 @@ pub mod tests {
             CardTypeSetSource::TrackedSet {
                 set: crate::types::ability::TrackedAnaphorSource::ChainSet,
                 caused_by: None,
+                filter: None,
             },
         ] {
             assert!(
