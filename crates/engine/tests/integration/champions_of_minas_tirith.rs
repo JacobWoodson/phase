@@ -516,7 +516,7 @@ fn monarch_required_at_fire_and_resolution() {
     );
 }
 
-/// V5 (row 5) — CR 511.3 + CR 506.2: the decline restriction is present
+/// V5 (row 5) — CR 511.2 + CR 506.2: the decline restriction is present
 /// mid-combat, absent after, and the turn's SECOND combat starts clean (the
 /// re-fired trigger is a fresh prompt, answered here by paying, after which
 /// P1 attacks P0 freely). The extra combat is scheduled through the engine's
@@ -764,7 +764,7 @@ fn decline_restricts_only_the_declining_opponent() {
     );
 }
 
-/// V8 (row 8) — CR 511.3: the end-of-combat teardown is the SOLE prune
+/// V8 (row 8) — CR 511.2: the end-of-combat teardown is the SOLE prune
 /// authority for EndOfCombat game restrictions. Both teardown callers prune
 /// (the natural EndCombat step, proven by V5's absence legs, and the CR
 /// 724.2d skip path, driven here through the real

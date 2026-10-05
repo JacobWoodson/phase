@@ -3939,33 +3939,16 @@ fn parse_may_pay_decline_restriction(input: &str) -> Option<ParsedEffectClause> 
 /// scoped player on this trigger. Controller-relative ("you") and
 /// target-free quantities pass through untouched.
 ///
-/// Mirrors the Target→ScopedPlayer table in `rewrite_player_scope_refs`
+/// The Target→ScopedPlayer rewrite delegates to the exhaustive
+/// `QuantityRef::player_scope_mut` authority (types/ability.rs) rather than
+/// hand-enumerating members: every player-scoped member rebinds, and a future
+/// member is a compile error there instead of a silent X=0 here. The
+/// `TargetZoneCardCount` mapping below mirrors `rewrite_player_scope_refs`
 /// (oracle_effect/mod.rs) for the may-pay context; keep the two in sync (a
 /// shared extraction needs that file and is out of unit-3b scope).
 fn rebind_may_pay_quantity_to_payer(expr: &mut QuantityExpr) {
     match expr {
         QuantityExpr::Ref { qty } => match qty {
-            QuantityRef::LifeTotal {
-                player: PlayerScope::Target,
-            } => {
-                *qty = QuantityRef::LifeTotal {
-                    player: PlayerScope::ScopedPlayer,
-                }
-            }
-            QuantityRef::HandSize {
-                player: PlayerScope::Target,
-            } => {
-                *qty = QuantityRef::HandSize {
-                    player: PlayerScope::ScopedPlayer,
-                }
-            }
-            QuantityRef::LifeLostThisTurn {
-                player: PlayerScope::Target,
-            } => {
-                *qty = QuantityRef::LifeLostThisTurn {
-                    player: PlayerScope::ScopedPlayer,
-                }
-            }
             QuantityRef::TargetZoneCardCount { zone } => match zone {
                 ZoneRef::Hand => {
                     *qty = QuantityRef::HandSize {
@@ -3982,7 +3965,13 @@ fn rebind_may_pay_quantity_to_payer(expr: &mut QuantityExpr) {
                 }
                 ZoneRef::Exile => {}
             },
-            _ => {}
+            other => {
+                if let Some(scope) = other.player_scope_mut() {
+                    if *scope == PlayerScope::Target {
+                        *scope = PlayerScope::ScopedPlayer;
+                    }
+                }
+            }
         },
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Multiply { inner, .. }

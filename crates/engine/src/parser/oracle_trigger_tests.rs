@@ -33630,6 +33630,32 @@ fn may_pay_decline_rebinds_that_player_hand() {
     );
 }
 
+/// Class axis (unit 3b, fix round 1): a player-scoped member OUTSIDE the
+/// original 3-arm enumeration rebinds through the exhaustive
+/// `player_scope_mut` authority. `CardsDiscardedThisTurn` in Target form
+/// (Dream Salvage's "target opponent discarded this turn" — CR 701.9 +
+/// CR 115.1) is covered by neither the old match nor the sibling event
+/// table; without the authority rewrite it keeps `Target` and resolves to 0
+/// with no player target. Synthetic grammar probe.
+#[test]
+fn may_pay_decline_rebinds_discarded_this_turn() {
+    let line = "At the beginning of combat on each opponent's turn, that opponent may pay {X}, where X is the number of cards target opponent discarded this turn. If they don't, they can't attack you this combat.";
+    let def = parse_trigger_line(line, "Unit 3b Probe");
+    let modifier = def.unless_pay.as_ref().expect("unless_pay set");
+    assert_eq!(
+        modifier.cost,
+        AbilityCost::ManaDynamic {
+            quantity: QuantityExpr::Ref {
+                qty: QuantityRef::CardsDiscardedThisTurn {
+                    player: PlayerScope::ScopedPlayer,
+                },
+            },
+        },
+        "'target opponent discarded this turn' rebinds to the payer, got {:?}",
+        modifier.cost
+    );
+}
+
 /// Guard (unit 3b): the arm requires full consumption — trailing text after
 /// the consequence declines the arm and the generic chain takes the body
 /// (base PayCost behavior).

@@ -279,7 +279,7 @@ fn complete_end_combat_teardown(state: &mut GameState) {
     state
         .pending_damage_replacements
         .retain(|r| !matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat)));
-    // CR 511.3: "this combat" game restrictions expire with every other
+    // CR 511.2: "this combat" game restrictions expire with every other
     // combat-scoped effect (unit 3b: Champions of Minas Tirith's decline
     // restriction is the first producer). One line covers both end-of-combat
     // callers (the EndCombat step arm and `end_combat_phase_to_postcombat`)
