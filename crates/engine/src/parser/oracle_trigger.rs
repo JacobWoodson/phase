@@ -20606,14 +20606,19 @@ fn parse_turn_constraint(phase_text: &str) -> Option<TriggerConstraint> {
     if let Ok((_, constraint)) = parse_turn_possessive_prefix(phase_text) {
         return Some(constraint);
     }
-    // Suffix-based: "combat on your turn", "each combat on your turn"
+    // Suffix-based: "combat on your turn", "combat on each opponent's turn, ..."
     let mut remaining = phase_text;
     while !remaining.is_empty() {
-        if tag::<_, _, OracleError<'_>>("on your turn")
-            .parse(remaining)
-            .is_ok()
+        if let Ok((_, constraint)) = terminated(
+            preceded(tag::<_, _, OracleError<'_>>("on "), parse_during_turn_spec),
+            alt((
+                value((), eof),
+                value((), peek(tag::<_, _, OracleError<'_>>(","))),
+            )),
+        )
+        .parse(remaining)
         {
-            return Some(TriggerConstraint::OnlyDuringYourTurn);
+            return Some(constraint);
         }
         remaining = remaining
             .find(' ')

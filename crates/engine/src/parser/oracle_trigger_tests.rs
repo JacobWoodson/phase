@@ -33013,18 +33013,20 @@ fn tawnos_the_toymaker_copy_is_an_artifact() {
 // the trigger-line parse AND the full-text parse — the oracle_trigger.rs:2164
 // `modifiers.constraint.or(def.constraint)` precedence adds nothing at base.
 
-/// CR 603.1 + CR 500.1 (branch-(b) characterization): Sentinel of the Eternal
-/// Watch licenses only opponents' turns but parses `None` at base, line and
-/// full text alike. Commit 2 flips both legs to `OnlyDuringOpponentsTurn`.
+/// CR 603.1 + CR 500.1: Sentinel of the Eternal Watch licenses only
+/// opponents' turns, and the suffix arm routes both legs to
+/// `OnlyDuringOpponentsTurn`.
 #[test]
-fn sentinel_begin_combat_opponent_turn_constraint_null_at_base() {
+fn sentinel_begin_combat_routes_to_opponents_turn() {
+    use crate::types::ability::TriggerConstraint;
     let line = "At the beginning of combat on each opponent's turn, tap target creature that player controls.";
     let def = parse_trigger_line(line, "Sentinel of the Eternal Watch");
     assert_eq!(def.mode, TriggerMode::Phase);
     assert_eq!(def.phase, Some(Phase::BeginCombat));
     assert_eq!(
-        def.constraint, None,
-        "Sentinel trigger line must parse null at base"
+        def.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "Sentinel trigger line must route to OnlyDuringOpponentsTurn"
     );
 
     let parsed = parse_oracle_text(
@@ -33040,17 +33042,17 @@ fn sentinel_begin_combat_opponent_turn_constraint_null_at_base() {
         .find(|t| t.phase == Some(Phase::BeginCombat))
         .expect("Sentinel full text must yield its BeginCombat trigger");
     assert_eq!(
-        trigger.constraint, None,
-        "Sentinel full text must parse null at base (:2164 adds nothing)"
+        trigger.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "Sentinel full text must route to OnlyDuringOpponentsTurn"
     );
 }
 
-/// CR 603.1 + CR 500.1 (branch-(b) characterization + canary): Citadel Siege's
-/// Khans mode already routes to `OnlyDuringYourTurn` while its Dragons mode
-/// parses `None` at base. One-description rule: Khans is triggers[0], Dragons
-/// is triggers[1]. Commit 2 flips Dragons only; Khans is UNCHANGED.
+/// CR 603.1 + CR 500.1 (canary): Citadel Siege's Khans mode routes to
+/// `OnlyDuringYourTurn` and its Dragons mode to `OnlyDuringOpponentsTurn`.
+/// One-description rule: Khans is triggers[0], Dragons is triggers[1].
 #[test]
-fn citadel_siege_mode_split_khans_your_turn_dragons_null_at_base() {
+fn citadel_siege_mode_split_khans_your_turn_dragons_opponents_turn() {
     use crate::types::ability::TriggerConstraint;
     let khans = parse_trigger_line(
         "At the beginning of combat on your turn, put two +1/+1 counters on target creature you control.",
@@ -33068,8 +33070,9 @@ fn citadel_siege_mode_split_khans_your_turn_dragons_null_at_base() {
     );
     assert_eq!(dragons.phase, Some(Phase::BeginCombat));
     assert_eq!(
-        dragons.constraint, None,
-        "Citadel Dragons line must parse null at base"
+        dragons.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "Citadel Dragons line must route to OnlyDuringOpponentsTurn"
     );
 
     let parsed = parse_oracle_text(
@@ -33090,23 +33093,25 @@ fn citadel_siege_mode_split_khans_your_turn_dragons_null_at_base() {
         "Citadel triggers[0] (Khans) stays YourTurn"
     );
     assert_eq!(
-        parsed.triggers[1].constraint, None,
-        "Citadel triggers[1] (Dragons) must parse null at base"
+        parsed.triggers[1].constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "Citadel triggers[1] (Dragons) must route to OnlyDuringOpponentsTurn"
     );
 }
 
-/// CR 603.1 + CR 500.1 (branch-(b) characterization): Fight or Flight licenses
-/// only opponents' turns but parses `None` at base. Commit 2 flips both legs
-/// to `OnlyDuringOpponentsTurn`.
+/// CR 603.1 + CR 500.1: Fight or Flight licenses only opponents' turns, and
+/// the suffix arm routes both legs to `OnlyDuringOpponentsTurn`.
 #[test]
-fn fight_or_flight_begin_combat_opponent_turn_constraint_null_at_base() {
+fn fight_or_flight_begin_combat_routes_to_opponents_turn() {
+    use crate::types::ability::TriggerConstraint;
     let line = "At the beginning of combat on each opponent's turn, separate all creatures that player controls into two piles. Only creatures in the pile of their choice can attack this turn.";
     let def = parse_trigger_line(line, "Fight or Flight");
     assert_eq!(def.mode, TriggerMode::Phase);
     assert_eq!(def.phase, Some(Phase::BeginCombat));
     assert_eq!(
-        def.constraint, None,
-        "Fight or Flight trigger line must parse null at base"
+        def.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "Fight or Flight trigger line must route to OnlyDuringOpponentsTurn"
     );
 
     let parsed = parse_oracle_text(
@@ -33122,23 +33127,25 @@ fn fight_or_flight_begin_combat_opponent_turn_constraint_null_at_base() {
         .find(|t| t.phase == Some(Phase::BeginCombat))
         .expect("Fight or Flight full text must yield its BeginCombat trigger");
     assert_eq!(
-        trigger.constraint, None,
-        "Fight or Flight full text must parse null at base"
+        trigger.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "Fight or Flight full text must route to OnlyDuringOpponentsTurn"
     );
 }
 
-/// CR 603.1 + CR 500.1 (branch-(b) characterization): Web of Inertia licenses
-/// only opponents' turns but parses `None` at base. Commit 2 flips both legs
-/// to `OnlyDuringOpponentsTurn`.
+/// CR 603.1 + CR 500.1: Web of Inertia licenses only opponents' turns, and
+/// the suffix arm routes both legs to `OnlyDuringOpponentsTurn`.
 #[test]
-fn web_of_inertia_begin_combat_opponent_turn_constraint_null_at_base() {
+fn web_of_inertia_begin_combat_routes_to_opponents_turn() {
+    use crate::types::ability::TriggerConstraint;
     let line = "At the beginning of combat on each opponent's turn, that player may exile a card from their graveyard. If the player doesn't, creatures they control can't attack you this turn.";
     let def = parse_trigger_line(line, "Web of Inertia");
     assert_eq!(def.mode, TriggerMode::Phase);
     assert_eq!(def.phase, Some(Phase::BeginCombat));
     assert_eq!(
-        def.constraint, None,
-        "Web of Inertia trigger line must parse null at base"
+        def.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "Web of Inertia trigger line must route to OnlyDuringOpponentsTurn"
     );
 
     let parsed = parse_oracle_text(
@@ -33154,24 +33161,27 @@ fn web_of_inertia_begin_combat_opponent_turn_constraint_null_at_base() {
         .find(|t| t.phase == Some(Phase::BeginCombat))
         .expect("Web of Inertia full text must yield its BeginCombat trigger");
     assert_eq!(
-        trigger.constraint, None,
-        "Web of Inertia full text must parse null at base"
+        trigger.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "Web of Inertia full text must route to OnlyDuringOpponentsTurn"
     );
 }
 
-/// CR 603.1 + CR 500.1 (branch-(b) characterization): Champions of Minas
-/// Tirith licenses only opponents' turns but parses `None` at base (the
-/// already-parsed IsMonarch intervening-if is orthogonal and out of scope).
-/// Commit 2 flips both legs to `OnlyDuringOpponentsTurn`.
+/// CR 603.1 + CR 500.1: Champions of Minas Tirith licenses only opponents'
+/// turns, and the suffix arm routes both legs to `OnlyDuringOpponentsTurn`
+/// (the already-parsed IsMonarch intervening-if is orthogonal and out of
+/// scope).
 #[test]
-fn champions_begin_combat_opponent_turn_constraint_null_at_base() {
+fn champions_begin_combat_routes_to_opponents_turn() {
+    use crate::types::ability::TriggerConstraint;
     let line = "At the beginning of combat on each opponent's turn, if you're the monarch, that opponent may pay {X}, where X is the number of cards in their hand. If they don't, they can't attack you this combat.";
     let def = parse_trigger_line(line, "Champions of Minas Tirith");
     assert_eq!(def.mode, TriggerMode::Phase);
     assert_eq!(def.phase, Some(Phase::BeginCombat));
     assert_eq!(
-        def.constraint, None,
-        "Champions trigger line must parse null at base"
+        def.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "Champions trigger line must route to OnlyDuringOpponentsTurn"
     );
 
     let parsed = parse_oracle_text(
@@ -33187,8 +33197,9 @@ fn champions_begin_combat_opponent_turn_constraint_null_at_base() {
         .find(|t| t.phase == Some(Phase::BeginCombat))
         .expect("Champions full text must yield its BeginCombat trigger");
     assert_eq!(
-        trigger.constraint, None,
-        "Champions full text must parse null at base"
+        trigger.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "Champions full text must route to OnlyDuringOpponentsTurn"
     );
 }
 

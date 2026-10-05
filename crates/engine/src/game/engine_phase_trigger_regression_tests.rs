@@ -6575,20 +6575,20 @@ fn put_overencumbered(state: &mut GameState) -> ObjectId {
     id
 }
 
-/// CR 507.2 + CR 603.2 (branch-(b) characterization): Sentinel of the Eternal
-/// Watch over-fires at base — its Oracle licenses only opponents' turns
-/// (CR 603.1 + CR 500.1) but it fires on its controller's turn too. Commit 2
-/// flips the controller-turn leg to silence; the opponent-turn leg stays.
+/// CR 507.2 + CR 603.2: Sentinel of the Eternal Watch fires only on
+/// opponents' turns — its Oracle licenses only opponents' turns
+/// (CR 603.1 + CR 500.1), and the routed constraint silences the
+/// controller-turn leg while the opponent-turn leg stays.
 #[test]
-fn sentinel_fires_on_controller_and_opponent_turns_at_base() {
+fn sentinel_fires_only_on_opponent_turns() {
     let setup = |state: &mut GameState| {
         put_sentinel(state);
         put_pt_creature(state, 7002, PlayerId(0), "P0 Bear", 2, 2);
         put_pt_creature(state, 7003, PlayerId(1), "P1 Bear", 2, 2);
     };
     assert!(
-        fired_at_begin_combat(PlayerId(0), setup),
-        "BASE OVER-FIRE: Sentinel fires on its controller's turn"
+        !fired_at_begin_combat(PlayerId(0), setup),
+        "Sentinel stays silent on its controller's turn"
     );
     assert!(
         fired_at_begin_combat(PlayerId(1), setup),
@@ -6596,19 +6596,19 @@ fn sentinel_fires_on_controller_and_opponent_turns_at_base() {
     );
 }
 
-/// CR 507.2 + CR 603.2 (branch-(b) characterization): Citadel Siege's Dragons
-/// mode over-fires at base. Trigger line only (no ChosenLabelIs gate).
-/// Commit 2 flips the controller-turn leg to silence.
+/// CR 507.2 + CR 603.2: Citadel Siege's Dragons mode fires only on
+/// opponents' turns. Trigger line only (no ChosenLabelIs gate); the routed
+/// constraint silences the controller-turn leg.
 #[test]
-fn citadel_dragons_fires_on_controller_turn_at_base() {
+fn citadel_dragons_fires_only_on_opponent_turns() {
     let setup = |state: &mut GameState| {
         put_citadel_dragons_line(state);
         put_pt_creature(state, 7013, PlayerId(0), "P0 Bear", 2, 2);
         put_pt_creature(state, 7014, PlayerId(1), "P1 Bear", 2, 2);
     };
     assert!(
-        fired_at_begin_combat(PlayerId(0), setup),
-        "BASE OVER-FIRE: Citadel Dragons fires on its controller's turn"
+        !fired_at_begin_combat(PlayerId(0), setup),
+        "Citadel Dragons stays silent on its controller's turn"
     );
     assert!(
         fired_at_begin_combat(PlayerId(1), setup),
@@ -6635,12 +6635,11 @@ fn citadel_khans_fires_only_controller_turn() {
     );
 }
 
-/// CR 507.2 + CR 603.2 (canary, commit-1 base legs): full-Oracle Citadel Siege
-/// resolved via stack flow with the ETB anchor NamedChoice answered per mode.
-/// At base Dragons over-fires on the controller's turn while Khans mirrors
-/// correctly; commit 2 flips Dragons only.
+/// CR 507.2 + CR 603.2 (canary): full-Oracle Citadel Siege resolved via
+/// stack flow with the ETB anchor NamedChoice answered per mode. On the
+/// controller's turn Khans fires and Dragons stays silent.
 #[test]
-fn citadel_siege_both_modes_fire_at_base() {
+fn citadel_siege_khans_fires_dragons_silent_on_controller_turn() {
     for choice in ["Dragons", "Khans"] {
         let mut state = setup_game_at_main_phase();
         let siege_id = create_object(
@@ -6703,26 +6702,26 @@ fn citadel_siege_both_modes_fire_at_base() {
         apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         assert_eq!(state.phase, Phase::BeginCombat);
-        assert!(
-            !state.stack.is_empty() || state.pending_trigger.is_some(),
-            "{choice} mode must fire on the controller's turn at base"
+        let fired = !state.stack.is_empty() || state.pending_trigger.is_some();
+        assert_eq!(
+            fired,
+            choice == "Khans",
+            "{choice} mode on the controller's turn: Khans fires, Dragons stays silent"
         );
     }
 }
 
-/// CR 507.2 + CR 603.2 (branch-(b) characterization): Fight or Flight
-/// over-fires at base — its Oracle licenses only opponents' turns (CR 603.1 +
-/// CR 500.1) but it fires on its controller's turn too. The Unimplemented
-/// effect does not block firing observation. Commit 2 flips the
-/// controller-turn leg to silence.
+/// CR 507.2 + CR 603.2: Fight or Flight fires only on opponents' turns —
+/// its Oracle licenses only opponents' turns (CR 603.1 + CR 500.1). The
+/// Unimplemented effect does not block firing observation.
 #[test]
-fn fight_or_flight_fires_on_controller_turn_at_base() {
+fn fight_or_flight_fires_only_on_opponent_turns() {
     let setup = |state: &mut GameState| {
         put_fight_or_flight(state);
     };
     assert!(
-        fired_at_begin_combat(PlayerId(0), setup),
-        "BASE OVER-FIRE: Fight or Flight fires on its controller's turn"
+        !fired_at_begin_combat(PlayerId(0), setup),
+        "Fight or Flight stays silent on its controller's turn"
     );
     assert!(
         fired_at_begin_combat(PlayerId(1), setup),
@@ -6730,18 +6729,16 @@ fn fight_or_flight_fires_on_controller_turn_at_base() {
     );
 }
 
-/// CR 507.2 + CR 603.2 (branch-(b) characterization): Web of Inertia
-/// over-fires at base — its Oracle licenses only opponents' turns (CR 603.1 +
-/// CR 500.1) but it fires on its controller's turn too. Commit 2 flips the
-/// controller-turn leg to silence.
+/// CR 507.2 + CR 603.2: Web of Inertia fires only on opponents' turns —
+/// its Oracle licenses only opponents' turns (CR 603.1 + CR 500.1).
 #[test]
-fn web_of_inertia_fires_on_controller_turn_at_base() {
+fn web_of_inertia_fires_only_on_opponent_turns() {
     let setup = |state: &mut GameState| {
         put_web_of_inertia(state);
     };
     assert!(
-        fired_at_begin_combat(PlayerId(0), setup),
-        "BASE OVER-FIRE: Web of Inertia fires on its controller's turn"
+        !fired_at_begin_combat(PlayerId(0), setup),
+        "Web of Inertia stays silent on its controller's turn"
     );
     assert!(
         fired_at_begin_combat(PlayerId(1), setup),
@@ -6749,20 +6746,19 @@ fn web_of_inertia_fires_on_controller_turn_at_base() {
     );
 }
 
-/// CR 507.2 + CR 603.2 (branch-(b) characterization): Champions of Minas
-/// Tirith over-fires at base — its Oracle licenses only opponents' turns
-/// (CR 603.1 + CR 500.1) but it fires on its controller's turn too, once the
-/// already-parsed IsMonarch gate is satisfied via the existing monarch field.
-/// Commit 2 flips the controller-turn leg to silence.
+/// CR 507.2 + CR 603.2: Champions of Minas Tirith fires only on opponents'
+/// turns — its Oracle licenses only opponents' turns (CR 603.1 + CR 500.1),
+/// once the already-parsed IsMonarch gate is satisfied via the existing
+/// monarch field.
 #[test]
-fn champions_fires_on_controller_turn_at_base() {
+fn champions_fires_only_on_opponent_turns() {
     let setup = |state: &mut GameState| {
         put_champions(state);
         state.monarch = Some(PlayerId(0));
     };
     assert!(
-        fired_at_begin_combat(PlayerId(0), setup),
-        "BASE OVER-FIRE: Champions fires on its controller's turn"
+        !fired_at_begin_combat(PlayerId(0), setup),
+        "Champions stays silent on its controller's turn"
     );
     assert!(
         fired_at_begin_combat(PlayerId(1), setup),
@@ -6770,11 +6766,11 @@ fn champions_fires_on_controller_turn_at_base() {
     );
 }
 
-/// CR 507.2 + CR 603.2 (branch-(b) characterization, multiplayer): at base,
-/// Sentinel fires at EVERY seat's BeginCombat in a 3-player game. Commit 2
-/// flips to exactly the two opponents' turns (once per opponent turn).
+/// CR 507.2 + CR 603.2 (multiplayer): Sentinel fires at exactly the two
+/// opponents' BeginCombats in a 3-player game (once per opponent turn), and
+/// stays silent at its controller's.
 #[test]
-fn sentinel_fires_every_begin_combat_3player_at_base() {
+fn sentinel_fires_opponents_begin_combats_3player() {
     for active in [PlayerId(0), PlayerId(1), PlayerId(2)] {
         let mut state = GameState::new(FormatConfig::standard(), 3, 42);
         state.turn_number = 2;
@@ -6794,9 +6790,11 @@ fn sentinel_fires_every_begin_combat_3player_at_base() {
             Phase::BeginCombat,
             "all three players passing must reach BeginCombat (active {active:?})"
         );
-        assert!(
-            !state.stack.is_empty() || state.pending_trigger.is_some(),
-            "BASE OVER-FIRE: Sentinel fires at {active:?}'s BeginCombat in a 3-player game"
+        let fired = !state.stack.is_empty() || state.pending_trigger.is_some();
+        assert_eq!(
+            fired,
+            active != PlayerId(0),
+            "Sentinel at {active:?}'s BeginCombat in a 3-player game: fires on opponents' turns, silent on its controller's"
         );
     }
 }
