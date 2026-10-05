@@ -6449,7 +6449,7 @@ fn put_citadel_dragons_line(state: &mut GameState) -> ObjectId {
         obj.base_card_types = obj.card_types.clone();
     }
     // Trigger line only: no ETB anchor, so no ChosenLabelIs gate. Full-Oracle
-    // + NamedChoice coverage lives in citadel_siege_both_modes_fire_at_base.
+    // + NamedChoice coverage lives in citadel_siege_khans_fires_dragons_silent_on_controller_turn.
     apply_oracle_to_object(
         state,
         id,
