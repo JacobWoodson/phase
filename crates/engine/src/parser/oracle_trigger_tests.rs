@@ -33396,3 +33396,289 @@ fn brineborn_cutthroat_during_opponent_turn_constraint_pinned() {
         "Brineborn Cutthroat must stay OnlyDuringOpponentsTurn"
     );
 }
+
+/// CR 118.12 + CR 107.3c + CR 508.1c (unit 3b): Champions of Minas Tirith's
+/// third-party may-pay + decline routes to `unless_pay` (payer
+/// `TriggeringPlayer`, cost `ManaDynamic` over the payer's hand) with the
+/// decline restriction as the body — and the base `PayCost` production is
+/// fully supplanted (asserted absent, not just shadowed).
+#[test]
+fn champions_may_pay_decline_routes_to_unless_pay() {
+    use crate::types::ability::{
+        GameRestriction, ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope,
+        TriggerConstraint, UnlessPayModifier,
+    };
+    use crate::types::triggers::AttackTargetFilter;
+    let line = "At the beginning of combat on each opponent's turn, if you're the monarch, that opponent may pay {X}, where X is the number of cards in their hand. If they don't, they can't attack you this combat.";
+    let def = parse_trigger_line(line, "Champions of Minas Tirith");
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::BeginCombat));
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "phase-3 routing intact"
+    );
+    assert!(
+        matches!(def.condition, Some(TriggerCondition::IsMonarch { .. })),
+        "IsMonarch intervening-if intact, got {:?}",
+        def.condition
+    );
+    assert!(
+        !def.optional,
+        "the 'may' is the opponent's payment choice, never trigger optionality"
+    );
+    let UnlessPayModifier { cost, payer } = def.unless_pay.as_ref().expect("unless_pay set");
+    assert_eq!(*payer, TargetFilter::TriggeringPlayer);
+    assert_eq!(
+        cost,
+        &AbilityCost::ManaDynamic {
+            quantity: QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::ScopedPlayer,
+                },
+            },
+        },
+        "'their hand' rebinds to the payer's hand"
+    );
+    let execute = def.execute.as_deref().expect("execute present");
+    assert!(
+        !execute.optional,
+        "the 'may' is the opponent's payment choice, never controller optionality"
+    );
+    assert_eq!(execute.duration, Some(Duration::UntilEndOfCombat));
+    assert_eq!(
+        execute.effect.as_ref(),
+        &Effect::AddRestriction {
+            restriction: GameRestriction::ProhibitActivity {
+                source: crate::types::identifiers::ObjectId(0),
+                affected_players: RestrictionPlayerScope::ScopedPlayer,
+                expiry: RestrictionExpiry::EndOfCombat,
+                activity: ProhibitedActivity::Attack {
+                    defended: AttackTargetFilter::Player,
+                    protected_player: None,
+                    protected_scope: None,
+                },
+            },
+        }
+    );
+    assert!(
+        execute.sub_ability.is_none(),
+        "no PayCost root and no decline sub remain: PayCost fully supplanted, got {:?}",
+        execute.sub_ability
+    );
+}
+
+/// CR 118.12 (unit 3b): the full-Oracle Champions text carries the same
+/// unless_pay + restriction shape on its BeginCombat trigger.
+#[test]
+fn champions_full_text_may_pay_decline_shape() {
+    let parsed = parse_oracle_text(
+        "When this creature enters, you become the monarch.\nAt the beginning of combat on each opponent's turn, if you're the monarch, that opponent may pay {X}, where X is the number of cards in their hand. If they don't, they can't attack you this combat.",
+        "Champions of Minas Tirith",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Soldier".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.phase == Some(Phase::BeginCombat))
+        .expect("Champions full text must yield its BeginCombat trigger");
+    let modifier = trigger.unless_pay.as_ref().expect("unless_pay set");
+    assert_eq!(modifier.payer, TargetFilter::TriggeringPlayer);
+    assert!(
+        matches!(modifier.cost, AbilityCost::ManaDynamic { .. }),
+        "cost is ManaDynamic, got {:?}",
+        modifier.cost
+    );
+    let execute = trigger.execute.as_ref().expect("execute present");
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::AddRestriction { .. }),
+        "consequence is AddRestriction, got {:?}",
+        execute.effect
+    );
+    assert!(execute.sub_ability.is_none(), "no PayCost root remains");
+}
+
+/// Hostile (unit 3b): Overencumbered's static-cost sibling ("may pay {1} for
+/// each artifact", no {X}-where-X) must NOT route here — its base
+/// PayCost + GenericEffect shape and null constraint stand unchanged.
+#[test]
+fn overencumbered_static_cost_stays_generic_chain() {
+    let line = "At the beginning of combat on enchanted opponent's turn, that player may pay {1} for each artifact they control. If they don't, creatures can't attack this combat.";
+    let def = parse_trigger_line(line, "Overencumbered");
+    assert_eq!(def.phase, Some(Phase::BeginCombat));
+    assert_eq!(
+        def.constraint, None,
+        "Overencumbered must stay null (enchanted turn, not opponents' turns)"
+    );
+    assert_eq!(
+        def.unless_pay, None,
+        "static-cost may-pay must not route to unless_pay"
+    );
+    let execute = def.execute.as_deref().expect("execute present");
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::PayCost { .. }),
+        "base PayCost production intact, got {:?}",
+        execute.effect
+    );
+}
+
+/// Hostile (unit 3b): the "unless"-voice trigger production (Esper Sentinel)
+/// is unchanged — unless_pay via the unless path, Draw body, no restriction.
+#[test]
+fn esper_sentinel_unless_voice_unchanged() {
+    let line = "Whenever an opponent casts their first noncreature spell each turn, draw a card unless that player pays {X}, where X is this creature's power.";
+    let def = parse_trigger_line(line, "Esper Sentinel");
+    let modifier = def
+        .unless_pay
+        .as_ref()
+        .expect("unless-voice unless_pay intact");
+    assert!(
+        matches!(modifier.cost, AbilityCost::ManaDynamic { .. }),
+        "unless-voice ManaDynamic intact, got {:?}",
+        modifier.cost
+    );
+    let execute = def.execute.as_deref().expect("execute present");
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::Draw { .. }),
+        "unless-voice Draw body intact, got {:?}",
+        execute.effect
+    );
+    assert!(
+        !matches!(execute.effect.as_ref(), Effect::AddRestriction { .. }),
+        "the decline arm must not steal unless-voice triggers"
+    );
+}
+
+/// Hostile (unit 3b): Primordial Ooze's controller-voice decline ("you may
+/// pay {X} ... If you don't") stays on its base production — the arm's
+/// third-party subject grammar must not match controller voice.
+#[test]
+fn primordial_ooze_controller_decline_stays_off_arm() {
+    let parsed = parse_oracle_text(
+        "This creature attacks each combat if able.\nAt the beginning of your upkeep, put a +1/+1 counter on this creature. Then you may pay {X}, where X is the number of +1/+1 counters on it. If you don't, tap this creature and it deals X damage to you.",
+        "Primordial Ooze",
+        &[],
+        &["Creature".to_string()],
+        &["Ooze".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.phase == Some(Phase::Upkeep))
+        .expect("Ooze upkeep trigger must parse (reach-guard)");
+    assert_eq!(trigger.mode, TriggerMode::Phase);
+    assert!(
+        trigger.execute.is_some(),
+        "Ooze body must parse (reach-guard)"
+    );
+    assert_eq!(
+        trigger.unless_pay, None,
+        "controller-voice decline must not route to unless_pay"
+    );
+}
+
+/// Class axis (unit 3b): the arm accepts any where-X quantity — a target-free
+/// quantity (source power) passes the payer rebind untouched while the
+/// decline restriction still builds. Synthetic grammar probe (no printed
+/// member pairs power-X with a decline restriction today).
+#[test]
+fn may_pay_decline_accepts_non_hand_quantity() {
+    let line = "At the beginning of combat on each opponent's turn, that opponent may pay {X}, where X is this creature's power. If they don't, they can't attack you this combat.";
+    let def = parse_trigger_line(line, "Unit 3b Probe");
+    let modifier = def.unless_pay.as_ref().expect("unless_pay set");
+    assert_eq!(modifier.payer, TargetFilter::TriggeringPlayer);
+    assert!(
+        matches!(
+            modifier.cost,
+            AbilityCost::ManaDynamic {
+                quantity: QuantityExpr::Ref {
+                    qty: QuantityRef::Power { .. },
+                },
+            }
+        ),
+        "target-free power quantity passes through, got {:?}",
+        modifier.cost
+    );
+    let execute = def.execute.as_deref().expect("execute present");
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::AddRestriction { .. }),
+        "consequence still builds, got {:?}",
+        execute.effect
+    );
+}
+
+/// Class axis (unit 3b): the "that player's hand" possessive rebinds to the
+/// payer exactly like "their hand". Synthetic grammar probe.
+#[test]
+fn may_pay_decline_rebinds_that_player_hand() {
+    let line = "At the beginning of combat on each opponent's turn, that opponent may pay {X}, where X is the number of cards in that player's hand. If they don't, they can't attack you this combat.";
+    let def = parse_trigger_line(line, "Unit 3b Probe");
+    let modifier = def.unless_pay.as_ref().expect("unless_pay set");
+    assert_eq!(
+        modifier.cost,
+        AbilityCost::ManaDynamic {
+            quantity: QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::ScopedPlayer,
+                },
+            },
+        },
+        "'that player's hand' rebinds to the payer's hand, got {:?}",
+        modifier.cost
+    );
+}
+
+/// Guard (unit 3b): the arm requires full consumption — trailing text after
+/// the consequence declines the arm and the generic chain takes the body
+/// (base PayCost behavior).
+#[test]
+fn may_pay_decline_requires_full_consumption() {
+    let line = "At the beginning of combat on each opponent's turn, if you're the monarch, that opponent may pay {X}, where X is the number of cards in their hand. If they don't, they can't attack you this combat. Draw a card.";
+    let def = parse_trigger_line(line, "Unit 3b Probe");
+    assert_eq!(def.unless_pay, None, "trailing text must decline the arm");
+    let execute = def.execute.as_deref().expect("execute present");
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::PayCost { .. }),
+        "generic-chain fallback intact, got {:?}",
+        execute.effect
+    );
+}
+
+/// Alternation (unit 3b): the "pays" voice routes identically to "may pay".
+/// Synthetic grammar probe (no printed pays+decline trigger member today).
+#[test]
+fn pays_voice_routes_to_unless_pay() {
+    let line = "At the beginning of combat on each opponent's turn, that player pays {X}, where X is the number of cards in their hand. If they don't, they can't attack you this combat.";
+    let def = parse_trigger_line(line, "Unit 3b Probe");
+    let modifier = def.unless_pay.as_ref().expect("unless_pay set");
+    assert_eq!(modifier.payer, TargetFilter::TriggeringPlayer);
+    assert!(
+        matches!(modifier.cost, AbilityCost::ManaDynamic { .. }),
+        "cost is ManaDynamic, got {:?}",
+        modifier.cost
+    );
+    let execute = def.execute.as_deref().expect("execute present");
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::AddRestriction { .. }),
+        "consequence is AddRestriction, got {:?}",
+        execute.effect
+    );
+}
+
+/// Guard (unit 3b): duration is a required discriminator — a bare "can't
+/// attack" decline declines the arm (no expiry could be honestly stamped).
+#[test]
+fn may_pay_decline_requires_combat_duration() {
+    let line = "At the beginning of combat on each opponent's turn, that opponent may pay {X}, where X is the number of cards in their hand. If they don't, they can't attack you.";
+    let def = parse_trigger_line(line, "Unit 3b Probe");
+    assert_eq!(
+        def.unless_pay, None,
+        "duration-less decline must decline the arm"
+    );
+    assert!(
+        def.execute.is_some(),
+        "body still parses via the generic chain (reach-guard)"
+    );
+}

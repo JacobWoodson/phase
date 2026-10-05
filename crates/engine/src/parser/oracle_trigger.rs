@@ -10,10 +10,10 @@ use nom::Parser;
 use super::oracle_effect::conditions::source_saddled_filter;
 use super::oracle_effect::{
     attach_terminal_die_result_branches_before_finalization, condition_text_is_rehomeable,
-    lower_effect_chain_ir, parse_effect_chain_ir, parse_player_relative_clause,
+    lower_effect_chain_ir, parse_effect_chain_ir, parse_player_relative_clause, parse_where_x_is,
     try_parse_reanimator_aura_etb_effect_ir, try_parse_reanimator_aura_grant_etb_effect_ir,
 };
-use super::oracle_ir::ast::parsed_clause;
+use super::oracle_ir::ast::{parsed_clause, ParsedEffectClause};
 use super::oracle_ir::context::{ParseContext, TriggerConditionScope};
 use super::oracle_ir::doc::PrintedTriggerIndex;
 use super::oracle_ir::effect_chain::{DieResultBranchIr, EffectChainIr};
@@ -37,7 +37,10 @@ use super::oracle_nom::primitives::{
     self as nom_primitives, scan_contains, scan_preceded, scan_split_at_phrase,
 };
 use super::oracle_nom::target::parse_type_phrase as parse_type_phrase_nom;
-use super::oracle_static::{parse_commander_subject_filter_prefix, typed_filter_for_subtype};
+use super::oracle_static::{
+    parse_cant_attack_defended_scope_nom, parse_commander_subject_filter_prefix,
+    typed_filter_for_subtype,
+};
 use super::oracle_target::{
     attachment_kinds_filter_prop, parse_attachment_kind_disjunction, parse_type_phrase_folding,
     parse_type_phrase_folding_with_ctx, starts_with_type_list_continuation, starts_with_type_word,
@@ -55,17 +58,19 @@ use crate::types::ability::{
     AttackersDeclaredCountSubject, CardSelectionMode, CardTypeSetSource, CastManaObjectScope,
     CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator, ControllerRef, CountScope,
     CounterTriggerFilter, DamageAmountScope, DamageAmountThreshold, DamageChannel,
-    DamageKindFilter, DelayedTriggerCondition, DestinationConstraint, DieResultFilter, Effect,
-    EffectScope, FilterProp, ManaAbilityProducedFilter, ObjectScope, OriginConstraint,
-    ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate, PtStat,
-    PtValueScope, QuantityExpr, QuantityRef, RenownSubject, SacrificeAggregateStat, SacrificeCost,
-    SacrificeRequirement, SharedQuality, StaticCondition, SubAbilityLink, TapCreaturesRequirement,
-    TapStateChange, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
+    DamageKindFilter, DelayedTriggerCondition, DestinationConstraint, DieResultFilter, Duration,
+    Effect, EffectScope, FilterProp, GameRestriction, ManaAbilityProducedFilter, ObjectScope,
+    OriginConstraint, ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope,
+    ProhibitedActivity, PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef,
+    RenownSubject, RestrictionExpiry, RestrictionPlayerScope, SacrificeAggregateStat,
+    SacrificeCost, SacrificeRequirement, SharedQuality, StaticCondition, SubAbilityLink,
+    TapCreaturesRequirement, TapStateChange, TargetFilter, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause, ZoneRef,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
 use crate::types::events::{ClashResult, PlayerActionKind};
+use crate::types::identifiers::ObjectId;
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::{ManaColor, ManaType};
 use crate::types::phase::Phase;
@@ -1473,6 +1478,19 @@ pub(crate) fn parse_trigger_line_with_index_ir(
 
     // CR 118.12: Detect "unless [player] pays {cost}" in effect text.
     let (effect_for_parse, unless_pay) = extract_unless_pay_modifier(&effect_final, &cond_lower);
+    // CR 118.12 (unit 3b): third-party-voice may-pay with a decline
+    // restriction ("that opponent may pay {X}, where X is <quantity>. If
+    // they don't, <consequence>"). The "unless" extractor above declines
+    // unless-less text; recognize this sibling shape here so the payment
+    // becomes `unless_pay` and the prebuilt consequence becomes the body.
+    // Disjoint from the reflexive split (controller "you may" voice) by
+    // subject; anything unrecognized falls through to the generic chain.
+    let (unless_pay, decline_consequence) = match unless_pay {
+        Some(modifier) => (Some(modifier), None),
+        None => try_parse_may_pay_decline_consequence(&effect_for_parse)
+            .map(|(modifier, consequence)| (Some(modifier), Some(consequence)))
+            .unwrap_or((None, None)),
+    };
 
     // CR 107.4 + CR 202.1 + CR 603.4: Stage the cast-trigger's colored-mana-symbol
     // qualifier color (Namor) so a "create that many tokens" effect clause can
@@ -1589,6 +1607,20 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                     "reflexive optional payment",
                     &effect_for_parse,
                 )),
+                None,
+                effect_ctx.actor.clone(),
+                effect_ctx.in_trigger,
+            )))
+        } else if let Some(consequence) = decline_consequence {
+            // Unit 3b: prebuilt decline consequence (the generic chain
+            // cannot build the "can't attack ... this combat" restriction);
+            // the payment rode into `unless_pay` above. The "may" is the
+            // opponent's payment choice, never controller optionality.
+            optional = false;
+            Some(TriggerBody::EffectChain(EffectChainIr::single_clause(
+                &effect_for_parse,
+                AbilityKind::Spell,
+                consequence,
                 None,
                 effect_ctx.actor.clone(),
                 effect_ctx.in_trigger,
@@ -3778,6 +3810,197 @@ fn extract_unless_pay_modifier(
     let cleaned = text[..unless_pos].trim().to_string();
 
     (cleaned, Some(UnlessPayModifier { cost, payer }))
+}
+
+/// CR 118.12 + CR 107.3c + CR 508.1c (unit 3b): third-party-voice optional
+/// payment with a decline restriction and no "unless" — "that opponent may
+/// pay {X}, where X is <quantity>. If they don't, <consequence>" (Champions
+/// of Minas Tirith).
+///
+/// Sibling of `extract_unless_pay_modifier`, which declines unless-less text:
+/// the payment becomes `unless_pay` (payer `TriggeringPlayer`, cost
+/// `ManaDynamic` over the where-X quantity rebound to the payer) and the
+/// decline consequence becomes the parsed body. Runs only when the "unless"
+/// extractor returned `None`; disjoint from the reflexive split (controller
+/// "you may" voice) by subject.
+///
+/// Fail-closed: returns `None` unless the pay clause, the where-X quantity,
+/// the decline prefix, AND a supported restriction consequence all parse,
+/// with full consumption — anything else falls through to the generic chain
+/// (base behavior).
+fn try_parse_may_pay_decline_consequence(
+    effect_text: &str,
+) -> Option<(UnlessPayModifier, ParsedEffectClause)> {
+    let lower = effect_text.to_lowercase();
+    let input = lower.as_str();
+    // Pay-clause subject: anaphoric third-party only ("you" stays reflexive).
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("that opponent "),
+        tag("that player "),
+        tag("they "),
+    ))
+    .parse(input)
+    .ok()?;
+    let (input, _) = alt((tag::<_, _, OracleError<'_>>("may pay "), tag("pays ")))
+        .parse(input)
+        .ok()?;
+    // Exactly "{X}": a second mana shard is a different (static-scale) cost.
+    let (input, _) = tag::<_, _, OracleError<'_>>("{x}").parse(input).ok()?;
+    if tag::<_, _, OracleError<'_>>("{")
+        .parse(input.trim_start())
+        .is_ok()
+    {
+        return None;
+    }
+    // Where-X clause up to its sentence end; the shared authority parses it.
+    let (input, where_text) = terminated(take_until::<_, _, OracleError<'_>>(". "), tag(". "))
+        .parse(input)
+        .ok()?;
+    let mut quantity = parse_where_x_is(where_text)?;
+    rebind_may_pay_quantity_to_payer(&mut quantity);
+    // Decline prefix.
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("if they don't, "),
+        tag("if that player doesn't, "),
+        tag("if that opponent doesn't, "),
+    ))
+    .parse(input)
+    .ok()?;
+    // Consequence: payer-subject attack restriction this combat.
+    let consequence = parse_may_pay_decline_restriction(input)?;
+    let modifier = UnlessPayModifier {
+        cost: AbilityCost::ManaDynamic { quantity },
+        payer: TargetFilter::TriggeringPlayer,
+    };
+    Some((modifier, consequence))
+}
+
+/// CR 508.1c + CR 109.5 + CR 608.2c (unit 3b): the decline-consequence half
+/// of `try_parse_may_pay_decline_consequence` — "<payer> can't attack <scope>
+/// this combat" as a typed attack restriction.
+///
+/// Mirrors `try_parse_that_player_cant_attack_prohibition`
+/// (oracle_effect/mod.rs) with two decline-context bindings: the restricted
+/// player is the payer (fire-stamped `ScopedPlayer`, resolved at creation —
+/// NOT the parent-target anaphor, since this shape declares no target), and
+/// the combat window stamps the final `EndOfCombat` expiry directly (no
+/// resolution-time anchoring needed, unlike player-anchored next-turn
+/// expiries). The defended scope reuses the shared combinator. Duration is a
+/// required discriminator (a bare "can't attack" stays out).
+fn parse_may_pay_decline_restriction(input: &str) -> Option<ParsedEffectClause> {
+    // Restricted subject: the payer anaphor in any of its printed forms.
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("they "),
+        tag("that player "),
+        tag("that opponent "),
+    ))
+    .parse(input)
+    .ok()?;
+    let (input, _) = preceded(
+        alt((tag::<_, _, OracleError<'_>>("can't"), tag("cannot"))),
+        tag(" attack"),
+    )
+    .parse(input)
+    .ok()?;
+    let (input, defended) = parse_cant_attack_defended_scope_nom(input).ok()?;
+    // A bare "can't attack" with no scope defends the player only (mirrors
+    // the shared recognizer).
+    let defended = defended.unwrap_or(AttackTargetFilter::Player);
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>(" this combat"),
+        tag(" until end of combat"),
+    ))
+    .parse(input)
+    .ok()?;
+    if !input.trim_matches(['.', ' ']).is_empty() {
+        return None;
+    }
+    let mut clause = parsed_clause(Effect::AddRestriction {
+        restriction: GameRestriction::ProhibitActivity {
+            source: ObjectId(0),
+            affected_players: RestrictionPlayerScope::ScopedPlayer,
+            expiry: RestrictionExpiry::EndOfCombat,
+            activity: ProhibitedActivity::Attack {
+                defended,
+                protected_player: None,
+                protected_scope: None,
+            },
+        },
+    });
+    clause.duration = Some(Duration::UntilEndOfCombat);
+    Some(clause)
+}
+
+/// CR 109.5 + CR 608.2c (unit 3b): rebind Target-form player references in a
+/// may-pay-decline cost quantity to the payer. The pay clause declares no
+/// target (anaphoric-only subject grammar), so "their"/"that player"
+/// quantities MUST NOT keep their parsed `Target` form (which resolves to 0
+/// with no player target); they anaphor to the payer — the fire-stamped
+/// scoped player on this trigger. Controller-relative ("you") and
+/// target-free quantities pass through untouched.
+///
+/// Mirrors the Target→ScopedPlayer table in `rewrite_player_scope_refs`
+/// (oracle_effect/mod.rs) for the may-pay context; keep the two in sync (a
+/// shared extraction needs that file and is out of unit-3b scope).
+fn rebind_may_pay_quantity_to_payer(expr: &mut QuantityExpr) {
+    match expr {
+        QuantityExpr::Ref { qty } => match qty {
+            QuantityRef::LifeTotal {
+                player: PlayerScope::Target,
+            } => {
+                *qty = QuantityRef::LifeTotal {
+                    player: PlayerScope::ScopedPlayer,
+                }
+            }
+            QuantityRef::HandSize {
+                player: PlayerScope::Target,
+            } => {
+                *qty = QuantityRef::HandSize {
+                    player: PlayerScope::ScopedPlayer,
+                }
+            }
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Target,
+            } => {
+                *qty = QuantityRef::LifeLostThisTurn {
+                    player: PlayerScope::ScopedPlayer,
+                }
+            }
+            QuantityRef::TargetZoneCardCount { zone } => match zone {
+                ZoneRef::Hand => {
+                    *qty = QuantityRef::HandSize {
+                        player: PlayerScope::ScopedPlayer,
+                    }
+                }
+                ZoneRef::Library | ZoneRef::Graveyard => {
+                    *qty = QuantityRef::ZoneCardCount {
+                        zone: zone.clone(),
+                        card_types: Vec::new(),
+                        scope: crate::types::ability::CountScope::ScopedPlayer,
+                        filter: None,
+                    }
+                }
+                ZoneRef::Exile => {}
+            },
+            _ => {}
+        },
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Offset { inner, .. } => rebind_may_pay_quantity_to_payer(inner),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            for inner in exprs {
+                rebind_may_pay_quantity_to_payer(inner);
+            }
+        }
+        QuantityExpr::UpTo { max } => rebind_may_pay_quantity_to_payer(max),
+        QuantityExpr::Power { exponent, .. } => rebind_may_pay_quantity_to_payer(exponent),
+        QuantityExpr::Difference { left, right } => {
+            rebind_may_pay_quantity_to_payer(left);
+            rebind_may_pay_quantity_to_payer(right);
+        }
+        QuantityExpr::Fixed { .. } => {}
+    }
 }
 
 fn condition_introduces_scoped_phase_player(cond_lower: &str) -> bool {

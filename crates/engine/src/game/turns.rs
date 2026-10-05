@@ -279,6 +279,21 @@ fn complete_end_combat_teardown(state: &mut GameState) {
     state
         .pending_damage_replacements
         .retain(|r| !matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat)));
+    // CR 511.3: "this combat" game restrictions expire with every other
+    // combat-scoped effect (unit 3b: Champions of Minas Tirith's decline
+    // restriction is the first producer). One line covers both end-of-combat
+    // callers (the EndCombat step arm and `end_combat_phase_to_postcombat`)
+    // through this single teardown authority.
+    state.restrictions.retain(|r| {
+        use crate::types::ability::{GameRestriction, RestrictionExpiry};
+        match r {
+            GameRestriction::DamagePreventionDisabled { expiry, .. }
+            | GameRestriction::ProhibitActivity { expiry, .. }
+            | GameRestriction::CantEnterBattlefieldFrom { expiry, .. } => {
+                !matches!(expiry, RestrictionExpiry::EndOfCombat)
+            }
+        }
+    });
 }
 
 /// CR 724.2d: End the current combat phase by removing everything from combat,
