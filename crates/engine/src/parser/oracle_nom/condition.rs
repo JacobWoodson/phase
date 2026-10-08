@@ -1719,6 +1719,14 @@ fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
                 ],
             }
         }),
+        // Digital-only Alchemy (no CR entry): "if you have a boon"
+        // (Underbridge Warlock). Only the controller subject is printed.
+        value(
+            StaticCondition::HasBoon {
+                player: PlayerScope::Controller,
+            },
+            tag("you have a boon"),
+        ),
         // CR 726.3: Initiative status
         value(
             StaticCondition::IsInitiative,

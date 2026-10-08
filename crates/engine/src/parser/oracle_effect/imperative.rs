@@ -12297,6 +12297,78 @@ fn parse_activation_cost_referent(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+/// Digital-only Alchemy (no CR entry): "note <quantity>" where `<quantity>`
+/// is any shared-grammar quantity ("its power") or the licensed excess
+/// demonstrative ("that excess damage").
+///
+/// CR 120.10: the bare demonstrative "that excess damage" is bound ONLY
+/// outside trigger and replacement bodies (`!ctx.in_trigger &&
+/// !ctx.in_replacement`). Inside a trigger body the antecedent could be the
+/// triggering event — a different resolution whose excess tally was cleared
+/// at depth-0 (Fall of Cair Andros) — while in a spell/activated ability the
+/// damage leg and the note share one resolution (Contest of Claws), so
+/// `PreviousEffectAmount { Excess }` reads correctly. This trigger-context
+/// gate is the same-resolution guarantee the where-X licence
+/// (`rebind_context_dependent_where_x`) enforces via the sibling condition;
+/// the note needs no condition of its own (an ungated note honestly reads 0
+/// when no excess was dealt).
+fn parse_note_number_clause(lower: &str, ctx: &ParseContext) -> Option<ImperativeFamilyAst> {
+    let rest = lower
+        .strip_prefix("note ")?
+        .trim()
+        .trim_end_matches('.')
+        .trim();
+    if rest.is_empty() {
+        return None;
+    }
+    if rest == "that excess damage" {
+        if ctx.in_trigger || ctx.in_replacement {
+            return None;
+        }
+        return Some(ImperativeFamilyAst::NoteNumber {
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::PreviousEffectAmount {
+                    channel: crate::types::ability::DamageChannel::Excess,
+                    aggregate: crate::types::ability::AggregateFunction::Sum,
+                },
+            },
+        });
+    }
+    // CR 608.2k: in a trigger body the bare possessive ("its power")
+    // anaphors the triggering object (Dragonborn Immolator's dies trigger
+    // notes the DIED creature) — the shared leaf's context-free `Source`
+    // would misbind whenever source and trigger subject differ.
+    if ctx.in_trigger {
+        if let Some(value) = anaphoric_trigger_body_note_value(rest) {
+            return Some(ImperativeFamilyAst::NoteNumber { value });
+        }
+    }
+    let (_, value) = all_consuming(nom_quantity::parse_quantity)
+        .parse(rest)
+        .ok()?;
+    Some(ImperativeFamilyAst::NoteNumber { value })
+}
+
+/// CR 608.2k: direct `Anaphoric` binding for the three printed "its …"
+/// note surfaces in trigger bodies (see `parse_note_number_clause`).
+/// Surface-gated: a fixed "~'s power" keeps `Source`, and spells keep
+/// `Source` ("its" there can only be the source).
+fn anaphoric_trigger_body_note_value(rest: &str) -> Option<QuantityExpr> {
+    let qty = match rest {
+        "its power" => QuantityRef::Power {
+            scope: crate::types::ability::ObjectScope::Anaphoric,
+        },
+        "its toughness" => QuantityRef::Toughness {
+            scope: crate::types::ability::ObjectScope::Anaphoric,
+        },
+        "its mana value" => QuantityRef::ObjectManaValue {
+            scope: crate::types::ability::ObjectScope::Anaphoric,
+        },
+        _ => return None,
+    };
+    Some(QuantityExpr::Ref { qty })
+}
+
 /// CR 205.1a + CR 205.1b + CR 110.2a + CR 122.1 + CR 115.2: recognize the
 /// `assimilate <target phrase>` keyword action and return the phrase's target
 /// filter.
@@ -12675,6 +12747,15 @@ pub(super) fn parse_imperative_family_ast(
         .is_ok()
     {
         return Some(ImperativeFamilyAst::NoteManaSpent);
+    }
+
+    // Digital-only Alchemy (no CR entry): "note <quantity>" — record a
+    // number for the resolving player (Dragonborn Immolator's "note its
+    // power"; Mephit's Enthusiasm / Molten Impact's "note that excess
+    // damage"). Runs after the mana-spent pre-check: disjoint surfaces
+    // ("note the type of mana …" never parses as a quantity).
+    if let Some(ast) = parse_note_number_clause(lower.trim(), ctx) {
+        return Some(ast);
     }
 
     // NOTE: when adding verbs here, also add them to CLAUSE_HEAD_VERBS in
@@ -15884,6 +15965,7 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::Investigate => Effect::Investigate,
         ImperativeFamilyAst::Learn => Effect::Learn,
         ImperativeFamilyAst::NoteManaSpent => Effect::NoteManaSpent,
+        ImperativeFamilyAst::NoteNumber { value } => Effect::NoteNumber { value },
         // CR 701.40a: Default subject is the controller ("you manifest..."). Subject
         // lowering for "its controller manifests..." routes through the dedicated
         // subject-predicate arm in `lower_subject_predicate_ast` below, which

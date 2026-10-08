@@ -47,7 +47,7 @@ use crate::types::zones::Zone;
 
 use super::ability_utils::build_resolved_from_def;
 use super::conditions::{
-    counter_condition_matches_lki, eval_has_city_blessing, eval_has_enduring_story,
+    counter_condition_matches_lki, eval_has_boon, eval_has_city_blessing, eval_has_enduring_story,
     eval_is_initiative, eval_is_monarch, eval_no_monarch, eval_source_is_attacking,
 };
 use super::filter::{
@@ -12095,6 +12095,7 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber
+        | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
         | QuantityRef::SpellsCastLastTurn
         | QuantityRef::DungeonsCompleted
@@ -12883,6 +12884,45 @@ fn static_gate_bridge_loses_zone(condition: &StaticCondition) -> bool {
 /// (the controller-scoped `QuantityCheck` populations pinned by
 /// `non_battlefield_presence_gate_declines_the_fire_time_hoist` and its
 /// siblings) — buying nothing and costing CR 603.4's fire-time half.
+/// Digital-only Alchemy (no CR entry): a boon's intervening-`if`, read off
+/// its EMBEDDED trigger.
+///
+/// The boon installer (`game::effects::create_boon`) lowers the quoted text
+/// as a printed trigger line, so an inner "if …" lands on the embedded
+/// `TriggerDefinition.condition` — not on the delayed body where
+/// [`delayed_intervening_if`] looks. The condition is already a
+/// `TriggerCondition`, so unlike the hoisted body gate it crosses no
+/// ability→static→trigger bridge and needs none of that path's fidelity
+/// guards; like a printed trigger's gate it is evaluated unconditionally
+/// (CR 603.4: false means the ability does nothing).
+///
+/// Gated on `is_boon`: no other delayed trigger carries an embedded
+/// condition (`effects::delayed_trigger` never sets one), so this gate is
+/// inert for every existing card. `or_trigger` is always `None` for boons
+/// (one printed trigger per boon) but joins the conjunction defensively so a
+/// future disjunctive boon cannot lose half its gate.
+fn boon_embedded_condition(delayed: &DelayedTrigger) -> Option<TriggerCondition> {
+    if !delayed.is_boon {
+        return None;
+    }
+    let (trigger, or_trigger) = match &delayed.condition {
+        crate::types::ability::DelayedTriggerCondition::WhenNextEvent {
+            trigger,
+            or_trigger,
+            ..
+        } => (trigger, or_trigger),
+        _ => return None,
+    };
+    let mut conditions: Vec<TriggerCondition> = Vec::new();
+    conditions.extend(trigger.condition.clone());
+    conditions.extend(or_trigger.as_ref().and_then(|t| t.condition.clone()));
+    match conditions.len() {
+        0 => None,
+        1 => conditions.into_iter().next(),
+        _ => Some(TriggerCondition::And { conditions }),
+    }
+}
+
 fn delayed_intervening_if(ability: &ResolvedAbility) -> Option<TriggerCondition> {
     if delayed_body_outlives_a_false_gate(ability) {
         return None;
@@ -12989,8 +13029,20 @@ fn delayed_trigger_to_context(
     // entry so `stack.rs`'s resolution recheck applies to a delayed triggered
     // ability exactly as it does to a printed one. `delayed_intervening_if` is
     // the SAME authority the collection gate below used, so the two halves of
-    // the CR 603.4 pair cannot read different predicates.
-    let condition = delayed_intervening_if(&trigger.ability);
+    // the CR 603.4 pair cannot read different predicates. A boon conjoins its
+    // embedded gate the same way — the collection gate above checked both, so
+    // the carried conjunction is the same predicate pair, not a new one.
+    let condition = match (
+        delayed_intervening_if(&trigger.ability),
+        boon_embedded_condition(&trigger),
+    ) {
+        (Some(hoisted), Some(embedded)) => Some(TriggerCondition::And {
+            conditions: vec![hoisted, embedded],
+        }),
+        (Some(hoisted), None) => Some(hoisted),
+        (None, Some(embedded)) => Some(embedded),
+        (None, None) => None,
+    };
     PendingTriggerContext::delayed(
         PendingTrigger {
             source_id: trigger.source_id,
@@ -13082,6 +13134,28 @@ fn collect_matching_delayed_triggers(
                     // a BROAD event filter) stays installed and gets its gate
                     // re-checked on the next occurrence, per CR 603.7b's
                     // stated-duration clause.
+                    if delayed.one_shot && false_gate_consumes_one_shot(&delayed.condition) {
+                        to_discard.push((
+                            idx,
+                            super::lifecycle::DelayedTerminalDisposition::InterveningIfFalse,
+                        ));
+                    }
+                    continue;
+                }
+            }
+            // Digital-only Alchemy (no CR entry): CR 603.4 (first half) for a
+            // boon's EMBEDDED gate — the hoist above cannot see it. Same
+            // evaluator, same single-occurrence discard: the boon spent its
+            // one trigger event. Inert for non-boons (the helper gates on
+            // `is_boon`).
+            if let Some(condition) = boon_embedded_condition(delayed) {
+                if !check_trigger_condition_with_source(
+                    state,
+                    &condition,
+                    delayed.controller,
+                    delayed.ability.trigger_source.as_ref(),
+                    Some(&trigger_event),
+                ) {
                     if delayed.one_shot && false_gate_consumes_one_shot(&delayed.condition) {
                         to_discard.push((
                             idx,
@@ -15263,6 +15337,19 @@ fn evaluate_trigger_condition_with_source(
         TriggerCondition::HasCityBlessing => eval_has_city_blessing(state, controller),
         // CR 702.195b: True when the controller has the enduring story designation.
         TriggerCondition::HasEnduringStory => eval_has_enduring_story(state, controller),
+        // Digital-only Alchemy (no CR entry): "if you have a boon". The
+        // player axis resolves like `IsMonarch`'s; only `Controller` is
+        // printed (Underbridge Warlock).
+        TriggerCondition::HasBoon { player } => {
+            crate::game::quantity::resolve_player_scope_for_trigger_check(
+                state,
+                player,
+                controller,
+                source_context,
+                trigger_event,
+            )
+            .is_some_and(|pid| eval_has_boon(state, pid))
+        }
         // CR 110.5b: True when the trigger source is tapped. Negation ("untapped")
         // wraps via `Not { Box::new(SourceIsTapped) }`. No battlefield zone guard
         // (trigger conditions; zone already constrained by functioning-abilities path).
@@ -16447,6 +16534,7 @@ fn quantity_ref_refs_cost_paid_object(qty: &QuantityRef) -> bool {
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber
         | QuantityRef::PlayerChosenNumber { .. }
+        | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::SpellsCastLastTurn
@@ -21911,6 +21999,7 @@ pub mod tests {
             controller: PlayerId(0),
             source_id: source,
             one_shot: true,
+            is_boon: false,
             provenance: DelayedInstallIdentity::LegacyDelayed,
         });
 
@@ -23819,6 +23908,7 @@ pub mod tests {
             controller,
             source_id: source_draw,
             one_shot: true,
+            is_boon: false,
             provenance: DelayedInstallIdentity::LegacyDelayed,
         });
         // DT2: "when [a creature] dies, gain 1 life" (GainLife) — distinct effect.
@@ -23838,6 +23928,7 @@ pub mod tests {
             controller,
             source_id: source_gain,
             one_shot: true,
+            is_boon: false,
             provenance: DelayedInstallIdentity::LegacyDelayed,
         });
 
@@ -23989,6 +24080,7 @@ pub mod tests {
                 controller,
                 source_id: source,
                 one_shot: true,
+                is_boon: false,
                 provenance: DelayedInstallIdentity::LegacyDelayed,
             });
 
@@ -24107,6 +24199,7 @@ pub mod tests {
                 controller,
                 source_id: source,
                 one_shot: true,
+                is_boon: false,
                 provenance: DelayedInstallIdentity::LegacyDelayed,
             });
 
@@ -24212,6 +24305,7 @@ pub mod tests {
                 controller,
                 source_id: source,
                 one_shot: true,
+                is_boon: false,
                 provenance: DelayedInstallIdentity::LegacyDelayed,
             });
 
@@ -24345,6 +24439,7 @@ pub mod tests {
                     controller,
                     source_id: source,
                     one_shot: true,
+                    is_boon: false,
                     provenance: DelayedInstallIdentity::LegacyDelayed,
                 });
             }
@@ -24507,6 +24602,7 @@ pub mod tests {
                 // Mirrors `effects::delayed_trigger`'s own computation
                 // (`one_shot = !matches!(condition, WheneverEvent { .. })`).
                 one_shot: false,
+                is_boon: false,
                 provenance: DelayedInstallIdentity::LegacyDelayed,
             });
 
@@ -24642,6 +24738,7 @@ pub mod tests {
             controller,
             source_id: source,
             one_shot: true,
+            is_boon: false,
             provenance: DelayedInstallIdentity::LegacyDelayed,
         });
 
@@ -24752,6 +24849,7 @@ pub mod tests {
                 controller,
                 source_id: source,
                 one_shot: true,
+                is_boon: false,
                 provenance: DelayedInstallIdentity::LegacyDelayed,
             });
 
@@ -24857,6 +24955,7 @@ pub mod tests {
                 controller,
                 source_id: source,
                 one_shot: true,
+                is_boon: false,
                 provenance: DelayedInstallIdentity::LegacyDelayed,
             });
 
@@ -25023,6 +25122,7 @@ pub mod tests {
                 controller,
                 source_id: source,
                 one_shot: true,
+                is_boon: false,
                 provenance: DelayedInstallIdentity::LegacyDelayed,
             });
 
@@ -25162,6 +25262,7 @@ pub mod tests {
                 controller,
                 source_id: source,
                 one_shot: true,
+                is_boon: false,
                 provenance: DelayedInstallIdentity::LegacyDelayed,
             });
 
@@ -25329,6 +25430,7 @@ pub mod tests {
                 controller,
                 source_id: source,
                 one_shot: true,
+                is_boon: false,
                 provenance: DelayedInstallIdentity::LegacyDelayed,
             });
 
@@ -25434,6 +25536,7 @@ pub mod tests {
                 controller,
                 source_id: source,
                 one_shot: true,
+                is_boon: false,
                 provenance: DelayedInstallIdentity::LegacyDelayed,
             });
 
@@ -25675,6 +25778,7 @@ pub mod tests {
                 controller,
                 source_id: source,
                 one_shot: true,
+                is_boon: false,
                 provenance: DelayedInstallIdentity::LegacyDelayed,
             });
 
@@ -25853,6 +25957,7 @@ pub mod tests {
                 controller,
                 source_id: source,
                 one_shot: true,
+                is_boon: false,
                 provenance: DelayedInstallIdentity::LegacyDelayed,
             });
 
@@ -25992,6 +26097,7 @@ pub mod tests {
                 controller,
                 source_id: source,
                 one_shot: true,
+                is_boon: false,
                 provenance: DelayedInstallIdentity::LegacyDelayed,
             });
 
@@ -26082,6 +26188,7 @@ pub mod tests {
                 controller,
                 source_id: source,
                 one_shot: true,
+                is_boon: false,
                 provenance: DelayedInstallIdentity::LegacyDelayed,
             });
 
@@ -26178,6 +26285,7 @@ pub mod tests {
             controller,
             source_id: source,
             one_shot: true,
+            is_boon: false,
             provenance: DelayedInstallIdentity::LegacyDelayed,
         });
 
@@ -26251,6 +26359,7 @@ pub mod tests {
             controller,
             source_id: delayed_source,
             one_shot: true,
+            is_boon: false,
             provenance: DelayedInstallIdentity::LegacyDelayed,
         });
 
@@ -26518,6 +26627,7 @@ pub mod tests {
             controller,
             source_id: rider_source,
             one_shot: false,
+            is_boon: false,
             // A normal (legacy) delayed trigger with no command receipt — engine
             // test scaffolding, not a rule implementation, so no CR citation. (#6933
             // canonicalized `provenance` from Option to the DelayedInstallIdentity enum.)
@@ -39521,6 +39631,7 @@ pub mod tests {
             controller: PlayerId(0),
             source_id,
             one_shot: true,
+            is_boon: false,
             provenance: DelayedInstallIdentity::ReceiptEligible(origin),
         });
         (source_id, origin)
@@ -39857,6 +39968,7 @@ pub mod tests {
             controller: PlayerId(0),
             source_id,
             one_shot: true,
+            is_boon: false,
             provenance: DelayedInstallIdentity::ReceiptEligible(origin),
         });
 

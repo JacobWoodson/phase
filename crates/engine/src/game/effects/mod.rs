@@ -91,6 +91,7 @@ pub mod copy_spell;
 pub mod copy_token_blocking;
 pub mod counter;
 pub mod counters;
+pub mod create_boon;
 pub mod create_damage_replacement;
 pub mod create_draw_replacement;
 pub mod create_emblem;
@@ -172,6 +173,7 @@ pub mod mill;
 pub mod monstrosity;
 pub mod myriad;
 pub mod note_mana_spent;
+pub mod note_number;
 pub mod open_booster_pack;
 pub mod opponent_guess;
 pub mod overload;
@@ -5367,6 +5369,10 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
         | Effect::BecomeSaddled { .. }
         | Effect::SetClassLevel { .. }
         | Effect::CreateDelayedTrigger { .. }
+        // Digital-only Alchemy (no CR entry): a boon always carries its
+        // granted trigger, whose later referents are unauditable — refused
+        // like every other boundary carrier.
+        | Effect::CreateBoon { .. }
         | Effect::AddTargetReplacement { .. }
         | Effect::AddRestriction { .. }
         | Effect::ReduceNextSpellCost { .. }
@@ -5411,6 +5417,7 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
         | Effect::ChooseFromZone { .. }
         | Effect::RememberCard { .. }
         | Effect::NoteManaSpent
+        | Effect::NoteNumber { .. }
         | Effect::ForEachCategory { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }
@@ -5907,6 +5914,7 @@ fn quantity_ref_counts_population_matching(
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber
+        | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::SpellsCastLastTurn
@@ -7844,6 +7852,7 @@ pub fn resolve_effect(
             resolve_add_pending_enters_modifications(state, ability, events)
         }
         Effect::CreateEmblem { .. } => create_emblem::resolve(state, ability, events),
+        Effect::CreateBoon { .. } => create_boon::resolve(state, ability, events),
         Effect::PayCost { .. } => pay::resolve(state, ability, events),
         Effect::CastFromZone { .. } => cast_from_zone::resolve(state, ability, events),
         Effect::FreeCastFromZones { .. } => free_cast_from_zones::resolve(state, ability, events),
@@ -7871,6 +7880,7 @@ pub fn resolve_effect(
         Effect::ChooseFromZone { .. } => choose_from_zone::resolve(state, ability, events),
         Effect::RememberCard { .. } => remember_card::resolve(state, ability, events),
         Effect::NoteManaSpent => note_mana_spent::resolve(state, ability, events),
+        Effect::NoteNumber { .. } => note_number::resolve(state, ability, events),
         Effect::ForEachCategory { .. } => {
             choose_from_zone::resolve_for_each_category(state, ability, events)
         }

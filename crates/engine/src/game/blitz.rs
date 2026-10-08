@@ -82,6 +82,7 @@ pub(crate) fn install_blitz_riders(
             controller,
             source_id: object_id,
             one_shot: true,
+            is_boon: false,
             provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
         },
         events,

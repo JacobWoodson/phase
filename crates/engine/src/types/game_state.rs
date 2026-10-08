@@ -7157,6 +7157,14 @@ pub struct DelayedTrigger {
     /// Whether this trigger fires once and is removed (most delayed triggers).
     /// CR 603.7b.
     pub one_shot: bool,
+    /// Digital-only Alchemy (no CR entry): true when this entry is a
+    /// one-time boon installed by `Effect::CreateBoon` rather than an
+    /// ordinary delayed trigger. Read by "if you have a boon"
+    /// (`TriggerCondition::HasBoon`) and by the boon-only embedded-condition
+    /// gate in delayed matching; skipped from JSON when false so every
+    /// pre-existing serialized delayed trigger round-trips byte-identical.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_boon: bool,
     /// Private command-backed installation identity. Legacy delayed triggers
     /// continue through the normal rules lifecycle without receipt or
     /// forced-transition authority.
@@ -7180,6 +7188,7 @@ impl DelayedTrigger {
             controller,
             source_id,
             one_shot,
+            is_boon: false,
             provenance: DelayedInstallIdentity::LegacyDelayed,
         }
     }
@@ -37524,6 +37533,7 @@ mod tests {
             controller: PlayerId(0),
             source_id: ObjectId(5),
             one_shot: true,
+            is_boon: false,
             provenance: DelayedInstallIdentity::LegacyDelayed,
         });
         a.stack.push_back(StackEntry {

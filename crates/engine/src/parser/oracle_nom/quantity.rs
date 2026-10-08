@@ -991,6 +991,18 @@ fn parse_chosen_number_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     value(QuantityRef::ChosenNumber, tag("the chosen number")).parse(input)
 }
 
+/// Digital-only Alchemy (no CR entry): "the noted number" — the resolving
+/// player's `Player::noted_number`, written by `Effect::NoteNumber` ("note
+/// its power", "note that excess damage") and read when a granted one-time
+/// boon triggers ("where X is the noted number", "damage equal to the noted
+/// number" — Dragonborn Immolator / Mephit's Enthusiasm / Molten Impact).
+/// Reads 0 when nothing was noted. Sits beside `parse_chosen_number_ref`:
+/// both are bare "the <adj> number" leaves, and neither collides with the
+/// "the number of …" counting arms below (those require "of").
+fn parse_noted_number_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    value(QuantityRef::NotedNumber, tag("the noted number")).parse(input)
+}
+
 /// CR 608.2c: The amount of energy paid in the immediately preceding
 /// resolution-time payment, because resolving instructions follow their written
 /// order.
@@ -1082,6 +1094,7 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
             parse_guessed_number_ref,
             parse_object_count_by_shared_quality,
             parse_chosen_number_ref,
+            parse_noted_number_ref,
             parse_paid_energy_this_way_ref,
             parse_intensity_ref,
             // CR 120.10: must precede the generic damage/number arms so the

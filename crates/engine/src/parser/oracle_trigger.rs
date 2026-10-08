@@ -6171,6 +6171,11 @@ pub(crate) fn static_condition_to_trigger_condition(
         StaticCondition::HasCityBlessing => Some(TriggerCondition::HasCityBlessing),
         // CR 702.195b: Enduring story bridges as a player designation.
         StaticCondition::HasEnduringStory => Some(TriggerCondition::HasEnduringStory),
+        // Digital-only Alchemy (no CR entry): "if you have a boon" bridges
+        // 1:1 (same `player` axis).
+        StaticCondition::HasBoon { player } => Some(TriggerCondition::HasBoon {
+            player: player.clone(),
+        }),
         // CR 110.5b: Source tapped state bridges for trigger conditions like
         // "At the beginning of your upkeep, if this land is tapped, ..."
         StaticCondition::SourceIsTapped => Some(TriggerCondition::SourceIsTapped),

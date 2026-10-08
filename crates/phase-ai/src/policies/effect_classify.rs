@@ -346,6 +346,8 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::CopyTokenOf { .. }
         | Effect::CounterAll { .. }
         | Effect::CrankContraptions { .. }
+        | Effect::CreateBoon { .. }
+        | Effect::NoteNumber { .. }
         | Effect::CreateDamageReplacement { .. }
         | Effect::CreateDelayedTrigger { .. }
         | Effect::CreateDrawReplacement { .. }

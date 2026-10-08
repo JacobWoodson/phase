@@ -461,6 +461,7 @@ mod tests {
             controller: PlayerId(0),
             source_id: source,
             one_shot: true,
+            is_boon: false,
             provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
         });
         assert_eq!(state.delayed_triggers.len(), 2);

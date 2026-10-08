@@ -2716,6 +2716,7 @@ impl ReflexiveGateParent {
             | Effect::BecomeSaddled { .. }
             | Effect::SetClassLevel { .. }
             | Effect::CreateDelayedTrigger { .. }
+            | Effect::CreateBoon { .. }
             | Effect::AddTargetReplacement { .. }
             | Effect::AddRestriction { .. }
             | Effect::ReduceNextSpellCost { .. }
@@ -2761,6 +2762,7 @@ impl ReflexiveGateParent {
             | Effect::ChooseFromZone { .. }
             | Effect::RememberCard { .. }
             | Effect::NoteManaSpent
+            | Effect::NoteNumber { .. }
             | Effect::ForEachCategory { .. }
             | Effect::ChooseObjectsIntoTrackedSet { .. }
             | Effect::ChooseAndSacrificeRest { .. }
@@ -12656,7 +12658,7 @@ fn apply_where_x_static_condition(
     }
 }
 
-fn parse_pt_modifier(text: &str) -> Option<(PtValue, PtValue)> {
+pub(crate) fn parse_pt_modifier(text: &str) -> Option<(PtValue, PtValue)> {
     let token = text.trim();
     let slash = token.find('/')?;
     let power = parse_signed_pt_component(token[..slash].trim())?;

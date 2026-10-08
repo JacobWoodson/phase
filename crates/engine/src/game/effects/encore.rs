@@ -131,6 +131,7 @@ pub fn resolve(
                 controller: ability.controller,
                 source_id: ability.source_id,
                 one_shot: true,
+                is_boon: false,
                 provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
             },
             events,

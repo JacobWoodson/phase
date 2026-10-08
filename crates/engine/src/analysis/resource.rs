@@ -8051,6 +8051,10 @@ fn project_out_player_consumables(p: &mut Player) {
         status: _,
         companion: _,
         chosen_attributes: _,
+        // Digital-only Alchemy (no CR entry): the noted number is durable
+        // per-player state like `chosen_attributes` — strict equality, not
+        // a projected consumable.
+        noted_number: _,
         can_look_at_top_of_library: _,
         commander_color_identity: _,
     } = p;
@@ -8311,6 +8315,7 @@ fn projected_player_axes(p: &Player) -> Vec<i64> {
         status: _,
         companion: _,
         chosen_attributes: _,
+        noted_number: _,
         can_look_at_top_of_library: _,
         commander_color_identity: _,
     } = p;
@@ -8368,6 +8373,7 @@ fn projected_player_maps(
         status: _,
         companion: _,
         chosen_attributes: _,
+        noted_number: _,
         can_look_at_top_of_library: _,
         commander_color_identity: _,
     } = p;
