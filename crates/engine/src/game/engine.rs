@@ -14299,6 +14299,61 @@ fn apply_non_priority_pass_action(
             state.waiting_for.clone()
         }
         (
+            WaitingFor::ChooseTokenHost {
+                player,
+                source_id: _,
+                legal_targets,
+                pending_ability,
+            },
+            GameAction::ChooseTarget { target },
+        ) => {
+            if turn_control::authorized_submitter(state) != Some(*player) {
+                return Err(EngineError::WrongPlayer);
+            }
+            let chosen = match target {
+                Some(target) if legal_targets.contains(&target) => target.clone(),
+                _ => {
+                    return Err(EngineError::InvalidAction(
+                        "ChooseTokenHost: invalid or missing legal target".to_string(),
+                    ));
+                }
+            };
+            // Fail-closed liveness backstop: the choice was offered moments
+            // ago against incarnation-current battlefield objects, and
+            // nothing resolves during a prompt — but a stale answer must
+            // never bind a departed host.
+            let host = match &chosen {
+                TargetRef::Object(id) => {
+                    let live = state
+                        .objects
+                        .get(id)
+                        .is_some_and(|obj| obj.zone == Zone::Battlefield);
+                    if !live {
+                        return Err(EngineError::InvalidAction(
+                            "ChooseTokenHost: chosen host is no longer legal".to_string(),
+                        ));
+                    }
+                    super::game_object::AttachTarget::Object(*id)
+                }
+                TargetRef::Player(id) => super::game_object::AttachTarget::Player(*id),
+            };
+            // Digital-only Alchemy (no CR entry): resume the paused token
+            // creation with the choice bound. The pause pass mutated nothing
+            // (it returned before proposing), so re-entry applies exactly
+            // once; the override skips the pause branch, so a resumed
+            // resolution never prompts twice.
+            let pending = pending_ability.clone();
+            let active_player = *player;
+            super::effects::token::resolve_with_host_override(state, &pending, &mut events, Some(host))
+                .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+            state.waiting_for = WaitingFor::Priority {
+                player: active_player,
+            };
+            state.priority_player = active_player;
+            resume_pending_continuation_if_priority(state, &mut events)?;
+            state.waiting_for.clone()
+        }
+        (
             WaitingFor::EquipTarget {
                 player,
                 equipment_id,

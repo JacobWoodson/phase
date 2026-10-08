@@ -294,6 +294,12 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         // `SetTapState { .. }` here catches only the non-Single scopes; the
         // beneficial (Single+Untap) and harmful (Single+Tap) cases are handled
         // by the guarded arms above.
+        // A granted one-time boon carries the direction of the trigger it
+        // grants: a pump boon is beneficial to its recipient, a stun-counter
+        // boon (Loch Larent, granted to an opponent) is harmful. Read it
+        // through the shared granted-trigger seam so target selection aims
+        // beneficial boons at self and harmful boons at opponents.
+        Effect::CreateBoon { trigger, .. } => granted_trigger_polarity(trigger),
         Effect::Adapt { .. }
         | Effect::AdditionalPhase { .. }
         | Effect::AddPendingETBCounters { .. }
@@ -346,7 +352,6 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::CopyTokenOf { .. }
         | Effect::CounterAll { .. }
         | Effect::CrankContraptions { .. }
-        | Effect::CreateBoon { .. }
         | Effect::NoteNumber { .. }
         | Effect::CreateDamageReplacement { .. }
         | Effect::CreateDelayedTrigger { .. }
@@ -1421,6 +1426,17 @@ fn selected_player_target_filter(effect: &Effect) -> Option<&TargetFilter> {
             target: Some(target),
             ..
         } => chosen_player_binding(target).then_some(target),
+        // Boon recipient semantics: the granted body's impact lands on the
+        // RECIPIENT, so route it to the chosen candidate — but only when the
+        // recipient IS a chosen slot. Contextual holders (`Controller` "you
+        // get", `TriggeringPlayer` "that player gets") resolve independently
+        // of target selection and must not score (they would pollute
+        // unrelated slots in mixed abilities); declared player slots
+        // (`Player` "target player", player-shaped `Typed` "target opponent")
+        // and inherited chain targets (`ParentTarget`) do.
+        Effect::CreateBoon { recipient, .. } => {
+            boon_recipient_is_selected(recipient).then_some(recipient)
+        }
         _ => extract_target_filter(effect),
     }
 }
@@ -1428,6 +1444,21 @@ fn selected_player_target_filter(effect: &Effect) -> Option<&TargetFilter> {
 fn chosen_player_binding(filter: &TargetFilter) -> bool {
     matches!(filter, TargetFilter::Player | TargetFilter::ParentTarget)
         || filter_names_the_chosen_players_permanents(filter)
+}
+
+/// Whether a boon `recipient` is a slot target selection chooses (as opposed
+/// to a contextual holder that resolves on its own). Mirrors the recipient
+/// shapes `Effect::CreateBoon` documents: `Player` ("target player") and
+/// player-shaped `Typed` ("target opponent", Loch Larent) declare slots;
+/// `ParentTarget` inherits the chain target being chosen now. `Controller`
+/// ("you get"), `TriggeringPlayer` ("that player gets"), and every other
+/// shape resolve independently of selection. Object-shaped `Typed` recipients
+/// fail closed later in the player matcher.
+fn boon_recipient_is_selected(recipient: &TargetFilter) -> bool {
+    matches!(
+        recipient,
+        TargetFilter::Player | TargetFilter::ParentTarget | TargetFilter::Typed(_)
+    )
 }
 
 /// "each creature target player controls" (Requisition
@@ -1670,11 +1701,23 @@ pub(crate) fn static_mode_polarity(mode: &StaticMode) -> EffectPolarity {
 /// bound statically from the parsed `TriggerDefinition.execute.effect`; no live
 /// game-state lookup.
 fn granted_trigger_polarity(trigger: &TriggerDefinition) -> EffectPolarity {
-    trigger
-        .execute
-        .as_deref()
-        .map(|exec| effect_polarity(&exec.effect))
-        .unwrap_or(EffectPolarity::Contextual)
+    let Some(exec) = trigger.execute.as_deref() else {
+        return EffectPolarity::Contextual;
+    };
+    // A granted body that installs a floating replacement carries its
+    // direction in the REPLACEMENT body, not the install wrapper (which is
+    // Contextual): Loch Larent's boon installs "enters tapped with a stun
+    // counter", whose tap-first root is Harmful to the entering creature's
+    // controller. Without this descent the harmful grant would read
+    // Contextual and the recipient routing below would score it 0.0.
+    if let Effect::AddTargetReplacement { replacement, .. } = exec.effect.as_ref() {
+        return replacement
+            .execute
+            .as_deref()
+            .map(|body| effect_polarity(&body.effect))
+            .unwrap_or(EffectPolarity::Contextual);
+    }
+    effect_polarity(&exec.effect)
 }
 
 /// Classify a continuous modification as beneficial/harmful to its target.
@@ -2091,6 +2134,144 @@ mod grant_trigger_polarity_tests {
                 )),
             }),
             EffectPolarity::Beneficial
+        );
+    }
+}
+
+#[cfg(test)]
+mod create_boon_polarity_tests {
+    use super::*;
+    use engine::game::scenario::{GameScenario, P0, P1};
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, ControllerRef, ReplacementDefinition, TapStateChange,
+        TypedFilter,
+    };
+    use engine::types::replacements::ReplacementEvent;
+
+    fn boon_with_body(recipient: TargetFilter, exec: Option<Effect>) -> Effect {
+        let mut trigger = TriggerDefinition::new(TriggerMode::SpellCast);
+        trigger.execute = exec.map(|e| Box::new(AbilityDefinition::new(AbilityKind::Spell, e)));
+        Effect::CreateBoon {
+            recipient,
+            trigger: Box::new(trigger),
+        }
+    }
+
+    fn opponent_recipient() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            type_filters: Vec::new(),
+            controller: Some(ControllerRef::Opponent),
+            properties: Vec::new(),
+        })
+    }
+
+    /// Loch Larent's boon body: a floating install whose replacement taps the
+    /// entering creature first, then places the stun counter.
+    fn loch_install() -> Effect {
+        let tap = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            },
+        );
+        Effect::AddTargetReplacement {
+            replacement: Box::new(ReplacementDefinition {
+                execute: Some(Box::new(tap)),
+                ..ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+            }),
+            target: TargetFilter::None,
+        }
+    }
+
+    #[test]
+    fn create_boon_polarity_follows_granted_body() {
+        let gain = boon_with_body(
+            TargetFilter::Player,
+            Some(Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Controller,
+            }),
+        );
+        assert_eq!(effect_polarity(&gain), EffectPolarity::Beneficial);
+        let drain = boon_with_body(
+            TargetFilter::Player,
+            Some(Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: None,
+            }),
+        );
+        assert_eq!(effect_polarity(&drain), EffectPolarity::Harmful);
+        let bodiless = boon_with_body(TargetFilter::Player, None);
+        assert_eq!(effect_polarity(&bodiless), EffectPolarity::Contextual);
+    }
+
+    #[test]
+    fn create_boon_loch_replacement_body_reads_harmful() {
+        // The install wrapper is Contextual; the seam must descend into the
+        // replacement body (tap-first root: Harmful) or the harmful grant
+        // scores 0.0 and aims nowhere.
+        let loch = boon_with_body(opponent_recipient(), Some(loch_install()));
+        assert_eq!(effect_polarity(&loch), EffectPolarity::Harmful);
+    }
+
+    #[test]
+    fn boon_harmful_grant_scores_opponent_negative() {
+        // Loch Larent: "target opponent gets [stun] boon" must score -1.0 for
+        // the opponent candidate, so selection aims the harmful grant away
+        // from self. (It must NOT read beneficial-for-self.)
+        let runner = GameScenario::new().build();
+        let state = runner.state();
+        let loch = boon_with_body(opponent_recipient(), Some(loch_install()));
+        assert_eq!(
+            targeted_player_impact_in(
+                state,
+                Some(P0),
+                Some(engine::types::identifiers::ObjectId(0)),
+                &[&loch],
+                P1,
+            ),
+            Some(-1.0),
+        );
+    }
+
+    #[test]
+    fn boon_beneficial_grant_prefers_self_and_ignores_contextual_holder() {
+        let runner = GameScenario::new().build();
+        let state = runner.state();
+        let source = Some(engine::types::identifiers::ObjectId(0));
+        let gain = boon_with_body(
+            TargetFilter::Player,
+            Some(Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Controller,
+            }),
+        );
+        // "Target player gets [beneficial] boon": +1.0 for self, so selection
+        // keeps the good boon instead of gifting it to an opponent.
+        assert_eq!(
+            targeted_player_impact_in(state, Some(P0), source, &[&gain], P0),
+            Some(1.0),
+        );
+        // "You get [beneficial] boon": the Controller holder is contextual —
+        // it resolves independently of selection and must not score (no
+        // per-candidate signal, so it can never pollute an unrelated slot in
+        // a mixed ability).
+        let self_gain = boon_with_body(
+            TargetFilter::Controller,
+            Some(Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Controller,
+            }),
+        );
+        assert_eq!(
+            targeted_player_impact_in(state, Some(P0), source, &[&self_gain], P0),
+            None,
+        );
+        assert_eq!(
+            targeted_player_impact_in(state, Some(P0), source, &[&self_gain], P1),
+            None,
         );
     }
 }

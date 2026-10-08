@@ -15,7 +15,7 @@
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ParentTargetMissingReason, PerpetualModification,
-    ResolvedAbility, TargetFilter,
+    QuantityExpr, ResolvedAbility, TargetFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, StackEntryKind};
@@ -185,18 +185,25 @@ pub fn resolve(
     // Digital-only Alchemy (no CR entry): a dynamic P/T delta carries live
     // `QuantityExpr`s ("it perpetually gets +X/+X, where X is its power",
     // Rothga, Bonded Engulfer) — evaluate once here, at application time,
-    // and freeze into a plain `ModifyPowerToughness` record. Perpetual
-    // edits are permanent, never live expressions: the frozen record is
-    // what `apply_perpetual_modification` installs AND persists in
+    // and freeze to `Fixed`. Perpetual edits are permanent, never live
+    // expressions: the frozen record is what
+    // `apply_perpetual_modification` installs AND persists in
     // `perpetual_mods`, so a later copy-rebuild re-applies the resolved
     // numbers, never the stale exprs.
     let modification = match modification {
-        PerpetualModification::ModifyPowerToughnessDynamic { power, toughness } => {
-            PerpetualModification::ModifyPowerToughness {
-                power_delta: resolve_quantity_with_targets(state, power, ability),
-                toughness_delta: resolve_quantity_with_targets(state, toughness, ability),
-            }
-        }
+        PerpetualModification::ModifyPowerToughness {
+            power,
+            toughness,
+            keywords,
+        } => PerpetualModification::ModifyPowerToughness {
+            power: QuantityExpr::Fixed {
+                value: resolve_quantity_with_targets(state, power, ability),
+            },
+            toughness: QuantityExpr::Fixed {
+                value: resolve_quantity_with_targets(state, toughness, ability),
+            },
+            keywords: keywords.clone(),
+        },
         other => other.clone(),
     };
     let target = target.clone();
@@ -234,8 +241,8 @@ mod tests {
     use crate::game::scenario::GameRunner;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        CardSelectionMode, Chooser, Effect, PerpetualModification, ResolvedAbility, TargetFilter,
-        TargetRef, ZoneOwner,
+        CardSelectionMode, Chooser, Effect, PerpetualModification, QuantityExpr, ResolvedAbility,
+        TargetFilter, TargetRef, ZoneOwner,
     };
     use crate::types::events::GameEvent;
     use crate::types::game_state::GameState;
@@ -347,8 +354,9 @@ mod tests {
             Effect::ApplyPerpetual {
                 target: crate::types::ability::TargetFilter::Any,
                 modification: PerpetualModification::ModifyPowerToughness {
-                    power_delta: 3,
-                    toughness_delta: 3,
+                    power: QuantityExpr::Fixed { value: 3 },
+                    toughness: QuantityExpr::Fixed { value: 3 },
+                    keywords: Vec::new(),
                 },
             },
             vec![TargetRef::Object(id)],

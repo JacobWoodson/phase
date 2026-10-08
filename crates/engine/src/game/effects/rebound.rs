@@ -85,7 +85,7 @@ pub fn arm_rebound(
         source_id: exiled_id,
         // CR 603.7b: one-shot — removed after it fires.
         one_shot: true,
-        is_boon: false,
+        kind: crate::types::ability::DelayedTriggerKind::Ordinary,
         provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
     };
     crate::game::triggers::install_delayed_trigger(state, rebound_cast, events);

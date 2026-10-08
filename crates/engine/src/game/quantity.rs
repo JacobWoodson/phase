@@ -6152,11 +6152,20 @@ fn resolve_ref(
                 })
             })
             .unwrap_or(0),
-        // Digital-only Alchemy (no CR entry): the resolving player's noted
-        // number (`Player::noted_number`), written by `Effect::NoteNumber`
+        // Digital-only Alchemy (no CR entry): the noted number. Inside a
+        // granted boon body this is the grant's CAPTURE — what the granting
+        // resolution noted, snapshotted into the ability's context at
+        // install (`SpellContext::boon_captured_noted_number`) — so
+        // sequential or cross-card notes never leak into each other's
+        // boons. Outside a boon grant the capture is `None` and the read
+        // falls back to the resolving player's live global
+        // (`Player::noted_number`), written by `Effect::NoteNumber`
         // ("where X is the noted number" — Dragonborn Immolator / Mephit's
-        // Enthusiasm / Molten Impact). `None` (nothing noted) reads as 0.
-        QuantityRef::NotedNumber => player.map_or(0, |p| p.noted_number.unwrap_or(0)),
+        // Enthusiasm / Molten Impact). Nothing noted anywhere reads as 0.
+        QuantityRef::NotedNumber => ability
+            .and_then(|a| a.context.boon_captured_noted_number)
+            .or_else(|| player.as_ref().and_then(|p| p.noted_number))
+            .unwrap_or(0),
         // CR 101.4 + CR 608.2d: the number a PLAYER secretly chose this
         // resolution, read off `Player::chosen_attributes`. `AllPlayers { Max }`
         // / `{ Min }` fold to "the highest/lowest number" over the players who

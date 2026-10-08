@@ -12313,11 +12313,8 @@ fn parse_activation_cost_referent(input: &str) -> OracleResult<'_, ()> {
 /// the note needs no condition of its own (an ungated note honestly reads 0
 /// when no excess was dealt).
 fn parse_note_number_clause(lower: &str, ctx: &ParseContext) -> Option<ImperativeFamilyAst> {
-    let rest = lower
-        .strip_prefix("note ")?
-        .trim()
-        .trim_end_matches('.')
-        .trim();
+    let (rest, _) = tag::<_, _, OracleError<'_>>("note ").parse(lower).ok()?;
+    let rest = rest.trim().trim_end_matches('.').trim();
     if rest.is_empty() {
         return None;
     }
@@ -12354,18 +12351,28 @@ fn parse_note_number_clause(lower: &str, ctx: &ParseContext) -> Option<Imperativ
 /// Surface-gated: a fixed "~'s power" keeps `Source`, and spells keep
 /// `Source` ("its" there can only be the source).
 fn anaphoric_trigger_body_note_value(rest: &str) -> Option<QuantityExpr> {
-    let qty = match rest {
-        "its power" => QuantityRef::Power {
-            scope: crate::types::ability::ObjectScope::Anaphoric,
-        },
-        "its toughness" => QuantityRef::Toughness {
-            scope: crate::types::ability::ObjectScope::Anaphoric,
-        },
-        "its mana value" => QuantityRef::ObjectManaValue {
-            scope: crate::types::ability::ObjectScope::Anaphoric,
-        },
-        _ => return None,
-    };
+    let (_, qty) = all_consuming(alt((
+        value(
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Anaphoric,
+            },
+            tag::<_, _, OracleError<'_>>("its power"),
+        ),
+        value(
+            QuantityRef::Toughness {
+                scope: crate::types::ability::ObjectScope::Anaphoric,
+            },
+            tag::<_, _, OracleError<'_>>("its toughness"),
+        ),
+        value(
+            QuantityRef::ObjectManaValue {
+                scope: crate::types::ability::ObjectScope::Anaphoric,
+            },
+            tag::<_, _, OracleError<'_>>("its mana value"),
+        ),
+    )))
+    .parse(rest)
+    .ok()?;
     Some(QuantityExpr::Ref { qty })
 }
 

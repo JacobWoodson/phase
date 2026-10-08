@@ -7,13 +7,18 @@ use crate::types::game_state::GameState;
 /// `value` and record it as the resolving player's noted number
 /// (`Player::noted_number`), overwriting any previous note ("note its
 /// power", Dragonborn Immolator; "note that excess damage", Mephit's
-/// Enthusiasm / Molten Impact). Read back by `QuantityRef::NotedNumber`
-/// ("where X is the noted number") when the granted one-time boon later
-/// triggers.
+/// Enthusiasm / Molten Impact). The sibling `CreateBoon` leg snapshots
+/// this note into the granted ability at install time
+/// (`SpellContext::boon_captured_noted_number`), so each boon reads what
+/// its own resolution noted even after a later note overwrites the live
+/// global; `QuantityRef::NotedNumber` ("where X is the noted number")
+/// prefers that per-grant capture and falls back to the live global
+/// outside a boon grant.
 ///
 /// The noting player is `original_controller.unwrap_or(controller)` — the
 /// same subject `resolve_quantity_with_targets` resolves `value` under —
-/// so a note and its read agree even under `player_scope` fanout.
+/// so a note and its grant-time capture agree even under `player_scope`
+/// fanout.
 ///
 /// Doing the write at resolution — not when the trigger fires — means a
 /// countered or otherwise removed-from-stack ability never notes anything

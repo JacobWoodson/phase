@@ -5124,8 +5124,8 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
     // ── the classifier's own reach-guard: the enum was actually found ──
     let total = enum_variants(&enum_src, "WaitingFor").len();
     assert_eq!(
-        total, 140,
-        "`WaitingFor` has 140 variants at this tip, read off the `syn` parse. This number is \
+        total, 141,
+        "`WaitingFor` has 141 variants at this tip, read off the `syn` parse. This number is \
          pinned so a variant REMOVED is as visible as one added; if you added a variant and it \
          carries no `DecisionTemplate`, update this number. A wildly different count means the \
          reader lost its anchor, and every assertion below would then be measuring an empty enum"
@@ -5182,6 +5182,13 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
     // the carrier assertion below is unchanged by it.
     // 139 ⇒ 140 is ADJUDICATED: DigRestSplitChoice carries no DecisionTemplate;
     // its hidden card identities are filtered by the Dig visibility path.
+    // 140 ⇒ 141 is ADJUDICATED: the one-time-boon token-host choice (CR 608.2d,
+    // Dunbarrow Revivalist) added `ChooseTokenHost { player, source_id,
+    // legal_targets, pending_ability }`. Measured, not inferred from the diff:
+    // that body holds NO `DecisionTemplate` (zero matches) — it is a
+    // resolution-choice prompt answered by `GameAction::ChooseTarget`, not a
+    // shortcut-style template — so it is not a third carrier and the carrier
+    // assertion below is unchanged by it.
 
     let carriers = carriers_in_source(&enum_src, "WaitingFor", &corpus, &marker, true);
     assert_eq!(

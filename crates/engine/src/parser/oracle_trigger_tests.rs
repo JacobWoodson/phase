@@ -3145,12 +3145,17 @@ fn trigger_hex_companion_keeps_exile_or_battlefield_perpetual_condition() {
         Effect::ApplyPerpetual {
             modification:
                 PerpetualModification::ModifyPowerToughness {
-                    power_delta,
-                    toughness_delta,
+                    power, toughness, ..
                 },
             ..
         } => {
-            assert_eq!((*power_delta, *toughness_delta), (1, 1));
+            assert_eq!(
+                (power, toughness),
+                (
+                    &QuantityExpr::Fixed { value: 1 },
+                    &QuantityExpr::Fixed { value: 1 }
+                )
+            );
         }
         other => panic!("expected ApplyPerpetual +1/+1, got {other:?}"),
     }
@@ -6496,6 +6501,40 @@ fn trigger_exploits_a_creature() {
         "Exploit Payoff",
     );
     assert!(matches!(unsupported.mode, TriggerMode::Unknown(_)));
+}
+
+#[test]
+fn trigger_enlists_a_creature() {
+    // Benalish Knight-Counselor + Guardian of New Benalia: the only printed
+    // actor-side enlist triggers. Same shape as the synthesized Enlist keyword
+    // trigger (`valid_card` = subject), which `match_enlisted` fires on.
+    let cases = [
+        "Whenever Benalish Knight-Counselor enlists a creature, scry 1.",
+        "Whenever this creature enlists a creature, scry 2.",
+        "When Benalish Knight-Counselor enlists, scry 1.",
+    ];
+    for oracle in cases {
+        let def = parse_trigger_line(oracle, "Benalish Knight-Counselor");
+        assert_eq!(def.mode, TriggerMode::Enlisted, "{oracle}");
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef), "{oracle}");
+        assert_eq!(def.valid_source, None, "{oracle}");
+        assert_no_unimplemented(def.execute.as_deref().expect("trigger body"));
+    }
+
+    // Goblin Morale Sergeant: victim-qualified ("nontoken") — fails closed,
+    // since `match_enlisted` keys on the attacker alone and would over-fire.
+    // Non-self subjects likewise (none printed).
+    let unsupported = [
+        "Whenever Goblin Morale Sergeant enlists a nontoken creature, scry 1.",
+        "Whenever a creature you control enlists a creature, scry 1.",
+    ];
+    for oracle in unsupported {
+        let def = parse_trigger_line(oracle, "Goblin Morale Sergeant");
+        assert!(
+            matches!(def.mode, TriggerMode::Unknown(_)),
+            "{oracle}: {def:?}"
+        );
+    }
 }
 
 #[test]

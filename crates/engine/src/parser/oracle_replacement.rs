@@ -5574,7 +5574,18 @@ fn parse_whenever_you_cast_enters_with(
     // expression, misrouting the whole ability to the generic self-ETB
     // fallback (Runadi, Behemoth Caller — issue #6492).
     let count_expr = match fixed_count {
-        Some(n) => QuantityExpr::Fixed { value: n as i32 },
+        Some(n) => {
+            // CR 614.12: the fixed-count arm must not publish a
+            // complete-looking replacement while silently dropping a trailing
+            // rider ("… on it and it gains haste"). Require the same complete
+            // suffix consumption the conjoined-list route above enforces — a
+            // rider this route cannot compose stays an honest gap. (The
+            // dynamic-X arm already fails closed via `?`.)
+            if !counter_list_remainder_is_exhausted(rest) {
+                return None;
+            }
+            QuantityExpr::Fixed { value: n as i32 }
+        }
         None => parse_enters_with_where_x_suffix(rest)?,
     };
 
@@ -25212,6 +25223,69 @@ mod tests {
         let Effect::PutCounter { count, .. } = &*put_counter.effect else {
             panic!("expected PutCounter");
         };
+        assert_eq!(count, &QuantityExpr::Fixed { value: 1 });
+    }
+
+    /// M6: a fixed article counter followed by a trailing rider must fail
+    /// closed — the route cannot compose the rider, so publishing the bare
+    /// counter replacement would silently drop rules text.
+    #[test]
+    fn fixed_article_counter_with_trailing_rider_fails_closed() {
+        let text = "Whenever you cast a creature spell, that creature enters with a stun counter on it and it gains haste.";
+        assert!(
+            parse_whenever_you_cast_enters_with(&text.to_lowercase(), text).is_none(),
+            "article counter + rider must fail the route closed, not drop the rider"
+        );
+        assert!(
+            parse_whenever_you_cast_enters_with_trigger(text, "Filler").is_none(),
+            "the trigger recognizer must also fail closed when its payload builder does"
+        );
+    }
+
+    /// M6: the same trailing-rider gate covers the numeric fixed-count arm,
+    /// which shared the accept-and-discard weakness.
+    #[test]
+    fn fixed_numeric_counter_with_trailing_rider_fails_closed() {
+        let text = "Whenever you cast a creature spell, that creature enters with two +1/+1 counters on it and it gains haste.";
+        assert!(
+            parse_whenever_you_cast_enters_with(&text.to_lowercase(), text).is_none(),
+            "numeric counter + rider must fail the route closed, not drop the rider"
+        );
+        assert!(
+            parse_whenever_you_cast_enters_with_trigger(text, "Filler").is_none(),
+            "the trigger recognizer must also fail closed when its payload builder does"
+        );
+    }
+
+    /// M6 no-regression: Loch Larent's boon body ("that creature enters
+    /// tapped and with a stun counter on it") has no trailing rider — the
+    /// tap composes ahead of the counters, so the route still accepts it.
+    #[test]
+    fn fixed_article_counter_simple_body_still_parses() {
+        let text =
+            "When you cast a creature spell, that creature enters tapped and with a stun counter on it.";
+        let trigger =
+            parse_whenever_you_cast_enters_with_trigger(text, "Loch Larent").expect("should parse");
+        let exec = trigger.execute.as_ref().expect("execute set");
+        let Effect::AddTargetReplacement { replacement, .. } = &*exec.effect else {
+            panic!("expected AddTargetReplacement, got {:?}", exec.effect);
+        };
+        let tap = replacement.execute.as_ref().expect("execute set");
+        assert!(
+            matches!(&*tap.effect, Effect::SetTapState { .. }),
+            "tapped rider must compose ahead of the counters, got {:?}",
+            tap.effect
+        );
+        let put_counter = tap.sub_ability.as_ref().expect("counter payload chained");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            ..
+        } = &*put_counter.effect
+        else {
+            panic!("expected PutCounter payload, got {:?}", put_counter.effect);
+        };
+        assert_eq!(*counter_type, CounterType::Stun);
         assert_eq!(count, &QuantityExpr::Fixed { value: 1 });
     }
 

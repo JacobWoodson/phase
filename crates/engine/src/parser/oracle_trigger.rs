@@ -14748,6 +14748,10 @@ fn try_parse_event(
         Exploits {
             victim: Option<TargetFilter>,
         },
+        /// CR 702.154c: A creature enlisted another creature. No victim field:
+        /// only the vacuous "a creature" object parses (anything enlisted is a
+        /// creature by CR 702.154a), so the object carries no information.
+        Enlists,
         /// CR 701.44b: A permanent "explores" after the explore process completes.
         Explores,
         /// CR 701.50f: A permanent "connives" after the connive process completes.
@@ -14813,6 +14817,25 @@ fn try_parse_event(
                 victim: Some(victim),
             },
         ))
+    }
+    /// CR 702.154c: actor-side enlist event — "enlists" / "enlists a creature".
+    /// Only the vacuous object is admitted (only creatures can be enlisted, CR
+    /// 702.154a) and it is dropped. Victim-qualified forms ("enlists a nontoken
+    /// creature", Goblin Morale Sergeant) fail here: `match_enlisted` keys on
+    /// the attacker alone, so admitting them would over-fire.
+    fn parse_enlists_event(input: &str) -> OracleResult<'_, SimpleEvent> {
+        let (remaining, _) = tag("enlists").parse(input)?;
+        if remaining.is_empty() {
+            return Ok((remaining, SimpleEvent::Enlists));
+        }
+        let (rest, _) = tag(" a creature").parse(remaining)?;
+        if rest.is_empty() {
+            return Ok(("", SimpleEvent::Enlists));
+        }
+        Err(nom::Err::Error(OracleError::new(
+            rest,
+            nom::error::ErrorKind::Eof,
+        )))
     }
     /// CR 120.4 + CR 120.4b: the source-scoping tail on the received-damage
     /// grammar — `"…by a single source"` (Pain Magnification). It narrows the
@@ -15071,6 +15094,9 @@ fn try_parse_event(
             // Short form: "becomes attached" without a trailing target phrase
             // (future-proofing; no current Oracle cards use this form).
             value(SimpleEvent::BecomesAttached, tag("becomes attached")),
+            // CR 702.154c: actor-side enlist trigger (Benalish Knight-Counselor,
+            // Guardian of New Benalia).
+            parse_enlists_event,
         )))
         .parse(input)
     }
@@ -15278,6 +15304,20 @@ fn try_parse_event(
                 def.mode = TriggerMode::Exploited;
                 def.valid_source = Some(subject.clone());
                 def.valid_card = victim;
+            }
+            SimpleEvent::Enlists => {
+                // CR 702.154c: actor-side enlist trigger. Self subjects only —
+                // no printed card scopes another enlister, and `match_enlisted`
+                // fires on the source attacker. Same shape as the synthesized
+                // keyword trigger (`valid_card` = subject, `valid_source` unset).
+                if !matches!(
+                    subject,
+                    TargetFilter::SelfRef | TargetFilter::Any | TargetFilter::CostPaidObject
+                ) {
+                    return None;
+                }
+                def.mode = TriggerMode::Enlisted;
+                def.valid_card = Some(subject.clone());
             }
             SimpleEvent::Explores => {
                 if !remaining.trim().is_empty() {

@@ -97,10 +97,10 @@ use super::oracle_quantity::{
     parse_for_each_object_filter_clause_with_context,
 };
 use super::oracle_target::{
-    parse_definite_parent_reference, parse_event_context_ref, parse_fight_target, parse_target,
-    parse_target_with_ctx, parse_target_with_disjunctive_restriction, parse_target_with_syntax,
-    parse_type_phrase_folding, parse_type_phrase_folding_with_ctx,
-    resolve_singular_exiled_card_target, TargetSyntax,
+    parse_anaphoric_target_ref, parse_definite_parent_reference, parse_event_context_ref,
+    parse_fight_target, parse_target, parse_target_with_ctx,
+    parse_target_with_disjunctive_restriction, parse_target_with_syntax, parse_type_phrase_folding,
+    parse_type_phrase_folding_with_ctx, resolve_singular_exiled_card_target, TargetSyntax,
 };
 use super::oracle_util::{
     contains_possessive, first_sentence, has_unconsumed_conditional, parse_count_expr,
@@ -11364,7 +11364,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
 
     // Digital-only Alchemy: "[~/that X] perpetually gets +N/+M" — persistent
     // base P/T modifier (Heir to Dragonfire, Tiana's Vehicle).
-    if let Some(effect) = try_parse_perpetual_modify_pt(tp) {
+    if let Some(effect) = try_parse_perpetual_modify_pt(tp, ctx) {
         return parsed_clause(effect);
     }
 
@@ -11794,8 +11794,26 @@ fn try_parse_perpetual_base_pt(tp: TextPair) -> Option<Effect> {
 /// [`TargetFilter::ParentTarget`] (the trigger/event object, e.g. Tiana's
 /// crewed Vehicle). The clause tail must be fully consumed so compound riders
 /// on other perpetual forms fall through to `Unimplemented`.
-fn try_parse_perpetual_modify_pt(tp: TextPair) -> Option<Effect> {
-    try_parse_perpetual_modify_pt_single(tp).or_else(|| perpetual_modify_pt_gap(tp))
+fn try_parse_perpetual_modify_pt(tp: TextPair, ctx: &ParseContext) -> Option<Effect> {
+    try_parse_perpetual_modify_pt_single(tp, ctx).or_else(|| perpetual_modify_pt_gap(tp))
+}
+
+/// Mixed perpetual rider: " and gains/gain <keyword list>" (Jaheira, Stirring
+/// Harper's boon; By Elspeth's Command mode 1). The leading "perpetually"
+/// scopes over the compound verb phrase, so the keywords join the SAME
+/// modification (cf. `Become`'s combined P/T + keywords payload) rather than
+/// a temporary grant. Reuses the standalone perpetual keyword-list grammar
+/// (evergreen table + the "storm" supplement). Returns the keywords and the
+/// remaining tail; the caller still requires `tail_done`.
+fn parse_mixed_perpetual_keyword_rider(rest: &str) -> Option<(Vec<Keyword>, &str)> {
+    let (after_and, _) = alt((
+        tag::<_, _, OracleError<'_>>(" and gains "),
+        tag::<_, _, OracleError<'_>>(" and gain "),
+    ))
+    .parse(rest)
+    .ok()?;
+    sequence::parse_keyword_grant_list(after_and)
+        .or_else(|| parse_perpetual_non_evergreen_keyword(after_and))
 }
 
 /// "<subject> perpetually get(s) " head used by the gap arm: splits
@@ -11975,8 +11993,8 @@ fn perpetual_modify_pt_gap(tp: TextPair) -> Option<Effect> {
 /// Digital-only Alchemy (no CR entry): parse the dynamic "perpetually gets
 /// +X/+X / +X/+0, where X is …" form (Rothga, Bonded Engulfer; Dragonborn
 /// Immolator; Mephit's Enthusiasm) into [`Effect::ApplyPerpetual`] with
-/// [`PerpetualModification::ModifyPowerToughnessDynamic`], whose exprs the
-/// resolver evaluates once at application time and freezes.
+/// [`PerpetualModification::ModifyPowerToughness`] carrying live exprs, which
+/// the resolver evaluates once at application time and freezes to `Fixed`.
 ///
 /// Subjects mirror the fixed arm: "it" / "that …" (the trigger/event object,
 /// [`TargetFilter::ParentTarget`]) and the self list (`~` / "this creature" /
@@ -11986,11 +12004,26 @@ fn perpetual_modify_pt_gap(tp: TextPair) -> Option<Effect> {
 /// a missing tail, an unparseable tail, a `-X` axis, or a non-X variable
 /// fails closed.
 ///
-/// CR 608.2k: in an "it"/"that" clause the tail pronoun ("its power") names
-/// the triggering object, so `anaphoric_trigger_characteristic` binds the
-/// printed characteristic surfaces to `EventSource` directly (and any other
-/// `Anaphoric` scope rebinds there); fixed `Source` referents ("~'s power")
-/// are left untouched. Self subjects keep the tail's scopes as parsed.
+/// CR 608.2k: in an "it"/"that" clause the tail pronoun ("its power")
+/// names the triggering object, so the tail parses owner-threaded
+/// (`parse_where_x_quantity_expression_with_owner` with `EventSource`): bare,
+/// composed ("2 plus its power"), and nested pronouns bind the owner
+/// structurally during the shared CDA recursion, and any residual `Anaphoric`
+/// scope rebinds to the same owner. Explicit self-references ("~'s power")
+/// never match the pronoun grammar and keep `Source`. Self subjects keep the
+/// tail's scopes as parsed.
+/// Validate a perpetual arm's "that <subject>" demonstrative through the
+/// shared anaphor grammar, returning the text after the subject phrase.
+/// A compound ("that Artifact and this creature") or unmodelled noun phrase
+/// fails closed (`None` → honest gap) instead of silently becoming a
+/// single-object edit; the caller additionally requires the remainder to
+/// start with "perpetually ", so a partially consumed subject (trailing
+/// conjuncts) also fails closed.
+fn validated_that_subject_rest(head_lower: &str) -> Option<&str> {
+    let (_, rest) = parse_anaphoric_target_ref(head_lower, true)?;
+    Some(rest)
+}
+
 fn try_parse_perpetual_modify_pt_dynamic(tp: TextPair) -> Option<Effect> {
     let (head, where_x) = lower::strip_trailing_where_x(tp);
     let where_x = where_x?;
@@ -12006,66 +12039,66 @@ fn try_parse_perpetual_modify_pt_dynamic(tp: TextPair) -> Option<Effect> {
     }
 
     // Subject dispatch (mirrors the fixed arm's heads).
-    let (delta_text, target, subject) = if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>("it perpetually ").parse(head_lower)
-    {
-        let (rest, _) = alt((
-            tag::<_, _, OracleError<'_>>("gets "),
-            tag::<_, _, OracleError<'_>>("get "),
-        ))
-        .parse(rest)
-        .ok()?;
-        (
-            rest,
-            TargetFilter::ParentTarget,
-            DynamicSubject::TriggerAnaphor,
-        )
-    } else if let Ok((after_that, _)) = tag::<_, _, OracleError<'_>>("that ").parse(head_lower) {
-        let (rest, _) = take_until::<_, _, OracleError<'_>>("perpetually ")
-            .parse(after_that)
-            .ok()?;
-        let (rest, _) = tag::<_, _, OracleError<'_>>("perpetually ")
+    let (delta_text, target, subject) =
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("it perpetually ").parse(head_lower) {
+            let (rest, _) = alt((
+                tag::<_, _, OracleError<'_>>("gets "),
+                tag::<_, _, OracleError<'_>>("get "),
+            ))
             .parse(rest)
             .ok()?;
-        let (rest, _) = alt((
-            tag::<_, _, OracleError<'_>>("gets "),
-            tag::<_, _, OracleError<'_>>("get "),
-        ))
-        .parse(rest)
-        .ok()?;
-        (
-            rest,
-            TargetFilter::ParentTarget,
-            DynamicSubject::TriggerAnaphor,
-        )
-    } else {
-        let after_subject = [
-            "~ ",
-            "this creature ",
-            "this artifact ",
-            "this enchantment ",
-            "this permanent ",
-            "this token ",
-            "this card ",
-        ]
-        .iter()
-        .find_map(|subject| {
-            tag::<_, _, OracleError<'_>>(*subject)
-                .parse(head_lower)
-                .ok()
-                .map(|(rest, _)| rest)
-        })?;
-        let (rest, _) = tag::<_, _, OracleError<'_>>("perpetually ")
-            .parse(after_subject)
+            (
+                rest,
+                TargetFilter::ParentTarget,
+                DynamicSubject::TriggerAnaphor,
+            )
+        } else if tag::<_, _, OracleError<'_>>("that ")
+            .parse(head_lower)
+            .is_ok()
+        {
+            let after_subject = validated_that_subject_rest(head_lower)?;
+            let (rest, _) = tag::<_, _, OracleError<'_>>("perpetually ")
+                .parse(after_subject.trim_start())
+                .ok()?;
+            let (rest, _) = alt((
+                tag::<_, _, OracleError<'_>>("gets "),
+                tag::<_, _, OracleError<'_>>("get "),
+            ))
+            .parse(rest)
             .ok()?;
-        let (rest, _) = alt((
-            tag::<_, _, OracleError<'_>>("gets "),
-            tag::<_, _, OracleError<'_>>("get "),
-        ))
-        .parse(rest)
-        .ok()?;
-        (rest, TargetFilter::Any, DynamicSubject::Source)
-    };
+            (
+                rest,
+                TargetFilter::ParentTarget,
+                DynamicSubject::TriggerAnaphor,
+            )
+        } else {
+            let after_subject = [
+                "~ ",
+                "this creature ",
+                "this artifact ",
+                "this enchantment ",
+                "this permanent ",
+                "this token ",
+                "this card ",
+            ]
+            .iter()
+            .find_map(|subject| {
+                tag::<_, _, OracleError<'_>>(*subject)
+                    .parse(head_lower)
+                    .ok()
+                    .map(|(rest, _)| rest)
+            })?;
+            let (rest, _) = tag::<_, _, OracleError<'_>>("perpetually ")
+                .parse(after_subject)
+                .ok()?;
+            let (rest, _) = alt((
+                tag::<_, _, OracleError<'_>>("gets "),
+                tag::<_, _, OracleError<'_>>("get "),
+            ))
+            .parse(rest)
+            .ok()?;
+            (rest, TargetFilter::Any, DynamicSubject::Source)
+        };
 
     let (power_value, toughness_value) =
         lower::parse_pt_modifier(delta_text.trim_end_matches('.').trim())?;
@@ -12076,17 +12109,17 @@ fn try_parse_perpetual_modify_pt_dynamic(tp: TextPair) -> Option<Effect> {
         return None;
     }
     let x = if subject == DynamicSubject::TriggerAnaphor {
-        match anaphoric_trigger_characteristic(&where_x) {
-            // The anaphoric surface ("its power") names the triggering
-            // object — bind it directly (see the helper's note on why the
-            // shared normalizer's `Source` output cannot be repaired here).
-            Some(direct) => direct,
-            None => {
-                let mut parsed = lower::parse_where_x_quantity_expression(&where_x)?;
-                rebind_anaphoric_object_scope(&mut parsed, ObjectScope::EventSource);
-                parsed
-            }
-        }
+        // The anaphoric pronoun ("its power", "2 plus its power") names the
+        // triggering object — bind it STRUCTURALLY via the owner-threaded
+        // tail parse (the owner rides the shared CDA recursion, so composed
+        // and nested forms bind at every level). Any residual `Anaphoric`
+        // scope rebinds to the same owner; explicit "~'s" keeps `Source`.
+        let mut parsed = lower::parse_where_x_quantity_expression_with_owner(
+            &where_x,
+            ObjectScope::EventSource,
+        )?;
+        rebind_anaphoric_object_scope(&mut parsed, ObjectScope::EventSource);
+        parsed
     } else {
         lower::parse_where_x_quantity_expression(&where_x)?
     };
@@ -12099,37 +12132,17 @@ fn try_parse_perpetual_modify_pt_dynamic(tp: TextPair) -> Option<Effect> {
     };
     Some(Effect::ApplyPerpetual {
         target,
-        modification: crate::types::ability::PerpetualModification::ModifyPowerToughnessDynamic {
+        modification: crate::types::ability::PerpetualModification::ModifyPowerToughness {
             power: bind(power_value)?,
             toughness: bind(toughness_value)?,
+            // No printed dynamic inner carries a keyword rider; the mixed
+            // shape stays fixed-form-only and fails closed here.
+            keywords: Vec::new(),
         },
     })
 }
 
-/// CR 608.2k: in an "it"/"that" perpetual clause the tail pronoun ("its
-/// power") names the triggering object — but the shared where-X normalizer
-/// has no clause-subject context, so it binds "its …" to `Source`. That
-/// output cannot be repaired post-hoc: the anaphoric "its power" and a
-/// fixed "~'s power" are indistinguishable once lowered (both `Source`), and
-/// rewriting every `Source` would corrupt the latter. For the three printed
-/// characteristic surfaces, bind `EventSource` directly instead.
-fn anaphoric_trigger_characteristic(where_x: &str) -> Option<QuantityExpr> {
-    let qty = match where_x.trim().trim_end_matches('.').trim() {
-        "its power" => QuantityRef::Power {
-            scope: ObjectScope::EventSource,
-        },
-        "its toughness" => QuantityRef::Toughness {
-            scope: ObjectScope::EventSource,
-        },
-        "its mana value" => QuantityRef::ObjectManaValue {
-            scope: ObjectScope::EventSource,
-        },
-        _ => return None,
-    };
-    Some(QuantityExpr::Ref { qty })
-}
-
-fn try_parse_perpetual_modify_pt_single(tp: TextPair) -> Option<Effect> {
+fn try_parse_perpetual_modify_pt_single(tp: TextPair, ctx: &ParseContext) -> Option<Effect> {
     fn tail_done(tail: &str) -> bool {
         tail.is_empty() || tail == "."
     }
@@ -12165,23 +12178,31 @@ fn try_parse_perpetual_modify_pt_single(tp: TextPair) -> Option<Effect> {
             .ok()?;
             let (rest, (power_delta, toughness_delta)) =
                 nom_primitives::parse_pt_modifier(rest).ok()?;
+            // Mixed "… and gains [keywords]" rider (By Elspeth's Command mode
+            // 1): the explicit target is always bound, so no context gate.
+            let (rest, keywords) = parse_mixed_perpetual_keyword_rider(rest)
+                .map(|(keywords, rest)| (rest, keywords))
+                .unwrap_or((rest, Vec::new()));
             return tail_done(rest).then_some(Effect::ApplyPerpetual {
                 target,
                 modification: crate::types::ability::PerpetualModification::ModifyPowerToughness {
-                    power_delta,
-                    toughness_delta,
+                    power: QuantityExpr::Fixed { value: power_delta },
+                    toughness: QuantityExpr::Fixed {
+                        value: toughness_delta,
+                    },
+                    keywords,
                 },
             });
         }
     }
 
-    // Anaphoric back-reference: "that Vehicle perpetually gets +1/+0".
-    if let Ok((after_that, _)) = tag::<_, _, OracleError<'_>>("that ").parse(lower) {
-        let (rest, _) = take_until::<_, _, OracleError<'_>>("perpetually ")
-            .parse(after_that)
-            .ok()?;
+    // Anaphoric back-reference: "that Vehicle perpetually gets +1/+0". The
+    // subject validates through the shared anaphor grammar (compounds and
+    // unmodelled phrases fail closed — see `validated_that_subject_rest`).
+    if tag::<_, _, OracleError<'_>>("that ").parse(lower).is_ok() {
+        let after_subject = validated_that_subject_rest(lower)?;
         let (rest, _) = tag::<_, _, OracleError<'_>>("perpetually ")
-            .parse(rest)
+            .parse(after_subject.trim_start())
             .ok()?;
         let (rest, _) = alt((
             tag::<_, _, OracleError<'_>>("gets "),
@@ -12194,8 +12215,12 @@ fn try_parse_perpetual_modify_pt_single(tp: TextPair) -> Option<Effect> {
         return tail_done(rest).then_some(Effect::ApplyPerpetual {
             target: TargetFilter::ParentTarget,
             modification: crate::types::ability::PerpetualModification::ModifyPowerToughness {
-                power_delta,
-                toughness_delta,
+                power: QuantityExpr::Fixed { value: power_delta },
+                toughness: QuantityExpr::Fixed {
+                    value: toughness_delta,
+                },
+                // No printed "that <type>" inner carries a keyword rider.
+                keywords: Vec::new(),
             },
         });
     }
@@ -12210,11 +12235,27 @@ fn try_parse_perpetual_modify_pt_single(tp: TextPair) -> Option<Effect> {
         .ok()?;
         let (rest, (power_delta, toughness_delta)) =
             nom_primitives::parse_pt_modifier(rest).ok()?;
+        // Mixed "… and gains [keywords]" rider (Jaheira's boon inner): a bare
+        // "it" is only bound when the enclosing trigger body pinned an
+        // object-pronoun antecedent. Standalone ("It perpetually gets +1/+1
+        // and gains vigilance", By Elspeth's Command mode 2 / #6965) has no
+        // antecedent, so the rider stays declined and the clause keeps
+        // failing closed exactly as before.
+        let (rest, keywords) = if ctx.object_pronoun_ref.is_some() {
+            parse_mixed_perpetual_keyword_rider(rest)
+                .map(|(keywords, rest)| (rest, keywords))
+                .unwrap_or((rest, Vec::new()))
+        } else {
+            (rest, Vec::new())
+        };
         return tail_done(rest).then_some(Effect::ApplyPerpetual {
             target: TargetFilter::ParentTarget,
             modification: crate::types::ability::PerpetualModification::ModifyPowerToughness {
-                power_delta,
-                toughness_delta,
+                power: QuantityExpr::Fixed { value: power_delta },
+                toughness: QuantityExpr::Fixed {
+                    value: toughness_delta,
+                },
+                keywords,
             },
         });
     }
@@ -12248,8 +12289,12 @@ fn try_parse_perpetual_modify_pt_single(tp: TextPair) -> Option<Effect> {
     tail_done(rest).then_some(Effect::ApplyPerpetual {
         target: TargetFilter::Any,
         modification: crate::types::ability::PerpetualModification::ModifyPowerToughness {
-            power_delta,
-            toughness_delta,
+            power: QuantityExpr::Fixed { value: power_delta },
+            toughness: QuantityExpr::Fixed {
+                value: toughness_delta,
+            },
+            // No printed self-subject inner carries a keyword rider.
+            keywords: Vec::new(),
         },
     })
 }
@@ -35003,6 +35048,22 @@ pub(crate) fn each_quantity_expr_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
         Effect::Discover {
             mana_value_limit, ..
         } => f(mana_value_limit),
+        // Digital-only Alchemy (no CR entry): the noted value ("note their
+        // power") and a perpetual P/T delta's exprs ("…where X is their …")
+        // surface possessive quantities, so scope/possessive rewrites must
+        // reach them. Other `PerpetualModification` variants carry no
+        // `QuantityExpr`.
+        Effect::NoteNumber { value, .. } => f(value),
+        Effect::ApplyPerpetual {
+            modification:
+                PerpetualModification::ModifyPowerToughness {
+                    power, toughness, ..
+                },
+            ..
+        } => {
+            f(power);
+            f(toughness);
+        }
         // CR 109.5: "you"/"your" in a delayed payload resolve to the delayed
         // ability's controller (the creating spell's or ability's controller,
         // per CR 603.7d-f), so its nested quantity references need the same

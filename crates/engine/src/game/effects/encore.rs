@@ -38,8 +38,8 @@
 
 use crate::game::players;
 use crate::types::ability::{
-    ContinuousModification, DelayedTriggerCondition, Duration, Effect, EffectError, EffectKind,
-    QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+    ContinuousModification, DelayedTriggerCondition, DelayedTriggerKind, Duration, Effect,
+    EffectError, EffectKind, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{DelayedTrigger, GameState};
@@ -131,7 +131,7 @@ pub fn resolve(
                 controller: ability.controller,
                 source_id: ability.source_id,
                 one_shot: true,
-                is_boon: false,
+                kind: DelayedTriggerKind::Ordinary,
                 provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
             },
             events,

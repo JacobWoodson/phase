@@ -5782,6 +5782,35 @@ impl DelayedTriggerPlayerBinding {
     }
 }
 
+/// Which family a `DelayedTrigger` entry belongs to. A one-time boon is a
+/// structurally distinct entry (holder-relative matching, "if you have a
+/// boon" membership, the boon-only embedded-condition gate), not a flag on
+/// an ordinary entry — hence a typed axis rather than a bool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DelayedTriggerKind {
+    /// DEFAULT — an ordinary CR 603.7 delayed trigger. Every pre-existing
+    /// entry is this variant.
+    #[default]
+    Ordinary,
+    /// Digital-only Alchemy (no CR entry): a one-time boon installed by
+    /// `Effect::CreateBoon`.
+    Boon,
+}
+
+impl DelayedTriggerKind {
+    /// Serde skip-helper: `Ordinary` is the default and is omitted from
+    /// JSON, so every pre-existing serialized delayed trigger round-trips
+    /// byte-identical.
+    pub fn is_ordinary(&self) -> bool {
+        matches!(self, DelayedTriggerKind::Ordinary)
+    }
+
+    /// True for a one-time boon entry.
+    pub fn is_boon(self) -> bool {
+        matches!(self, DelayedTriggerKind::Boon)
+    }
+}
+
 /// When a delayed triggered ability fires (CR 603.7).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -16416,18 +16445,24 @@ pub enum PerpetualModification {
     SetBasePowerToughness { power: i32, toughness: i32 },
     /// "[object] perpetually gets +N/+M" — permanently modifies base power and
     /// toughness by the given deltas (Heir to Dragonfire, Tiana's Vehicle).
+    /// Fixed deltas are `QuantityExpr::Fixed`; the dynamic "+X/+X / +X/+0,
+    /// where X is …" form (Rothga, Bonded Engulfer; Dragonborn Immolator;
+    /// Mephit's Enthusiasm) carries live exprs that `effects/perpetual.rs`
+    /// evaluates ONCE at application time and freezes to `Fixed` before
+    /// installing — perpetual edits are permanent, never live expressions,
+    /// so only `Fixed` may ever persist in `perpetual_mods`.
+    ///
+    /// The leading "perpetually" scopes over a compound verb phrase, so the
+    /// mixed "[subject] perpetually gets +N/+M and gains [keyword(s)]" shape
+    /// (Jaheira, Stirring Harper's boon; By Elspeth's Command) carries its
+    /// keywords here, mirroring `Become`'s combined P/T + keywords payload —
+    /// one application, one recording, no sibling variant. Empty (and off the
+    /// wire) for every pure-P/T edit.
     ModifyPowerToughness {
-        power_delta: i32,
-        toughness_delta: i32,
-    },
-    /// Digital-only Alchemy (no CR entry): "[object] perpetually gets
-    /// +X/+X / +X/+0, where X is …" (Rothga, Bonded Engulfer;
-    /// Dragonborn Immolator; Mephit's Enthusiasm). The deltas evaluate at
-    /// application time and freeze into a plain `ModifyPowerToughness`
-    /// record — perpetual edits are permanent, never live expressions.
-    ModifyPowerToughnessDynamic {
         power: QuantityExpr,
         toughness: QuantityExpr,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        keywords: Vec<crate::types::keywords::Keyword>,
     },
     /// "[object] perpetually gains [keyword] [and [keyword]]" — permanently
     /// grants evergreen keywords (Monoist Gravliner station trigger).
@@ -18886,7 +18921,7 @@ pub enum Effect {
     /// Digital-only Alchemy (no CR entry): "you get a one-time boon with
     /// `<ability>`" grants the recipient a single-use trigger. Resolved by
     /// `game::effects::create_boon` into a Persistent one-shot
-    /// `WhenNextEvent` delayed trigger (`DelayedTrigger::is_boon`), so
+    /// `WhenNextEvent` delayed trigger (`DelayedTriggerKind::Boon`), so
     /// one-shot removal, intervening-if gating, and cross-turn persistence
     /// all reuse the CR 603.7 machinery. The `trigger` keeps its parsed
     /// `execute` here; resolve splits it into the delayed condition matcher
@@ -23520,6 +23555,19 @@ impl Effect {
             // quantity — visit it so fixed-ness audits see through the note.
             Effect::NoteNumber { value } => {
                 f(value);
+            }
+            // Digital-only Alchemy (no CR entry): a perpetual P/T delta's
+            // exprs are live quantities pre-freeze — visit them so
+            // fixed-ness audits see through the modification. Other
+            // `PerpetualModification` variants carry no `QuantityExpr` and
+            // stay in the empty arm below.
+            Effect::ApplyPerpetual {
+                modification:
+                    PerpetualModification::ModifyPowerToughness { power, toughness, .. },
+                ..
+            } => {
+                f(power);
+                f(toughness);
             }
             Effect::PumpAll {
                 power, toughness, ..
@@ -28455,6 +28503,32 @@ pub struct SpellContext {
     /// event-delayed trigger, which reads the event that fires it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creation_lookback_event: Option<Box<crate::types::events::GameEvent>>,
+    /// Digital-only Alchemy (no CR entry): the noted number this boon
+    /// grant captured. Each "note ..." + "you get a one-time boon with
+    /// [... the noted number ...]" resolution snapshots the noting
+    /// player's `Player::noted_number` into the granted ability at install
+    /// time, so sequential notes (or notes from different cards) never
+    /// leak into each other's boons: a boon reads what its own grant
+    /// captured, not the live global. `None` outside boon grants (and for
+    /// grants whose resolution noted nothing), where `NotedNumber` falls
+    /// back to the live global. Stamped only by
+    /// `game::effects::create_boon::resolve`; the stored ability rides the
+    /// delayed-fire path untouched, so the capture survives fire, stack,
+    /// and resolution without any trigger-entry lookup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boon_captured_noted_number: Option<i32>,
+    /// Digital-only Alchemy (no CR entry): the matching entrant set of a
+    /// batch-semantics boon trigger ("one or more creatures enter",
+    /// Dunbarrow Revivalist), pinned at fire time in batch order. A
+    /// one-shot delayed trigger fires once per batch, so the single fired
+    /// event cannot serve a "one of them" resolution choice — the fire
+    /// path stamps every matching entrant here (with incarnations, so a
+    /// departed-and-returned entrant is a new object per CR 400.7) and the
+    /// token host resolver offers the still-legal subset as the choice.
+    /// Empty for every non-batch boon and outside boons; stamped only by
+    /// the delayed-fire path in `game::triggers`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub boon_trigger_batch_objects: Vec<crate::types::identifiers::ObjectIncarnationRef>,
     /// CR 608.2c: The immediate `forward_result` producer's complete ordered
     /// result. `None` means no producer has run in this resolution; `Some([])`
     /// is a completed producer that moved no objects and intentionally blocks
@@ -29027,7 +29101,7 @@ pub enum TriggerCondition {
     },
     /// Digital-only Alchemy (no CR entry): "if you have a boon" is true when
     /// `player` holds at least one unconsumed one-time boon (a
-    /// `DelayedTrigger::is_boon` entry they control). Checked at fire time
+    /// `DelayedTriggerKind::Boon` entry they control). Checked at fire time
     /// and again as the ability resolves (CR 603.4), mirroring `IsMonarch`.
     /// `player` is the CR 109.5 subject axis; only `Controller` is printed
     /// (Underbridge Warlock).
@@ -37183,6 +37257,69 @@ mod tests {
         let mut visited = Vec::new();
         effect.for_each_quantity_expr(&mut |quantity| visited.push(quantity.clone()));
         assert_eq!(visited, vec![count, rhs]);
+    }
+
+    /// V-QE: the digital-Alchemy quantity carriers are visited — the noted
+    /// `value` of `NoteNumber`, and both delta exprs of a perpetual P/T
+    /// modification (live pre-freeze, `Fixed` after). Without these arms a
+    /// fixed-ness audit cannot see through a note or a dynamic perpetual.
+    #[test]
+    fn note_and_perpetual_quantity_visitor_reaches_live_exprs() {
+        let noted = QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::Anaphoric,
+            },
+        };
+        let effect = Effect::NoteNumber {
+            value: noted.clone(),
+        };
+        let mut visited = Vec::new();
+        effect.for_each_quantity_expr(&mut |quantity| visited.push(quantity.clone()));
+        assert_eq!(visited, vec![noted]);
+
+        let power = QuantityExpr::Ref {
+            qty: QuantityRef::NotedNumber,
+        };
+        let toughness = QuantityExpr::Fixed { value: 0 };
+        let effect = Effect::ApplyPerpetual {
+            target: TargetFilter::Any,
+            modification: PerpetualModification::ModifyPowerToughness {
+                power: power.clone(),
+                toughness: toughness.clone(),
+                keywords: Vec::new(),
+            },
+        };
+        let mut visited = Vec::new();
+        effect.for_each_quantity_expr(&mut |quantity| visited.push(quantity.clone()));
+        assert_eq!(visited, vec![power, toughness]);
+    }
+
+    /// M8 serde contract: the unified P/T axis emits `power`/`toughness`
+    /// quantity exprs (fixed deltas as `Fixed`), never the pre-unification
+    /// `power_delta`/`toughness_delta` bare numbers. Pins the exact emission
+    /// the card-data export and test fixture carry.
+    #[test]
+    fn modify_power_toughness_serde_shape_is_fixed_quantities() {
+        let modification = PerpetualModification::ModifyPowerToughness {
+            power: QuantityExpr::Fixed { value: 1 },
+            toughness: QuantityExpr::Fixed { value: 1 },
+            keywords: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::to_string(&modification).unwrap(),
+            r#"{"kind":"ModifyPowerToughness","power":{"type":"Fixed","value":1},"toughness":{"type":"Fixed","value":1}}"#
+        );
+        // Mixed "perpetually gets +N/+M and gains [keywords]" (Jaheira): the
+        // keyword list rides the same modification, off the wire when empty.
+        let mixed = PerpetualModification::ModifyPowerToughness {
+            power: QuantityExpr::Fixed { value: 1 },
+            toughness: QuantityExpr::Fixed { value: 0 },
+            keywords: vec![crate::types::keywords::Keyword::Haste],
+        };
+        assert_eq!(
+            serde_json::to_string(&mixed).unwrap(),
+            r#"{"kind":"ModifyPowerToughness","power":{"type":"Fixed","value":1},"toughness":{"type":"Fixed","value":0},"keywords":["Haste"]}"#
+        );
     }
 
     /// V-QE: `ChooseAndSacrificeRest`'s TWO secondary quantity slots —

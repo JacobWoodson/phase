@@ -1,5 +1,5 @@
 use crate::types::ability::{
-    ControllerRef, DelayedTriggerCondition, DelayedTriggerLifetime, Effect, EffectError,
+    DelayedTriggerCondition, DelayedTriggerKind, DelayedTriggerLifetime, Effect, EffectError,
     EffectKind, ResolvedAbility, TargetFilter, TargetRef, TriggerDefinition,
 };
 use crate::types::events::GameEvent;
@@ -10,7 +10,7 @@ use crate::types::player::PlayerId;
 /// `<ability>`" installs the granted trigger for the recipient as a
 /// Persistent one-shot `WhenNextEvent` delayed trigger. One-shot removal,
 /// intervening-if gating, cross-turn persistence, and cleanup survival all
-/// reuse the CR 603.7 machinery; `DelayedTrigger::is_boon` distinguishes the
+/// reuse the CR 603.7 machinery; `DelayedTriggerKind::Boon` distinguishes the
 /// entry for "if you have a boon" (`TriggerCondition::HasBoon`) and for the
 /// boon-only embedded-condition gate in delayed matching.
 pub fn resolve(
@@ -88,6 +88,25 @@ pub fn resolve(
     // Larent, Valiant Batrider).
     delayed_ability.set_controller_recursive(holder);
 
+    // Digital-only Alchemy (no CR entry): per-grant note capture. A boon
+    // whose body reads "the noted number" sees what its OWN resolution
+    // noted — not whatever a later (or cross-card) note overwrote the
+    // live global with before the boon fired. Snapshot the noting
+    // player's live value into the granted ability now; the stored
+    // ability rides the delayed-fire path untouched, so the capture
+    // survives fire, stack, and resolution with no trigger-entry lookup
+    // (and no sensitivity to one-shot consumption timing). The reader is
+    // the same subject the `NoteNumber` leg writes for (its resolving
+    // player), so a grant whose own resolution noted nothing — or a
+    // non-note grant — captures `None` and reads fall back to the live
+    // global.
+    let noting_player = ability.original_controller.unwrap_or(ability.controller);
+    delayed_ability.context.boon_captured_noted_number = state
+        .players
+        .iter()
+        .find(|p| p.id == noting_player)
+        .and_then(|p| p.noted_number);
+
     // CR 701.27f + CR 400.7: same creation-time generation/incarnation
     // capture as `delayed_trigger::resolve`.
     let source = state
@@ -106,7 +125,7 @@ pub fn resolve(
             controller: holder,
             source_id: delayed_source_id,
             one_shot: true,
-            is_boon: true,
+            kind: DelayedTriggerKind::Boon,
             provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
         },
         events,
@@ -169,50 +188,89 @@ fn resolve_recipient(
 /// Re-anchor the embedded matcher's holder-relative references to the
 /// concrete holder.
 ///
-/// Delayed-trigger matchers resolve "you" through the trigger source's
-/// controller, which is the boon's CREATOR. When the holder differs from the
-/// creator (Loch Larent, Valiant Batrider), an un-rewritten `Controller`
-/// would watch the wrong player's events. Binding unconditionally (even when
-/// holder == creator) additionally immunizes self-held boons against the
-/// creating object changing controller mid-flight; in the common case the
-/// bound filter matches exactly what the relative one would.
+/// Every `TargetFilter`-bearing matcher field — the four subject slots
+/// (`valid_card`, `valid_target`, `valid_subject_player`, `valid_source`)
+/// and each disjunctive zone-change clause's `valid_card` — routes through
+/// the shared [`crate::game::filter::reanchor_filter_to_holder`] traversal,
+/// so nested descendants (`TrackedSetFiltered` filters, `DistinctFrom`
+/// references, `Typed` properties) re-anchor too. Each field is
+/// transactional on its own; an incomplete bounded walk leaves that field
+/// creator-relative (today's behavior for exotic shapes) rather than
+/// publishing a partial rewrite.
 ///
 /// Only `You`-shaped references are re-anchored. `Opponent` and the other
 /// relative `ControllerRef`s have no concrete singular form and never appear
 /// in a printed boon inner; execute-time "you" needs no rewrite because the
-/// delayed ability is already controlled by the holder.
+/// delayed ability is already controlled by the holder. Intervening-if
+/// CONDITIONS are intentionally not walked here: the delayed path evaluates
+/// them with `delayed.controller` (the holder) as the controller parameter,
+/// so player-valued leaves are already holder-correct, and no printed boon
+/// inner carries a holder-relative condition filter.
 fn reanchor_holder_refs(inner: &mut TriggerDefinition, holder: PlayerId) {
-    if matches!(inner.valid_target, Some(TargetFilter::Controller)) {
-        inner.valid_target = Some(TargetFilter::SpecificPlayer { id: holder });
-    }
     for slot in [
         inner.valid_card.as_mut(),
-        inner.valid_source.as_mut(),
         inner.valid_target.as_mut(),
+        inner.valid_subject_player.as_mut(),
+        inner.valid_source.as_mut(),
     ]
     .into_iter()
     .flatten()
     {
-        reanchor_filter(slot, holder);
+        crate::game::filter::reanchor_filter_to_holder(slot, holder);
+    }
+    for clause in inner.zone_change_clauses.iter_mut() {
+        if let Some(valid_card) = clause.valid_card.as_mut() {
+            crate::game::filter::reanchor_filter_to_holder(valid_card, holder);
+        }
     }
 }
 
-fn reanchor_filter(filter: &mut TargetFilter, holder: PlayerId) {
-    match filter {
-        TargetFilter::Controller => {
-            *filter = TargetFilter::SpecificPlayer { id: holder };
-        }
-        TargetFilter::Typed(typed) => {
-            if matches!(typed.controller, Some(ControllerRef::You)) {
-                typed.controller = Some(ControllerRef::SpecificPlayer { id: holder });
-            }
-        }
-        TargetFilter::Not { filter } => reanchor_filter(filter, holder),
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            for nested in filters {
-                reanchor_filter(nested, holder);
-            }
-        }
-        _ => {}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ability::{ControllerRef, OriginConstraint, TypedFilter, ZoneChangeClause};
+    use crate::types::triggers::TriggerMode;
+
+    /// M10: re-anchoring covers every matcher field — the four subject slots
+    /// AND each zone-change clause — so no nested `You` keeps the creator.
+    #[test]
+    fn reanchor_covers_subject_player_and_zone_clauses() {
+        let holder = PlayerId(1);
+        let you_creature =
+            || TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+        let bound_creature = TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::SpecificPlayer { id: holder }),
+        );
+
+        let mut inner = TriggerDefinition::new(TriggerMode::SpellCast);
+        inner.valid_card = Some(you_creature());
+        inner.valid_target = Some(TargetFilter::Controller);
+        inner.valid_subject_player = Some(TargetFilter::Controller);
+        inner.valid_source = Some(you_creature());
+        inner.zone_change_clauses = vec![ZoneChangeClause {
+            origin: OriginConstraint::Any,
+            destination: None,
+            destination_constraint: OriginConstraint::Any,
+            valid_card: Some(you_creature()),
+        }];
+
+        reanchor_holder_refs(&mut inner, holder);
+
+        assert_eq!(inner.valid_card.as_ref(), Some(&bound_creature));
+        assert_eq!(
+            inner.valid_target,
+            Some(TargetFilter::SpecificPlayer { id: holder })
+        );
+        assert_eq!(
+            inner.valid_subject_player,
+            Some(TargetFilter::SpecificPlayer { id: holder }),
+            "alternate subject must re-anchor"
+        );
+        assert_eq!(inner.valid_source.as_ref(), Some(&bound_creature));
+        assert_eq!(
+            inner.zone_change_clauses[0].valid_card.as_ref(),
+            Some(&bound_creature),
+            "zone-clause filters must re-anchor"
+        );
     }
 }

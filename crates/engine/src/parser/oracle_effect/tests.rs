@@ -44140,8 +44140,9 @@ fn perpetual_parser_maps_modify_pt() {
         e,
         Effect::ApplyPerpetual {
             modification: PerpetualModification::ModifyPowerToughness {
-                power_delta: 3,
-                toughness_delta: 3,
+                power: QuantityExpr::Fixed { value: 3 },
+                toughness: QuantityExpr::Fixed { value: 3 },
+                ..
             },
             ..
         }
@@ -44153,8 +44154,9 @@ fn perpetual_parser_maps_modify_pt() {
         Effect::ApplyPerpetual {
             target: TargetFilter::ParentTarget,
             modification: PerpetualModification::ModifyPowerToughness {
-                power_delta: 1,
-                toughness_delta: 0,
+                power: QuantityExpr::Fixed { value: 1 },
+                toughness: QuantityExpr::Fixed { value: 0 },
+                ..
             },
             ..
         }
@@ -44166,8 +44168,9 @@ fn perpetual_parser_maps_modify_pt() {
         Effect::ApplyPerpetual {
             target: TargetFilter::ParentTarget,
             modification: PerpetualModification::ModifyPowerToughness {
-                power_delta: 3,
-                toughness_delta: 0,
+                power: QuantityExpr::Fixed { value: 3 },
+                toughness: QuantityExpr::Fixed { value: 0 },
+                ..
             },
             ..
         }
@@ -44179,8 +44182,9 @@ fn perpetual_parser_maps_modify_pt() {
         Effect::ApplyPerpetual {
             target: TargetFilter::Typed(ref filter),
             modification: PerpetualModification::ModifyPowerToughness {
-                power_delta: -1,
-                toughness_delta: -2,
+                power: QuantityExpr::Fixed { value: -1 },
+                toughness: QuantityExpr::Fixed { value: -2 },
+                ..
             },
         } if filter.type_filters.contains(&crate::types::ability::TypeFilter::Creature)
             && filter.controller == Some(crate::types::ability::ControllerRef::Opponent)
@@ -44192,12 +44196,64 @@ fn perpetual_parser_maps_modify_pt() {
         Effect::ApplyPerpetual {
             target: TargetFilter::Typed(ref filter),
             modification: PerpetualModification::ModifyPowerToughness {
-                power_delta: 1,
-                toughness_delta: 0,
+                power: QuantityExpr::Fixed { value: 1 },
+                toughness: QuantityExpr::Fixed { value: 0 },
+                ..
             },
         } if filter.type_filters.contains(&crate::types::ability::TypeFilter::Creature)
             && filter.controller == Some(crate::types::ability::ControllerRef::You)
     ));
+}
+
+/// M4: the dynamic "that <subject>" arm validates its subject through the
+/// shared anaphor grammar. A valid demonstrative binds `ParentTarget` with
+/// the trigger-anaphor tail scope; a compound or unmodelled subject fails
+/// closed (honest gap) instead of silently becoming a single-object edit.
+#[test]
+fn perpetual_dynamic_that_subject_validates_and_rejects_compounds() {
+    use crate::types::ability::PerpetualModification;
+
+    let e = parse_effect("that vehicle perpetually gets +X/+0, where X is its power.");
+    assert!(
+        matches!(
+            e,
+            Effect::ApplyPerpetual {
+                target: TargetFilter::ParentTarget,
+                modification: PerpetualModification::ModifyPowerToughness {
+                    power: QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: crate::types::ability::ObjectScope::EventSource
+                        }
+                    },
+                    toughness: QuantityExpr::Fixed { value: 0 },
+                    ..
+                },
+                ..
+            }
+        ),
+        "a valid demonstrative subject must bind: {e:?}"
+    );
+
+    for bad in [
+        "that artifact and this creature perpetually gets +X/+0, where X is its power.",
+        "that thingamajig perpetually gets +X/+0, where X is its power.",
+    ] {
+        let e = parse_effect(bad);
+        assert!(
+            matches!(e, Effect::Unimplemented { .. }),
+            "a compound/unmodelled subject must fail closed, got {e:?} for {bad:?}"
+        );
+    }
+}
+
+/// M4 twin for the fixed arm: compounds fail closed there too.
+#[test]
+fn perpetual_fixed_that_subject_rejects_compounds() {
+    let e = parse_effect("that artifact and this creature perpetually gets +1/+0.");
+    assert!(
+        matches!(e, Effect::Unimplemented { .. }),
+        "a compound subject must fail closed, got {e:?}"
+    );
 }
 
 #[test]
@@ -45294,8 +45350,9 @@ fn perpetual_anaphor_after_chosen_card_targets_parent_target() {
             Effect::ApplyPerpetual {
                 target: TargetFilter::ParentTarget,
                 modification: PerpetualModification::ModifyPowerToughness {
-                    power_delta: 3,
-                    toughness_delta: 0,
+                    power: QuantityExpr::Fixed { value: 3 },
+                    toughness: QuantityExpr::Fixed { value: 0 },
+                    ..
                 },
             }
         ),
@@ -80999,9 +81056,9 @@ fn self_cost_modification_after_closed_quote_is_its_own_chunk() {
 //
 // Every printed one-time-boon grant parses to `Effect::CreateBoon` — never to
 // a phantom prose counter, never to a permanent trigger, never silently
-// dropped. The 21 grants below are the full printed population: the 20 cards
-// matching Scryfall `o:"one-time boon"` plus Klement, Life Acolyte (whose
-// grant hides behind "specializes" reminder text).
+// dropped. The 22 grants below are the full printed population (MTGJSON
+// corpus count), including Klement, Life Acolyte (whose grant hides behind
+// "specializes" reminder text) and Jaheira, Stirring Harper.
 // ---------------------------------------------------------------------------
 
 use crate::parser::oracle::ParsedAbilities;
@@ -81009,93 +81066,89 @@ use crate::types::ability::{PlayerScope, TriggerCondition};
 use crate::types::counter::CounterType;
 use crate::types::triggers::TriggerMode;
 
+/// Shared boon-test traversal: collects `def` and everything reachable through
+/// modal branches, chained siblings, and mode abilities. `descend_boon`
+/// additionally walks granted-trigger bodies — grant/phantom collectors pass
+/// `true` (the whole tree is one search space); gap-name collectors pass
+/// `false` to keep the outer/inner split (`outer_gap_names` never descends
+/// into inners; those are `inner_gap_names`' job).
+fn collect_test_tree<'a>(
+    def: &'a AbilityDefinition,
+    descend_boon: bool,
+    out: &mut Vec<&'a AbilityDefinition>,
+) {
+    out.push(def);
+    if descend_boon {
+        if let Effect::CreateBoon { trigger, .. } = def.effect.as_ref() {
+            if let Some(execute) = trigger.execute.as_deref() {
+                collect_test_tree(execute, descend_boon, out);
+            }
+        }
+    }
+    if let Effect::ChooseOneOf { branches, .. } = def.effect.as_ref() {
+        for branch in branches {
+            collect_test_tree(branch, descend_boon, out);
+        }
+    }
+    for child in [def.sub_ability.as_deref(), def.else_ability.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        collect_test_tree(child, descend_boon, out);
+    }
+    for mode in &def.mode_abilities {
+        collect_test_tree(mode, descend_boon, out);
+    }
+}
+
 /// Every `CreateBoon` grant anywhere in the parsed abilities/triggers,
 /// descending through modal branches (Bloodrage Alpha's grant is a
 /// choose-one branch, not a chain node).
 fn boon_grants(parsed: &ParsedAbilities) -> Vec<(&TargetFilter, &TriggerDefinition)> {
-    fn walk_def<'a>(
-        def: &'a AbilityDefinition,
-        out: &mut Vec<(&'a TargetFilter, &'a TriggerDefinition)>,
-    ) {
-        if let Effect::CreateBoon { recipient, trigger } = def.effect.as_ref() {
-            out.push((recipient, trigger.as_ref()));
-            if let Some(execute) = trigger.execute.as_deref() {
-                walk_def(execute, out);
-            }
-        }
-        if let Effect::ChooseOneOf { branches, .. } = def.effect.as_ref() {
-            for branch in branches {
-                walk_def(branch, out);
-            }
-        }
-        for child in [def.sub_ability.as_deref(), def.else_ability.as_deref()]
-            .into_iter()
-            .flatten()
-        {
-            walk_def(child, out);
-        }
-        for mode in &def.mode_abilities {
-            walk_def(mode, out);
-        }
-    }
-    let mut out = Vec::new();
+    let mut defs = Vec::new();
     for ability in &parsed.abilities {
-        walk_def(ability, &mut out);
+        collect_test_tree(ability, true, &mut defs);
     }
     for trigger in &parsed.triggers {
         if let Some(execute) = trigger.execute.as_deref() {
-            walk_def(execute, &mut out);
+            collect_test_tree(execute, true, &mut defs);
         }
     }
-    out
+    defs.into_iter()
+        .filter_map(|def| match def.effect.as_ref() {
+            Effect::CreateBoon { recipient, trigger } => Some((recipient, trigger.as_ref())),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The issue #7495 phantom: a `PutCounter` whose counter type is quoted
 /// trigger prose ("\"when you cast a creature spell, that creature enters
 /// with an additional +1/+1\"") instead of a real counter.
 fn prose_counter_phantoms(parsed: &ParsedAbilities) -> Vec<String> {
-    fn walk_def(def: &AbilityDefinition, out: &mut Vec<String>) {
-        if let Effect::PutCounter {
-            counter_type: CounterType::Generic(name),
-            ..
-        } = def.effect.as_ref()
-        {
-            if name.to_lowercase().contains("when ") {
-                out.push(name.clone());
-            }
-        }
-        if let Effect::CreateBoon { trigger, .. } = def.effect.as_ref() {
-            if let Some(execute) = trigger.execute.as_deref() {
-                walk_def(execute, out);
-            }
-        }
-        if let Effect::ChooseOneOf { branches, .. } = def.effect.as_ref() {
-            for branch in branches {
-                walk_def(branch, out);
-            }
-        }
-        for child in [def.sub_ability.as_deref(), def.else_ability.as_deref()]
-            .into_iter()
-            .flatten()
-        {
-            walk_def(child, out);
-        }
-    }
-    let mut out = Vec::new();
+    let mut defs = Vec::new();
     for ability in &parsed.abilities {
-        walk_def(ability, &mut out);
+        collect_test_tree(ability, true, &mut defs);
     }
     for trigger in &parsed.triggers {
         if let Some(execute) = trigger.execute.as_deref() {
-            walk_def(execute, &mut out);
+            collect_test_tree(execute, true, &mut defs);
         }
     }
     for replacement in &parsed.replacements {
         if let Some(execute) = replacement.execute.as_ref() {
-            walk_def(execute, &mut out);
+            collect_test_tree(execute, true, &mut defs);
         }
     }
-    out
+    defs.into_iter()
+        .filter_map(|def| match def.effect.as_ref() {
+            Effect::PutCounter {
+                counter_type: CounterType::Generic(name),
+                ..
+            } if name.to_lowercase().contains("when ") => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 fn boon_strings(words: &[&str]) -> Vec<String> {
@@ -81105,64 +81158,30 @@ fn boon_strings(words: &[&str]) -> Vec<String> {
 /// Gap names anywhere in a boon inner's body (descending modal branches —
 /// Swiftspear's Teachings grants a choice).
 fn inner_gap_names(inner: &TriggerDefinition) -> Vec<String> {
-    fn walk(def: &AbilityDefinition, out: &mut Vec<String>) {
-        if let Some(name) = unimplemented_name(def) {
-            out.push(name.to_string());
-        }
-        if let Effect::ChooseOneOf { branches, .. } = def.effect.as_ref() {
-            for branch in branches {
-                walk(branch, out);
-            }
-        }
-        for child in [def.sub_ability.as_deref(), def.else_ability.as_deref()]
-            .into_iter()
-            .flatten()
-        {
-            walk(child, out);
-        }
-        for mode in &def.mode_abilities {
-            walk(mode, out);
-        }
-    }
-    let mut out = Vec::new();
+    let mut defs = Vec::new();
     if let Some(execute) = inner.execute.as_deref() {
-        walk(execute, &mut out);
+        collect_test_tree(execute, false, &mut defs);
     }
-    out
+    defs.into_iter()
+        .filter_map(|def| unimplemented_name(def).map(str::to_string))
+        .collect()
 }
 
 /// Gap names anywhere OUTSIDE boon-inner bodies (the granting clauses).
 /// Never descends into `CreateBoon` inners — those are `inner_gap_names`' job.
 fn outer_gap_names(parsed: &ParsedAbilities) -> Vec<String> {
-    fn walk(def: &AbilityDefinition, out: &mut Vec<String>) {
-        if let Some(name) = unimplemented_name(def) {
-            out.push(name.to_string());
-        }
-        if let Effect::ChooseOneOf { branches, .. } = def.effect.as_ref() {
-            for branch in branches {
-                walk(branch, out);
-            }
-        }
-        for child in [def.sub_ability.as_deref(), def.else_ability.as_deref()]
-            .into_iter()
-            .flatten()
-        {
-            walk(child, out);
-        }
-        for mode in &def.mode_abilities {
-            walk(mode, out);
-        }
-    }
-    let mut out = Vec::new();
+    let mut defs = Vec::new();
     for ability in &parsed.abilities {
-        walk(ability, &mut out);
+        collect_test_tree(ability, false, &mut defs);
     }
     for trigger in &parsed.triggers {
         if let Some(execute) = trigger.execute.as_deref() {
-            walk(execute, &mut out);
+            collect_test_tree(execute, false, &mut defs);
         }
     }
-    out
+    defs.into_iter()
+        .filter_map(|def| unimplemented_name(def).map(str::to_string))
+        .collect()
 }
 
 /// Shared spine: exactly one grant, the expected recipient, a recognized
@@ -81319,6 +81338,15 @@ fn boon_benalish_knight_counselor() {
     );
     assert_eq!(inner.mode, TriggerMode::SpellCast);
     assert!(parsed.replacements.is_empty());
+    // Outer trigger: "Whenever ~ enlists a creature" is a real Enlisted trigger
+    // (not Unknown) — the card is fully supported end to end.
+    assert_eq!(parsed.triggers.len(), 1);
+    assert_eq!(parsed.triggers[0].mode, TriggerMode::Enlisted);
+    assert!(
+        outer_gap_names(&parsed).is_empty(),
+        "Benalish host must be gap-free, got {:?}",
+        outer_gap_names(&parsed)
+    );
 }
 
 #[test]
@@ -81436,12 +81464,43 @@ fn boon_dragonborn_immolator() {
         "granting clause must be gap-free, got {:?}: {parsed:#?}",
         outer_gap_names(&parsed)
     );
-    // Dies trigger: "note its power" reads the died creature anaphorically,
-    // then the grant follows in the same body.
+    // Dies trigger: CR 603.4 intervening-if gates the WHOLE ability —
+    // "note its power" reads the died creature anaphorically, then the
+    // grant follows in the same body, both legs ungated within the
+    // trigger.
     assert_eq!(parsed.triggers.len(), 1, "dies trigger: {parsed:#?}");
     let outer = &parsed.triggers[0];
     assert_eq!(outer.mode, TriggerMode::ChangesZone);
+    match outer.condition.as_ref() {
+        Some(TriggerCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        }) => {
+            assert!(
+                matches!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: crate::types::ability::ObjectScope::Source
+                        }
+                    }
+                ),
+                "gate must read the dying source's power, got {lhs:?}"
+            );
+            assert_eq!(*comparator, Comparator::GT, "greater than 0");
+            assert!(
+                matches!(rhs, QuantityExpr::Fixed { value: 0 }),
+                "greater than 0, got {rhs:?}"
+            );
+        }
+        other => panic!("expected hoisted QuantityComparison gate, got {other:?}"),
+    }
     let note = outer.execute.as_deref().expect("note leg");
+    assert!(
+        note.condition.is_none(),
+        "the intervening-if gates the trigger, not the note leg: {parsed:#?}"
+    );
     match note.effect.as_ref() {
         Effect::NoteNumber { value } => assert!(
             matches!(
@@ -81457,6 +81516,10 @@ fn boon_dragonborn_immolator() {
         other => panic!("expected NoteNumber, got {other:?}"),
     }
     let grant = note.sub_ability.as_deref().expect("grant leg");
+    assert!(
+        grant.condition.is_none(),
+        "the intervening-if gates the trigger, not the grant leg: {parsed:#?}"
+    );
     assert!(
         matches!(grant.effect.as_ref(), Effect::CreateBoon { .. }),
         "grant must follow the note: {parsed:#?}"
@@ -81476,9 +81539,10 @@ fn boon_dragonborn_immolator() {
         "'it' is the cast spell: {parsed:#?}"
     );
     match modification {
-        crate::types::ability::PerpetualModification::ModifyPowerToughnessDynamic {
+        crate::types::ability::PerpetualModification::ModifyPowerToughness {
             power,
             toughness,
+            ..
         } => {
             assert!(
                 matches!(
@@ -81494,7 +81558,7 @@ fn boon_dragonborn_immolator() {
                 "+X/+0 keeps a fixed 0 toughness, got {toughness:?}"
             );
         }
-        other => panic!("expected dynamic perpetual, got {other:?}"),
+        other => panic!("expected live-expr perpetual P/T, got {other:?}"),
     }
 }
 
@@ -81507,7 +81571,91 @@ fn boon_dunbarrow_revivalist() {
         &boon_strings(&["Creature"]),
         &boon_strings(&["Human", "Warlock"]),
     );
-    assert_single_boon(&parsed, &TargetFilter::Controller, "Dunbarrow Revivalist");
+    let inner = assert_single_boon(&parsed, &TargetFilter::Controller, "Dunbarrow Revivalist");
+    // "One or more" is batch semantics: the fire path stamps every matching
+    // entrant so "one of them" can offer a resolution-time choice.
+    assert!(
+        inner.batched,
+        "the enters batch must be flagged: {parsed:#?}"
+    );
+    let body = inner.execute.as_deref().expect("inner body");
+    let Effect::Token { attach_to, .. } = body.effect.as_ref() else {
+        panic!("expected Token creation, got {:?}", body.effect);
+    };
+    assert_eq!(
+        attach_to.as_ref(),
+        Some(&TargetFilter::ParentTarget),
+        "'one of them' is the entrant-set reference: {parsed:#?}"
+    );
+}
+
+/// M1: scope rewrites reach into note values and perpetual P/T deltas — a
+/// scope-bearing ref inside either still binds. Drives the shared mutable
+/// visitor with an Anaphoric→EventSource rebind (the shape production
+/// rebinders use) and asserts both carriers were rewritten.
+#[test]
+fn each_quantity_expr_mut_rebinds_scopes_inside_note_and_perpetual() {
+    use crate::types::ability::ObjectScope;
+
+    let rebind = |effect: &mut Effect| {
+        super::each_quantity_expr_mut(effect, &mut |expr| {
+            super::each_quantity_ref_mut(expr, &mut |qty| {
+                if let QuantityRef::Power { scope } = qty {
+                    *scope = ObjectScope::EventSource;
+                }
+            });
+        });
+    };
+    let anaphoric_power = || QuantityExpr::Ref {
+        qty: QuantityRef::Power {
+            scope: ObjectScope::Anaphoric,
+        },
+    };
+
+    let mut note = Effect::NoteNumber {
+        value: anaphoric_power(),
+    };
+    rebind(&mut note);
+    assert!(
+        matches!(
+            note,
+            Effect::NoteNumber {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::EventSource
+                    }
+                }
+            }
+        ),
+        "the note value must be rebound, got {note:?}"
+    );
+
+    let mut perpetual = Effect::ApplyPerpetual {
+        target: TargetFilter::Any,
+        modification: PerpetualModification::ModifyPowerToughness {
+            power: anaphoric_power(),
+            toughness: QuantityExpr::Fixed { value: 0 },
+            keywords: Vec::new(),
+        },
+    };
+    rebind(&mut perpetual);
+    assert!(
+        matches!(
+            perpetual,
+            Effect::ApplyPerpetual {
+                modification: PerpetualModification::ModifyPowerToughness {
+                    power: QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::EventSource
+                        }
+                    },
+                    ..
+                },
+                ..
+            }
+        ),
+        "the perpetual power delta must be rebound, got {perpetual:?}"
+    );
 }
 
 #[test]
@@ -81612,9 +81760,10 @@ fn boon_mephits_enthusiasm() {
         "'it' is the cast spell: {parsed:#?}"
     );
     match modification {
-        crate::types::ability::PerpetualModification::ModifyPowerToughnessDynamic {
+        crate::types::ability::PerpetualModification::ModifyPowerToughness {
             power,
             toughness,
+            ..
         } => {
             assert!(
                 matches!(
@@ -81630,7 +81779,7 @@ fn boon_mephits_enthusiasm() {
                 "+X/+0 keeps a fixed 0 toughness, got {toughness:?}"
             );
         }
-        other => panic!("expected dynamic perpetual, got {other:?}"),
+        other => panic!("expected live-expr perpetual P/T, got {other:?}"),
     }
 }
 
@@ -81773,12 +81922,11 @@ fn boon_rothga_bonded_engulfer() {
         &TargetFilter::ParentTarget,
         "'it' is the cast spell: {parsed:#?}"
     );
-    let crate::types::ability::PerpetualModification::ModifyPowerToughnessDynamic {
-        power,
-        toughness,
+    let crate::types::ability::PerpetualModification::ModifyPowerToughness {
+        power, toughness, ..
     } = modification
     else {
-        panic!("expected dynamic perpetual, got {modification:?}");
+        panic!("expected live-expr perpetual P/T, got {modification:?}");
     };
     for axis in [power, toughness] {
         match axis {
@@ -81911,6 +82059,56 @@ fn boon_valiant_batrider() {
     );
     let inner = assert_single_boon(&parsed, &TargetFilter::TriggeringPlayer, "Valiant Batrider");
     assert_eq!(inner.mode, TriggerMode::SpellCast);
+}
+
+#[test]
+fn boon_jaheira_stirring_harper() {
+    let parsed = parse_oracle_text(
+        "Hexproof from artifacts and enchantments\nWhen this creature specializes, destroy up to one target artifact or enchantment. You get a one-time boon with \"When you cast a creature spell, it perpetually gets +1/+0 and gains haste.\"",
+        "Jaheira, Stirring Harper",
+        &boon_strings(&["Hexproof from artifacts and enchantments"]),
+        &boon_strings(&["Creature"]),
+        &boon_strings(&["Human", "Elf", "Druid"]),
+    );
+    let inner = assert_single_boon(
+        &parsed,
+        &TargetFilter::Controller,
+        "Jaheira, Stirring Harper",
+    );
+    assert_eq!(inner.mode, TriggerMode::SpellCast);
+    assert!(
+        outer_gap_names(&parsed).is_empty(),
+        "Jaheira host (specialize + destroy + hexproof-from) must be gap-free, got {:?}",
+        outer_gap_names(&parsed)
+    );
+    // Mixed body: fixed perpetual +1/+0 on the cast spell AND perpetual
+    // haste, one combined modification (the leading "perpetually" scopes over
+    // the compound verb phrase).
+    let body = inner.execute.as_deref().expect("grant body");
+    let Effect::ApplyPerpetual {
+        target,
+        modification:
+            PerpetualModification::ModifyPowerToughness {
+                power,
+                toughness,
+                keywords,
+            },
+    } = body.effect.as_ref()
+    else {
+        panic!("expected a perpetual P/T root, got {:?}", body.effect);
+    };
+    assert_eq!(
+        target,
+        &TargetFilter::ParentTarget,
+        "'it' is the cast spell: {parsed:#?}"
+    );
+    assert_eq!(power, &QuantityExpr::Fixed { value: 1 });
+    assert_eq!(toughness, &QuantityExpr::Fixed { value: 0 });
+    assert_eq!(
+        keywords,
+        &vec![crate::types::keywords::Keyword::Haste],
+        "Jaheira grants perpetual haste alongside +1/+0"
+    );
 }
 
 #[test]

@@ -12896,13 +12896,16 @@ fn static_gate_bridge_loses_zone(condition: &StaticCondition) -> bool {
 /// guards; like a printed trigger's gate it is evaluated unconditionally
 /// (CR 603.4: false means the ability does nothing).
 ///
-/// Gated on `is_boon`: no other delayed trigger carries an embedded
-/// condition (`effects::delayed_trigger` never sets one), so this gate is
-/// inert for every existing card. `or_trigger` is always `None` for boons
-/// (one printed trigger per boon) but joins the conjunction defensively so a
-/// future disjunctive boon cannot lose half its gate.
-fn boon_embedded_condition(delayed: &DelayedTrigger) -> Option<TriggerCondition> {
-    if !delayed.is_boon {
+/// Gated on `DelayedTriggerKind::Boon`: no other delayed trigger carries
+/// an embedded condition (`effects::delayed_trigger` never sets one), so
+/// this gate is inert for every existing card. `or_trigger` is always `None`
+/// for boons (one printed trigger per boon) but joins the conjunction
+/// defensively so a future disjunctive boon cannot lose half its gate.
+fn boon_embedded_condition(
+    delayed: &DelayedTrigger,
+    matched_alternative: usize,
+) -> Option<TriggerCondition> {
+    if !delayed.kind.is_boon() {
         return None;
     }
     let (trigger, or_trigger) = match &delayed.condition {
@@ -12913,14 +12916,66 @@ fn boon_embedded_condition(delayed: &DelayedTrigger) -> Option<TriggerCondition>
         } => (trigger, or_trigger),
         _ => return None,
     };
-    let mut conditions: Vec<TriggerCondition> = Vec::new();
-    conditions.extend(trigger.condition.clone());
-    conditions.extend(or_trigger.as_ref().and_then(|t| t.condition.clone()));
-    match conditions.len() {
-        0 => None,
-        1 => conditions.into_iter().next(),
-        _ => Some(TriggerCondition::And { conditions }),
+    // Only the FIRED alternative's gate is checked/carried: matching fired on
+    // one alternative, so conjoining both would gate on an event that never
+    // occurred. An alternative with NO gate yields None (ungated) — only a
+    // MISSING `or_trigger` on alternative 1 (unreachable: it matched, so it
+    // exists) falls back to the primary rather than failing open.
+    match matched_alternative {
+        1 => match or_trigger.as_deref() {
+            Some(t) => t.condition.clone(),
+            None => trigger.condition.clone(),
+        },
+        _ => trigger.condition.clone(),
     }
+}
+
+/// Digital-only Alchemy (no CR entry): stamp a batch-semantics boon's full
+/// matching entrant set onto the firing ability. A one-shot delayed trigger
+/// fires once per batch, so the single fired event cannot serve a "one of
+/// them" resolution choice ("one or more creatures enter … attached to one
+/// of them", Dunbarrow Revivalist) — every matching entrant is pinned here,
+/// in batch order with incarnations, and the token host resolver offers the
+/// still-legal subset as the choice at resolution.
+///
+/// Inert for non-boons and for non-batch (`batched == false`) inners. Only
+/// zone-change matches yield entrants; any other matching event shape has no
+/// entering object to pin. An entrant already gone from `state.objects` is
+/// skipped (nothing to pin).
+fn stamp_boon_trigger_batch(state: &GameState, events: &[GameEvent], trigger: &mut DelayedTrigger) {
+    if !trigger.kind.is_boon() {
+        return;
+    }
+    let crate::types::ability::DelayedTriggerCondition::WhenNextEvent {
+        trigger: embedded,
+        or_trigger,
+        ..
+    } = &trigger.condition
+    else {
+        return;
+    };
+    if !embedded.batched && !or_trigger.as_ref().is_some_and(|t| t.batched) {
+        return;
+    }
+    let matches = delayed_when_next_event_matches(
+        embedded,
+        or_trigger,
+        events,
+        state,
+        trigger.ability.trigger_source.as_ref(),
+    );
+    trigger.ability.context.boon_trigger_batch_objects = matches
+        .into_iter()
+        .filter_map(|(_, event, _)| {
+            let GameEvent::ZoneChanged { object_id, .. } = event else {
+                return None;
+            };
+            state
+                .objects
+                .get(&object_id)
+                .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
+        })
+        .collect();
 }
 
 fn delayed_intervening_if(ability: &ResolvedAbility) -> Option<TriggerCondition> {
@@ -13024,17 +13079,19 @@ fn delayed_trigger_to_context(
     state: &GameState,
     trigger: DelayedTrigger,
     trigger_event: GameEvent,
+    matched_alternative: usize,
 ) -> PendingTriggerContext {
     // CR 603.4 (second half): carry the hoisted intervening-`if` onto the stack
     // entry so `stack.rs`'s resolution recheck applies to a delayed triggered
     // ability exactly as it does to a printed one. `delayed_intervening_if` is
     // the SAME authority the collection gate below used, so the two halves of
-    // the CR 603.4 pair cannot read different predicates. A boon conjoins its
-    // embedded gate the same way — the collection gate above checked both, so
-    // the carried conjunction is the same predicate pair, not a new one.
+    // the CR 603.4 pair cannot read different predicates. A boon carries its
+    // embedded gate the same way — the collection gate above checked the
+    // FIRED alternative's gate, so the carried predicate is that same gate,
+    // not the conjunction of both alternatives'.
     let condition = match (
         delayed_intervening_if(&trigger.ability),
-        boon_embedded_condition(&trigger),
+        boon_embedded_condition(&trigger, matched_alternative),
     ) {
         (Some(hoisted), Some(embedded)) => Some(TriggerCondition::And {
             conditions: vec![hoisted, embedded],
@@ -13089,19 +13146,44 @@ fn collect_matching_delayed_triggers(
 
     // Separate "abilities to fire" from "indices to remove".
     // One-shot triggers are removed; multi-fire triggers are cloned and left in place.
-    let mut to_fire: Vec<(DelayedTrigger, usize, GameEvent, bool)> = Vec::new();
-    let mut to_remove: Vec<(usize, usize, GameEvent)> = Vec::new();
+    // The trailing `usize` on the fire/remove tuples is the matched
+    // `or_trigger` alternative (0 = primary); it threads to the carried
+    // gate so only the FIRED alternative's embedded condition is rechecked
+    // at resolution, never the conjunction of both.
+    let mut to_fire: Vec<(DelayedTrigger, usize, GameEvent, bool, usize)> = Vec::new();
+    let mut to_remove: Vec<(usize, usize, GameEvent, usize)> = Vec::new();
     let mut to_discard: Vec<(usize, super::lifecycle::DelayedTerminalDisposition)> = Vec::new();
 
     for (idx, delayed) in state.delayed_triggers.iter().enumerate() {
-        if let Some((event_index, trigger_event)) = delayed_trigger_event_with_index(
-            &delayed.condition,
-            events,
-            state,
-            delayed.source_id,
-            delayed.controller,
-            delayed.ability.trigger_source.as_ref(),
-        ) {
+        // `WhenNextEvent` matches come from the batch helper: the newest
+        // match is the fired event (identical to the single matcher), and
+        // its alternative index rides along. Every other condition keeps
+        // the single matcher (alternative 0 — only `WhenNextEvent` carries
+        // an `or_trigger`).
+        let matched: Option<(usize, GameEvent, usize)> = match &delayed.condition {
+            DelayedTriggerCondition::WhenNextEvent {
+                trigger,
+                or_trigger,
+                ..
+            } => delayed_when_next_event_matches(
+                trigger,
+                or_trigger,
+                events,
+                state,
+                delayed.ability.trigger_source.as_ref(),
+            )
+            .pop(),
+            _ => delayed_trigger_event_with_index(
+                &delayed.condition,
+                events,
+                state,
+                delayed.source_id,
+                delayed.controller,
+                delayed.ability.trigger_source.as_ref(),
+            )
+            .map(|(event_index, trigger_event)| (event_index, trigger_event, 0)),
+        };
+        if let Some((event_index, trigger_event, matched_alternative)) = matched {
             if !scope.accepts(&trigger_event) {
                 continue;
             }
@@ -13147,8 +13229,9 @@ fn collect_matching_delayed_triggers(
             // boon's EMBEDDED gate — the hoist above cannot see it. Same
             // evaluator, same single-occurrence discard: the boon spent its
             // one trigger event. Inert for non-boons (the helper gates on
-            // `is_boon`).
-            if let Some(condition) = boon_embedded_condition(delayed) {
+            // `DelayedTriggerKind::Boon`). Only the FIRED alternative's gate
+            // is checked — never the conjunction of both alternatives'.
+            if let Some(condition) = boon_embedded_condition(delayed, matched_alternative) {
                 if !check_trigger_condition_with_source(
                     state,
                     &condition,
@@ -13166,7 +13249,7 @@ fn collect_matching_delayed_triggers(
                 }
             }
             if delayed.one_shot {
-                to_remove.push((idx, event_index, trigger_event));
+                to_remove.push((idx, event_index, trigger_event, matched_alternative));
             } else {
                 // CR 603.2c + CR 510.2: A MULTI-FIRE WheneverEvent DamageDone
                 // trigger that matched the AGGREGATE `CombatDamageDealtToPlayer`
@@ -13190,7 +13273,7 @@ fn collect_matching_delayed_triggers(
                     state,
                     delayed.ability.trigger_source.as_ref(),
                 ) {
-                    to_fire.push((delayed.clone(), occ_index, occurrence, false));
+                    to_fire.push((delayed.clone(), occ_index, occurrence, false, 0));
                 }
             }
         }
@@ -13211,7 +13294,7 @@ fn collect_matching_delayed_triggers(
             synth.ability.trigger_source.as_ref(),
         ) {
             if scope.accepts(&trigger_event) {
-                to_fire.push((synth, event_index, trigger_event, false));
+                to_fire.push((synth, event_index, trigger_event, false, 0));
             }
         }
     }
@@ -13222,9 +13305,11 @@ fn collect_matching_delayed_triggers(
     // resolution boundary and is owned by
     // `terminalize_unmatched_reflexives_for_closed_batch`, so a partial
     // frame-local batch (a nested mana payment) cannot expire an outer reflexive.
-    let mut fired_events: std::collections::HashMap<usize, (usize, GameEvent)> = to_remove
+    let mut fired_events: std::collections::HashMap<usize, (usize, GameEvent, usize)> = to_remove
         .iter()
-        .map(|(idx, event_index, event)| (*idx, (*event_index, event.clone())))
+        .map(|(idx, event_index, event, alternative)| {
+            (*idx, (*event_index, event.clone(), *alternative))
+        })
         .collect();
     let mut unfired_dispositions: std::collections::HashMap<
         usize,
@@ -13233,14 +13318,14 @@ fn collect_matching_delayed_triggers(
     let terminalized_unfired = to_discard.len();
     let mut combined: Vec<usize> = to_remove
         .iter()
-        .map(|(idx, _, _)| *idx)
+        .map(|(idx, _, _, _)| *idx)
         .chain(to_discard.iter().map(|(idx, _)| *idx))
         .collect();
     combined.sort_unstable();
     for idx in combined.into_iter().rev() {
         let trigger = state.delayed_triggers.remove(idx);
-        if let Some((event_index, trigger_event)) = fired_events.remove(&idx) {
-            to_fire.push((trigger, event_index, trigger_event, true));
+        if let Some((event_index, trigger_event, alternative)) = fired_events.remove(&idx) {
+            to_fire.push((trigger, event_index, trigger_event, true, alternative));
         } else if let Some(disposition) = unfired_dispositions.remove(&idx) {
             super::lifecycle::record_delayed_terminal(trigger.provenance.firing(), disposition);
         }
@@ -13249,37 +13334,43 @@ fn collect_matching_delayed_triggers(
     let mut consumed_events = Vec::new();
     let mut pending: Vec<PendingTriggerContext> = to_fire
         .into_iter()
-        .map(|(trigger, event_index, trigger_event, removed_one_shot)| {
-            // CR 603.2c + CR 510.2: The consumed IDENTITY is the raw originating
-            // buffer event at `event_index`. For an expanded multi-fire combat
-            // trigger that is the aggregate `CombatDamageDealtToPlayer` — NOT the
-            // synthetic per-source `DamageDealt` in `trigger_event`, which exists
-            // only as per-firing context. `trigger_event_occurrence` counts
-            // occurrences of `events[event_index]`, so the recorded event MUST key
-            // off the same raw event; otherwise `filter_consumed_trigger_events_from`
-            // (which compares both event equality and occurrence) never matches the
-            // aggregate, leaving it in the buffer for a later priority scan to
-            // re-expand and fire the delayed trigger a second time. For every
-            // non-expanded case `trigger_event == events[event_index]`, so this is a
-            // no-op there.
-            consumed_events.push(ConsumedTriggerEventOccurrence {
-                occurrence: trigger_event_occurrence(events, event_index),
-                event: events[event_index].clone(),
-                scope: ConsumedTriggerEventScope::AllCollectors,
-            });
-            let origin = trigger.provenance.origin();
-            let binding = super::lifecycle::ImmutableBinding {
-                source_id: trigger.source_id,
-                controller: trigger.controller,
-            };
-            let context = delayed_trigger_to_context(state, trigger, trigger_event);
-            if removed_one_shot {
-                if let Some(origin) = origin {
-                    super::lifecycle::record_delayed_due(origin, binding);
+        .map(
+            |(mut trigger, event_index, trigger_event, removed_one_shot, matched_alternative)| {
+                // CR 603.2c + CR 510.2: The consumed IDENTITY is the raw originating
+                // buffer event at `event_index`. For an expanded multi-fire combat
+                // trigger that is the aggregate `CombatDamageDealtToPlayer` — NOT the
+                // synthetic per-source `DamageDealt` in `trigger_event`, which exists
+                // only as per-firing context. `trigger_event_occurrence` counts
+                // occurrences of `events[event_index]`, so the recorded event MUST key
+                // off the same raw event; otherwise `filter_consumed_trigger_events_from`
+                // (which compares both event equality and occurrence) never matches the
+                // aggregate, leaving it in the buffer for a later priority scan to
+                // re-expand and fire the delayed trigger a second time. For every
+                // non-expanded case `trigger_event == events[event_index]`, so this is a
+                // no-op there.
+                consumed_events.push(ConsumedTriggerEventOccurrence {
+                    occurrence: trigger_event_occurrence(events, event_index),
+                    event: events[event_index].clone(),
+                    scope: ConsumedTriggerEventScope::AllCollectors,
+                });
+                let origin = trigger.provenance.origin();
+                let binding = super::lifecycle::ImmutableBinding {
+                    source_id: trigger.source_id,
+                    controller: trigger.controller,
+                };
+                // A batch-semantics boon stamps every matching entrant (not just
+                // the fired one) so a "one of them" choice can resolve later.
+                stamp_boon_trigger_batch(state, events, &mut trigger);
+                let context =
+                    delayed_trigger_to_context(state, trigger, trigger_event, matched_alternative);
+                if removed_one_shot {
+                    if let Some(origin) = origin {
+                        super::lifecycle::record_delayed_due(origin, binding);
+                    }
                 }
-            }
-            context
-        })
+                context
+            },
+        )
         .collect();
 
     // CR 603.3b + CR 101.4: APNAP stack-placement order for the firing batch.
@@ -13834,25 +13925,55 @@ fn delayed_trigger_event_with_index(
         }
         // CR 603.7: "When you next [event] this turn" — one-shot; optional
         // `or_trigger` covers disjunctive clauses (Magus Lucea Kane).
-        // Scan newest-to-oldest so a batch containing several events binds
-        // the most recent match (the activation/cast that fired the trigger).
+        // The single match is the NEWEST batch match (the activation/cast
+        // that fired the trigger) — `.pop()` on the batch-ordered helper,
+        // exactly the old newest-to-oldest scan.
         DelayedTriggerCondition::WhenNextEvent {
             trigger,
             or_trigger,
             ..
-        } => events.iter().enumerate().rev().find_map(|(idx, event)| {
-            let source_context = source_context?;
-            for t in std::iter::once(trigger.as_ref()).chain(or_trigger.iter().map(|b| b.as_ref()))
-            {
+        } => delayed_when_next_event_matches(trigger, or_trigger, events, state, source_context)
+            .pop()
+            .map(|(idx, event, _)| (idx, event)),
+    }
+}
+
+/// Every `(index, event, alternative)` match of a `WhenNextEvent` delayed
+/// condition over an event batch, in batch order. `alternative` is 0 for the
+/// primary trigger and 1 for the `or_trigger`; each event reports its FIRST
+/// matching alternative (primary wins ties), mirroring the single-match scan
+/// (`delayed_trigger_event_with_index` takes the newest via `.pop()`).
+///
+/// The collector fires the newest match but needs the whole set twice: a
+/// batch-semantics boon ("one or more creatures enter") stamps every matching
+/// entrant for its resolution-time "one of them" choice, and the carried
+/// intervening-if conjunction keeps only the FIRED event's alternative gate
+/// (M3) rather than conjoining both alternatives' gates.
+fn delayed_when_next_event_matches(
+    trigger: &TriggerDefinition,
+    or_trigger: &Option<Box<TriggerDefinition>>,
+    events: &[GameEvent],
+    state: &GameState,
+    source_context: Option<&TriggerSourceContext>,
+) -> Vec<(usize, GameEvent, usize)> {
+    let Some(source_context) = source_context else {
+        return Vec::new();
+    };
+    let alternatives = std::iter::once(trigger).chain(or_trigger.iter().map(|b| b.as_ref()));
+    events
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, event)| {
+            for (alternative, t) in alternatives.clone().enumerate() {
                 if let Some(matcher) = super::trigger_matchers::trigger_matcher(t.mode.clone()) {
                     if matcher(event, t, source_context, state) {
-                        return Some((idx, event.clone()));
+                        return Some((idx, event.clone(), alternative));
                     }
                 }
             }
             None
-        }),
-    }
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)] // The condition supplies independent zone, filter, and exact-source facts.
@@ -16954,13 +17075,13 @@ pub mod tests {
         AggregateFunction, AttackersDeclaredCountSubject, CardSelectionMode, ChoiceType,
         ChosenAttribute, ChosenSubtypeKind, CommanderOwnership, Comparator, ContinuousModification,
         ControllerRef, DamageChannel, DamageKindFilter, DelayedTriggerCondition,
-        DelayedTriggerLifetime, DiscardSelfScope, Duration, EachDamageRecipient, Effect,
-        FilterProp, GuessSubject, KickerVariant, ModalChoice, MultiTargetSpec, PlayerFilter,
-        PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-        ReplacementDefinition, ReplacementMode, ResolvedAbility, SearchSelectionConstraint,
-        SharedQuality, SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter,
-        TargetRef, TargetSelectionMode, TriggerCondition, TriggerConstraint, TriggerDefinition,
-        TriggerGrantInstanceRef, TypeFilter, TypedFilter,
+        DelayedTriggerKind, DelayedTriggerLifetime, DiscardSelfScope, Duration,
+        EachDamageRecipient, Effect, FilterProp, GuessSubject, KickerVariant, ModalChoice,
+        MultiTargetSpec, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr,
+        QuantityRef, ReplacementDefinition, ReplacementMode, ResolvedAbility,
+        SearchSelectionConstraint, SharedQuality, SharedQualityRelation, StaticCondition,
+        StaticDefinition, TargetFilter, TargetRef, TargetSelectionMode, TriggerCondition,
+        TriggerConstraint, TriggerDefinition, TriggerGrantInstanceRef, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::LayoutKind;
@@ -21999,7 +22120,7 @@ pub mod tests {
             controller: PlayerId(0),
             source_id: source,
             one_shot: true,
-            is_boon: false,
+            kind: DelayedTriggerKind::Ordinary,
             provenance: DelayedInstallIdentity::LegacyDelayed,
         });
 
@@ -23908,7 +24029,7 @@ pub mod tests {
             controller,
             source_id: source_draw,
             one_shot: true,
-            is_boon: false,
+            kind: DelayedTriggerKind::Ordinary,
             provenance: DelayedInstallIdentity::LegacyDelayed,
         });
         // DT2: "when [a creature] dies, gain 1 life" (GainLife) — distinct effect.
@@ -23928,7 +24049,7 @@ pub mod tests {
             controller,
             source_id: source_gain,
             one_shot: true,
-            is_boon: false,
+            kind: DelayedTriggerKind::Ordinary,
             provenance: DelayedInstallIdentity::LegacyDelayed,
         });
 
@@ -24080,7 +24201,7 @@ pub mod tests {
                 controller,
                 source_id: source,
                 one_shot: true,
-                is_boon: false,
+                kind: DelayedTriggerKind::Ordinary,
                 provenance: DelayedInstallIdentity::LegacyDelayed,
             });
 
@@ -24199,7 +24320,7 @@ pub mod tests {
                 controller,
                 source_id: source,
                 one_shot: true,
-                is_boon: false,
+                kind: DelayedTriggerKind::Ordinary,
                 provenance: DelayedInstallIdentity::LegacyDelayed,
             });
 
@@ -24305,7 +24426,7 @@ pub mod tests {
                 controller,
                 source_id: source,
                 one_shot: true,
-                is_boon: false,
+                kind: DelayedTriggerKind::Ordinary,
                 provenance: DelayedInstallIdentity::LegacyDelayed,
             });
 
@@ -24370,6 +24491,126 @@ pub mod tests {
             0,
             "CR 603.4 + CR 603.7b: the ability already spent its single occurrence with the \
              gate false; making the gate true afterwards must not let a LATER land drop fire it"
+        );
+    }
+
+    /// M3: a disjunctive delayed trigger's embedded gate is the FIRED
+    /// alternative's — never the conjunction of both alternatives' gates.
+    /// The fixture boon pairs a primary (`LandPlayed` by the controller,
+    /// FALSE gate) with an `or_trigger` (`LandPlayed` by anyone, no gate):
+    /// an opponent's land matches only the alternative, so the trigger
+    /// fires and carries NO embedded gate. Conjoining both (the old shape)
+    /// would check the primary's FALSE gate and never fire. The negative
+    /// leg (the controller's own land) matches the primary first and is
+    /// blocked by its FALSE gate, proving the alternatives discriminate.
+    #[test]
+    fn boon_embedded_gate_uses_only_the_fired_alternative() {
+        use crate::types::ability::DelayedTriggerLifetime;
+        use crate::types::triggers::TriggerMode;
+
+        fn install(state: &mut GameState) -> (ObjectId, ObjectId) {
+            let controller = PlayerId(0);
+            state.active_player = controller;
+            state.priority_player = controller;
+
+            let source = create_object(
+                state,
+                CardId(0x0603_0409),
+                controller,
+                "Disjunctive Boon".to_string(),
+                Zone::Battlefield,
+            );
+            let own_land = create_object(
+                state,
+                CardId(0x0603_040a),
+                controller,
+                "Own Land".to_string(),
+                Zone::Battlefield,
+            );
+            let foe_land = create_object(
+                state,
+                CardId(0x0603_040b),
+                PlayerId(1),
+                "Foe Land".to_string(),
+                Zone::Battlefield,
+            );
+
+            let mut primary = TriggerDefinition::new(TriggerMode::LandPlayed);
+            primary.valid_target = Some(TargetFilter::Controller);
+            primary.condition = Some(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Fixed { value: 0 },
+                comparator: Comparator::GT,
+                rhs: QuantityExpr::Fixed { value: 999 },
+            });
+            let alternative = TriggerDefinition::new(TriggerMode::LandPlayed);
+
+            let mut ability = ResolvedAbility::new(
+                Effect::BecomeMonarch {
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                controller,
+            );
+            let source_object = state.objects.get(&source).expect("installed source");
+            ability.trigger_source = Some(trigger_source_context_for_latch(state, source_object));
+
+            state.delayed_triggers.push(DelayedTrigger {
+                condition: DelayedTriggerCondition::WhenNextEvent {
+                    trigger: Box::new(primary),
+                    or_trigger: Some(Box::new(alternative)),
+                    lifetime: DelayedTriggerLifetime::ThisTurn,
+                },
+                ability: Box::new(ability),
+                controller,
+                source_id: source,
+                one_shot: true,
+                kind: DelayedTriggerKind::Boon,
+                provenance: DelayedInstallIdentity::LegacyDelayed,
+            });
+
+            (own_land, foe_land)
+        }
+
+        fn land_played(land: ObjectId, player: PlayerId) -> GameEvent {
+            GameEvent::LandPlayed {
+                object_id: land,
+                player_id: player,
+                from_zone: Zone::Hand,
+            }
+        }
+
+        // The foe's land matches only the alternative (ungated): fires, and
+        // the stack entry carries NO embedded gate.
+        let mut state = setup();
+        let (_, foe_land) = install(&mut state);
+        check_delayed_triggers(&mut state, &[land_played(foe_land, PlayerId(1))]);
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "the alternative's (absent) gate governs its own match — the \
+             primary's FALSE gate must not block it"
+        );
+        let StackEntryKind::TriggeredAbility { condition, .. } = &state.stack[0].kind else {
+            panic!(
+                "expected a triggered ability, got {:?}",
+                state.stack[0].kind
+            );
+        };
+        assert_eq!(
+            *condition, None,
+            "the carry is the fired alternative's gate (none), not the conjunction"
+        );
+
+        // The controller's own land matches the primary first: its FALSE
+        // gate blocks, proving the alternatives discriminate.
+        let mut state = setup();
+        let (own_land, _) = install(&mut state);
+        check_delayed_triggers(&mut state, &[land_played(own_land, PlayerId(0))]);
+        assert_eq!(
+            state.stack.len(),
+            0,
+            "the primary's FALSE gate must block its own match"
         );
     }
 
@@ -24439,7 +24680,7 @@ pub mod tests {
                     controller,
                     source_id: source,
                     one_shot: true,
-                    is_boon: false,
+                    kind: DelayedTriggerKind::Ordinary,
                     provenance: DelayedInstallIdentity::LegacyDelayed,
                 });
             }
@@ -24602,7 +24843,7 @@ pub mod tests {
                 // Mirrors `effects::delayed_trigger`'s own computation
                 // (`one_shot = !matches!(condition, WheneverEvent { .. })`).
                 one_shot: false,
-                is_boon: false,
+                kind: DelayedTriggerKind::Ordinary,
                 provenance: DelayedInstallIdentity::LegacyDelayed,
             });
 
@@ -24738,7 +24979,7 @@ pub mod tests {
             controller,
             source_id: source,
             one_shot: true,
-            is_boon: false,
+            kind: DelayedTriggerKind::Ordinary,
             provenance: DelayedInstallIdentity::LegacyDelayed,
         });
 
@@ -24849,7 +25090,7 @@ pub mod tests {
                 controller,
                 source_id: source,
                 one_shot: true,
-                is_boon: false,
+                kind: DelayedTriggerKind::Ordinary,
                 provenance: DelayedInstallIdentity::LegacyDelayed,
             });
 
@@ -24955,7 +25196,7 @@ pub mod tests {
                 controller,
                 source_id: source,
                 one_shot: true,
-                is_boon: false,
+                kind: DelayedTriggerKind::Ordinary,
                 provenance: DelayedInstallIdentity::LegacyDelayed,
             });
 
@@ -25122,7 +25363,7 @@ pub mod tests {
                 controller,
                 source_id: source,
                 one_shot: true,
-                is_boon: false,
+                kind: DelayedTriggerKind::Ordinary,
                 provenance: DelayedInstallIdentity::LegacyDelayed,
             });
 
@@ -25262,7 +25503,7 @@ pub mod tests {
                 controller,
                 source_id: source,
                 one_shot: true,
-                is_boon: false,
+                kind: DelayedTriggerKind::Ordinary,
                 provenance: DelayedInstallIdentity::LegacyDelayed,
             });
 
@@ -25430,7 +25671,7 @@ pub mod tests {
                 controller,
                 source_id: source,
                 one_shot: true,
-                is_boon: false,
+                kind: DelayedTriggerKind::Ordinary,
                 provenance: DelayedInstallIdentity::LegacyDelayed,
             });
 
@@ -25536,7 +25777,7 @@ pub mod tests {
                 controller,
                 source_id: source,
                 one_shot: true,
-                is_boon: false,
+                kind: DelayedTriggerKind::Ordinary,
                 provenance: DelayedInstallIdentity::LegacyDelayed,
             });
 
@@ -25778,7 +26019,7 @@ pub mod tests {
                 controller,
                 source_id: source,
                 one_shot: true,
-                is_boon: false,
+                kind: DelayedTriggerKind::Ordinary,
                 provenance: DelayedInstallIdentity::LegacyDelayed,
             });
 
@@ -25957,7 +26198,7 @@ pub mod tests {
                 controller,
                 source_id: source,
                 one_shot: true,
-                is_boon: false,
+                kind: DelayedTriggerKind::Ordinary,
                 provenance: DelayedInstallIdentity::LegacyDelayed,
             });
 
@@ -26097,7 +26338,7 @@ pub mod tests {
                 controller,
                 source_id: source,
                 one_shot: true,
-                is_boon: false,
+                kind: DelayedTriggerKind::Ordinary,
                 provenance: DelayedInstallIdentity::LegacyDelayed,
             });
 
@@ -26188,7 +26429,7 @@ pub mod tests {
                 controller,
                 source_id: source,
                 one_shot: true,
-                is_boon: false,
+                kind: DelayedTriggerKind::Ordinary,
                 provenance: DelayedInstallIdentity::LegacyDelayed,
             });
 
@@ -26285,7 +26526,7 @@ pub mod tests {
             controller,
             source_id: source,
             one_shot: true,
-            is_boon: false,
+            kind: DelayedTriggerKind::Ordinary,
             provenance: DelayedInstallIdentity::LegacyDelayed,
         });
 
@@ -26359,7 +26600,7 @@ pub mod tests {
             controller,
             source_id: delayed_source,
             one_shot: true,
-            is_boon: false,
+            kind: DelayedTriggerKind::Ordinary,
             provenance: DelayedInstallIdentity::LegacyDelayed,
         });
 
@@ -26627,7 +26868,7 @@ pub mod tests {
             controller,
             source_id: rider_source,
             one_shot: false,
-            is_boon: false,
+            kind: DelayedTriggerKind::Ordinary,
             // A normal (legacy) delayed trigger with no command receipt — engine
             // test scaffolding, not a rule implementation, so no CR citation. (#6933
             // canonicalized `provenance` from Option to the DelayedInstallIdentity enum.)
@@ -39631,7 +39872,7 @@ pub mod tests {
             controller: PlayerId(0),
             source_id,
             one_shot: true,
-            is_boon: false,
+            kind: DelayedTriggerKind::Ordinary,
             provenance: DelayedInstallIdentity::ReceiptEligible(origin),
         });
         (source_id, origin)
@@ -39968,7 +40209,7 @@ pub mod tests {
             controller: PlayerId(0),
             source_id,
             one_shot: true,
-            is_boon: false,
+            kind: DelayedTriggerKind::Ordinary,
             provenance: DelayedInstallIdentity::ReceiptEligible(origin),
         });
 

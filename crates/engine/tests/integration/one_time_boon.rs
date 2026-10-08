@@ -6,6 +6,7 @@
 //! on the granted trigger is checked at fire time and again at resolution
 //! (CR 603.4), with a false gate consuming the single occurrence (CR 603.7b).
 
+use engine::game::keywords::object_has_effective_keyword_kind;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
     DelayedTriggerCondition, DelayedTriggerLifetime, PerpetualModification, TargetRef,
@@ -13,7 +14,7 @@ use engine::types::ability::{
 use engine::types::actions::{GameAction, ResolutionOptionalPaymentChoice};
 use engine::types::counter::CounterType;
 use engine::types::game_state::WaitingFor;
-use engine::types::keywords::KeywordKind;
+use engine::types::keywords::{Keyword, KeywordKind};
 use engine::types::phase::Phase;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
@@ -32,6 +33,13 @@ const DRAGONBORN: &str = "{2}{R}: This creature gets +1/+0 until end of turn.\nG
 const MEPHITS: &str = "This sorcery deals 4 damage to target creature or planeswalker. If excess damage was dealt this way, note that excess damage, then you get a one-time boon with \"When you cast a creature spell, it perpetually gets +X/+0, where X is the noted number.\"";
 const MOLTEN: &str = "This sorcery deals 4 damage to target creature or planeswalker. If excess damage was dealt this way, note that excess damage, then you get a one-time boon with \"When you cast an instant or sorcery spell, this boon deals damage equal to the noted number to target creature or planeswalker an opponent controls.\"";
 const ROTHGA: &str = "Trample\nWhen Rothga, Bonded Engulfer enters, you get a one-time boon with \"When you cast a creature spell, it perpetually gets +X/+X, where X is its power.\"";
+// Jaheira, Stirring Harper's boon body on a drivable ETB grantor: Jaheira
+// herself grants on specialize, which has no scenario driver, so the runtime
+// pins the shared inner shape while `boon_jaheira_stirring_harper` pins her
+// text to that same shape.
+const JAHEIRA_INNER_GRANT: &str = "When ~ enters, you get a one-time boon with \"When you cast a creature spell, it perpetually gets +1/+0 and gains haste.\"";
+const DUNBARROW: &str = "When Dunbarrow Revivalist enters, you get a one-time boon with \"When one or more creatures enter under your control, create a Wicked Role token attached to one of them.\"";
+const RAISE_ALARM: &str = "Create two 1/1 white Soldier creature tokens.";
 
 /// Resolve the stack fully, ordering simultaneous triggers in listed order.
 /// Stops on an empty stack at priority — never passes into the next phase.
@@ -85,22 +93,40 @@ fn held_boons(runner: &GameRunner) -> Vec<engine::types::player::PlayerId> {
         .state()
         .delayed_triggers
         .iter()
-        .filter(|dt| dt.is_boon)
+        .filter(|dt| dt.kind.is_boon())
         .map(|dt| dt.controller)
         .collect()
 }
 
+/// The per-grant noted-number capture each held boon snapshotted at install
+/// time, in install order. A boon reads its own capture — never the live
+/// global — when its body resolves.
+fn held_boon_captures(runner: &GameRunner) -> Vec<Option<i32>> {
+    runner
+        .state()
+        .delayed_triggers
+        .iter()
+        .filter(|dt| dt.kind.is_boon())
+        .map(|dt| dt.ability.context.boon_captured_noted_number)
+        .collect()
+}
+
 /// The frozen perpetual P/T records on an object: dynamic deltas evaluate
-/// once at application time, so only plain `ModifyPowerToughness` records
-/// may persist — never a live `ModifyPowerToughnessDynamic`.
+/// once at application time and freeze to `Fixed`, so only `Fixed` exprs
+/// may persist — never a live expression.
 fn frozen_perpetual_pt(runner: &GameRunner, id: ObjectId) -> Vec<(i32, i32)> {
+    use engine::types::ability::QuantityExpr;
     runner.state().objects[&id]
         .perpetual_mods
         .iter()
         .filter_map(|modification| match modification {
             PerpetualModification::ModifyPowerToughness {
-                power_delta,
-                toughness_delta,
+                power: QuantityExpr::Fixed { value: power_delta },
+                toughness:
+                    QuantityExpr::Fixed {
+                        value: toughness_delta,
+                    },
+                ..
             } => Some((*power_delta, *toughness_delta)),
             _ => None,
         })
@@ -108,11 +134,17 @@ fn frozen_perpetual_pt(runner: &GameRunner, id: ObjectId) -> Vec<(i32, i32)> {
 }
 
 fn assert_no_dynamic_perpetual(runner: &GameRunner, id: ObjectId) {
+    use engine::types::ability::QuantityExpr;
     assert!(
         !runner.state().objects[&id]
             .perpetual_mods
             .iter()
-            .any(|m| matches!(m, PerpetualModification::ModifyPowerToughnessDynamic { .. })),
+            .any(|m| matches!(
+                m,
+                PerpetualModification::ModifyPowerToughness { power, toughness, .. }
+                if !matches!(power, QuantityExpr::Fixed { .. })
+                    || !matches!(toughness, QuantityExpr::Fixed { .. })
+            )),
         "dynamic perpetuals must freeze at application, never persist live: {:?}",
         runner.state().objects[&id].perpetual_mods
     );
@@ -133,7 +165,7 @@ fn lash_installs_persistent_one_shot_boon() {
         .state()
         .delayed_triggers
         .iter()
-        .filter(|dt| dt.is_boon)
+        .filter(|dt| dt.kind.is_boon())
         .collect();
     assert_eq!(boons.len(), 1, "one boon must be held");
     let boon = boons[0];
@@ -477,36 +509,60 @@ fn dragonborn_dies_notes_power_and_pumps_next_creature() {
 }
 
 #[test]
-fn dragonborn_zero_power_grants_boon_without_noting() {
+fn dragonborn_zero_power_never_triggers() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let dragonborn = scenario
-        .add_creature_from_oracle(P0, "Dragonborn Immolator", 0, 3, DRAGONBORN)
+        .add_creature_from_oracle(P0, "Dragonborn Immolator", 3, 3, DRAGONBORN)
         .id();
-    let bolt = scenario
-        .add_spell_to_hand_from_oracle(P0, "Bolt", true, BOLT)
+    // Same oracle text, distinct name (no name self-reference in the text,
+    // so the rename is behavior-preserving and side-steps the legend rule).
+    let dragonborn_zero = scenario
+        .add_creature_from_oracle(P0, "Dragonborn Whelp", 0, 3, DRAGONBORN)
+        .id();
+    let bolt_one = scenario
+        .add_spell_to_hand_from_oracle(P0, "Bolt One", true, BOLT)
+        .id();
+    let bolt_two = scenario
+        .add_spell_to_hand_from_oracle(P0, "Bolt Two", true, BOLT)
         .id();
     let bear = scenario
         .add_creature_to_hand_from_oracle(P0, "Grizzly Bears", 2, 2, "")
         .id();
     let mut runner = scenario.build();
 
-    // Power 0 fails the note gate, but the grant is a separate sentence.
-    runner.cast(bolt).target_object(dragonborn).resolve();
+    // The 3/3 dies first: notes 3 and grants a boon, leaving a stale
+    // nonzero note behind for the sting below.
+    runner.cast(bolt_one).target_object(dragonborn).resolve();
     drain_stack(&mut runner);
-    assert_eq!(runner.state().players[0].noted_number, None);
+    assert_eq!(runner.state().players[0].noted_number, Some(3));
+    assert_eq!(held_boons(&runner), vec![P0]);
+
+    // Power 0 fails the CR 603.4 intervening-if, so the trigger never
+    // fires at all: no note, no grant — even with the stale note 3 live.
+    runner
+        .cast(bolt_two)
+        .target_object(dragonborn_zero)
+        .resolve();
+    drain_stack(&mut runner);
+    assert_eq!(
+        runner.state().players[0].noted_number,
+        Some(3),
+        "a gated-off trigger notes nothing"
+    );
     assert_eq!(
         held_boons(&runner),
         vec![P0],
-        "the grant is ungated by the note condition"
+        "a gated-off trigger grants nothing"
     );
+    assert_eq!(held_boon_captures(&runner), vec![Some(3)]);
 
-    // An un-noted X reads as 0: the pump lands as a frozen +0/+0.
+    // Only the first boon fires on the bear: 2 + 3.
     runner.cast(bear).resolve();
     drain_stack(&mut runner);
     let entered = &runner.state().objects[&bear];
-    assert_eq!((entered.power, entered.toughness), (Some(2), Some(2)));
-    assert_eq!(frozen_perpetual_pt(&runner, bear), vec![(0, 0)]);
+    assert_eq!((entered.power, entered.toughness), (Some(5), Some(2)));
+    assert_eq!(frozen_perpetual_pt(&runner, bear), vec![(3, 0)]);
     assert_no_dynamic_perpetual(&runner, bear);
     assert!(held_boons(&runner).is_empty());
 }
@@ -651,7 +707,55 @@ fn rothga_perpetual_reads_spell_power_not_granter() {
 }
 
 #[test]
-fn second_excess_note_overwrites_first() {
+fn jaheira_boon_grants_perpetual_pt_and_haste_to_cast_creature() {
+    use engine::types::ability::QuantityExpr;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let grantor = scenario
+        .add_creature_to_hand_from_oracle(P0, "Jaheira Proxy", 2, 2, JAHEIRA_INNER_GRANT)
+        .id();
+    let bear = scenario
+        .add_creature_to_hand_from_oracle(P0, "Grizzly Bears", 2, 2, "")
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(grantor).resolve();
+    drain_stack(&mut runner);
+    assert_eq!(held_boons(&runner), vec![P0]);
+
+    runner.cast(bear).resolve();
+    drain_stack(&mut runner);
+    let entered = &runner.state().objects[&bear];
+    assert_eq!((entered.power, entered.toughness), (Some(3), Some(2)));
+    assert_eq!(frozen_perpetual_pt(&runner, bear), vec![(1, 0)]);
+    assert_no_dynamic_perpetual(&runner, bear);
+    // One combined record — the +1/+0 and the haste ride a single
+    // modification, not sibling records.
+    let combined = runner.state().objects[&bear]
+        .perpetual_mods
+        .iter()
+        .filter(|m| {
+            matches!(
+                m,
+                PerpetualModification::ModifyPowerToughness {
+                    power: QuantityExpr::Fixed { value: 1 },
+                    toughness: QuantityExpr::Fixed { value: 0 },
+                    keywords,
+                } if keywords.iter().any(|k| matches!(k, Keyword::Haste))
+            )
+        })
+        .count();
+    assert_eq!(combined, 1);
+    assert!(
+        object_has_effective_keyword_kind(runner.state(), bear, KeywordKind::Haste),
+        "the cast creature must have perpetual haste"
+    );
+    assert!(held_boons(&runner).is_empty());
+}
+
+#[test]
+fn sequential_notes_grant_independent_boons() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let wall_a = scenario
@@ -679,13 +783,16 @@ fn second_excess_note_overwrites_first() {
     assert_eq!(
         runner.state().players[0].noted_number,
         Some(3),
-        "a new note overwrites"
+        "the live global still overwrites"
     );
     assert_eq!(held_boons(&runner).len(), 2);
+    // Each grant captured what its own resolution noted — the second note
+    // must not leak into the first boon.
+    assert_eq!(held_boon_captures(&runner), vec![Some(1), Some(3)]);
 
-    // Both boons fire on the one cast, each reading the latest note. Two
-    // simultaneous triggers need manual driving: the cast driver's commit
-    // loop does not order triggers.
+    // Both boons fire on the one cast, each pumping its own captured note
+    // (2 + 1 + 3). Two simultaneous triggers need manual driving: the cast
+    // driver's commit loop does not order triggers.
     let bear_card = runner.state().objects[&bear].card_id;
     runner
         .act(GameAction::CastSpell {
@@ -697,6 +804,244 @@ fn second_excess_note_overwrites_first() {
         .expect("cast Bear");
     drain_stack(&mut runner);
     let entered = &runner.state().objects[&bear];
-    assert_eq!((entered.power, entered.toughness), (Some(8), Some(2)));
+    assert_eq!((entered.power, entered.toughness), (Some(6), Some(2)));
+    let mut frozen = frozen_perpetual_pt(&runner, bear);
+    frozen.sort_unstable();
+    assert_eq!(frozen, vec![(1, 0), (3, 0)]);
+    assert_no_dynamic_perpetual(&runner, bear);
+    assert!(held_boons(&runner).is_empty());
+}
+
+/// Every Role token in the game, in every zone on purpose: a token that
+/// reached the battlefield and was swept looks identical to one never
+/// created under a battlefield-only query.
+fn role_tokens(runner: &GameRunner) -> Vec<ObjectId> {
+    runner
+        .state()
+        .objects
+        .values()
+        .filter(|object| object.is_token && object.card_types.subtypes.iter().any(|s| s == "Role"))
+        .map(|object| object.id)
+        .collect()
+}
+
+#[test]
+fn dunbarrow_two_entrants_offer_host_choice() {
+    use engine::game::game_object::AttachTarget;
+    use engine::types::ability::TargetRef;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let dunbarrow = scenario
+        .add_creature_to_hand_from_oracle(P0, "Dunbarrow Revivalist", 3, 3, DUNBARROW)
+        .id();
+    let alarm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Raise Alarm", false, RAISE_ALARM)
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(dunbarrow).resolve();
+    drain_stack(&mut runner);
+    assert_eq!(held_boons(&runner), vec![P0]);
+
+    // Two soldiers enter in one batch; the boon fires once. Manual driving:
+    // the cast driver's commit loop does not answer the host choice.
+    runner.cast(alarm).commit();
+    let mut answered = false;
+    for _ in 0..200 {
+        match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => runner.pass_both_players(),
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let order: Vec<usize> = (0..triggers.len()).collect();
+                runner
+                    .act(GameAction::OrderTriggers { order })
+                    .expect("order triggers");
+            }
+            WaitingFor::ChooseTokenHost { legal_targets, .. } => {
+                assert_eq!(
+                    legal_targets.len(),
+                    2,
+                    "both entrants must be offered, got {legal_targets:?}"
+                );
+                // Choose deterministically: the greater soldier id.
+                let mut soldiers: Vec<ObjectId> = legal_targets
+                    .iter()
+                    .filter_map(|t| match t {
+                        TargetRef::Object(id) => Some(*id),
+                        _ => None,
+                    })
+                    .collect();
+                soldiers.sort();
+                let chosen = soldiers[1];
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(chosen)),
+                    })
+                    .expect("choose host");
+                answered = true;
+            }
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    assert!(answered, "the host choice must have been offered");
+    drain_stack(&mut runner);
+
+    // The Role entered attached to the CHOSEN soldier — not the first.
+    let roles = role_tokens(&runner);
+    assert_eq!(roles.len(), 1, "one Role must be created");
+    let role = &runner.state().objects[&roles[0]];
+    assert_eq!(role.zone, Zone::Battlefield);
+    let mut soldiers: Vec<ObjectId> = runner
+        .state()
+        .objects
+        .values()
+        .filter(|o| {
+            o.is_token && o.controller == P0 && o.card_types.subtypes.iter().any(|s| s == "Soldier")
+        })
+        .map(|o| o.id)
+        .collect();
+    soldiers.sort();
+    assert_eq!(soldiers.len(), 2);
+    assert_eq!(
+        role.attached_to,
+        Some(AttachTarget::Object(soldiers[1])),
+        "the Role must attach to the chosen entrant"
+    );
+    assert!(held_boons(&runner).is_empty());
+}
+
+#[test]
+fn dunbarrow_single_entrant_attaches_without_prompt() {
+    use engine::game::game_object::AttachTarget;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let dunbarrow = scenario
+        .add_creature_to_hand_from_oracle(P0, "Dunbarrow Revivalist", 3, 3, DUNBARROW)
+        .id();
+    let bear = scenario
+        .add_creature_to_hand_from_oracle(P0, "Grizzly Bears", 2, 2, "")
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(dunbarrow).resolve();
+    drain_stack(&mut runner);
+    assert_eq!(held_boons(&runner), vec![P0]);
+
+    // One entrant: auto-bound, no prompt (`drain_stack` panics on any
+    // unexpected prompt, proving none was offered).
+    runner.cast(bear).resolve();
+    drain_stack(&mut runner);
+
+    let roles = role_tokens(&runner);
+    assert_eq!(roles.len(), 1, "one Role must be created");
+    let role = &runner.state().objects[&roles[0]];
+    assert_eq!(role.zone, Zone::Battlefield);
+    assert_eq!(
+        role.attached_to,
+        Some(AttachTarget::Object(bear)),
+        "the Role must attach to the lone entrant"
+    );
+    assert!(held_boons(&runner).is_empty());
+}
+
+#[test]
+fn dunbarrow_departed_entrant_creates_no_token() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let dunbarrow = scenario
+        .add_creature_to_hand_from_oracle(P0, "Dunbarrow Revivalist", 3, 3, DUNBARROW)
+        .id();
+    let bear = scenario
+        .add_creature_to_hand_from_oracle(P0, "Grizzly Bears", 2, 2, "")
+        .id();
+    let bolt = scenario
+        .add_spell_to_hand_from_oracle(P0, "Bolt", true, BOLT)
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(dunbarrow).resolve();
+    drain_stack(&mut runner);
+    assert_eq!(held_boons(&runner), vec![P0]);
+
+    // The bear enters (firing the boon), then dies in response to the
+    // trigger: at resolution no stamped entrant is legal, so CR 303.4i
+    // denies the Aura token entirely.
+    runner.cast(bear).commit();
+    let mut bolted = false;
+    for _ in 0..200 {
+        if !bolted
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            && !runner.state().stack.is_empty()
+            && runner.state().objects[&bear].zone == Zone::Battlefield
+        {
+            runner.cast(bolt).target_object(bear).resolve();
+            bolted = true;
+            continue;
+        }
+        match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => runner.pass_both_players(),
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    assert!(bolted, "the bear must have died in response");
+    drain_stack(&mut runner);
+
+    assert!(
+        role_tokens(&runner).is_empty(),
+        "no Role may be created without a legal host"
+    );
+    assert!(held_boons(&runner).is_empty());
+}
+
+#[test]
+fn cross_card_notes_stay_independent() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let dragonborn = scenario
+        .add_creature_from_oracle(P0, "Dragonborn Immolator", 3, 3, DRAGONBORN)
+        .id();
+    let bolt = scenario
+        .add_spell_to_hand_from_oracle(P0, "Bolt", true, BOLT)
+        .id();
+    let wall = scenario.add_creature_from_oracle(P1, "Wall", 0, 2, "").id();
+    let mephits = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mephit's Enthusiasm", false, MEPHITS)
+        .id();
+    let bear = scenario
+        .add_creature_to_hand_from_oracle(P0, "Grizzly Bears", 2, 2, "")
+        .id();
+    let mut runner = scenario.build();
+
+    // Dragonborn dies noting its power 3; Mephit's notes excess 2. Notes
+    // from different cards must not cross-contaminate their boons.
+    runner.cast(bolt).target_object(dragonborn).resolve();
+    drain_stack(&mut runner);
+    assert_eq!(runner.state().players[0].noted_number, Some(3));
+    runner.cast(mephits).target_object(wall).resolve();
+    drain_stack(&mut runner);
+    assert_eq!(runner.state().players[0].noted_number, Some(2));
+    assert_eq!(held_boons(&runner).len(), 2);
+    assert_eq!(held_boon_captures(&runner), vec![Some(3), Some(2)]);
+
+    // Both fire on the bear: 2 + 3 + 2.
+    let bear_card = runner.state().objects[&bear].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: bear,
+            card_id: bear_card,
+            targets: vec![],
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("cast Bear");
+    drain_stack(&mut runner);
+    let entered = &runner.state().objects[&bear];
+    assert_eq!((entered.power, entered.toughness), (Some(7), Some(2)));
+    let mut frozen = frozen_perpetual_pt(&runner, bear);
+    frozen.sort_unstable();
+    assert_eq!(frozen, vec![(2, 0), (3, 0)]);
+    assert_no_dynamic_perpetual(&runner, bear);
     assert!(held_boons(&runner).is_empty());
 }

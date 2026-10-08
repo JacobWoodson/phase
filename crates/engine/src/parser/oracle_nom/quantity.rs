@@ -3883,6 +3883,44 @@ fn parse_self_characteristic_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     .parse(rest)
 }
 
+/// CR 608.2k: possessive-PRONOUN characteristic bound to a caller-supplied
+/// owner ("its"/"his"/"her"/"their power|toughness|loyalty|mana value").
+/// The owner-threaded twin of [`parse_self_characteristic_ref`]: identical
+/// characteristic arms, but the scope comes from the parse context (set by
+/// `parse_where_x_quantity_expression_with_owner` for boon-granted "it"/"that"
+/// tails, where the pronoun names the triggering object) instead of being
+/// hardcoded to `Source`.
+///
+/// The pronoun set is DELIBERATELY narrower than [`parse_self_possessive`]:
+/// only the four genuinely anaphoric surfaces are accepted here. Explicit
+/// self-references ("~'s", "this creature's", "this card's") name the ability
+/// source regardless of clause position, so they must keep their `Source`
+/// binding even in owner mode — accepting them here would corrupt that.
+/// Mana value mirrors the `" mana value"` / `" converted mana cost"` synonym
+/// pair of the possessive mana-value arm below (CR 202.3).
+pub(crate) fn parse_pronoun_characteristic_ref_with_scope(
+    input: &str,
+    scope: ObjectScope,
+) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = alt((tag("its"), tag("his"), tag("her"), tag("their"))).parse(input)?;
+    alt((
+        value(QuantityRef::Power { scope }, tag(" power")),
+        value(QuantityRef::Toughness { scope }, tag(" toughness")),
+        value(
+            QuantityRef::CountersOn {
+                scope,
+                counter_type: Some(CounterType::Loyalty),
+            },
+            tag(" loyalty"),
+        ),
+        value(
+            QuantityRef::ObjectManaValue { scope },
+            alt((tag(" mana value"), tag(" converted mana cost"))),
+        ),
+    ))
+    .parse(rest)
+}
+
 /// CR 301.5f + CR 303.4m + CR 208.1: Parse "equipped creature's power/toughness"
 /// and "enchanted creature's power/toughness" — a dynamic quantity bound to
 /// whatever creature the ability's Equipment/Aura source is CURRENTLY attached

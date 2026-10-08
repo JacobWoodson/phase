@@ -23,8 +23,9 @@
 
 use crate::game::game_object::GameObject;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ContinuousModification, DelayedTriggerCondition, Duration,
-    Effect, QuantityExpr, ResolvedAbility, TargetFilter, TriggerDefinition,
+    AbilityDefinition, AbilityKind, ContinuousModification, DelayedTriggerCondition,
+    DelayedTriggerKind, Duration, Effect, QuantityExpr, ResolvedAbility, TargetFilter,
+    TriggerDefinition,
 };
 use crate::types::game_state::{DelayedTrigger, GameState};
 use crate::types::identifiers::ObjectId;
@@ -82,7 +83,7 @@ pub(crate) fn install_blitz_riders(
             controller,
             source_id: object_id,
             one_shot: true,
-            is_boon: false,
+            kind: DelayedTriggerKind::Ordinary,
             provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
         },
         events,
