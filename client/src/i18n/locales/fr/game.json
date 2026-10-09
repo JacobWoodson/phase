@@ -845,6 +845,7 @@
     "chooseCreatureToExplore": "Choisissez quelle créature explore ensuite",
     "chooseCreatureTokenToPopulate": "Choisissez un jeton de créature à peupler",
     "chooseReturnAsAuraTarget": "Choisissez un permanent à enchanter",
+    "chooseTokenHost": "Choisissez un hôte pour le jeton",
     "tapUntappedCreatures_one": "Engagez {{count}} créature dégagée",
     "tapUntappedCreatures_other": "Engagez {{count}} créatures dégagées",
     "chooseTargetOf": "Choisissez la cible {{current}} sur {{total}}",

@@ -92,20 +92,21 @@ pub fn resolve(
     // whose body reads "the noted number" sees what its OWN resolution
     // noted — not whatever a later (or cross-card) note overwrote the
     // live global with before the boon fired. Snapshot the noting
-    // player's live value into the granted ability now; the stored
-    // ability rides the delayed-fire path untouched, so the capture
-    // survives fire, stack, and resolution with no trigger-entry lookup
-    // (and no sensitivity to one-shot consumption timing). The reader is
-    // the same subject the `NoteNumber` leg writes for (its resolving
-    // player), so a grant whose own resolution noted nothing — or a
-    // non-note grant — captures `None` and reads fall back to the live
-    // global.
+    // player's RESOLUTION-LOCAL entry into the granted ability now; the
+    // stored ability rides the delayed-fire path untouched, so the
+    // capture survives fire, stack, and resolution with no trigger-entry
+    // lookup (and no sensitivity to one-shot consumption timing). The
+    // reader is the same subject the `NoteNumber` leg writes for (its
+    // resolving player), and the slot is cleared at every top-level
+    // resolution — so a grant whose own resolution noted nothing (even
+    // with a stale live note from an earlier resolution) captures `None`
+    // and reads fall back to the live global.
     let noting_player = ability.original_controller.unwrap_or(ability.controller);
     delayed_ability.context.boon_captured_noted_number = state
-        .players
+        .noted_numbers_this_resolution
         .iter()
-        .find(|p| p.id == noting_player)
-        .and_then(|p| p.noted_number);
+        .find(|(player, _)| *player == noting_player)
+        .map(|(_, noted)| *noted);
 
     // CR 701.27f + CR 400.7: same creation-time generation/incarnation
     // capture as `delayed_trigger::resolve`.

@@ -210,6 +210,12 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 109 — One-time boons (#7495): new Effect.CreateBoon / Effect.NoteNumber tags,
+ *       HasBoon conditions, and WaitingFor.ChooseTokenHost; the perpetual P/T
+ *       edit retypes power_delta/toughness_delta to required QuantityExpr
+ *       power/toughness. A v108 peer cannot parse the new shapes; the
+ *       exact-match handshake refuses the pairing. P2P moves in lockstep
+ *       (wire 91).
  * 108 — Serialized IllegalTargetsDisposition.StillResolves preserves a root
  *       ability's printed resolution rule when its chosen target becomes
  *       illegal. Older peers would silently apply ordinary non-resolution;
@@ -704,7 +710,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 108;
+export const PROTOCOL_VERSION = 109;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

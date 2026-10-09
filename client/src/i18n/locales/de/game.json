@@ -845,6 +845,7 @@
     "chooseCreatureToExplore": "Wähle, welche Kreatur als Nächstes erkundet",
     "chooseCreatureTokenToPopulate": "Wähle einen Kreaturspielstein zum Populieren",
     "chooseReturnAsAuraTarget": "Wähle eine bleibende Karte zum Verzaubern",
+    "chooseTokenHost": "Wähle, woran der Spielstein angelegt wird",
     "tapUntappedCreatures_one": "Tappe {{count}} ungetappte Kreatur",
     "tapUntappedCreatures_other": "Tappe {{count}} ungetappte Kreaturen",
     "chooseTargetOf": "Wähle Ziel {{current}} von {{total}}",

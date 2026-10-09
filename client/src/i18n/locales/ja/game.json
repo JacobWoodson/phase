@@ -885,6 +885,7 @@
     "chooseCreatureToExplore": "次に探検するクリーチャーを選択",
     "chooseCreatureTokenToPopulate": "居住でコピーするクリーチャー・トークンを選択",
     "chooseReturnAsAuraTarget": "エンチャントするパーマネントを選択",
+    "chooseTokenHost": "トークンをつけるホストを選択",
     "tapUntappedCreatures_one": "アンタップ状態のクリーチャー{{count}}体をタップ",
     "tapUntappedCreatures_other": "アンタップ状態のクリーチャー{{count}}体をタップ",
     "sacrificeExact_one": "パーマネント{{count}}個を生け贄に捧げる",

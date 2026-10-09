@@ -5578,10 +5578,10 @@ describe("P2P wire-protocol version gate", () => {
   // assertion once the first has thrown. The admitting half is still the
   // reach-guard — without it "refuses v89" is also satisfied by a client
   // that refuses everything.
-  it("refuses the previous wire protocol (v89) and admits its own (v90)", async () => {
+  it("refuses the previous wire protocol (v90) and admits its own (v91)", async () => {
     const refusing = makeGuest();
     await refusing.adapter.initialize();
-    await refusing.conn.simulateData(setupFrameAt(89));
+    await refusing.conn.simulateData(setupFrameAt(90));
 
     await expect(refusing.adapter.initializeGame()).rejects.toMatchObject({
       code: "P2P_REJECTED",
@@ -5593,7 +5593,7 @@ describe("P2P wire-protocol version gate", () => {
 
     const admitting = makeGuest();
     await admitting.adapter.initialize();
-    await admitting.conn.simulateData(setupFrameAt(90));
+    await admitting.conn.simulateData(setupFrameAt(91));
 
     await expect(admitting.adapter.initializeGame()).resolves.toBeDefined();
     expect(admitting.emitted).not.toHaveBeenCalledWith(

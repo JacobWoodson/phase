@@ -9698,7 +9698,7 @@ pub enum QuantityRef {
     /// Digital-only Alchemy (no CR entry): the resolving player's noted
     /// number (`Player::noted_number`) — "where X is the noted number"
     /// (Dragonborn Immolator / Mephit's Enthusiasm / Molten Impact). Reads
-    /// 0 when nothing was noted (CR 107.3f by analogy: an undefined X is 0).
+    /// 0 when nothing was noted (digital-only engine convention; no CR entry).
     NotedNumber,
     /// A number chosen as the source entered the battlefield (e.g., Talion, the Kindly Lord).
     /// Resolved from the source object's `ChosenAttribute::Number`.

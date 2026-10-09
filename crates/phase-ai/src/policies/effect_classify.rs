@@ -2,7 +2,8 @@ use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::game_object::GameObject;
 use engine::game::quantity::try_resolve_quantity_in_source_context;
 use engine::types::ability::{
-    AbilityKind, ContinuousModification, ControllerRef, Effect, EffectScope, PtValue, QuantityExpr,
+    AbilityKind, ContinuousModification, ControllerRef, Effect, EffectScope,
+    PerpetualGrantModification, PerpetualModification, PlayerFilter, PtValue, QuantityExpr,
     ResolvedAbility, SubAbilityLink, TapStateChange, TargetChoiceTiming, TargetFilter, TargetRef,
     TriggerDefinition, TypeFilter,
 };
@@ -299,7 +300,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         // boon (Loch Larent, granted to an opponent) is harmful. Read it
         // through the shared granted-trigger seam so target selection aims
         // beneficial boons at self and harmful boons at opponents.
-        Effect::CreateBoon { trigger, .. } => granted_trigger_polarity(trigger),
+        Effect::CreateBoon { trigger, .. } => boon_granted_trigger_polarity(trigger),
         Effect::Adapt { .. }
         | Effect::AdditionalPhase { .. }
         | Effect::AddPendingETBCounters { .. }
@@ -1700,7 +1701,15 @@ pub(crate) fn static_mode_polarity(mode: &StaticMode) -> EffectPolarity {
 /// grant-a-trigger buffs and downside curses (AI heuristic). The polarity is
 /// bound statically from the parsed `TriggerDefinition.execute.effect`; no live
 /// game-state lookup.
-fn granted_trigger_polarity(trigger: &TriggerDefinition) -> EffectPolarity {
+/// The `CreateBoon` recipient-routing reading. Unlike
+/// `granted_trigger_polarity` (the committed target-relative reading kept for
+/// non-boon granted triggers), the boon holder RECEIVES the body, so the inner
+/// is re-based into the holder's frame: a weapon aimed at the holder's enemies
+/// is a benefit to hold, a debuff on the holder's own creatures a harm. The
+/// two paths stay split because event anaphors (`TriggeringSource`) need
+/// trigger-shape analysis to place — self-referential in a Malice-style grant,
+/// anyone's in a general boon — which is out of scope for the boon routing.
+fn boon_granted_trigger_polarity(trigger: &TriggerDefinition) -> EffectPolarity {
     let Some(exec) = trigger.execute.as_deref() else {
         return EffectPolarity::Contextual;
     };
@@ -1714,10 +1723,207 @@ fn granted_trigger_polarity(trigger: &TriggerDefinition) -> EffectPolarity {
         return replacement
             .execute
             .as_deref()
+            .map(|body| boon_body_polarity_for_holder(&body.effect))
+            .unwrap_or(EffectPolarity::Contextual);
+    }
+    boon_body_polarity_for_holder(&exec.effect)
+}
+
+fn granted_trigger_polarity(trigger: &TriggerDefinition) -> EffectPolarity {
+    let Some(exec) = trigger.execute.as_deref() else {
+        return EffectPolarity::Contextual;
+    };
+    // Same replacement descent as the boon path, but the committed
+    // target-relative reading: non-boon granted triggers (Undying Malice)
+    // keep their pinned polarity; only the `CreateBoon` recipient router
+    // re-bases into the holder's frame.
+    if let Effect::AddTargetReplacement { replacement, .. } = exec.effect.as_ref() {
+        return replacement
+            .execute
+            .as_deref()
             .map(|body| effect_polarity(&body.effect))
             .unwrap_or(EffectPolarity::Contextual);
     }
     effect_polarity(&exec.effect)
+}
+
+/// Which side of a granted boon body an inner target sits on, in the HOLDER's
+/// frame. The install re-stamp makes the holder the body's controller, so
+/// holder-relative is CR 608.2c controller-relative at fire time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoonTargetSide {
+    /// The holder's own objects, or the holder (`Controller`, `SelfRef`,
+    /// `ParentTarget`, and untargeted verbs that default to the controller).
+    Holder,
+    /// The holder's opponents or their objects (`Typed{Opponent}`, opponent
+    /// players).
+    Enemy,
+    /// A slot the holder aims at fire time (`Player`, `Any`, an unrestricted
+    /// `Typed`): the holder picks the target that favors them.
+    Chosen,
+    /// Anything else — fail closed to `Contextual`.
+    Unknown,
+}
+
+/// Impact of a granted boon body ON ITS HOLDER. `effect_polarity` reads impact
+/// on the inner TARGET; a boon holder RECEIVES the body, so that reading must
+/// be re-based into the holder's frame: a weapon aimed at the holder's enemies
+/// is a benefit to hold, a debuff on the holder's own creatures a harm.
+/// Without the flip, "target opponent loses 3 life" would read Harmful and the
+/// recipient routing would aim the weapon-grant AT the opponent.
+fn boon_body_polarity_for_holder(effect: &Effect) -> EffectPolarity {
+    // Perpetual bodies carry no global polarity (`ApplyPerpetual` is
+    // Contextual by default — the modified card's owner varies), so the boon
+    // path reads the modification's own direction instead of `effect_polarity`.
+    if let Effect::ApplyPerpetual { modification, .. } = effect {
+        return holder_relative_polarity(
+            perpetual_modification_direction(modification),
+            boon_inner_target_side(effect),
+        );
+    }
+    holder_relative_polarity(effect_polarity(effect), boon_inner_target_side(effect))
+}
+
+/// Re-base a target-relative reading into the boon holder's frame.
+fn holder_relative_polarity(
+    target_relative: EffectPolarity,
+    side: BoonTargetSide,
+) -> EffectPolarity {
+    if target_relative == EffectPolarity::Contextual {
+        return EffectPolarity::Contextual;
+    }
+    match side {
+        BoonTargetSide::Holder => target_relative,
+        BoonTargetSide::Enemy => invert(target_relative),
+        // The holder aims a chosen slot at fire time and picks the target
+        // that favors them, so any directed weapon or gift is a benefit to
+        // hold regardless of which way the verb itself points.
+        BoonTargetSide::Chosen => EffectPolarity::Beneficial,
+        BoonTargetSide::Unknown => EffectPolarity::Contextual,
+    }
+}
+
+/// Side of a granted body's primary target via the engine's own slot accessor:
+/// `target_filter()` already resolves the Token / CopyTokenOf / ApplyPerpetual
+/// axes, and `None` is an untargeted verb (or the perpetual self-subject
+/// `Any`), which CR 608.2c defaults to the resolving controller — the holder
+/// once the install re-stamp lands.
+fn boon_inner_target_side(effect: &Effect) -> BoonTargetSide {
+    match effect.target_filter() {
+        None => BoonTargetSide::Holder,
+        Some(filter) => boon_filter_side(filter),
+    }
+}
+
+/// Classify one target filter into the boon holder's frame. Holder-affiliated
+/// context refs keep the inner reading; enemy-side filters flip it; slots the
+/// holder aims read as weapons to hold. `TriggeringPlayer` is whoever's event
+/// fired the boon — which may be an opponent ("whenever an opponent casts") —
+/// and `CostPaidObject` names no one in a trigger fire, so both fail closed.
+fn boon_filter_side(filter: &TargetFilter) -> BoonTargetSide {
+    match filter {
+        TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::SelfRef
+        | TargetFilter::ParentTarget => BoonTargetSide::Holder,
+        TargetFilter::Opponent => BoonTargetSide::Enemy,
+        TargetFilter::Player | TargetFilter::Any => BoonTargetSide::Chosen,
+        TargetFilter::Typed(typed) => match typed.controller {
+            // Unrestricted "target creature" — the holder aims it.
+            None => BoonTargetSide::Chosen,
+            Some(ControllerRef::You) => BoonTargetSide::Holder,
+            Some(ControllerRef::Opponent | ControllerRef::TargetOpponent) => BoonTargetSide::Enemy,
+            // The holder targets the player first, then aims within.
+            Some(ControllerRef::TargetPlayer) => BoonTargetSide::Chosen,
+            _ => BoonTargetSide::Unknown,
+        },
+        TargetFilter::PlayerMatching { player } => match player.as_ref() {
+            PlayerFilter::Controller => BoonTargetSide::Holder,
+            PlayerFilter::Opponent
+            | PlayerFilter::OpponentLostLife
+            | PlayerFilter::OpponentGainedLife => BoonTargetSide::Enemy,
+            _ => BoonTargetSide::Unknown,
+        },
+        _ => BoonTargetSide::Unknown,
+    }
+}
+
+/// Direction of a perpetual edit for its TARGET (before the holder-relative
+/// re-base): signed P/T deltas, keyword grants, and cost changes each carry
+/// their own sign. Absolute sets (`Become`, `SetBasePowerToughness`) are
+/// directionless without the target's base stats, and dynamic (`X`) deltas
+/// freeze only at application time, so both stay Contextual. A zero-delta edit
+/// with a keyword rider (the Jaheira combined shape with no P/T movement)
+/// takes the rider's sign.
+fn perpetual_modification_direction(modification: &PerpetualModification) -> EffectPolarity {
+    match modification {
+        PerpetualModification::ModifyPowerToughness {
+            power,
+            toughness,
+            keywords,
+        } => {
+            let deltas = match (power, toughness) {
+                (QuantityExpr::Fixed { value: p }, QuantityExpr::Fixed { value: t }) => {
+                    Some((*p, *t))
+                }
+                _ => None,
+            };
+            match deltas {
+                Some((0, 0)) if !keywords.is_empty() => perpetual_keyword_sign(keywords),
+                Some((p, t)) if p >= 0 && t >= 0 && (p, t) != (0, 0) => EffectPolarity::Beneficial,
+                Some((p, t)) if p <= 0 && t <= 0 && (p, t) != (0, 0) => EffectPolarity::Harmful,
+                _ => EffectPolarity::Contextual,
+            }
+        }
+        PerpetualModification::GrantKeywords { keywords } => perpetual_keyword_sign(keywords),
+        PerpetualModification::Become { .. }
+        | PerpetualModification::SetBasePowerToughness { .. } => EffectPolarity::Contextual,
+        PerpetualModification::ModifyCost { mode, .. } => match mode {
+            engine::types::statics::CostModifyMode::Reduce => EffectPolarity::Beneficial,
+            // A raise — or a floor, which can only ever raise what is paid —
+            // hurts the modified card's caster.
+            engine::types::statics::CostModifyMode::Raise
+            | engine::types::statics::CostModifyMode::Minimum => EffectPolarity::Harmful,
+        },
+        PerpetualModification::GrantAbility { modifications } => {
+            // First directed grant wins, mirroring the `GenericEffect` arm.
+            for grant in modifications {
+                let polarity = match grant {
+                    PerpetualGrantModification::AddKeyword { keyword } => {
+                        perpetual_keyword_sign(std::slice::from_ref(keyword))
+                    }
+                    PerpetualGrantModification::AddStaticMode { mode } => {
+                        static_mode_polarity(mode)
+                    }
+                    PerpetualGrantModification::GrantAbility { definition } => {
+                        effect_polarity(&definition.effect)
+                    }
+                    PerpetualGrantModification::GrantTrigger { trigger } => {
+                        granted_trigger_polarity(trigger)
+                    }
+                };
+                if polarity != EffectPolarity::Contextual {
+                    return polarity;
+                }
+            }
+            EffectPolarity::Contextual
+        }
+    }
+}
+
+/// Sign of granted keywords for the card that bears them: CR 702.147a decayed
+/// is the one keyword grant that is a drawback, mirroring the keyword-counter
+/// rule in `counter_sign_polarity`.
+fn perpetual_keyword_sign(keywords: &[Keyword]) -> EffectPolarity {
+    if keywords.is_empty() {
+        return EffectPolarity::Contextual;
+    }
+    if keywords.iter().any(|k| matches!(k, Keyword::Decayed)) {
+        EffectPolarity::Harmful
+    } else {
+        EffectPolarity::Beneficial
+    }
 }
 
 /// Classify a continuous modification as beneficial/harmful to its target.
@@ -2143,10 +2349,13 @@ mod create_boon_polarity_tests {
     use super::*;
     use engine::game::scenario::{GameScenario, P0, P1};
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, ControllerRef, ReplacementDefinition, TapStateChange,
+        AbilityDefinition, AbilityKind, ControllerRef, PerpetualGrantModification,
+        PerpetualModification, PlayerFilter, QuantityRef, ReplacementDefinition, TapStateChange,
         TypedFilter,
     };
+    use engine::types::mana::ManaCost;
     use engine::types::replacements::ReplacementEvent;
+    use engine::types::statics::CostModifyMode;
 
     fn boon_with_body(recipient: TargetFilter, exec: Option<Effect>) -> Effect {
         let mut trigger = TriggerDefinition::new(TriggerMode::SpellCast);
@@ -2272,6 +2481,296 @@ mod create_boon_polarity_tests {
         assert_eq!(
             targeted_player_impact_in(state, Some(P0), source, &[&self_gain], P1),
             None,
+        );
+    }
+
+    fn drain_some(target: TargetFilter) -> Effect {
+        Effect::LoseLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+            target: Some(target),
+        }
+    }
+
+    fn typed_controller(controller: Option<ControllerRef>) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            type_filters: Vec::new(),
+            controller,
+            properties: Vec::new(),
+        })
+    }
+
+    fn perpetual(target: TargetFilter, modification: PerpetualModification) -> Effect {
+        Effect::ApplyPerpetual {
+            target,
+            modification,
+        }
+    }
+
+    fn modify_pt(power: i32, toughness: i32) -> PerpetualModification {
+        PerpetualModification::ModifyPowerToughness {
+            power: QuantityExpr::Fixed { value: power },
+            toughness: QuantityExpr::Fixed { value: toughness },
+            keywords: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn boon_opponent_aimed_harm_reads_beneficial_to_hold() {
+        // A weapon aimed at the holder's enemies is a benefit to RECEIVE: the
+        // enemy-side inner flips, or selection would aim the weapon-grant at
+        // the opponent.
+        for target in [
+            typed_controller(Some(ControllerRef::Opponent)),
+            typed_controller(Some(ControllerRef::TargetOpponent)),
+            TargetFilter::PlayerMatching {
+                player: Box::new(PlayerFilter::Opponent),
+            },
+            TargetFilter::Opponent,
+        ] {
+            let weapon = boon_with_body(TargetFilter::Player, Some(drain_some(target.clone())));
+            assert_eq!(
+                effect_polarity(&weapon),
+                EffectPolarity::Beneficial,
+                "opponent-aimed drain must flip to Beneficial for the holder, got {target:?}"
+            );
+        }
+        let burn = boon_with_body(
+            TargetFilter::Player,
+            Some(Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: typed_controller(Some(ControllerRef::Opponent)),
+                damage_source: None,
+                excess: None,
+            }),
+        );
+        assert_eq!(effect_polarity(&burn), EffectPolarity::Beneficial);
+    }
+
+    #[test]
+    fn boon_chosen_slot_reads_beneficial_holder_aims() {
+        // The holder aims a chosen slot at fire time and picks the target that
+        // favors them, so any directed verb on a chosen slot is a benefit to
+        // hold regardless of which way the verb points.
+        let chosen_drain =
+            boon_with_body(TargetFilter::Player, Some(drain_some(TargetFilter::Player)));
+        assert_eq!(effect_polarity(&chosen_drain), EffectPolarity::Beneficial);
+        let any_burn = boon_with_body(
+            TargetFilter::Player,
+            Some(Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            }),
+        );
+        assert_eq!(effect_polarity(&any_burn), EffectPolarity::Beneficial);
+        let open_destroy = boon_with_body(
+            TargetFilter::Player,
+            Some(Effect::Destroy {
+                target: typed_controller(None),
+                cant_regenerate: false,
+            }),
+        );
+        assert_eq!(effect_polarity(&open_destroy), EffectPolarity::Beneficial);
+        let chosen_gift = boon_with_body(
+            TargetFilter::Player,
+            Some(Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Player,
+            }),
+        );
+        assert_eq!(effect_polarity(&chosen_gift), EffectPolarity::Beneficial);
+    }
+
+    #[test]
+    fn boon_self_side_readings_keep_inner_direction() {
+        // Holder-side inners keep their direction: a self-drain is a curse to
+        // hold, a self-gift a benefit.
+        for target in [TargetFilter::Controller, TargetFilter::ParentTarget] {
+            let curse = boon_with_body(TargetFilter::Player, Some(drain_some(target.clone())));
+            assert_eq!(
+                effect_polarity(&curse),
+                EffectPolarity::Harmful,
+                "holder-side drain must stay Harmful, got {target:?}"
+            );
+        }
+        let own_destroy = boon_with_body(
+            TargetFilter::Player,
+            Some(Effect::Destroy {
+                target: typed_controller(Some(ControllerRef::You)),
+                cant_regenerate: false,
+            }),
+        );
+        assert_eq!(effect_polarity(&own_destroy), EffectPolarity::Harmful);
+    }
+
+    #[test]
+    fn boon_perpetual_pt_deltas_signal_direction() {
+        // Perpetual bodies read their modification's own P/T deltas (the
+        // global ApplyPerpetual default stays Contextual): buffs on the
+        // holder's side are benefits, debuffs harms, enemy-side debuffs flip.
+        let buff = boon_with_body(
+            TargetFilter::Player,
+            Some(perpetual(TargetFilter::ParentTarget, modify_pt(1, 0))),
+        );
+        assert_eq!(effect_polarity(&buff), EffectPolarity::Beneficial);
+        let self_buff = boon_with_body(
+            TargetFilter::Player,
+            Some(perpetual(TargetFilter::Any, modify_pt(3, 3))),
+        );
+        assert_eq!(effect_polarity(&self_buff), EffectPolarity::Beneficial);
+        let shrink = boon_with_body(
+            TargetFilter::Player,
+            Some(perpetual(TargetFilter::ParentTarget, modify_pt(-1, -2))),
+        );
+        assert_eq!(effect_polarity(&shrink), EffectPolarity::Harmful);
+        // "Target creature an opponent controls perpetually gets -1/-2": an
+        // enemy-side debuff is a weapon to hold.
+        let enemy_shrink = boon_with_body(
+            TargetFilter::Player,
+            Some(perpetual(
+                typed_controller(Some(ControllerRef::Opponent)),
+                modify_pt(-1, -2),
+            )),
+        );
+        assert_eq!(effect_polarity(&enemy_shrink), EffectPolarity::Beneficial);
+        // Dynamic (X) deltas freeze only at application time — no static sign.
+        let dynamic = boon_with_body(
+            TargetFilter::Player,
+            Some(perpetual(
+                TargetFilter::ParentTarget,
+                PerpetualModification::ModifyPowerToughness {
+                    power: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                    toughness: QuantityExpr::Fixed { value: 0 },
+                    keywords: Vec::new(),
+                },
+            )),
+        );
+        assert_eq!(effect_polarity(&dynamic), EffectPolarity::Contextual);
+        // Mixed deltas and absolute sets are directionless without a base.
+        let mixed = boon_with_body(
+            TargetFilter::Player,
+            Some(perpetual(TargetFilter::ParentTarget, modify_pt(1, -1))),
+        );
+        assert_eq!(effect_polarity(&mixed), EffectPolarity::Contextual);
+        let set_base = boon_with_body(
+            TargetFilter::Player,
+            Some(perpetual(
+                TargetFilter::ParentTarget,
+                PerpetualModification::SetBasePowerToughness {
+                    power: 4,
+                    toughness: 4,
+                },
+            )),
+        );
+        assert_eq!(effect_polarity(&set_base), EffectPolarity::Contextual);
+    }
+
+    #[test]
+    fn boon_perpetual_keyword_cost_and_grant_signals() {
+        let flying = boon_with_body(
+            TargetFilter::Player,
+            Some(perpetual(
+                TargetFilter::ParentTarget,
+                PerpetualModification::GrantKeywords {
+                    keywords: vec![Keyword::Flying],
+                },
+            )),
+        );
+        assert_eq!(effect_polarity(&flying), EffectPolarity::Beneficial);
+        // Decayed is the one keyword grant that is a drawback for its bearer.
+        let decayed = boon_with_body(
+            TargetFilter::Player,
+            Some(perpetual(
+                TargetFilter::ParentTarget,
+                PerpetualModification::GrantKeywords {
+                    keywords: vec![Keyword::Decayed],
+                },
+            )),
+        );
+        assert_eq!(effect_polarity(&decayed), EffectPolarity::Harmful);
+        let discount = boon_with_body(
+            TargetFilter::Player,
+            Some(perpetual(
+                TargetFilter::Any,
+                PerpetualModification::ModifyCost {
+                    mode: CostModifyMode::Reduce,
+                    amount: ManaCost::default(),
+                },
+            )),
+        );
+        assert_eq!(effect_polarity(&discount), EffectPolarity::Beneficial);
+        let tax = boon_with_body(
+            TargetFilter::Player,
+            Some(perpetual(
+                TargetFilter::Any,
+                PerpetualModification::ModifyCost {
+                    mode: CostModifyMode::Raise,
+                    amount: ManaCost::default(),
+                },
+            )),
+        );
+        assert_eq!(effect_polarity(&tax), EffectPolarity::Harmful);
+        // Quoted grants route through the shared static inspector.
+        let evasive = boon_with_body(
+            TargetFilter::Player,
+            Some(perpetual(
+                TargetFilter::ParentTarget,
+                PerpetualModification::GrantAbility {
+                    modifications: vec![PerpetualGrantModification::AddStaticMode {
+                        mode: StaticMode::CantBeBlocked,
+                    }],
+                },
+            )),
+        );
+        assert_eq!(effect_polarity(&evasive), EffectPolarity::Beneficial);
+    }
+
+    #[test]
+    fn boon_unresolvable_sides_fail_closed() {
+        // `TriggeringPlayer` is whoever's event fired the boon — possibly an
+        // opponent — and `CostPaidObject` / fixed ids name no side at all.
+        for target in [
+            TargetFilter::TriggeringPlayer,
+            TargetFilter::CostPaidObject,
+            TargetFilter::SpecificObject {
+                id: engine::types::identifiers::ObjectId(7),
+            },
+        ] {
+            let murky = boon_with_body(TargetFilter::Player, Some(drain_some(target.clone())));
+            assert_eq!(
+                effect_polarity(&murky),
+                EffectPolarity::Contextual,
+                "unresolvable side must fail closed, got {target:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn boon_weapon_grant_scores_self_positive() {
+        // "Target player gets [opponent-draining] boon": the flipped weapon
+        // reads Beneficial, so selection scores keeping it +1.0 for self —
+        // the same keep-the-good-boon signal as the gift test above.
+        let runner = GameScenario::new().build();
+        let state = runner.state();
+        let weapon = boon_with_body(
+            TargetFilter::Player,
+            Some(drain_some(typed_controller(Some(ControllerRef::Opponent)))),
+        );
+        assert_eq!(effect_polarity(&weapon), EffectPolarity::Beneficial);
+        assert_eq!(
+            targeted_player_impact_in(
+                state,
+                Some(P0),
+                Some(engine::types::identifiers::ObjectId(0)),
+                &[&weapon],
+                P0,
+            ),
+            Some(1.0),
         );
     }
 }

@@ -9032,6 +9032,41 @@ fn parse_leading_spell_targets_if_clause(input: &str) -> Option<(&str, TargetFil
     Some((rest, filter))
 }
 
+/// True when `fragment` is a possessive/object-pronoun P/T clause the shared
+/// composer lowered to a STRICT Source-scoped comparison — the shape whose
+/// source binding is valid only on self-subject triggers ("its power is
+/// greater than 0" with "its" == the source). Explicit source subjects
+/// ("~", "this creature") and non-strict forms never match.
+fn strict_pronoun_pt_comparison(fragment: &str, sc: &StaticCondition) -> bool {
+    let trimmed = fragment.trim_start();
+    let pronoun_led = ["its ", "her ", "his ", "it "]
+        .iter()
+        .any(|head| trimmed.starts_with(head));
+    if !pronoun_led {
+        return false;
+    }
+    let StaticCondition::QuantityComparison {
+        lhs, comparator, ..
+    } = sc
+    else {
+        return false;
+    };
+    if !matches!(comparator, Comparator::GT | Comparator::LT) {
+        return false;
+    }
+    let QuantityExpr::Ref { qty } = lhs else {
+        return false;
+    };
+    matches!(
+        qty,
+        QuantityRef::Power {
+            scope: ObjectScope::Source
+        } | QuantityRef::Toughness {
+            scope: ObjectScope::Source
+        }
+    )
+}
+
 fn try_extract_intervening(
     tp: &TextPair<'_>,
     lower: &str,
@@ -9071,6 +9106,15 @@ fn try_extract_intervening(
             cond_fragment
         };
     let (rest, sc) = parse_inner_condition(condition_input).ok()?;
+    // CR 201.5 + CR 603.4: the shared possessive composer binds "its"/"her"/
+    // "his"/"it" to the ability source. On a non-self trigger that reading is
+    // wrong for a STRICT P/T gate — the pronoun names the event object, whose
+    // past-tense form the dying-object arm owns and whose present tense no arm
+    // binds. No printed card needs the strict misreading, so fail closed
+    // rather than check the grantor's stat.
+    if !source_is_self && strict_pronoun_pt_comparison(cond_fragment, &sc) {
+        return None;
+    }
     let rest_trimmed = rest.trim();
     let after_dots = rest_trimmed.trim_start_matches('.').trim_start();
     let has_otherwise = tag::<_, _, OracleError<'_>>("otherwise")

@@ -13,7 +13,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::{GameAction, ResolutionOptionalPaymentChoice};
 use engine::types::counter::CounterType;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{StackEntryKind, WaitingFor};
 use engine::types::keywords::{Keyword, KeywordKind};
 use engine::types::phase::Phase;
 use engine::types::triggers::TriggerMode;
@@ -40,6 +40,8 @@ const ROTHGA: &str = "Trample\nWhen Rothga, Bonded Engulfer enters, you get a on
 const JAHEIRA_INNER_GRANT: &str = "When ~ enters, you get a one-time boon with \"When you cast a creature spell, it perpetually gets +1/+0 and gains haste.\"";
 const DUNBARROW: &str = "When Dunbarrow Revivalist enters, you get a one-time boon with \"When one or more creatures enter under your control, create a Wicked Role token attached to one of them.\"";
 const RAISE_ALARM: &str = "Create two 1/1 white Soldier creature tokens.";
+const DOUBLING_SEASON: &str = "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.\nIf an effect would put one or more counters on a permanent you control, it puts twice that many of those counters on that permanent instead.";
+const HALVING_SEASON: &str = "If an opponent would create one or more tokens, they create half that many of each of those kinds of tokens instead, rounded down.\nIf an opponent would put one or more counters on a permanent or player, they put half that many of each of those kinds of counters on that permanent or player instead, rounded down.";
 
 /// Resolve the stack fully, ordering simultaneous triggers in listed order.
 /// Stops on an empty stack at priority — never passes into the next phase.
@@ -99,8 +101,9 @@ fn held_boons(runner: &GameRunner) -> Vec<engine::types::player::PlayerId> {
 }
 
 /// The per-grant noted-number capture each held boon snapshotted at install
-/// time, in install order. A boon reads its own capture — never the live
-/// global — when its body resolves.
+/// time, in install order. A boon reads its own capture when its body
+/// resolves; a `None` capture (its resolution noted nothing) falls back to
+/// the live global.
 fn held_boon_captures(runner: &GameRunner) -> Vec<Option<i32>> {
     runner
         .state()
@@ -812,6 +815,86 @@ fn sequential_notes_grant_independent_boons() {
     assert!(held_boons(&runner).is_empty());
 }
 
+/// Resolution-local note provenance: a grant whose own resolution noted
+/// nothing captures `None` even with a stale live note in place, so a
+/// later note reaches its live fallback. Synthetic grantor (no printed
+/// note-reading grant lacks a note leg); the inner mirrors Mephit's.
+const NOTELESS_GRANT: &str = "When ~ enters, you get a one-time boon with \"When you cast a creature spell, it perpetually gets +X/+0, where X is the noted number.\"";
+
+#[test]
+fn noteless_grant_ignores_stale_note_and_reads_live() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let wall_a = scenario
+        .add_creature_from_oracle(P1, "Wall A", 0, 3, "")
+        .id();
+    let wall_b = scenario
+        .add_creature_from_oracle(P1, "Wall B", 0, 1, "")
+        .id();
+    let mephits_one = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mephit's One", false, MEPHITS)
+        .id();
+    let mephits_two = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mephit's Two", false, MEPHITS)
+        .id();
+    let proxy = scenario
+        .add_creature_to_hand_from_oracle(P0, "Noteless Proxy", 2, 2, NOTELESS_GRANT)
+        .id();
+    let bear = scenario
+        .add_creature_to_hand_from_oracle(P0, "Grizzly Bears", 2, 2, "")
+        .id();
+    let mut runner = scenario.build();
+
+    // Pre-existing note 1 in place, with its own grant capturing 1.
+    runner.cast(mephits_one).target_object(wall_a).resolve();
+    drain_stack(&mut runner);
+    assert_eq!(runner.state().players[0].noted_number, Some(1));
+
+    // Casting the proxy fires boonA first (positive control: it captured its
+    // own 1). The noteless grant then resolves with the stale note live: it
+    // must capture `None`, not 1. Manual cast: the SpellCast driver does not
+    // order the two triggers (boonA's fire + the proxy's own ETB).
+    let proxy_card = runner.state().objects[&proxy].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: proxy,
+            card_id: proxy_card,
+            targets: vec![],
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("cast Proxy");
+    drain_stack(&mut runner);
+    let proxied = &runner.state().objects[&proxy];
+    assert_eq!((proxied.power, proxied.toughness), (Some(3), Some(2)));
+    assert_eq!(held_boon_captures(&runner), vec![None]);
+
+    // A later note overwrites the live global (and grants its own boon).
+    runner.cast(mephits_two).target_object(wall_b).resolve();
+    drain_stack(&mut runner);
+    assert_eq!(runner.state().players[0].noted_number, Some(3));
+    assert_eq!(held_boon_captures(&runner), vec![None, Some(3)]);
+
+    // One cast fires both: the noteless boon reads the live 3, not the
+    // stale 1 (2 + 3 + 3). Manual cast again for the two simultaneous fires.
+    let bear_card = runner.state().objects[&bear].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: bear,
+            card_id: bear_card,
+            targets: vec![],
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("cast Bear");
+    drain_stack(&mut runner);
+    let entered = &runner.state().objects[&bear];
+    assert_eq!((entered.power, entered.toughness), (Some(8), Some(2)));
+    let mut frozen = frozen_perpetual_pt(&runner, bear);
+    frozen.sort_unstable();
+    assert_eq!(frozen, vec![(3, 0), (3, 0)]);
+    assert_no_dynamic_perpetual(&runner, bear);
+    assert!(held_boons(&runner).is_empty());
+}
+
 /// Every Role token in the game, in every zone on purpose: a token that
 /// reached the battlefield and was swept looks identical to one never
 /// created under a battlefield-only query.
@@ -946,6 +1029,207 @@ fn dunbarrow_single_entrant_attaches_without_prompt() {
     assert!(held_boons(&runner).is_empty());
 }
 
+/// CR 616.1: one Dunbarrow batch under the holder's Doubling Season and the
+/// opponent's Halving Season, applying `first` first. Integer halving does
+/// not commute with doubling, so double-then-halve yields one Role while
+/// halve-then-double yields zero — the host-choice resume must preserve the
+/// replacement pause instead of settling to Priority and dropping it.
+fn dunbarrow_season_order(first: &str, expect_roles: usize) {
+    use engine::game::game_object::AttachTarget;
+    use engine::types::ability::TargetRef;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON);
+    scenario.add_enchantment_from_oracle(P1, "Halving Season", HALVING_SEASON);
+    let dunbarrow = scenario
+        .add_creature_to_hand_from_oracle(P0, "Dunbarrow Revivalist", 3, 3, DUNBARROW)
+        .id();
+    let alarm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Raise Alarm", false, RAISE_ALARM)
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(dunbarrow).resolve();
+    drain_stack(&mut runner);
+    assert_eq!(held_boons(&runner), vec![P0]);
+
+    let other = if first == "twice" { "half" } else { "twice" };
+    let mut host_answered = false;
+    let mut chosen_host = None;
+    let mut role_prompts = 0;
+    runner.cast(alarm).commit();
+    for _ in 0..200 {
+        match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => runner.pass_both_players(),
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let order: Vec<usize> = (0..triggers.len()).collect();
+                runner
+                    .act(GameAction::OrderTriggers { order })
+                    .expect("order triggers");
+            }
+            WaitingFor::ChooseTokenHost { legal_targets, .. } => {
+                assert!(
+                    legal_targets.len() >= 2,
+                    "the batch must offer a host choice, got {legal_targets:?}"
+                );
+                let mut soldiers: Vec<ObjectId> = legal_targets
+                    .iter()
+                    .filter_map(|t| match t {
+                        TargetRef::Object(id) => Some(*id),
+                        _ => None,
+                    })
+                    .collect();
+                soldiers.sort();
+                let chosen = soldiers[soldiers.len() - 1];
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(chosen)),
+                    })
+                    .expect("choose host");
+                host_answered = true;
+                chosen_host = Some(chosen);
+            }
+            WaitingFor::ReplacementChoice { candidates, .. } => {
+                // Pre-host prompts belong to the soldiers (either order lands
+                // on two: 2*2/2 == 2 and 2/2*2 == 2); post-host prompts are
+                // the Role's ordering and follow `first`.
+                let want = if !host_answered {
+                    None
+                } else {
+                    role_prompts += 1;
+                    Some(if role_prompts == 1 { first } else { other })
+                };
+                let index = match want {
+                    None => 0,
+                    Some(want) => candidates
+                        .iter()
+                        .position(|c| c.description.contains(want))
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "expected a {want} candidate, got {:?}",
+                                candidates
+                                    .iter()
+                                    .map(|c| c.description.as_str())
+                                    .collect::<Vec<_>>()
+                            )
+                        }),
+                };
+                runner
+                    .act(GameAction::ChooseReplacement { index })
+                    .expect("choose replacement");
+            }
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    assert!(host_answered, "the host choice must have been offered");
+    assert!(
+        role_prompts >= 1,
+        "answering the host must surface the Role's replacement pause"
+    );
+    drain_stack(&mut runner);
+
+    let roles = role_tokens(&runner);
+    assert_eq!(
+        roles.len(),
+        expect_roles,
+        "ordering {first} first must create exactly {expect_roles} Role(s)"
+    );
+    if expect_roles == 1 {
+        let role = &runner.state().objects[&roles[0]];
+        assert_eq!(role.zone, Zone::Battlefield);
+        assert_eq!(
+            role.attached_to,
+            Some(AttachTarget::Object(chosen_host.expect("host"))),
+            "the Role must attach to the chosen entrant"
+        );
+    }
+    assert!(held_boons(&runner).is_empty());
+}
+
+#[test]
+fn dunbarrow_double_then_halve_creates_one_role() {
+    dunbarrow_season_order("twice", 1);
+}
+
+#[test]
+fn dunbarrow_halve_then_double_creates_no_role() {
+    dunbarrow_season_order("half", 0);
+}
+
+/// CR 608.2c: a token-host instruction with a following instruction parks its
+/// tail while the host choice is pending. Synthetic inner (no printed boon
+/// pairs "one of them" with a tail): the life gain must NOT have applied
+/// while the prompt is open, and must apply exactly once after it resolves.
+const DUNBARROW_TAIL: &str = "When ~ enters, you get a one-time boon with \"When one or more creatures enter under your control, create a Wicked Role token attached to one of them. You gain 2 life.\"";
+
+#[test]
+fn dunbarrow_host_choice_parks_following_instruction() {
+    use engine::types::ability::TargetRef;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let grantor = scenario
+        .add_creature_to_hand_from_oracle(P0, "Dunbarrow Proxy", 3, 3, DUNBARROW_TAIL)
+        .id();
+    let alarm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Raise Alarm", false, RAISE_ALARM)
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(grantor).resolve();
+    drain_stack(&mut runner);
+    assert_eq!(held_boons(&runner), vec![P0]);
+    assert_eq!(runner.state().players[0].life, 20);
+
+    runner.cast(alarm).commit();
+    let mut answered = false;
+    for _ in 0..200 {
+        match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => runner.pass_both_players(),
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let order: Vec<usize> = (0..triggers.len()).collect();
+                runner
+                    .act(GameAction::OrderTriggers { order })
+                    .expect("order triggers");
+            }
+            WaitingFor::ChooseTokenHost { legal_targets, .. } => {
+                assert_eq!(
+                    runner.state().players[0].life,
+                    20,
+                    "the tail must not run before the host is chosen"
+                );
+                let chosen = legal_targets
+                    .iter()
+                    .filter_map(|t| match t {
+                        TargetRef::Object(id) => Some(*id),
+                        _ => None,
+                    })
+                    .max()
+                    .expect("legal host");
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(chosen)),
+                    })
+                    .expect("choose host");
+                answered = true;
+            }
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    assert!(answered, "the host choice must have been offered");
+    drain_stack(&mut runner);
+    assert_eq!(
+        runner.state().players[0].life,
+        22,
+        "the parked tail must run exactly once after the host resolves"
+    );
+    assert_eq!(role_tokens(&runner).len(), 1);
+    assert!(held_boons(&runner).is_empty());
+}
+
 #[test]
 fn dunbarrow_departed_entrant_creates_no_token() {
     let mut scenario = GameScenario::new();
@@ -976,6 +1260,21 @@ fn dunbarrow_departed_entrant_creates_no_token() {
             && !runner.state().stack.is_empty()
             && runner.state().objects[&bear].zone == Zone::Battlefield
         {
+            // Reach-guard: the stack top must be the boon trigger WITH its
+            // entrant stamped — otherwise a fire-without-stamp bug would
+            // pass the no-token assertions below for the wrong reason.
+            let top = runner
+                .state()
+                .stack
+                .last()
+                .expect("boon trigger on the stack");
+            let StackEntryKind::TriggeredAbility { ability, .. } = &top.kind else {
+                panic!("stack top must be the boon trigger, got {:?}", top.kind);
+            };
+            assert!(
+                !ability.context.boon_trigger_batch_objects.is_empty(),
+                "the boon trigger must stamp its entrant before Bolt is cast"
+            );
             runner.cast(bolt).target_object(bear).resolve();
             bolted = true;
             continue;

@@ -60,6 +60,22 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 109 — One-time boons (#7495) add serialized `GameState` tags, and the
+///      perpetual P/T edit is retyped. `Effect::CreateBoon` (with its granted
+///      `TriggerDefinition`), `Effect::NoteNumber`, the `HasBoon` trigger and
+///      static conditions, and `WaitingFor::ChooseTokenHost` are new tags with
+///      no fallback: a v108 peer fails deserialization on any of them — a
+///      conditional PARSE bump like 76/79, breaking only while a boon grant,
+///      note, or host prompt is actually serialized.
+///      `PerpetualModification::ModifyPowerToughness` retypes
+///      `power_delta`/`toughness_delta: i32` to required `power`/`toughness:
+///      QuantityExpr` (plus a defaulted `keywords` rider): a v108 peer's
+///      bare-integer fields miss the new required keys, and a v109 peer's
+///      tagged exprs fail a v108 `i32` — the break is unconditional for
+///      frames carrying the edit, in BOTH directions. Saved games still
+///      load: the persisted-decode migration rewrites legacy delta keys to
+///      canonical tagged `Fixed` exprs before materialization. P2P moves in
+///      lockstep (wire 91); lobby messages are unchanged.
 /// 108 — Serialized `IllegalTargetsDisposition::StillResolves` lets a root
 ///       ability continue after its chosen target becomes illegal. Older peers
 ///       would silently apply the ordinary non-resolution rule, so full-game
@@ -888,7 +904,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 108;
+pub const PROTOCOL_VERSION: u32 = 109;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2143,12 +2159,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 108);
+        assert_eq!(PROTOCOL_VERSION, 109);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 107);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 108);
     }
 
     #[test]

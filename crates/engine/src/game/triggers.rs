@@ -12940,8 +12940,10 @@ fn boon_embedded_condition(
 ///
 /// Inert for non-boons and for non-batch (`batched == false`) inners. Only
 /// zone-change matches yield entrants; any other matching event shape has no
-/// entering object to pin. An entrant already gone from `state.objects` is
-/// skipped (nothing to pin).
+/// entering object to pin. Pins come from the entry EVENT's recorded
+/// incarnation (`zone_change_parent_target_pin`), never live objects: a
+/// re-entered storage id is a different object (CR 400.7), and the
+/// resolution-time `is_current` check retires stale pins.
 fn stamp_boon_trigger_batch(state: &GameState, events: &[GameEvent], trigger: &mut DelayedTrigger) {
     if !trigger.kind.is_boon() {
         return;
@@ -12966,15 +12968,7 @@ fn stamp_boon_trigger_batch(state: &GameState, events: &[GameEvent], trigger: &m
     );
     trigger.ability.context.boon_trigger_batch_objects = matches
         .into_iter()
-        .filter_map(|(_, event, _)| {
-            let GameEvent::ZoneChanged { object_id, .. } = event else {
-                return None;
-            };
-            state
-                .objects
-                .get(&object_id)
-                .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
-        })
+        .filter_map(|(_, event, _)| zone_change_parent_target_pin(&event))
         .collect();
 }
 
@@ -37366,6 +37360,85 @@ pub mod tests {
             ),
             "CR 400.7: a later incarnation at the same storage id must not answer for \
              the original entrant — the record LKI of the ORIGINAL entry must still be read"
+        );
+    }
+
+    /// CR 400.7: the boon batch stamp pins the ENTRY EVENT's recorded
+    /// incarnation, never the live object. The entrant left and returned as
+    /// a new object at the same storage id before collection; the pin must
+    /// name the entered incarnation (which `is_current` then retires at
+    /// resolution), not the live one.
+    #[test]
+    fn boon_batch_stamp_pins_event_incarnation_not_live() {
+        use crate::types::ability::{DelayedTriggerKind, DelayedTriggerLifetime};
+        use crate::types::identifiers::DelayedInstallIdentity;
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = setup();
+        let controller = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            controller,
+            "Boon Granter".to_string(),
+            Zone::Battlefield,
+        );
+        let entrant = create_object(
+            &mut state,
+            CardId(2),
+            controller,
+            "Entrant".to_string(),
+            Zone::Battlefield,
+        );
+        let entered = state.objects[&entrant].incarnation;
+        let mut event = battlefield_entry_event_from_live(&state, entrant);
+        if let GameEvent::ZoneChanged { record, .. } = &mut event {
+            record.entered_incarnation = Some(entered);
+        }
+        // Leave-and-reentry BEFORE collection: same storage id, new object.
+        state.objects.get_mut(&entrant).unwrap().incarnation = entered + 2;
+
+        let mut embedded = TriggerDefinition::new(TriggerMode::ChangesZone);
+        embedded.batched = true;
+        embedded.destination = Some(Zone::Battlefield);
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            controller,
+        );
+        let source_object = state.objects.get(&source).expect("installed source");
+        ability.trigger_source = Some(trigger_source_context_for_latch(&state, source_object));
+        let mut trigger = DelayedTrigger {
+            condition: DelayedTriggerCondition::WhenNextEvent {
+                trigger: Box::new(embedded),
+                or_trigger: None,
+                lifetime: DelayedTriggerLifetime::Persistent,
+            },
+            ability: Box::new(ability),
+            controller,
+            source_id: source,
+            one_shot: true,
+            kind: DelayedTriggerKind::Boon,
+            provenance: DelayedInstallIdentity::LegacyDelayed,
+        };
+        stamp_boon_trigger_batch(&state, &[event], &mut trigger);
+        let pins = &trigger.ability.context.boon_trigger_batch_objects;
+        assert_eq!(
+            pins.len(),
+            1,
+            "the matching entry must stamp exactly one pin"
+        );
+        assert_eq!(
+            pins[0].incarnation, entered,
+            "the pin must name the ENTERED incarnation, not the live re-entry"
+        );
+        assert!(
+            !pins[0].is_current(&state),
+            "the stale pin must retire at resolution instead of seating the new object"
         );
     }
 

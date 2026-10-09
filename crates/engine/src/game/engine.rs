@@ -14342,13 +14342,23 @@ fn apply_non_priority_pass_action(
             // (it returned before proposing), so re-entry applies exactly
             // once; the override skips the pause branch, so a resumed
             // resolution never prompts twice.
+            //
+            // CR 616.1: clear the answered host prompt BEFORE re-entering the
+            // token resolver, so anything non-Priority afterwards is a pause
+            // the resumed creation opened itself (replacement ordering on
+            // the token event). Preserve every such pause; settle the
+            // priority player and drain continuation only when resolution
+            // truly returned to Priority.
             let pending = pending_ability.clone();
             let active_player = *player;
-            super::effects::token::resolve_with_host_override(state, &pending, &mut events, Some(host))
-                .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
             state.waiting_for = WaitingFor::Priority {
                 player: active_player,
             };
+            super::effects::token::resolve_with_host_override(state, &pending, &mut events, Some(host))
+                .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+            if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                return Ok(ActionResult::applied(events, state.waiting_for.clone()));
+            }
             state.priority_player = active_player;
             resume_pending_continuation_if_priority(state, &mut events)?;
             state.waiting_for.clone()

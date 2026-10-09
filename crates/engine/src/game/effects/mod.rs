@@ -4422,6 +4422,10 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::ChooseFromZoneOpponentChooser { .. }
             | WaitingFor::ChooseOneOfBranch { .. }
             | WaitingFor::ReturnAsAuraTarget { .. }
+            // CR 608.2c: a "one of them" host choice pauses token creation;
+            // anything chained after it must wait for the host (and any
+            // replacement work the resumed creation opens).
+            | WaitingFor::ChooseTokenHost { .. }
             | WaitingFor::ChooseManaColor { .. }
             | WaitingFor::ManifestDreadChoice { .. }
             | WaitingFor::DiscardChoice { .. }
@@ -14607,6 +14611,11 @@ fn reset_top_level_resolution_state(state: &mut GameState) {
     // CR 608.2c: "that sticker" names a sticker this resolution's own PutSticker
     // instruction placed; a new top-level resolution cannot inherit a prior one's.
     state.placed_sticker_this_resolution = None;
+    // Digital-only Alchemy (no CR entry): a sibling grant snapshots only a
+    // note THIS resolution wrote; a new top-level resolution cannot inherit
+    // a prior one's, so a grant whose own resolution noted nothing captures
+    // `None` and reads fall back to the live global.
+    state.noted_numbers_this_resolution.clear();
     // CR 401.5 + CR 608.2c + CR 609.3 + issue #4950: Defense in depth —
     // `apply_parent_chain_context` already consumes this at the very next
     // parent->child hand-off after a Dig/ChooseFromZone/RevealHand sets

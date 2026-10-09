@@ -5552,6 +5552,16 @@ pub fn build_parse_details(
     items
 }
 
+/// Digital-only Alchemy (no CR entry): a boon grant requires an executable
+/// granted body — the grant resolver errors on `execute: None`
+/// (game/effects/create_boon.rs), while ordinary triggers may legitimately
+/// lack bodies. All three canonical coverage authorities (carrier support,
+/// parse-details items, missing parts) share this predicate at their
+/// `CreateBoon` arms.
+fn boon_grant_has_body(trigger: &TriggerDefinition) -> bool {
+    trigger.execute.is_some()
+}
+
 /// Build a `ParsedItem` for a single `TriggerDefinition`, recursing into its
 /// `execute` ability. Shared between top-level triggers and triggers granted
 /// by static abilities (`ContinuousModification::GrantTrigger`).
@@ -5902,14 +5912,17 @@ fn append_effect_static_carrier_items(
             }
         }
         // Digital-only Alchemy (no CR entry): a boon is a single-trigger
-        // carrier like an emblem's trigger half.
+        // carrier like an emblem's trigger half. The granted body is
+        // required even when the mode is registered (shared M2 predicate).
         Effect::CreateBoon { trigger, .. } => {
-            children.push(build_trigger_item(
+            let mut child = build_trigger_item(
                 trigger,
                 trigger_registry,
                 static_registry,
                 token_static_traversal,
-            ));
+            );
+            child.supported &= boon_grant_has_body(trigger);
+            children.push(child);
         }
         _ => {}
     }
@@ -8234,6 +8247,14 @@ fn collect_effect_static_carrier_missing_parts(
             );
         }
         Effect::CreateBoon { trigger, .. } => {
+            // The granted body is required even when the mode is registered
+            // (shared M2 predicate); ordinary bodyless triggers stay legal.
+            if !boon_grant_has_body(trigger) {
+                let label = "Effect:BodylessBoon".to_string();
+                if !missing.contains(&label) {
+                    missing.push(label);
+                }
+            }
             check_triggers(
                 std::slice::from_ref(trigger),
                 trigger_registry,
@@ -9069,13 +9090,11 @@ fn effect_static_carriers_are_supported(
         }
         // Digital-only Alchemy (no CR entry): a one-time boon grant is
         // supported exactly when its granted trigger is supported AND has an
-        // executable body — `is_trigger_supported` permits `execute: None`,
-        // but the grant resolver errors on a bodyless boon, so a None body
-        // must classify unsupported (the wrapper parser guards this for
-        // parsed fixtures; serialized/constructed model values need the
-        // classifier to say so too).
+        // executable body (shared M2 predicate — the wrapper parser guards
+        // this for parsed fixtures; serialized/constructed model values
+        // need the classifier to say so too).
         Effect::CreateBoon { trigger, .. } => {
-            trigger.execute.is_some()
+            boon_grant_has_body(trigger)
                 && is_trigger_supported(
                     trigger,
                     trigger_registry,
@@ -10365,11 +10384,15 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         } => ("IsMonarch", Handled),
         StaticCondition::IsMonarch { .. } => ("IsMonarch", Unhandled),
         // Digital-only Alchemy (no CR entry): same scope rule as the monarch
-        // arm above — the layer evaluator binds both subjects.
+        // arm above — the layer evaluator binds both subjects. The unbound
+        // arm keeps a DISTINCT key: same-key insert would let sibling order
+        // decide the verdict (a later Handled overwriting an Unhandled, or
+        // vice versa), so mixed scopes on one card would resolve by
+        // HashMap insertion order instead of by restriction.
         StaticCondition::HasBoon {
             player: PlayerScope::Controller | PlayerScope::RecipientController,
         } => ("HasBoon", Handled),
-        StaticCondition::HasBoon { .. } => ("HasBoon", Unhandled),
+        StaticCondition::HasBoon { .. } => ("HasBoonUnboundScope", Unhandled),
         StaticCondition::IsInitiative => ("IsInitiative", Handled),
         StaticCondition::NoMonarch => ("NoMonarch", Handled),
         StaticCondition::HasCityBlessing => ("HasCityBlessing", Handled),
@@ -19020,6 +19043,82 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         );
     }
 
+    /// M2 canonical: the shared body requirement reaches the missing-parts
+    /// and parse-details authorities, not just the carrier classifier. A
+    /// constructed bodyless grant (registered mode, no body) is unsupported
+    /// with an `Effect:BodylessBoon` gap and a red trigger child; the bodied
+    /// twin is the positive control (supported, gap-free).
+    #[test]
+    fn create_boon_bodyless_rejected_across_canonical_coverage() {
+        let grant_def = |execute: Option<Box<AbilityDefinition>>| {
+            let mut trigger = TriggerDefinition::new(TriggerMode::SpellCast);
+            trigger.execute = execute;
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::CreateBoon {
+                    recipient: TargetFilter::Controller,
+                    trigger: Box::new(trigger),
+                },
+            )
+        };
+        let body = || {
+            Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )))
+        };
+
+        // Missing-parts authority.
+        let mut missing = Vec::new();
+        collect_test_ability_missing_parts(&grant_def(None), &mut missing);
+        assert!(
+            missing.contains(&"Effect:BodylessBoon".to_string()),
+            "bodyless grant must record the structural gap, got {missing:?}"
+        );
+        let mut control_missing = Vec::new();
+        collect_test_ability_missing_parts(&grant_def(body()), &mut control_missing);
+        assert!(
+            control_missing.is_empty(),
+            "bodied control must record no gaps, got {control_missing:?}"
+        );
+
+        // Full canonical card coverage + parse details.
+        for (execute, supported) in [(None, false), (body(), true)] {
+            let mut face = make_face();
+            face.name = "Coverage Boon Probe".to_string();
+            face.abilities = vec![grant_def(execute)];
+            let card = coverage_result_for_face(face);
+            assert_eq!(card.supported, supported, "bodied={supported}: {card:?}");
+            let item = card
+                .parse_details
+                .iter()
+                .find(|item| item.category == ParseCategory::Ability)
+                .expect("grant ability reaches face coverage");
+            let trigger_child = item
+                .children
+                .iter()
+                .find(|child| child.category == ParseCategory::Trigger)
+                .expect("granted trigger reaches parse details");
+            assert_eq!(
+                trigger_child.supported, supported,
+                "bodied={supported}: {trigger_child:?}"
+            );
+            if supported {
+                assert!(card.gap_details.is_empty(), "{card:?}");
+            } else {
+                assert!(
+                    card.gap_details
+                        .iter()
+                        .any(|gap| gap.handler == "Effect:BodylessBoon"),
+                    "canonical gaps must carry the structural label: {card:?}"
+                );
+            }
+        }
+    }
+
     /// M1: an unhandled reference nested inside a note value or a perpetual
     /// P/T delta is classified unhandled — not silently advertised as
     /// supported. `ChosenNumber` is the probe (tagged `Unhandled` by
@@ -20987,6 +21086,50 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             })
             .get("static_condition:IsMonarch"),
             Some(&FeatureSupport::Handled)
+        );
+    }
+
+    /// Mixed `HasBoon` scopes on one card resolve by restriction, not by
+    /// sibling order: the bound and unbound arms emit distinct keys, so an
+    /// `And`/`Or` pairing reports Unhandled in BOTH orders instead of
+    /// letting a later Handled overwrite it (or vice versa).
+    #[test]
+    fn has_boon_mixed_scopes_report_unhandled_in_both_orders() {
+        let feature_map = |cond: &StaticCondition| {
+            let mut features = HashMap::new();
+            extract_static_condition_features(cond, &mut features);
+            features
+        };
+        let bound = || StaticCondition::HasBoon {
+            player: PlayerScope::Controller,
+        };
+        let unbound = || StaticCondition::HasBoon {
+            player: PlayerScope::Target,
+        };
+        for siblings in [vec![bound(), unbound()], vec![unbound(), bound()]] {
+            let features = feature_map(&StaticCondition::And {
+                conditions: siblings,
+            });
+            assert_eq!(
+                features.get("static_condition:HasBoon"),
+                Some(&FeatureSupport::Handled),
+                "the bound arm keeps its own verdict"
+            );
+            assert_eq!(
+                features.get("static_condition:HasBoonUnboundScope"),
+                Some(&FeatureSupport::Unhandled),
+                "the unbound arm must survive in both sibling orders: {features:?}"
+            );
+        }
+        // Single-scope controls: each arm alone keeps its verdict.
+        assert_eq!(
+            feature_map(&bound()).get("static_condition:HasBoon"),
+            Some(&FeatureSupport::Handled)
+        );
+        assert!(!feature_map(&bound()).contains_key("static_condition:HasBoonUnboundScope"));
+        assert_eq!(
+            feature_map(&unbound()).get("static_condition:HasBoonUnboundScope"),
+            Some(&FeatureSupport::Unhandled)
         );
     }
 

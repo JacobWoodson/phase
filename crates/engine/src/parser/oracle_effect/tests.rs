@@ -44239,9 +44239,13 @@ fn perpetual_dynamic_that_subject_validates_and_rejects_compounds() {
         "that thingamajig perpetually gets +X/+0, where X is its power.",
     ] {
         let e = parse_effect(bad);
+        // Reach-guard: the `perpetual_modify_pt` gap name proves the clause
+        // was recognized as a perpetual P/T edit (subject split + signed
+        // delta head) and failed at subject validation — not declined
+        // earlier as a non-perpetual clause.
         assert!(
-            matches!(e, Effect::Unimplemented { .. }),
-            "a compound/unmodelled subject must fail closed, got {e:?} for {bad:?}"
+            matches!(&e, Effect::Unimplemented { name, .. } if name == "perpetual_modify_pt"),
+            "a compound/unmodelled subject must fail closed at the perpetual gap, got {e:?} for {bad:?}"
         );
     }
 }
@@ -44249,10 +44253,23 @@ fn perpetual_dynamic_that_subject_validates_and_rejects_compounds() {
 /// M4 twin for the fixed arm: compounds fail closed there too.
 #[test]
 fn perpetual_fixed_that_subject_rejects_compounds() {
+    // Reach-guard: the valid single subject binds, proving the fixed "that"
+    // path reaches the subject validator the compound below must fail.
+    let ok = parse_effect("that artifact perpetually gets +1/+0.");
+    assert!(
+        matches!(
+            ok,
+            Effect::ApplyPerpetual {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "reach-guard: valid single subject must bind, got {ok:?}"
+    );
     let e = parse_effect("that artifact and this creature perpetually gets +1/+0.");
     assert!(
-        matches!(e, Effect::Unimplemented { .. }),
-        "a compound subject must fail closed, got {e:?}"
+        matches!(&e, Effect::Unimplemented { name, .. } if name == "perpetual_modify_pt"),
+        "a compound subject must fail closed at the perpetual gap, got {e:?}"
     );
 }
 

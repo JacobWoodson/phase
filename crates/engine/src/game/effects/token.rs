@@ -1298,6 +1298,11 @@ pub fn apply_resolved_token_creation(
         .get(&object_id)
         .expect("the token was materialized above")
         .snapshot_for_zone_change(object_id, None, Zone::Battlefield);
+    // CR 400.7: mirror the live birth authority
+    // (`zones::record_and_emit_entry_from_no_zone`), which fills the entered
+    // incarnation from the birth occurrence — replay's reconstructed record
+    // must equal the live one field for field.
+    entry_record.entered_incarnation = state.objects.get(&object_id).map(|obj| obj.incarnation);
     crate::game::restrictions::record_zone_change(state, &mut entry_record);
     // CR 111.1: replay must not hand the same id out again to a later allocation.
     state.next_object_id = state.next_object_id.max(command.resulting_next_object_id);

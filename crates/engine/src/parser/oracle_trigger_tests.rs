@@ -6537,6 +6537,82 @@ fn trigger_enlists_a_creature() {
     }
 }
 
+/// CR 201.5 + CR 603.4: opposite-power controls for strict possessive P/T
+/// gates. On a SELF trigger ("When this creature dies, if its power is
+/// greater than 0" — Dragonborn Immolator) "its" is the source and the GT
+/// gate binds `Power { Source }`. On a NON-SELF trigger the pronoun names
+/// the event object (whose past-tense form the dying-object arm owns), so
+/// the present-tense strict gate fails closed instead of checking the
+/// grantor's stat. Explicit source subjects ("this creature has ...") on
+/// non-self triggers keep working.
+#[test]
+fn strict_pronoun_pt_gate_binds_source_only_on_self_trigger() {
+    use crate::types::ability::{
+        Comparator, ObjectScope, QuantityExpr, QuantityRef, TriggerCondition,
+    };
+
+    // Self: "its" == the source. Gate binds Source, strictly.
+    let zelf = parse_trigger_line(
+        "When this creature dies, if its power is greater than 0, draw a card.",
+        "Self Prober",
+    );
+    match zelf.condition.as_ref() {
+        Some(TriggerCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power { scope },
+                },
+            comparator,
+            rhs,
+        }) => {
+            assert_eq!(*scope, ObjectScope::Source);
+            assert_eq!(*comparator, Comparator::GT);
+            assert_eq!(*rhs, QuantityExpr::Fixed { value: 0 });
+        }
+        other => panic!("self strict gate must bind Source GT 0, got {other:?}"),
+    }
+
+    // Non-self: the pronoun names the event object — fail closed (no hoisted
+    // gate), for both strict directions. Reach guard: the trigger head
+    // itself still parses; only the gate declines.
+    for oracle in [
+        "Whenever another creature dies, if its power is greater than 0, draw a card.",
+        "Whenever another creature dies, if its toughness is less than 3, draw a card.",
+    ] {
+        let def = parse_trigger_line(oracle, "Other Prober");
+        assert!(
+            matches!(def.mode, TriggerMode::ChangesZone),
+            "{oracle}: head must parse, got {:?}",
+            def.mode
+        );
+        assert_eq!(
+            def.condition, None,
+            "{oracle}: non-self strict pronoun gate must fail closed, got {:?}",
+            def.condition
+        );
+    }
+
+    // Explicit source subject on a non-self trigger: still binds Source.
+    let explicit = parse_trigger_line(
+        "Whenever another creature dies, if this creature has power greater than 2, draw a card.",
+        "Explicit Prober",
+    );
+    match explicit.condition.as_ref() {
+        Some(TriggerCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power { scope },
+                },
+            comparator,
+            ..
+        }) => {
+            assert_eq!(*scope, ObjectScope::Source);
+            assert_eq!(*comparator, Comparator::GT);
+        }
+        other => panic!("explicit-source strict gate must survive, got {other:?}"),
+    }
+}
+
 #[test]
 fn exploit_real_cards_preserve_actor_victim_and_payoff_target_roles() {
     const SKULL: &str = "Exploit (When this creature enters, you may sacrifice a creature.)\nWhenever a creature you control exploits a nontoken creature, create a 2/2 black Zombie creature token.";

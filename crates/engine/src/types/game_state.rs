@@ -12691,6 +12691,55 @@ fn migrate_legacy_tap_effect(effect: &mut serde_json::Value) {
     effect.insert("state".to_string(), serde_json::json!({ "type": state }));
 }
 
+/// Upgrade pre-#7495 perpetual P/T edits at the persisted-state boundary.
+/// `ModifyPowerToughness` carried bare-integer `power_delta`/`toughness_delta`
+/// through v108; v109 requires tagged `power`/`toughness: QuantityExpr` (plus
+/// a defaulted `keywords` rider). A serde field alias cannot do this rewrite —
+/// the legacy keys hold bare integers, not tagged exprs — so the boundary
+/// rewrites the keys and wraps each delta in the canonical tagged `Fixed`
+/// form before materialization. Scoped by the `kind` tag, which only this
+/// enum emits, so every carrier (effects, perpetual baselines) is reached; a
+/// v109 payload (no delta keys) passes through untouched.
+fn migrate_legacy_perpetual_modify_pt_deltas(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                migrate_legacy_perpetual_modify_pt_deltas(value);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            let is_modify_pt = object.get("kind").and_then(serde_json::Value::as_str)
+                == Some("ModifyPowerToughness");
+            if is_modify_pt {
+                for (legacy, canonical) in
+                    [("power_delta", "power"), ("toughness_delta", "toughness")]
+                {
+                    let Some(delta) = object.remove(legacy) else {
+                        continue;
+                    };
+                    // A payload carrying both keeps its canonical key: no real
+                    // v108 emitter ever wrote `power`, so a present canonical
+                    // key is newer than any legacy key beside it.
+                    if object.contains_key(canonical) {
+                        continue;
+                    }
+                    let expr = match delta.as_i64() {
+                        Some(n) => serde_json::json!({ "type": "Fixed", "value": n }),
+                        // Never emitted; moved as-is so materialization fails
+                        // loudly on the unmigratable shape instead of guessing.
+                        None => delta,
+                    };
+                    object.insert(canonical.to_string(), expr);
+                }
+            }
+            for value in object.values_mut() {
+                migrate_legacy_perpetual_modify_pt_deltas(value);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Maps the pre-Option turn-face-up continuation wire shape onto the typed
 /// `Option<u32>` representation. A legacy `cost_had_x: false` plus zero was
 /// never an X announcement, while `true` plus zero was.
@@ -21629,6 +21678,17 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placed_sticker_this_resolution: Option<crate::types::stickers::AppliedSticker>,
 
+    /// Digital-only Alchemy (no CR entry): `(noting player, value)` pairs
+    /// noted by THIS resolution's `NoteNumber` legs, keyed per player so
+    /// fan-out iterations cannot overwrite each other. A sibling `CreateBoon`
+    /// leg snapshots its noting player's entry into the granted ability;
+    /// absence means this resolution noted nothing for that player, so the
+    /// grant captures `None` and reads fall back to the live global.
+    /// Cleared at every top-level resolution — a stale note from an earlier
+    /// resolution is never visible here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub noted_numbers_this_resolution: Vec<(PlayerId, i32)>,
+
     /// CR 609.7a-b: The most recently chosen damage source and its source
     /// filter. Set by `DamageSourceChoice`, consumed by prevention/replacement
     /// continuation effects, and then cleared.
@@ -22759,6 +22819,7 @@ impl GameStateDecode {
         migrate_legacy_turn_face_up_resume(&mut value)?;
         migrate_legacy_dungeon_choice_previews(&mut value)?;
         migrate_legacy_graveyard_paid_cast_cleanup(&mut value)?;
+        migrate_legacy_perpetual_modify_pt_deltas(&mut value);
         let mut state = Self::materialize_prepared(value)?;
         normalize_delayed_trigger_allocators(&mut state)?;
         normalize_resolution_cast_offer_allocator(&mut state)?;
@@ -22819,6 +22880,7 @@ impl GameStateDecode {
         // to rebuild those payloads before `RawGameStateFields` sees them.
         migrate_legacy_dungeon_choice_previews(value)?;
         migrate_legacy_graveyard_paid_cast_cleanup(value)?;
+        migrate_legacy_perpetual_modify_pt_deltas(value);
         Ok(())
     }
 
@@ -27708,6 +27770,7 @@ impl GameState {
             chosen_counter_kind_this_resolution: None,
             chosen_color_this_resolution: None,
             placed_sticker_this_resolution: None,
+            noted_numbers_this_resolution: Vec::new(),
             last_chosen_damage_source: None,
             all_creature_types: Vec::new(),
             all_card_names: Arc::from([]),
@@ -28823,6 +28886,10 @@ impl GameState {
         // reads (phase-2 quantity), so distinct live values must not share a
         // loop pre-filter fingerprint.
         self.placed_sticker_this_resolution.hash(&mut h);
+        // Digital-only Alchemy (no CR entry): a sibling grant snapshots this
+        // resolution's note, so distinct live values must not share a loop
+        // pre-filter fingerprint.
+        self.noted_numbers_this_resolution.hash(&mut h);
         self.stack.len().hash(&mut h);
         self.objects.len().hash(&mut h);
         // im::Vector<ObjectId>: Hash, ordered.
@@ -30237,6 +30304,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         chosen_counter_kind_this_resolution: _,
         chosen_color_this_resolution: _,
         placed_sticker_this_resolution: _,
+        noted_numbers_this_resolution: _,
         last_chosen_damage_source: _,
         all_creature_types: _,
         all_card_names: _,
@@ -30616,6 +30684,7 @@ impl PartialEq for GameState {
                 == other.chosen_counter_kind_this_resolution
             && self.chosen_color_this_resolution == other.chosen_color_this_resolution
             && self.placed_sticker_this_resolution == other.placed_sticker_this_resolution
+            && self.noted_numbers_this_resolution == other.noted_numbers_this_resolution
             && self.last_revealed_ids == other.last_revealed_ids
             && self.private_look_ids == other.private_look_ids
             && self.private_look_player == other.private_look_player
@@ -32558,6 +32627,83 @@ mod tests {
             serde_json::json!({ "type": "Untap" }),
             "only serialized Effect payloads are migrated"
         );
+    }
+
+    #[test]
+    fn persisted_legacy_perpetual_deltas_migrate_to_tagged_fixed_exprs() {
+        let mut persisted = serde_json::json!({
+            "objects": {
+                "3": {
+                    "abilities": [{
+                        "effect": {
+                            "type": "ApplyPerpetual",
+                            "target": { "type": "ParentTarget" },
+                            "modification": {
+                                "kind": "ModifyPowerToughness",
+                                "power_delta": 1,
+                                "toughness_delta": -2
+                            }
+                        }
+                    }]
+                }
+            },
+            "perpetual_baseline": {
+                "kind": "ModifyPowerToughness",
+                "power_delta": 0,
+                "toughness_delta": 0
+            }
+        });
+
+        // Negative control: the legacy shape cannot materialize unmigrated —
+        // the v109 `power`/`toughness` keys are required and absent.
+        let legacy = persisted["objects"]["3"]["abilities"][0]["effect"]["modification"].clone();
+        assert!(
+            serde_json::from_value::<crate::types::ability::PerpetualModification>(legacy).is_err(),
+            "unmigrated delta keys must fail materialization"
+        );
+
+        migrate_legacy_perpetual_modify_pt_deltas(&mut persisted);
+
+        let migrated = &persisted["objects"]["3"]["abilities"][0]["effect"]["modification"];
+        assert_eq!(
+            *migrated,
+            serde_json::json!({
+                "kind": "ModifyPowerToughness",
+                "power": { "type": "Fixed", "value": 1 },
+                "toughness": { "type": "Fixed", "value": -2 }
+            }),
+            "legacy bare-integer deltas rewrite to canonical tagged Fixed exprs"
+        );
+        // The rewritten payload must materialize as the current type.
+        let materialized: crate::types::ability::PerpetualModification =
+            serde_json::from_value(migrated.clone()).expect("migrated edit materializes");
+        assert!(
+            matches!(
+                materialized,
+                crate::types::ability::PerpetualModification::ModifyPowerToughness { .. }
+            ),
+            "migrated payload keeps its variant, got {materialized:?}"
+        );
+        // Shape-scoped, not carrier-scoped: the `kind` tag only this enum
+        // emits reaches every carrier, including non-effect baselines.
+        assert_eq!(
+            persisted["perpetual_baseline"],
+            serde_json::json!({
+                "kind": "ModifyPowerToughness",
+                "power": { "type": "Fixed", "value": 0 },
+                "toughness": { "type": "Fixed", "value": 0 }
+            }),
+            "non-effect carriers migrate too"
+        );
+        // A current-shape payload passes through untouched (idempotent).
+        let mut current = serde_json::json!({
+            "kind": "ModifyPowerToughness",
+            "power": { "type": "Fixed", "value": 2 },
+            "toughness": { "type": "Fixed", "value": 2 }
+        });
+        let before = current.clone();
+        migrate_legacy_perpetual_modify_pt_deltas(&mut current);
+        assert_eq!(current, before, "v109 payloads pass through untouched");
     }
 
     #[test]
