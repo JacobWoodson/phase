@@ -10291,6 +10291,11 @@ pub(super) fn parse_destroy_ast(
         if opens_attachment_qualifier(rem) {
             return None;
         }
+        // CR 608.2c: mirror of the Entry-35 return-verb guard — a "this
+        // way" the filter doesn't bind must refuse, not sweep.
+        if super::target_span_dropped_this_way_anaphor(rest, &target) {
+            return None;
+        }
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(rem, text);
         return Some(ZoneCounterImperativeAst::Destroy { target, all: true });
@@ -10301,6 +10306,11 @@ pub(super) fn parse_destroy_ast(
         // CR 608.2k: see comment above — anaphor binding via parse_target_with_ctx.
         let (target, rem) = parse_target_with_ctx(rest, ctx);
         if opens_attachment_qualifier(rem) {
+            return None;
+        }
+        // CR 608.2c: mirror of the Entry-35 return-verb guard — a "this
+        // way" the filter doesn't bind must refuse, not sweep.
+        if super::target_span_dropped_this_way_anaphor(rest, &target) {
             return None;
         }
         #[cfg(debug_assertions)]
@@ -10897,6 +10907,11 @@ pub(super) fn parse_exile_ast(
         } else {
             parsed_target
         };
+        // CR 608.2c: mirror of the Entry-35 return-verb guard — a "this
+        // way" the filter doesn't bind must refuse, not sweep.
+        if super::target_span_dropped_this_way_anaphor(rest, &target) {
+            return None;
+        }
         let origin = super::infer_origin_zone(rest_lower);
         let (origin, target) = super::compose_exile_graveyard_origin_and_target(
             origin,
@@ -10989,6 +11004,11 @@ pub(super) fn parse_exile_ast(
         || starts_with_target_possessive_zone(rest_lower);
     if mass_zone {
         let (target, _rem) = parse_target(rest_text);
+        // CR 608.2c: mirror of the Entry-35 return-verb guard — a "this
+        // way" the filter doesn't bind must refuse, not sweep.
+        if super::target_span_dropped_this_way_anaphor(rest_text, &target) {
+            return None;
+        }
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
         let origin = super::infer_origin_zone(rest_lower);
@@ -11032,6 +11052,11 @@ pub(super) fn parse_exile_ast(
         let tail_is_consumed = tail_clean.is_empty() || !enter_with_counters.is_empty();
         if rem.trim().is_empty() && !matches!(target, TargetFilter::Any) && tail_is_consumed {
             attach_controller_if_absent(&mut target, ControllerRef::You);
+            // CR 608.2c: mirror of the Entry-35 return-verb guard — a "this
+            // way" the filter doesn't bind must refuse, not sweep.
+            if super::target_span_dropped_this_way_anaphor(rest_lower, &target) {
+                return None;
+            }
             if let TargetFilter::Typed(typed) = &mut target {
                 typed
                     .properties
@@ -11093,6 +11118,11 @@ pub(super) fn parse_exile_ast(
             && target.extract_in_zone() == Some(Zone::Graveyard)
             && terminal_punctuation_only(remainder)
         {
+            // CR 608.2c: mirror of the Entry-35 return-verb guard — a "this
+            // way" the filter doesn't bind must refuse, not sweep.
+            if super::target_span_dropped_this_way_anaphor(target_text, &target) {
+                return None;
+            }
             return Some(ZoneCounterImperativeAst::Exile {
                 origin: Some(Zone::Graveyard),
                 target,
@@ -11180,6 +11210,11 @@ pub(super) fn parse_exile_ast(
     } else {
         parsed_target
     };
+    // CR 608.2c: mirror of the Entry-35 return-verb guard — a "this
+    // way" the filter doesn't bind must refuse, not sweep.
+    if super::target_span_dropped_this_way_anaphor(target_input, &target) {
+        return None;
+    }
     // CR 400.7 (issue #6505): infer the origin zone excluding ONLY a trailing
     // compound conjunct ("and their graveyard", Strategic Betrayal) so its
     // sibling graveyard leg cannot leak Zone::Graveyard onto the battlefield
