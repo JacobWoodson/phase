@@ -214,6 +214,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner
         // CR 201.5a: append-only; GrantingObject is concretized to SpecificObject
         // at grant-clone and never reaches this object predicate.
         | TargetFilter::GrantingObject
@@ -488,6 +489,7 @@ pub(crate) fn target_filter_characteristic_reads_at(
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::GrantingObject
         | TargetFilter::AllPlayers => CharacteristicKinds::EMPTY,
     }
@@ -876,6 +878,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner
         // CR 201.5a: append-only; GrantingObject is concretized to SpecificObject
         // at grant-clone and never reaches this object predicate.
         | TargetFilter::GrantingObject
@@ -1766,6 +1769,7 @@ pub(crate) fn filter_contains(filter: &TargetFilter, leaf: &dyn Fn(&TargetFilter
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AllPlayers => false,
     }
 }
@@ -1935,7 +1939,11 @@ pub(crate) fn player_filter_contains(
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::PlayerAttribute { .. }
         | PlayerFilter::ChosenPlayer { .. }
-        | PlayerFilter::ParentObjectTargetOwner => false,
+        | PlayerFilter::ParentObjectTargetOwner
+        // No nested `TargetFilter`: like `AllExcept`, the combinator nests
+        // only a `PlayerFilter`.
+        | PlayerFilter::ParentPlayerTarget
+        | PlayerFilter::OpponentExcept { .. } => false,
     }
 }
 
@@ -2017,6 +2025,7 @@ pub(crate) fn filter_contains_filter_prop(
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AllPlayers => false,
     }
 }
@@ -2167,6 +2176,9 @@ fn player_filter_contains_filter_prop(
         PlayerFilter::AllExcept { exclude } => {
             player_filter_contains_filter_prop(exclude, predicate)
         }
+        PlayerFilter::OpponentExcept { exclude } => {
+            player_filter_contains_filter_prop(exclude, predicate)
+        }
         PlayerFilter::Controller
         | PlayerFilter::Opponent
         | PlayerFilter::DefendingPlayer
@@ -2187,6 +2199,7 @@ fn player_filter_contains_filter_prop(
         | PlayerFilter::VotedFor { .. }
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ChosenPlayer { .. }
+        | PlayerFilter::ParentPlayerTarget
         | PlayerFilter::ParentObjectTargetOwner => false,
     }
 }
@@ -2536,6 +2549,7 @@ fn rewrite_filter_props(
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AllPlayers => {}
     }
 }
@@ -2697,6 +2711,9 @@ fn rewrite_player_filter_props(
         PlayerFilter::AllExcept { exclude } => {
             rewrite_player_filter_props(exclude, rewrite_node, rewrite, complete)
         }
+        PlayerFilter::OpponentExcept { exclude } => {
+            rewrite_player_filter_props(exclude, rewrite_node, rewrite, complete)
+        }
         PlayerFilter::Controller
         | PlayerFilter::Opponent
         | PlayerFilter::DefendingPlayer
@@ -2717,6 +2734,7 @@ fn rewrite_player_filter_props(
         | PlayerFilter::VotedFor { .. }
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ChosenPlayer { .. }
+        | PlayerFilter::ParentPlayerTarget
         | PlayerFilter::ParentObjectTargetOwner => {}
     }
 }
@@ -5032,6 +5050,9 @@ fn filter_inner_for_object(
         // mirrors ParentTargetController for the player-axis side of CR 108.3 vs CR 109.4.
         TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        // CR 108.3 + CR 508.1d: per-member owner anchor — resolved per affected
+        // member by `force_attack::resolve`, never via object matching here.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::PostReplacementSourceController
         // CR 615.5: an object-typed resolution-time ref (the prevented event's
         // damage source) — resolved via `resolve_target_filter`, not by scanning
@@ -5409,7 +5430,8 @@ fn zone_change_filter_inner(
         | TargetFilter::StackSpell
         // CR 201.5a: append-only (concretized before runtime).
         | TargetFilter::GrantingObject
-        | TargetFilter::Owner => false,
+        | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner => false,
     }
 }
 
@@ -5746,7 +5768,8 @@ pub fn spell_record_matches_filter(
         | TargetFilter::ChosenDamageSource { .. }
         // CR 201.5a: append-only (concretized before runtime).
         | TargetFilter::GrantingObject
-        | TargetFilter::Owner => false,
+        | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner => false,
     }
 }
 
@@ -6070,7 +6093,8 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::Named { .. }
         // CR 201.5a: append-only (concretized before runtime).
         | TargetFilter::GrantingObject
-        | TargetFilter::Owner => false,
+        | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner => false,
     }
 }
 

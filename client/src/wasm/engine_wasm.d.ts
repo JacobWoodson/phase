@@ -342,8 +342,9 @@ export function get_stack_pressure(): any;
 export function get_viewer_snapshot_js(player_id: number): any;
 
 /**
- * Get the viewer-filtered state, legal actions, interaction projection, and
- * event slice associated with one engine transition.
+ * Combined viewer projection and event slice for one engine transition.
+ * Unlike the legacy state-only endpoint, this path validates the viewer id
+ * before narrowing it to the engine's representable PlayerId domain.
  */
 export function get_viewer_transition_snapshot_js(player_id: number, events: any): any;
 

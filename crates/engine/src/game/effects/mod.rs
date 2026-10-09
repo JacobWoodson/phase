@@ -47,6 +47,7 @@ use crate::types::resolution::{
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
+pub mod abandon_scheme;
 pub mod adapt;
 pub mod add_restriction;
 pub mod add_target_replacement;
@@ -551,6 +552,31 @@ pub(crate) fn matches_player_scope(
                     // `ability_utils::parent_target_owner`. Resolved in
                     // `choose_one_of::choosing_players`; unreachable here.
                     PlayerFilter::ParentObjectTargetOwner => false,
+                    // CR 115.1 + CR 608.2c: the parent-player-target anchor
+                    // likewise requires the resolving `ResolvedAbility` (for
+                    // `ability.targets`), which this generic scope predicate
+                    // does not carry. Resolved in the ability-aware
+                    // `DamageEachPlayer` resolver via
+                    // `ability_utils::parent_target_player`; unreachable
+                    // here — fail closed, mirroring the
+                    // `ParentObjectTargetController` arm.
+                    PlayerFilter::ParentPlayerTarget => false,
+                    // CR 102.2 + CR 102.3 + CR 608.2c + CR 109.4:
+                    // predicate form — an opponent matches unless it
+                    // matches the `exclude` anchor. Exact for excludes
+                    // resolvable without ability targets (Controller,
+                    // Opponent, …); ability-target-dependent anchors
+                    // (`ParentPlayerTarget`) return `false` from this
+                    // generic predicate, so the player_scope driver routes
+                    // `OpponentExcept` through the ability-aware
+                    // `speed_effects::players_for_filter` instead, which is
+                    // authoritative for `OpponentExcept` effect-iteration
+                    // (mirroring the `AllExcept` contract). Opponent-ness
+                    // is team-aware via `players::is_opponent` (CR 102.3).
+                    PlayerFilter::OpponentExcept { exclude } => {
+                        crate::game::players::is_opponent(state, controller, p.id)
+                            && !matches_player_scope(state, p.id, exclude, controller, source_id)
+                    }
                     // CR 109.4 + CR 109.5: "each [player class] who controls
                     // [comparator] [count] [filter]" — the candidate must
                     // satisfy both the `relation` predicate and the
@@ -4588,11 +4614,16 @@ fn condition_depends_on_effect_performed(condition: &AbilityCondition) -> bool {
 ///   sub survives) or leave CR 603.4 unenforced (declining a body whose sub does
 ///   not).
 ///
-/// The two classes: a CR 603.12 performed/reflexive gate, whose truth is only
-/// knowable at resolution and is re-evaluated on its own; and a CR 615.5
+/// The three classes: a CR 603.12 performed/reflexive gate, whose truth is only
+/// knowable at resolution and is re-evaluated on its own; a CR 615.5
 /// INDEPENDENT per-event gate (Comeuppance's mutually-exclusive
 /// creature/noncreature reflection riders), which references the event rather
-/// than the parent's effect.
+/// than the parent's effect; and a CR 607.2d chosen-label gate (the
+/// self-or-others "If the player chooses others" branch), which references
+/// the paused choice's answer rather than the parent's gate — mutually
+/// exclusive with its sibling by construction, exactly like the Comeuppance
+/// riders. Without this, a deferred label gate that re-evaluates false on the
+/// drain would suppress its sibling instead of handing off to it.
 ///
 /// NOT included, deliberately: an unconditional `SequentialSibling` (it also
 /// runs on the false path, but as the next clause of the SAME gated sentence —
@@ -4605,6 +4636,7 @@ pub(crate) fn condition_survives_false_parent_gate(condition: &AbilityCondition)
         || matches!(
             condition,
             AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
+                | AbilityCondition::ChosenLabelIs { .. }
         )
 }
 
@@ -5344,6 +5376,7 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
         | Effect::TakeTheInitiative
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
+        | Effect::AbandonScheme
         | Effect::ChaosEnsues
         | Effect::ReverseTurnOrder
         | Effect::RedistributeLifeTotals
@@ -5658,6 +5691,9 @@ fn referent_exists_without_gated_action(
         | TargetFilter::EventTargetController
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        // CR 108.3 + CR 508.1d: per-member owner anchor — not an anaphor of a
+        // resolution result this gate looks for.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::OriginalSource
@@ -6041,6 +6077,7 @@ fn condition_reads_filter_population(
         | AbilityCondition::EffectOutcome { .. }
         | AbilityCondition::EventOutcomeWon
         | AbilityCondition::CoinFlipOutcome { .. }
+        | AbilityCondition::ChosenLabelIs { .. }
         | AbilityCondition::WhenYouDo
         | AbilityCondition::WasCast { .. }
         | AbilityCondition::CastDuringPhase { .. }
@@ -6502,6 +6539,7 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             // optional-decline branch selector — it reads the flip, not the
             // declined effect.
             | AbilityCondition::CoinFlipOutcome { .. }
+            | AbilityCondition::ChosenLabelIs { .. }
             // The frozen trigger-event damage/exploit read is independent of an
             // optional-effect decision, so it cannot select a decline branch.
             | AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
@@ -6756,6 +6794,7 @@ fn scope_keeps_scoped_whole_hand_shuffle_local(scope: &PlayerFilter) -> bool {
         | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::ParentPlayerTarget
         | PlayerFilter::ChosenPlayer { .. }
         // Turn/combat ledgers.
         | PlayerFilter::OpponentLostLife
@@ -6779,6 +6818,9 @@ fn scope_keeps_scoped_whole_hand_shuffle_local(scope: &PlayerFilter) -> bool {
         // Behaviour-identical while every arm above is `true`; recursing keeps it
         // from silently disagreeing with its anchor the moment one is not.
         PlayerFilter::AllExcept { exclude } => scope_keeps_scoped_whole_hand_shuffle_local(exclude),
+        PlayerFilter::OpponentExcept { exclude } => {
+            scope_keeps_scoped_whole_hand_shuffle_local(exclude)
+        }
     }
 }
 
@@ -7931,6 +7973,7 @@ pub fn resolve_effect(
         Effect::TakeTheInitiative => venture::resolve_take_initiative(state, ability, events),
         Effect::ArrangePlanarDeckTop { .. } => arrange_planar_deck::resolve(state, ability, events),
         Effect::Planeswalk => planeswalk::resolve(state, ability, events),
+        Effect::AbandonScheme => abandon_scheme::resolve(state, ability, events),
         Effect::ChaosEnsues => chaos_ensues::resolve(state, ability, events),
         Effect::ReverseTurnOrder => reverse_turn_order::resolve(state, ability, events),
         Effect::OpenAttractions { .. } | Effect::RollToVisitAttractions => {
@@ -8541,12 +8584,14 @@ fn player_filter_references_tracked_set(filter: &PlayerFilter) -> bool {
         | PlayerFilter::VotedFor { .. }
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::ParentPlayerTarget
         | PlayerFilter::ChosenPlayer { .. }
         | PlayerFilter::ControlsCount { .. }
         | PlayerFilter::PlayerAttribute { .. } => false,
         // The negation wrapper inherits its inner filter's consumption: an
         // "all except <tracked-set possessor>" scope still needs the set.
         PlayerFilter::AllExcept { exclude } => player_filter_references_tracked_set(exclude),
+        PlayerFilter::OpponentExcept { exclude } => player_filter_references_tracked_set(exclude),
     }
 }
 
@@ -11950,6 +11995,11 @@ pub(crate) fn resolve_player_for_context_ref(
             return player;
         }
     }
+    // CR 108.3 + CR 508.1d: `AffectedObjectOwner` is deliberately unresolved
+    // here. It names no one player — only `force_attack::resolve`'s per-member
+    // graft consumes it, before this resolver could ever see it. If this
+    // anchor ever reaches this function, that caller is missing its per-member
+    // expansion: do not "fix" it by returning a concrete player here.
     ability.controller
 }
 
@@ -14223,6 +14273,15 @@ fn condition_awaits_resolution_only_referent(
         AbilityCondition::Not { condition } => {
             condition_awaits_resolution_only_referent(condition, state, ability)
         }
+        // CR 607.2d + CR 608.2c: the label this gate reads may be bound by the
+        // paused choice's own answer (self-or-others "If that player chooses
+        // self, …"). Eager evaluation at pause time would read a missing
+        // anchor (both Fate branches would vanish) or a STALE label from an
+        // earlier instruction in a multi-choice chain; defer unconditionally
+        // so the drain re-evaluates after the answer persists. A label that
+        // is stable across the pause re-evaluates to the identical verdict,
+        // so deferral only ever delays — never changes — a settled gate.
+        AbilityCondition::ChosenLabelIs { .. } => true,
         _ => false,
     }
 }
@@ -15169,14 +15228,17 @@ fn resolve_chain_body(
         );
         let matching_players: Vec<PlayerId> = match scope {
             PlayerFilter::AllExcept { .. }
+            | PlayerFilter::OpponentExcept { .. }
             | PlayerFilter::ParentObjectTargetController
-            | PlayerFilter::ParentObjectTargetOwner => {
+            | PlayerFilter::ParentObjectTargetOwner
+            | PlayerFilter::ParentPlayerTarget => {
                 // CR 608.2c + CR 109.4 + CR 608.2h: these anchors are all
-                // ability-target references — the `AllExcept` exclude anchor and the
-                // direct `ParentObjectTargetController` / `ParentObjectTargetOwner`
-                // scopes (e.g. Declaration in Stone's "That player investigates",
-                // where "that player" = the controller of the exiled target). The
-                // generic `matches_player_scope` predicate cannot resolve them (it
+                // ability-target references — the `AllExcept` / `OpponentExcept`
+                // exclude anchors and the direct `ParentObjectTargetController` /
+                // `ParentObjectTargetOwner` / `ParentPlayerTarget` scopes (e.g.
+                // Declaration in Stone's "That player investigates", where "that
+                // player" = the controller of the exiled target). The generic
+                // `matches_player_scope` predicate cannot resolve them (it
                 // carries no `ResolvedAbility`, so `parent_target_controller`'s
                 // last-known-information lookup over `ability.targets` is
                 // unavailable). Route through the ability-aware
@@ -19243,6 +19305,15 @@ pub(crate) fn evaluate_condition(
         AbilityCondition::CoinFlipOutcome { result } => state
             .resolution_coin_flip
             .is_some_and(|f| f.flipper == ability.controller && f.result == *result),
+        // CR 607.2d + CR 608.2c: "If [that|the] player chooses <label>" — the
+        // source's persisted label matches the anchor word (case-insensitive).
+        // The preceding `Choose { Labeled, persist }` wrote the label onto the
+        // same source object earlier in this resolution (self-or-others
+        // scheme class); shares the `eval_chosen_label_is` authority with the
+        // static/trigger mirrors.
+        AbilityCondition::ChosenLabelIs { label } => {
+            crate::game::conditions::eval_chosen_label_is(state, ability.source_id, label)
+        }
         // CR 603.12: A reflexive triggered ability ("when you do") triggers
         // "based on whether the trigger event or events occurred earlier during
         // the resolution" of the parent. Two independent ways the parent event
@@ -20022,6 +20093,13 @@ fn scoped_player_matches_filter(
         PlayerFilter::AllExcept { exclude } => {
             !scoped_player_matches_filter(state, ability, candidate, exclude)
         }
+        // CR 102.2 + CR 102.3 + CR 608.2c + CR 109.4: the opponents-base
+        // analogue of `AllExcept` — the candidate must be an opponent of the
+        // printed controller (team-aware) AND not match the anchor.
+        PlayerFilter::OpponentExcept { exclude } => {
+            crate::game::players::is_opponent(state, controller, candidate)
+                && !scoped_player_matches_filter(state, ability, candidate, exclude)
+        }
         PlayerFilter::OpponentLostLife => {
             crate::game::players::is_opponent(state, controller, candidate)
                 && state
@@ -20058,6 +20136,7 @@ fn scoped_player_matches_filter(
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ChosenPlayer { .. }
         | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::ParentPlayerTarget
         | PlayerFilter::ControlsCount { .. }
         | PlayerFilter::TrackedSetPossessor { .. }
         | PlayerFilter::PlayerAttribute { .. } => false,
@@ -25964,6 +26043,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type: ChoiceType::Keyword {
                     options: vec![],
                     count: 1,
@@ -34097,6 +34177,7 @@ mod tests {
         // iteration and must not re-enter the fan-out driver mid-instruction.
         let mut choose_return = ResolvedAbility::new(
             Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type: ChoiceType::creature_type(),
                 persist: true,
                 selection: TargetSelectionMode::Chosen,

@@ -36349,6 +36349,7 @@ fn akroan_horse_etb_parsed_trigger() {
     assert_eq!(
         etb_exec.effect.as_ref(),
         &Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type: crate::types::ability::ChoiceType::opponent(),
             persist: false,
             selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -36534,4 +36535,21 @@ fn count_qualified_blocks_preserves_article_qualified_shapes() {
         assert_eq!(trigger.condition, None);
         assert_no_unimplemented(trigger.execute.as_deref().unwrap());
     }
+}
+
+/// CR 701.33a-b: verbatim The Very Soil Shall Shake abandon line.
+#[test]
+fn very_soil_abandon_clause_parses_to_abandon_scheme() {
+    let def = parse_trigger_line(
+        "When a creature you control dies, abandon this scheme.",
+        "The Very Soil Shall Shake",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    let execute = def.execute.as_deref().expect("abandon body");
+    assert!(
+        matches!(*execute.effect, Effect::AbandonScheme),
+        "expected Effect::AbandonScheme, got {:?}",
+        execute.effect
+    );
+    assert_no_unimplemented(execute);
 }

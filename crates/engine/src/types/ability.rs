@@ -6300,6 +6300,13 @@ pub enum ControllerRef {
     },
 }
 
+impl ControllerRef {
+    /// `skip_serializing_if` predicate — the controller default needs no JSON byte.
+    pub fn is_you(&self) -> bool {
+        matches!(self, Self::You)
+    }
+}
+
 /// CR 301 / CR 303: Kinds of attachments to permanents.
 /// Used by `FilterProp::HasAttachment` and `QuantityRef::AttachmentsOnLeavingObject`
 /// to parameterize attachment-predicate checks.
@@ -7857,6 +7864,21 @@ pub enum TargetFilter {
     /// Distinct from `Owner` (which always reads the source object's owner) and
     /// `ParentTargetController` (which returns the controller per CR 109.4).
     ParentTargetOwner,
+    /// CR 108.3 + CR 508.1d + CR 608.2c: The owner of each object in the
+    /// affected set, resolved per member — the defender anchor for "Each of
+    /// them attacks its owner" (My Crushing Masterstroke) and "Each of those
+    /// creatures attacks its owner" (The Dead Shall Serve). Unlike
+    /// `ParentTargetOwner` (the owner of the parent ability's single target)
+    /// and `Owner` (the source object's owner), this names no one player at
+    /// parse time: every affected member can have a different owner, so the
+    /// anchor is only meaningful per member.
+    ///
+    /// ONLY consumer: `force_attack::resolve`'s owner-relative graft, which
+    /// enumerates the affected population and installs one per-object
+    /// requirement pinned to that member's owner. Every other consumer fails
+    /// closed (resolves to no player / matches nothing) — a single-player
+    /// reading of a per-member anchor would be silently wrong.
+    AffectedObjectOwner,
     /// CR 607.2d + CR 608.2c: Resolves to the player chosen for the source by
     /// a linked persisted choice ("the chosen player"). This is not a target
     /// slot and is distinct from `ControllerRef::ChosenPlayer`, which is
@@ -11055,6 +11077,35 @@ pub enum PlayerFilter {
     /// player facing the choice is the owner of the targeted permanent named in
     /// the prior clause, not the ability controller.
     ParentObjectTargetOwner,
+    /// CR 115.1 + CR 608.2c: The first player target of the resolving ability —
+    /// the player-target sibling of `ParentObjectTargetController` /
+    /// `ParentObjectTargetOwner`, which derive a player from an OBJECT target's
+    /// controller/owner. Resolved via `ability_utils::parent_target_player`,
+    /// which reads the propagation-fed `ability.targets` (parent-target
+    /// propagation feeds sub-ability targets before sub-resolution, the same
+    /// mechanism `RestrictionTarget::ParentTargetedPlayer` relies on). Matches
+    /// no player when the resolving ability carries no player target
+    /// (fail-closed). Powers the "each of your other opponents" exclusion
+    /// anchor (Fate of the Flammable) as the `exclude` leaf of
+    /// `OpponentExcept`: the "other" anaphors back to the opponent targeted by
+    /// the prior instruction in the same chain. Ability-aware consumers only
+    /// (the `DamageEachPlayer` resolver); the generic scope predicate, the
+    /// `DamageAll` population helper, and the quantity axis fail closed, mirroring
+    /// the `ParentObjectTargetController` arms.
+    ParentPlayerTarget,
+    /// CR 102.2 + CR 102.3 + CR 608.2c + CR 109.4: Opponents of the ability's
+    /// controller except those matching `exclude`. The opponents-base analogue
+    /// of `AllExcept { exclude }` (the all-players base): the exclusion anchor
+    /// is itself a `PlayerFilter`, composing the enum with itself so "each of
+    /// your other opponents" parses to `exclude: ParentPlayerTarget` and any
+    /// future "each opponent other than ⟨ref⟩" reuses the same variant.
+    /// Opponent-ness is CR 102.3-aware (teammates are not opponents) via
+    /// `players::is_opponent`. `Box` breaks the enum's self-referential size
+    /// cycle. Ability-target-dependent anchors (e.g. `ParentPlayerTarget`)
+    /// resolve only in ability-aware consumers (the `DamageEachPlayer`
+    /// resolver); every other consumer fails closed on them, mirroring the
+    /// `AllExcept` contract.
+    OpponentExcept { exclude: Box<PlayerFilter> },
     /// CR 608.2c + CR 608.2h + CR 109.4 + CR 102.2: Each player matching
     /// `relation` who possessed — per `possession` — at least one member of the
     /// most recent tracked object set matching `filter`, restricted to members
@@ -18446,6 +18497,25 @@ pub enum Effect {
     /// Sets WaitingFor::NamedChoice and stores the result in GameState::last_named_choice.
     Choose {
         choice_type: ChoiceType,
+        /// CR 608.2d + CR 109.4: which player makes this choice. `You` (the
+        /// default) is the ability controller — the historic behavior for every
+        /// existing card. `TargetPlayer` / `TargetOpponent` bind a TARGETED
+        /// chooser ("target opponent chooses self or others" — the
+        /// self-or-others scheme class: The Fate of the Flammable, Feed the
+        /// Machine, May Civilization Collapse, Surrender Your Thoughts),
+        /// resolved from the ability's announced targets like the
+        /// `TargetFilter`-reading twin (`filter_inner` on `ability.targets`).
+        /// `ControllerRef` (not `PlayerFilter`) because it already carries the
+        /// announced-target slot — the same role `OpponentGuess::guesser`
+        /// plays. A targeted chooser surfaces its stack slot through the
+        /// companion-target-player path (`effect_references_target_player`),
+        /// never through `target_filter()` (still `None`: the choice is made
+        /// during resolution, CR 608.2d).
+        #[serde(
+            default = "default_controller_ref_you",
+            skip_serializing_if = "ControllerRef::is_you"
+        )]
+        chooser: ControllerRef,
         /// When true, persistable choice types store the chosen value on the
         /// source object's chosen_attributes. Some non-persisting choice types
         /// still carry source context for logs or prompts.
@@ -19182,6 +19252,12 @@ pub enum Effect {
     /// triggers and is put on the stack; on resolution its controller (the
     /// roller, CR 901.8) planeswalks (CR 701.31).
     Planeswalk,
+    /// CR 701.33a-b / CR 904.11: Abandon this scheme — turn the face-up ongoing
+    /// scheme that sourced this ability face down and put it on the bottom of
+    /// its owner's scheme deck. Payload-less resolving keyword action (mirrors
+    /// `Effect::Planeswalk`): the scheme is the ability source, never a target.
+    /// RUNTIME: abandon_scheme::resolve via game::archenemy::abandon.
+    AbandonScheme,
     /// CR 311.7 / CR 901.9b: Chaos ensues — the active plane's "whenever chaos
     /// ensues" triggered ability triggers. Payload-less resolving keyword action
     /// (mirrors `Effect::VentureIntoDungeon`). RUNTIME: chaos_ensues::resolve.
@@ -22413,6 +22489,7 @@ impl Effect {
             | Effect::TakeTheInitiative
             | Effect::ArrangePlanarDeckTop { .. }
             | Effect::Planeswalk
+            | Effect::AbandonScheme
             | Effect::ChaosEnsues
             | Effect::RedistributeLifeTotals
             | Effect::ReverseTurnOrder
@@ -23143,6 +23220,7 @@ impl Effect {
             | Effect::PhaseIn { .. }
             | Effect::PhaseOut { .. }
             | Effect::Planeswalk
+            | Effect::AbandonScheme
             | Effect::Populate
             | Effect::PreventDamage { .. }
             | Effect::Proliferate
@@ -23779,6 +23857,7 @@ impl Effect {
             | Effect::VentureInto { .. }
             | Effect::TakeTheInitiative
             | Effect::Planeswalk
+            | Effect::AbandonScheme
             | Effect::ChaosEnsues
             | Effect::ReverseTurnOrder
             | Effect::RedistributeLifeTotals
@@ -24101,6 +24180,7 @@ impl Effect {
             | Effect::TakeTheInitiative
             | Effect::ArrangePlanarDeckTop { .. }
             | Effect::Planeswalk
+            | Effect::AbandonScheme
             | Effect::ChaosEnsues
             | Effect::ReverseTurnOrder
             | Effect::RedistributeLifeTotals
@@ -24448,6 +24528,7 @@ impl Effect {
             | Effect::TakeTheInitiative
             | Effect::ArrangePlanarDeckTop { .. }
             | Effect::Planeswalk
+            | Effect::AbandonScheme
             | Effect::ChaosEnsues
             | Effect::RedistributeLifeTotals
             | Effect::ReverseTurnOrder
@@ -24713,6 +24794,7 @@ impl Effect {
             | Effect::TakeTheInitiative
             | Effect::ArrangePlanarDeckTop { .. }
             | Effect::Planeswalk
+            | Effect::AbandonScheme
             | Effect::ChaosEnsues
             | Effect::RedistributeLifeTotals
             | Effect::ReverseTurnOrder
@@ -24889,6 +24971,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::TakeTheInitiative => "TakeTheInitiative",
         Effect::ArrangePlanarDeckTop { .. } => "ArrangePlanarDeckTop",
         Effect::Planeswalk => "Planeswalk",
+        Effect::AbandonScheme => "AbandonScheme",
         Effect::ChaosEnsues => "ChaosEnsues",
         Effect::RedistributeLifeTotals => "RedistributeLifeTotals",
         Effect::ReverseTurnOrder => "ReverseTurnOrder",
@@ -25139,6 +25222,7 @@ pub enum EffectKind {
     TakeTheInitiative,
     ArrangePlanarDeckTop,
     Planeswalk,
+    AbandonScheme,
     ChaosEnsues,
     RedistributeLifeTotals,
     ReverseTurnOrder,
@@ -25414,6 +25498,7 @@ impl From<&Effect> for EffectKind {
             Effect::TakeTheInitiative => EffectKind::TakeTheInitiative,
             Effect::ArrangePlanarDeckTop { .. } => EffectKind::ArrangePlanarDeckTop,
             Effect::Planeswalk => EffectKind::Planeswalk,
+            Effect::AbandonScheme => EffectKind::AbandonScheme,
             Effect::ChaosEnsues => EffectKind::ChaosEnsues,
             Effect::RedistributeLifeTotals => EffectKind::RedistributeLifeTotals,
             Effect::ReverseTurnOrder => EffectKind::ReverseTurnOrder,
@@ -27218,6 +27303,18 @@ pub enum AbilityCondition {
     /// state sources. Feeds `RepeatContinuation::WhileCondition` ("repeat this
     /// process") and any cross-sentence flip-result gate.
     CoinFlipOutcome { result: CoinFlipResult },
+    /// CR 607.2d + CR 608.2c: "If [that|the] player chooses <label>" — true
+    /// when the ability source's persisted `ChosenAttribute::Label` matches
+    /// the anchor word (case-insensitive). The effect-resolution mirror of
+    /// `StaticCondition::ChosenLabelIs` / `TriggerCondition::ChosenLabelIs`:
+    /// those gate anchor-word linked abilities (Khans Sieges); this gates
+    /// sequential if-chose branches on a label persisted EARLIER IN THE SAME
+    /// resolution (the self-or-others scheme class: The Fate of the Flammable,
+    /// Feed the Machine, May Civilization Collapse, Surrender Your Thoughts).
+    /// Evaluated by `evaluate_condition` via `conditions::eval_chosen_label_is`
+    /// against `ability.source_id` — the same object the preceding
+    /// `Choose { Labeled, persist }` wrote.
+    ChosenLabelIs { label: String },
     /// CR 603.12: "When you do" — a reflexive trigger based on whether the
     /// parent event actually occurred. An optional non-cost parent must be
     /// performed; an unpayable or declined `Effect::PayCost` is not an occurrence.
@@ -27768,6 +27865,7 @@ impl AbilityCondition {
             | AbilityCondition::DayNightIsNeither
             | AbilityCondition::AdditionalCostPaid { .. }
             | AbilityCondition::CoinFlipOutcome { .. }
+            | AbilityCondition::ChosenLabelIs { .. }
             | AbilityCondition::WasCast { .. }
             | AbilityCondition::CastDuringPhase { .. }
             | AbilityCondition::CurrentPhaseIs { .. }
@@ -27909,6 +28007,7 @@ impl AbilityCondition {
             | AbilityCondition::DayNightIsNeither
             | AbilityCondition::AdditionalCostPaid { .. }
             | AbilityCondition::CoinFlipOutcome { .. }
+            | AbilityCondition::ChosenLabelIs { .. }
             | AbilityCondition::WasCast { .. }
             | AbilityCondition::CastDuringPhase { .. }
             | AbilityCondition::CurrentPhaseIs { .. }
@@ -33863,6 +33962,7 @@ impl ResolvedAbility {
             | Effect::TakeTheInitiative
             | Effect::ArrangePlanarDeckTop { .. }
             | Effect::Planeswalk
+            | Effect::AbandonScheme
             | Effect::ChaosEnsues
             | Effect::ReverseTurnOrder
             | Effect::RedistributeLifeTotals

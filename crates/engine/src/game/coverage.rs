@@ -772,6 +772,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::ParentTargetSlot { index } => format!("parent target slot {index}"),
         TargetFilter::ParentTargetController => "parent target's controller".into(),
         TargetFilter::ParentTargetOwner => "parent target's owner".into(),
+        TargetFilter::AffectedObjectOwner => "each affected object's owner".into(),
         TargetFilter::SourceChosenPlayer => "source's chosen player".into(),
         TargetFilter::PostReplacementSourceController => {
             "prevented event source's controller".into()
@@ -2191,6 +2192,9 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
         PlayerFilter::AllExcept { exclude } => {
             return format!("each player other than {}", fmt_player_filter(exclude));
         }
+        PlayerFilter::OpponentExcept { exclude } => {
+            return format!("each opponent other than {}", fmt_player_filter(exclude));
+        }
         PlayerFilter::HighestSpeed => "each player with the highest speed",
         PlayerFilter::ZoneChangedThisWay => "each player who changed a card this way",
         // CR 608.2c: the player scope and the action kind both select — "each
@@ -2220,6 +2224,7 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
             return format!("the chosen player {index}");
         }
         PlayerFilter::ParentObjectTargetOwner => "the parent target's owner",
+        PlayerFilter::ParentPlayerTarget => "the parent player target",
         // CR 109.4 + CR 109.5: "each [player class] who controls [comparator]
         // [count] matching permanents"
         PlayerFilter::ControlsCount {
@@ -3405,11 +3410,15 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Choose {
             choice_type,
             persist,
+            chooser,
             ..
         } => {
             d.push(("choice".into(), fmt_choice_type(choice_type)));
             if *persist {
                 d.push(("persist".into(), "yes".into()));
+            }
+            if !chooser.is_you() {
+                d.push(("chooser".into(), format!("{chooser:?}")));
             }
         }
         Effect::OpponentGuess { guesser, subject } => {
@@ -4326,6 +4335,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::TakeTheInitiative
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
+        | Effect::AbandonScheme
         | Effect::ChaosEnsues
         | Effect::RedistributeLifeTotals
         | Effect::ReverseTurnOrder
@@ -4571,6 +4581,7 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
             CoinFlipResult::Won => "you won the flip".into(),
             CoinFlipResult::Lost => "you lost the flip".into(),
         },
+        AbilityCondition::ChosenLabelIs { label } => format!("chosen label is {label}"),
         AbilityCondition::WhenYouDo => "when you do".into(),
         AbilityCondition::WasCast { zone } => match zone {
             Some(z) => format!("cast from {}", fmt_zone(z)),
@@ -9718,6 +9729,7 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         },
         AbilityCondition::EventOutcomeWon => ("EventOutcomeWon", Handled),
         AbilityCondition::CoinFlipOutcome { .. } => ("CoinFlipOutcome", Handled),
+        AbilityCondition::ChosenLabelIs { .. } => ("ChosenLabelIs", Handled),
         AbilityCondition::WhenYouDo => ("WhenYouDo", Handled),
         // ponytail: coverage tag key intentionally stays "CastFromZone" (decoupled
         // from the renamed variant) to keep coverage-data byte-stable across the
@@ -10185,6 +10197,10 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         // target owner anchors for villainous-choice choosers).
         PlayerFilter::ChosenPlayer { .. } => ("ChosenPlayer", Handled),
         PlayerFilter::ParentObjectTargetOwner => ("ParentObjectTargetOwner", Handled),
+        // Resolved ability-aware by the `DamageEachPlayer` resolver and
+        // `speed_effects::players_for_filter` (player_scope driver routing).
+        PlayerFilter::ParentPlayerTarget => ("ParentPlayerTarget", Handled),
+        PlayerFilter::OpponentExcept { .. } => ("OpponentExcept", Handled),
         PlayerFilter::ControlsCount { .. } => ("ControlsCount", Handled),
         PlayerFilter::PlayerAttribute { .. } => ("PlayerAttribute", Handled),
         // CR 608.2c + CR 109.4: resolved by `quantity::possessed_tracked_set_member`

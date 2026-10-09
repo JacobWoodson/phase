@@ -2066,6 +2066,48 @@ fn try_parse_subject_restriction_clause(
                 });
             }
         }
+        // CR 108.3 + CR 508.1d + CR 608.2c: owner-relative `ForceAttack`
+        // with an inherited (non-broadcast) subject — "Each of them attacks
+        // its owner" / "Each of those creatures attacks its owner", whose
+        // subject lowers to `ParentTarget`. The broadcast site above excludes
+        // `ParentTarget` subjects, so without this they fall to
+        // `Unimplemented`. Gated on the `AffectedObjectOwner` marker: no
+        // other defender kind takes this path, so every existing routing is
+        // unchanged. Scope All (no targeting slots); the resolver enumerates
+        // the inherited members per object and pins each requirement to that
+        // member's owner.
+        match imperative::try_parse_attack_if_able(&predicate) {
+            Some(ImperativeFamilyAst::ForceAttack {
+                duration,
+                required_defender,
+            }) if matches!(required_defender, TargetFilter::AffectedObjectOwner) => {
+                let application =
+                    parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?;
+                if matches!(
+                    static_affected_for_application(&application),
+                    TargetFilter::ParentTarget
+                ) {
+                    return Some(ParsedEffectClause {
+                        unlowered_guard: None,
+                        effect: Effect::ForceAttack {
+                            target: TargetFilter::ParentTarget,
+                            required_defender,
+                            scope: EffectScope::All,
+                            duration: duration.clone().unwrap_or(Duration::UntilEndOfTurn),
+                        },
+                        distribute: None,
+                        multi_target: application.multi_target,
+                        duration,
+                        sub_ability: None,
+                        condition: None,
+                        optional: application.is_optional,
+                        unless_pay: None,
+                    });
+                }
+            }
+            // Any other predicate shape falls through to the recognizers below.
+            _ => {}
+        }
         // Classify via the existing recognizer. Only the bare GenericEffect form
         // (MustAttack) is re-bound here.
         if let Some(ImperativeFamilyAst::GainKeyword(Effect::GenericEffect { duration, .. })) =
@@ -3287,6 +3329,18 @@ fn parse_subject_application_for(
                 // `ctx.subject.is_some()` fallback below (Archnemesis vs. the Curse
                 // cycle).
                 filter
+            } else if ctx.chain_prior_targeted_player
+                && matches!(subject_anaphor, PlayerSubjectAnaphor::Player)
+            {
+                // CR 608.2c + CR 109.4 + CR 115.1: "that player" / "the player"
+                // / "that opponent" after a targeted `Choose` ("target opponent
+                // chooses self or others") or a player-typed `TargetOnly` names
+                // the ANNOUNCED target — the most recent player mention — not
+                // the trigger event's player. Narrowed to the plain `Player`
+                // anaphor: "that/the attacking player" keeps its event-context
+                // binding. Placed after the explicit `relative_player_scope`
+                // pins (which win) and before the trigger-context default.
+                TargetFilter::ParentTarget
             } else if ctx.subject.is_some() {
                 ctx_filter
             } else {
@@ -6279,6 +6333,7 @@ fn try_parse_become_choice(
     Some(ParsedEffectClause {
         unlowered_guard: None,
         effect: Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type,
             persist: false,
             selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -6494,6 +6549,11 @@ fn build_restriction_clause(
             TargetFilter::ParentTarget
             | TargetFilter::TrackedSet { .. }
             | TargetFilter::SelfRef
+            // CR 108.3 + CR 508.1d: per-member owner anchor — no subject
+            // grammar emits it, but if one ever did, its set would be the
+            // fixed anaphoric set, consistent with the per-member grafts
+            // `force_attack::resolve` installs.
+            | TargetFilter::AffectedObjectOwner
             | TargetFilter::SpecificObject { .. } => true,
 
             // DEFERRED — broadcast subject, whose affected set must stay LIVE.

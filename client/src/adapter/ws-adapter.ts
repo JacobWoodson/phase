@@ -713,6 +713,20 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * PROTOCOL_VERSION moved twice for GameState-only changes and the derived lobby
  * window went disjoint from the deployed broker's.
  *
+ * 17 — Prospective: no lobby variant or field changes shape in this bump.
+ *      Moved ahead of the `ArchenemyCommander` GameFormat variant — see
+ *      LOBBY_PROTOCOL_VERSION's own `/// 17` entry in
+ *      crates/lobby-broker/src/protocol.rs. MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL
+ *      stays at 2. A pre-17 Rust broker rejects a lobby frame naming
+ *      ArchenemyCommander; MIN_LOBBY_PROTOCOL_FOR_ARCHENEMY_COMMANDER
+ *      below is this client's floor for it.
+ * 16 — Prospective: no lobby variant or field changes shape in this bump.
+ *      Moved ahead of the `TwoHeadedGiantCommander` GameFormat variant — see
+ *      LOBBY_PROTOCOL_VERSION's own `/// 16` entry in
+ *      crates/lobby-broker/src/protocol.rs. MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL
+ *      stays at 2. A pre-16 Rust broker rejects a lobby frame naming
+ *      TwoHeadedGiantCommander; MIN_LOBBY_PROTOCOL_FOR_TWO_HEADED_GIANT_COMMANDER
+ *      below is this client's floor for it.
  * 15 — FormatConfig loses `allow_experimental_dungeons` on its three lobby
  *      carriers (CreateGameWithSettings, JoinTargetInfo, PeerInfo): the
  *      per-session toggle is gone and the Wilderness pool is format-derived.
@@ -850,7 +864,7 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * 1 — Initial lobby-owned version, covering the lobby variant set unchanged
  *     since #1880.
  */
-export const LOBBY_PROTOCOL_VERSION = 15;
+export const LOBBY_PROTOCOL_VERSION = 17;
 
 /**
  * Lowest broker LOBBY_PROTOCOL_VERSION this client accepts.
@@ -980,6 +994,30 @@ export const MIN_LOBBY_PROTOCOL_FOR_RECOVERABLE_ROTATION = 9;
 export const MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS = 11;
 
 /**
+ * Lowest broker `LOBBY_PROTOCOL_VERSION` whose `GameFormat` deserializer knows
+ * `TwoHeadedGiantCommander`; below it a lobby frame naming it is rejected as
+ * malformed.
+ *
+ * Frozen at 16 and written as a bare literal, never derived from
+ * LOBBY_PROTOCOL_VERSION, so a later bump cannot drag it forward and start
+ * refusing v16 brokers. `scripts/check-protocol-version.mjs` refuses a derived
+ * right-hand side for it.
+ */
+export const MIN_LOBBY_PROTOCOL_FOR_TWO_HEADED_GIANT_COMMANDER = 16;
+
+/**
+ * Lowest broker `LOBBY_PROTOCOL_VERSION` whose `GameFormat` deserializer knows
+ * `ArchenemyCommander`; below it a lobby frame naming it is rejected as
+ * malformed.
+ *
+ * Frozen at 17 and written as a bare literal, never derived from
+ * LOBBY_PROTOCOL_VERSION, so a later bump cannot drag it forward and start
+ * refusing v17 brokers. `scripts/check-protocol-version.mjs` refuses a derived
+ * right-hand side for it.
+ */
+export const MIN_LOBBY_PROTOCOL_FOR_ARCHENEMY_COMMANDER = 17;
+
+/**
  * The lowest broker `LOBBY_PROTOCOL_VERSION` that parses `format` in a lobby
  * frame, or `null` when every broker this client connects to parses it (see
  * MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL). Consult it before sending any lobby
@@ -993,6 +1031,10 @@ export function lobbyProtocolRequiredForFormat(format: GameFormat): number | nul
     case "Freeform":
     case "FreeformCommander":
       return MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS;
+    case "TwoHeadedGiantCommander":
+      return MIN_LOBBY_PROTOCOL_FOR_TWO_HEADED_GIANT_COMMANDER;
+    case "ArchenemyCommander":
+      return MIN_LOBBY_PROTOCOL_FOR_ARCHENEMY_COMMANDER;
     case "Standard":
     case "Commander":
     case "Pioneer":

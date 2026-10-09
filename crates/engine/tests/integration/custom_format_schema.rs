@@ -830,7 +830,11 @@ fn commander_eligibility_rule_from_source_format_covers_every_builtin() {
         (GameFormat::HistoricBrawl, Some(BrawlColorIdentity)),
         (GameFormat::FreeForAll, None),
         (GameFormat::TwoHeadedGiant, None),
+        // CR 903.3, unchanged by CR 810 seating.
+        (GameFormat::TwoHeadedGiantCommander, Some(Standard)),
         (GameFormat::Archenemy, None),
+        // CR 904.13a + CR 903.3.
+        (GameFormat::ArchenemyCommander, Some(Standard)),
         (GameFormat::Planechase, None),
         (GameFormat::Momir, None),
         // CR 903.13g: Commander Draft games follow Commander's rules, and
@@ -897,7 +901,12 @@ fn game_format_serialization_is_byte_identical_to_old_derive_for_builtins() {
         (GameFormat::HistoricBrawl, "HistoricBrawl"),
         (GameFormat::FreeForAll, "FreeForAll"),
         (GameFormat::TwoHeadedGiant, "TwoHeadedGiant"),
+        (
+            GameFormat::TwoHeadedGiantCommander,
+            "TwoHeadedGiantCommander",
+        ),
         (GameFormat::Archenemy, "Archenemy"),
+        (GameFormat::ArchenemyCommander, "ArchenemyCommander"),
         (GameFormat::Planechase, "Planechase"),
         (GameFormat::Momir, "Momir"),
         (GameFormat::CommanderDraft, "CommanderDraft"),

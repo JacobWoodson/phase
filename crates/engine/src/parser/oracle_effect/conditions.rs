@@ -4509,6 +4509,7 @@ pub(super) fn reads_cast_time_snapshot(condition: &AbilityCondition) -> bool {
         | AbilityCondition::DayNightIsNeither
         | AbilityCondition::AdditionalCostPaid { .. }
         | AbilityCondition::CoinFlipOutcome { .. }
+        | AbilityCondition::ChosenLabelIs { .. }
         | AbilityCondition::WasCast { .. }
         | AbilityCondition::CastDuringPhase { .. }
         | AbilityCondition::CurrentPhaseIs { .. }
@@ -5998,17 +5999,21 @@ pub(crate) fn static_condition_to_ability_condition(
         StaticCondition::CompletedADungeon => {
             Some(AbilityCondition::CompletedDungeon { specific: None })
         }
+        // CR 607.2d + CR 608.2c: the sequential if-chose gate ("If [that|the]
+        // player chooses <label>") — the same persisted-label anchor the
+        // static/trigger mirrors read, evaluated at resolution against the
+        // ability source (self-or-others scheme class).
+        StaticCondition::ChosenLabelIs { label } => {
+            Some(AbilityCondition::ChosenLabelIs {
+                label: label.clone(),
+            })
+        }
         StaticCondition::DevotionGE { .. }
         // CR 702.176a + CR 611.3a: Persistent alternative-cost markers are
         // source-bound static predicates with no effect-resolution
         // `AbilityCondition` equivalent.
         | StaticCondition::CastVariantPaid { .. }
         | StaticCondition::ChosenColorIs { .. }
-        // CR 614.12c + CR 607.2d: Anchor-word linked statics are evaluated
-        // by `layers::evaluate_condition_with_context`; no effect-resolution
-        // `AbilityCondition` equivalent (the gate only makes sense for a
-        // static ability bound to the persisted source).
-        | StaticCondition::ChosenLabelIs { .. }
         | StaticCondition::SpeedGE { .. }
         | StaticCondition::ClassLevelGE { .. }
         | StaticCondition::RecipientHasCounters { .. }
@@ -6178,6 +6183,7 @@ pub(crate) fn ability_condition_to_static_condition(
         | AbilityCondition::EffectOutcome { .. }
         | AbilityCondition::EventOutcomeWon
         | AbilityCondition::CoinFlipOutcome { .. }
+        | AbilityCondition::ChosenLabelIs { .. }
         | AbilityCondition::WhenYouDo
         | AbilityCondition::RevealedHasCardType { .. }
         | AbilityCondition::ObjectsShareQuality { .. }

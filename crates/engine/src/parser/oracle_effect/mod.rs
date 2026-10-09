@@ -1471,6 +1471,7 @@ fn finalize_committed_guess_choice_types(
             _ => unreachable!("matched above"),
         };
         *ability.effect = Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type: ChoiceType::opponent(),
             persist: false,
             selection: TargetSelectionMode::Chosen,
@@ -7562,6 +7563,14 @@ fn parse_event_context_ref_with_ctx<'a>(
         (TargetFilter::TriggeringPlayer, Some(ControllerRef::ParentTargetController)) => {
             TargetFilter::ParentTargetController
         }
+        // CR 608.2c + CR 109.4 + CR 115.1: "that player" after a targeted
+        // `Choose` ("target opponent chooses self or others") or a
+        // player-typed `TargetOnly` names the ANNOUNCED target — the most
+        // recent player mention — not the trigger event's player. Fires only
+        // when no explicit `relative_player_scope` pin won above.
+        (TargetFilter::TriggeringPlayer, None) if ctx.chain_prior_targeted_player => {
+            TargetFilter::ParentTarget
+        }
         _ => target,
     };
     Some((target, rest))
@@ -8307,7 +8316,10 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
             // modifier is extracted before the main shell pass below, so consult
             // the same shell here to bind an anaphoric "they" to a prepositional
             // scope such as "for each opponent, you … unless they …".
-            let (player_scope, _) = super::clause_shell::peel_player_scope_subject(&clause_text);
+            let (player_scope, _) = super::clause_shell::peel_player_scope_subject(
+                &clause_text,
+                ctx.chain_prior_targeted_player,
+            );
             let (stripped, unless_pay) =
                 extract_resolution_unless_pay_modifier(&clause_text, player_scope.as_ref());
             if unless_pay.is_some() {
@@ -8347,7 +8359,8 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
     //
     // See `data/parser-swallow-progress.md` for the full architecture and
     // `crates/engine/src/parser/clause_shell.rs` for the slot machinery.
-    let (peeled_text, peel_ctx) = super::clause_shell::peel_clause(text);
+    let (peeled_text, peel_ctx) =
+        super::clause_shell::peel_clause_with_anchor(text, ctx.chain_prior_targeted_player);
     // CR 601.2 + CR 608.2c: the shell peels with a context-free condition parse, so a
     // cast-time snapshot gate would be accepted here even inside a trigger, where the
     // snapshot is never stamped and the gate could never open. Fail closed rather
@@ -9527,6 +9540,7 @@ fn try_parse_choose_player_to_verb(
     ctx.relative_player_scope = Some(chosen_scope.clone());
 
     let mut clause = parsed_clause(Effect::Choose {
+        chooser: crate::types::ability::ControllerRef::You,
         choice_type: choice_type.clone(),
         persist: false,
         selection,
@@ -9598,6 +9612,7 @@ fn try_parse_an_opponent_to_verb(
     }
 
     let mut clause = parsed_clause(Effect::Choose {
+        chooser: crate::types::ability::ControllerRef::You,
         choice_type: ChoiceType::opponent(),
         persist: false,
         selection: TargetSelectionMode::Chosen,
@@ -9630,6 +9645,7 @@ fn try_parse_opponent_guesses_chosen_library_kind(
     let mut guess = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type: ChoiceType::CardPredicateGuess {
                 options: ChoiceType::land_or_nonland_card_predicate_options(),
             },
@@ -9644,6 +9660,7 @@ fn try_parse_opponent_guesses_chosen_library_kind(
     });
 
     let mut choose_opponent = parsed_clause(Effect::Choose {
+        chooser: crate::types::ability::ControllerRef::You,
         choice_type: ChoiceType::opponent(),
         persist: false,
         selection: TargetSelectionMode::Chosen,
@@ -10042,6 +10059,8 @@ fn rebind_controller_scope(filter: &mut TargetFilter, from: ControllerRef, to: C
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        // No `ControllerRef` payload — nothing to rebind.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AllPlayers => {}
     }
 }
@@ -13955,6 +13974,7 @@ fn player_filter_reads_chain_local_result(filter: &PlayerFilter) -> bool {
         | PlayerFilter::TrackedSetPossessor { .. }
         | PlayerFilter::VotedFor { .. } => true,
         PlayerFilter::AllExcept { exclude } => player_filter_reads_chain_local_result(exclude),
+        PlayerFilter::OpponentExcept { exclude } => player_filter_reads_chain_local_result(exclude),
         PlayerFilter::ControlsCount { count, .. } => quantity_reads_chain_local_result(count),
         PlayerFilter::PlayerAttribute { attr, value, .. } => {
             quantity_ref_reads_chain_local_result(attr) || quantity_reads_chain_local_result(value)
@@ -13977,6 +13997,7 @@ fn player_filter_reads_chain_local_result(filter: &PlayerFilter) -> bool {
         | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ChosenPlayer { .. }
+        | PlayerFilter::ParentPlayerTarget
         | PlayerFilter::ParentObjectTargetOwner => false,
     }
 }
@@ -22281,7 +22302,9 @@ fn parse_bare_damage_continuation<'a>(
     {
         // "each player" / "each opponent" / "each foe" → per-player damage,
         // which may vary per recipient (`DamageEachPlayer`, CR 120.3a).
-        if let Some(player_filter) = lower::parse_damage_each_player_scope(after_to) {
+        if let Some(player_filter) =
+            lower::parse_damage_each_player_scope(after_to, ctx.chain_prior_targeted_player)
+        {
             return Some((
                 Effect::DamageEachPlayer {
                     amount,
@@ -22298,10 +22321,13 @@ fn parse_bare_damage_continuation<'a>(
         let rem = trim_dangling_target_word(rem);
         let trimmed_rem = rem.trim_start_matches([',', ' ']);
         let trimmed_rem_lower = trimmed_rem.to_lowercase();
+        let target_anchor_in_scope = ctx.chain_prior_targeted_player;
         let player_filter = tag::<_, _, OracleError<'_>>("and ")
             .parse(trimmed_rem_lower.as_str())
             .ok()
-            .and_then(|(after_and, _)| lower::parse_damage_each_player_scope(after_and));
+            .and_then(|(after_and, _)| {
+                lower::parse_damage_each_player_scope(after_and, target_anchor_in_scope)
+            });
         let rem_out = if player_filter.is_some() { "" } else { rem };
         return Some((
             Effect::DamageAll {
@@ -24990,6 +25016,73 @@ fn chain_prior_chosen_target(clauses: &[ClauseIr]) -> Option<&TargetFilter> {
     None
 }
 
+/// CR 608.2c + CR 109.4 + CR 115.1: whether the nearest player-referent
+/// clause earlier in this same chain names a TARGETED player — a `Choose`
+/// with a targeted chooser ("target opponent chooses self or others") or a
+/// player-typed `TargetOnly`. When true, a later "that player" / "the player"
+/// anaphor names that announced target (`ParentTarget`), not the trigger
+/// event's player (`TriggeringPlayer`).
+///
+/// Sibling of `chain_prior_chosen_target` (which answers the OBJECT question
+/// for Emry-style grants): same walk skeleton, player-oriented decision, kept
+/// separate so grant routing never observes choice clauses. Opaque through
+/// conditions (mirrors the sibling); transparent through `ParentTarget`
+/// carriers (they continue the referent). Stops false at:
+/// - a `Choose` naming a mid-resolution CHOSEN player (`Player`/`Opponent`
+///   choice types — Gluntch/Tempt class, bound by `ChosenPlayer` machinery),
+/// - a newer non-targeted `Choose` (the controller's own choice shadows),
+/// - an object-typed `TargetOnly` or any other typed referent ("that player"
+///   cannot name a chosen object — falls back to the event).
+fn chain_prior_targeted_player(clauses: &[ClauseIr]) -> bool {
+    for prev in clauses.iter().rev() {
+        if let Some(cond) = &prev.condition {
+            // CR 607.2d + CR 608.2c: a label-gated branch (a self-or-others
+            // sibling) introduces no player referent — it shares its choice
+            // head's announced target. See through it to the head rather than
+            // blocking: blocking would orphan the sibling branch's "other"
+            // anaphor ("each of your other opponents" in the Others branch
+            // names the head's target, not nobody). Every other condition
+            // still blocks (provenance: a nearer conditional clause may scope
+            // a different referent).
+            if matches!(cond, AbilityCondition::ChosenLabelIs { .. }) {
+                continue;
+            }
+            return false;
+        }
+        if let Effect::Choose {
+            chooser,
+            choice_type,
+            ..
+        } = &prev.parsed.effect
+        {
+            if matches!(
+                choice_type,
+                ChoiceType::Player { .. } | ChoiceType::Opponent { .. }
+            ) {
+                return false;
+            }
+            return matches!(
+                chooser,
+                ControllerRef::TargetPlayer | ControllerRef::TargetOpponent
+            );
+        }
+        if let Effect::TargetOnly { target } = &prev.parsed.effect {
+            return target_filter_can_target_player(target) && !target.is_context_ref();
+        }
+        if has_typed_target_widened(&prev.parsed.effect) {
+            return false;
+        }
+        if matches!(
+            prev.parsed.effect.target_filter(),
+            Some(TargetFilter::ParentTarget)
+        ) {
+            continue;
+        }
+        return false;
+    }
+    false
+}
+
 /// CR 601.2c + CR 608.2c: Returns the nearest earlier same-chain clause's
 /// declared OBJECT target filter — the antecedent a later clause's demonstrative
 /// anaphor ("that token", "that artifact") can name (Hazel of the Rootbloom's
@@ -27032,6 +27125,39 @@ fn target_filter_can_target_player(filter: &TargetFilter) -> bool {
     }
 }
 
+/// CR 109.4 + CR 115.1: map a targeted player subject to the announced-target
+/// chooser it names. Opponent-ness is read from either subject leg (the bare
+/// opponent filter "target opponent" lowers its `affected` to, or an
+/// opponent-typed `target`); anything else player-denoting is `TargetPlayer`.
+/// Returns `None` when the subject is untargeted or names no player —
+/// non-player targeted subjects keep the controller default (choosing is not
+/// targeting).
+fn targeted_chooser_for_subject(subject: &SubjectPhraseAst) -> Option<ControllerRef> {
+    subject.target.as_ref()?;
+    let player_denoting = [subject.target.as_ref(), subject.affected.as_ref()]
+        .into_iter()
+        .flatten()
+        .any(target_filter_can_target_player);
+    if !player_denoting {
+        return None;
+    }
+    let is_opponent = [subject.target.as_ref(), subject.affected.as_ref()]
+        .into_iter()
+        .flatten()
+        .any(|f| {
+            matches!(f, TargetFilter::Opponent)
+                || matches!(f, TargetFilter::Typed(tf)
+                if tf.controller == Some(ControllerRef::Opponent)
+                    && tf.type_filters.is_empty()
+                    && tf.properties.is_empty())
+        });
+    Some(if is_opponent {
+        ControllerRef::TargetOpponent
+    } else {
+        ControllerRef::TargetPlayer
+    })
+}
+
 /// CR 608.2c: A player subject stated once at the head of a same-sentence verb
 /// list governs every subjectless conjugated continuation after it ("target
 /// opponent sacrifices …, discards …, and loses 3 life"; "that player loses 2
@@ -27451,6 +27577,21 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, origin
             if *flipper == TargetFilter::Controller =>
         {
             *flipper = subject_filter;
+        }
+        // CR 608.2d + CR 109.4 + CR 115.1: "target opponent chooses …" /
+        // "target player chooses …" — bind the named chooser so the choice
+        // belongs to the announced target, not the source's controller (the
+        // self-or-others scheme class; mirrors the FlipCoin `flipper` arm).
+        // The bare lowering leaves `chooser = You`; only a genuine TARGETED
+        // player subject overrides it. Untargeted choosers ("an opponent
+        // chooses", "that player chooses") keep the default — separate
+        // pre-existing gaps, deliberately out of scope here.
+        Effect::Choose { chooser, .. }
+            if *chooser == ControllerRef::You && subject.target.is_some() =>
+        {
+            if let Some(mapped) = targeted_chooser_for_subject(subject) {
+                *chooser = mapped;
+            }
         }
         // CR 122.1: "target player gets a poison counter" — inject subject target
         Effect::GivePlayerCounter { target, .. } if *target == TargetFilter::Controller => {
@@ -31853,6 +31994,7 @@ fn opponent_guess_clause(guesser: ControllerRef, subject: GuessSubject) -> Parse
     // so the chosen player is threaded to the dependent guess as a
     // same-resolution `ChosenPlayer`.
     let mut clause = parsed_clause(Effect::Choose {
+        chooser: crate::types::ability::ControllerRef::You,
         choice_type: ChoiceType::opponent(),
         persist: false,
         selection: TargetSelectionMode::Chosen,
@@ -35522,6 +35664,7 @@ fn rebind_event_context_amount_counts(effect: &mut Effect, gate_qty: &QuantityRe
         | Effect::TakeTheInitiative
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
+        | Effect::AbandonScheme
         | Effect::ChaosEnsues
         | Effect::RedistributeLifeTotals
         | Effect::ReverseTurnOrder
@@ -36097,6 +36240,7 @@ fn wrap_in_color_choice(def: &mut AbilityDefinition) {
     let displaced_effect = std::mem::replace(
         &mut def.effect,
         Box::new(Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type: ChoiceType::color(),
             // CR 607.2d + CR 613.1: `persist: true` so the choice resolver
             // carries exact source authority into `WaitingFor::NamedChoice`;
@@ -40955,7 +41099,10 @@ fn parse_effect_chain_ir_body(
                         value((), tag("each ")).parse(i)
                     })
                     .is_some();
-                    let (scope, stripped) = super::clause_shell::peel_player_scope_subject(&text);
+                    let (scope, stripped) = super::clause_shell::peel_player_scope_subject(
+                        &text,
+                        chain_prior_targeted_player(builder.clauses()),
+                    );
                     let subject_worded_exile = subject_worded && scope.is_some();
                     (scope, stripped, subject_worded_exile)
                 }
@@ -41320,6 +41467,11 @@ fn parse_effect_chain_ir_body(
         let chain_prior_chosen_target_filter =
             chain_prior_chosen_target(builder.clauses()).cloned();
         let parent_target_is_chosen = chain_prior_chosen_target_filter.is_some();
+        // CR 608.2c + CR 109.4 + CR 115.1: the player-oriented sibling scan —
+        // whether a "that player" / "the player" anaphor in THIS chunk names an
+        // announced target (a prior targeted `Choose` or player-typed
+        // `TargetOnly`) rather than the trigger event's player.
+        let chain_prior_targeted_player = chain_prior_targeted_player(builder.clauses());
         // CR 608.2c (issue #1670): Consumption signal for the body "its
         // controller may" antecedent. True only when the rung ladder below
         // falls through to `chain_parent_target_controller_scope` for THIS
@@ -41544,6 +41696,7 @@ fn parse_effect_chain_ir_body(
             // zone) so `try_parse_cast_effect`'s anaphor branch can scope the
             // "you may cast that card" driver to a graveyard-chosen target.
             chain_prior_chosen_target: chain_prior_chosen_target_filter,
+            chain_prior_targeted_player,
             // CR 608.2c + CR 400.7: seed the zone published by an earlier
             // "choose card(s) in <zone>" producer so this chunk's "put those
             // cards onto the battlefield" anaphor binds its `TrackedSet` move to

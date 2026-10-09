@@ -1982,6 +1982,7 @@ fn player_filter_uses_filter_prop(
             target_filter_uses_filter_prop(filter, pred)
         }
         PlayerFilter::AllExcept { exclude } => player_filter_uses_filter_prop(exclude, pred),
+        PlayerFilter::OpponentExcept { exclude } => player_filter_uses_filter_prop(exclude, pred),
         PlayerFilter::Controller
         | PlayerFilter::Opponent
         | PlayerFilter::DefendingPlayer
@@ -2002,6 +2003,7 @@ fn player_filter_uses_filter_prop(
         | PlayerFilter::VotedFor { .. }
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ChosenPlayer { .. }
+        | PlayerFilter::ParentPlayerTarget
         | PlayerFilter::ParentObjectTargetOwner => false,
     }
 }
@@ -7143,6 +7145,7 @@ fn parse_normalized_oracle_ir(
             let def = AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Choose {
+                    chooser: crate::types::ability::ControllerRef::You,
                     choice_type: ChoiceType::color(),
                     persist: true,
                     selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -9071,6 +9074,7 @@ fn resolve_guards_in_effect(effect: &mut Effect) {
         | Effect::TakeTheInitiative
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
+        | Effect::AbandonScheme
         | Effect::ChaosEnsues
         | Effect::ReverseTurnOrder
         | Effect::RedistributeLifeTotals
@@ -9892,6 +9896,7 @@ fn demote_lifetimes_in_effect(effect: &mut Effect) {
         | Effect::TakeTheInitiative
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
+        | Effect::AbandonScheme
         | Effect::ChaosEnsues
         | Effect::ReverseTurnOrder
         | Effect::RedistributeLifeTotals
@@ -12433,6 +12438,10 @@ mod tests;
 #[cfg(test)]
 #[path = "oracle_pipeline_snapshot_tests.rs"]
 mod pipeline_snapshot_tests;
+
+#[cfg(test)]
+#[path = "scheme_tests.rs"]
+mod scheme_tests;
 
 /// Row 1.J — the continuation gate's failure-recursion helper must see a parse
 /// failure nested inside a WRAPPER EFFECT, not only inside a `sub_ability` chain.

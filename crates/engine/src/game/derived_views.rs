@@ -1786,7 +1786,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         });
     }
 
-    if state.format_config.format == GameFormat::Archenemy {
+    if state.format_config.format.is_archenemy_family() {
         if let Some(archenemy) = crate::game::topology::archenemy(state) {
             let hero_player_ids = state
                 .seat_order

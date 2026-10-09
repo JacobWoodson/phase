@@ -267,6 +267,39 @@ pub(crate) fn players_for_filter(
         PlayerFilter::ParentObjectTargetOwner => parent_object_target_owner_player(state, ability)
             .into_iter()
             .collect(),
+        // CR 115.1 + CR 608.2c: the first player target of the resolving
+        // ability — the player-target sibling of the object-target anchors
+        // above. Eliminated players are filtered (CR 104.5).
+        PlayerFilter::ParentPlayerTarget => {
+            crate::game::ability_utils::parent_target_player(ability)
+                .filter(|pid| {
+                    state
+                        .players
+                        .iter()
+                        .any(|player| player.id == *pid && !player.is_eliminated)
+                })
+                .into_iter()
+                .collect()
+        }
+        // CR 102.2 + CR 102.3 + CR 608.2c + CR 109.4: opponents of the
+        // controller except the anchor's set. The opponents-base analogue
+        // of the `AllExcept` arm above: the anchor resolves recursively
+        // through this same ability-aware function so a
+        // target-dependent anchor reads `ability.targets`. Opponent-ness
+        // is team-aware via `players::is_opponent` (CR 102.3).
+        PlayerFilter::OpponentExcept { exclude } => {
+            let excluded = players_for_filter(state, exclude, ability);
+            state
+                .players
+                .iter()
+                .filter(|player| {
+                    !player.is_eliminated
+                        && crate::game::players::is_opponent(state, controller, player.id)
+                        && !excluded.contains(&player.id)
+                })
+                .map(|player| player.id)
+                .collect()
+        }
         // CR 608.2c + CR 109.4: the resolution-scoped chosen player at `index`.
         PlayerFilter::ChosenPlayer { index } => ability
             .chosen_players

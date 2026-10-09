@@ -1334,6 +1334,9 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
         }
+        // CR 608.2d: `chooser` (controller / declared-target read) is subsumed
+        // by CONSERVATIVE on every axis; a future refinement of this arm must
+        // destructure the field and classify it per-axis.
         Effect::Choose { .. } => Axes::CONSERVATIVE,
         Effect::ChooseDamageSource { source_filter } => {
             let mut acc = Axes::NONE;
@@ -1556,6 +1559,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
         Effect::TakeTheInitiative => Axes::NONE,
         Effect::ArrangePlanarDeckTop { .. } => Axes::NONE,
         Effect::Planeswalk => Axes::NONE,
+        Effect::AbandonScheme => Axes::NONE,
         Effect::OpenAttractions { count: _ } => Axes::NONE,
         Effect::RollToVisitAttractions => Axes::NONE,
         Effect::AssembleContraptions { count } => {
@@ -2926,6 +2930,7 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes {
         AbilityCondition::EffectOutcome { signal: _ } => Axes::NONE,
         AbilityCondition::EventOutcomeWon => Axes::NONE,
         AbilityCondition::CoinFlipOutcome { result: _ } => Axes::NONE,
+        AbilityCondition::ChosenLabelIs { label: _ } => Axes::NONE,
         AbilityCondition::WhenYouDo => Axes::NONE,
         AbilityCondition::WasCast { zone: _ } => Axes::NONE,
         AbilityCondition::CastDuringPhase { phases: _ } => Axes::NONE,
@@ -3447,6 +3452,12 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
         }
         TargetFilter::Named { name: _ } => Axes::NONE,
         TargetFilter::Owner => Axes::NONE,
+        // CR 108.3: owner-of-each-affected-member anchor — the same owner-field
+        // read as `Owner` (source object's owner), evaluated per member at
+        // install by `force_attack::resolve`'s owner-relative graft. No
+        // event/sibling/projected axis: ownership is not trigger-event state,
+        // not a sibling-mutated aggregate, and not a monotone resource.
+        TargetFilter::AffectedObjectOwner => Axes::NONE,
         TargetFilter::AllPlayers => Axes::NONE,
         // CR 615: controller-relative compound recipient — no event/sibling axes.
         TargetFilter::ControllerAndControlledPermanents { .. } => Axes::NONE,
@@ -4728,6 +4739,21 @@ fn scan_player_filter(x: &PlayerFilter, mode: ScanMode) -> Axes {
             sibling: false,
             projected: false,
         },
+        // CR 115.1 + CR 608.2c: reads the resolving ability's own stored
+        // targets (chosen at cast/stack-put, immutable during resolution —
+        // never shared across abilities). Like `ChosenPlayer`, a
+        // resolution-scoped ability-field read with no event, sibling, or
+        // projected-resource axis. (Unlike `ParentObjectTargetOwner` there is
+        // no LKI / effect-context fallback read, so no event axis.)
+        PlayerFilter::ParentPlayerTarget => Axes::NONE,
+        // CR 102.2 + CR 102.3: the opponents-base analogue of `AllExcept` —
+        // the base population reads no mutable state; recurse into the
+        // exclusion anchor.
+        PlayerFilter::OpponentExcept { exclude } => {
+            let mut acc = Axes::NONE;
+            acc = acc.or(scan_player_filter(exclude, mode));
+            acc
+        }
         // CR 603.3b + CR 608.2c: the membership set is published by a PRECEDING
         // SIBLING effect in the same chain, and the per-member filter reads live
         // board state for members still on the battlefield — both are
@@ -6352,6 +6378,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
         | Effect::Planeswalk
+        | Effect::AbandonScheme
         // Susan Foreman reorders the PLANAR DECK top (Planechase),
         // not a battlefield population ⇒ not a live-board census (relax).
         | Effect::ArrangePlanarDeckTop { .. }
@@ -6742,6 +6769,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
         | Effect::Planeswalk
+        | Effect::AbandonScheme
         // Susan Foreman reorders the PLANAR DECK top (Planechase),
         // not a battlefield population ⇒ not a live-board census (relax).
         | Effect::ArrangePlanarDeckTop { .. }
@@ -6996,6 +7024,7 @@ pub(crate) fn effect_is_randomness_bearing(e: &Effect) -> bool {
         | Effect::TakeTheInitiative
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
+        | Effect::AbandonScheme
         | Effect::OpenAttractions { .. }
         | Effect::AssembleContraptions { .. }
         | Effect::CrankContraptions { .. }
@@ -9104,11 +9133,13 @@ mod tests {
         ));
         // Choose is the distinct `TargetSelectionMode`-carrier arm.
         assert!(effect_is_randomness_bearing(&Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type: ChoiceType::OddOrEven,
             persist: false,
             selection: TargetSelectionMode::Random,
         }));
         assert!(!effect_is_randomness_bearing(&Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type: ChoiceType::OddOrEven,
             persist: false,
             selection: TargetSelectionMode::Chosen,

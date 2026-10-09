@@ -224,6 +224,8 @@ impl CommanderEligibilityRule {
             // CR 903.13f routes its deck construction through CR 903.5 — so
             // CR 903.3's commander eligibility test applies unchanged.
             GameFormat::Commander
+            | GameFormat::TwoHeadedGiantCommander
+            | GameFormat::ArchenemyCommander
             | GameFormat::DuelCommander
             | GameFormat::PauperCommander
             | GameFormat::CommanderDraft => Ok(Some(Self::Standard)),

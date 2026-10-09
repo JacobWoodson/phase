@@ -5772,6 +5772,10 @@ fn node_reads_mutable_resolution_local_state(node: &crate::types::ability::Targe
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        // CR 108.3 + CR 508.1d: per-member owner anchor — reads affected
+        // members' owner fields, not a mutable slot or ledger; admitted with
+        // the fixed-object family.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
@@ -5899,6 +5903,10 @@ fn node_has_non_arrival_invariant_property(node: &crate::types::ability::TargetF
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        // CR 108.3 + CR 508.1d: per-member owner anchor — reads affected
+        // members' owner fields, not a mutable slot or ledger; admitted with
+        // the fixed-object family.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
@@ -6103,8 +6111,10 @@ fn player_filter_is_arrival_invariant(filter: &crate::types::ability::PlayerFilt
         | PlayerFilter::OpponentOfTriggeringPlayer
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::ParentPlayerTarget
         | PlayerFilter::ChosenPlayer { .. } => true,
         PlayerFilter::AllExcept { exclude } => player_filter_is_arrival_invariant(exclude),
+        PlayerFilter::OpponentExcept { exclude } => player_filter_is_arrival_invariant(exclude),
         // ── REFUSED: board-census and ledger-derived designations ──
         PlayerFilter::ControlsCount { .. }
         | PlayerFilter::TrackedSetPossessor { .. }

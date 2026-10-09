@@ -82,7 +82,7 @@ const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 32;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
-const EXPECTED_LOBBY_PROTOCOL_VERSION = 15;
+const EXPECTED_LOBBY_PROTOCOL_VERSION = 17;
 // The capability FLOOR for correlated tournament settlement — a different kind
 // of number from the other version constants here, and the reason it is pinned
 // separately. Those track a surface's current version; this one is frozen at the
@@ -287,6 +287,10 @@ const AUTHORED_LITERALS = [
     "MIN_LOBBY_PROTOCOL_FOR_RECOVERABLE_ROTATION",
     // Client-only frozen floor for the format names lobby 11 introduced; no Rust mirror.
     "MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS",
+    // Client-only frozen floor for the format name lobby 16 introduced; no Rust mirror.
+    "MIN_LOBBY_PROTOCOL_FOR_TWO_HEADED_GIANT_COMMANDER",
+    // Client-only frozen floor for the format name lobby 17 introduced; no Rust mirror.
+    "MIN_LOBBY_PROTOCOL_FOR_ARCHENEMY_COMMANDER",
     "MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL",
     "PROTOCOL_VERSION",
   ]],

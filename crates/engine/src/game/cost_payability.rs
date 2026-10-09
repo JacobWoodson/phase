@@ -97,6 +97,9 @@ pub(crate) fn target_filter_has_x_mana_value_constraint(filter: &TargetFilter) -
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        // CR 108.3 + CR 508.1d: per-member owner anchor — carries no
+        // pitch-bound X.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::PostReplacementSourceController
@@ -129,6 +132,9 @@ pub(crate) fn target_filter_has_x_mana_value_constraint(filter: &TargetFilter) -
 fn player_filter_has_x_mana_value_constraint(player: &PlayerFilter) -> bool {
     match player {
         PlayerFilter::AllExcept { exclude } => player_filter_has_x_mana_value_constraint(exclude),
+        PlayerFilter::OpponentExcept { exclude } => {
+            player_filter_has_x_mana_value_constraint(exclude)
+        }
         PlayerFilter::OpponentDealtDamage { source, .. } => source
             .as_deref()
             .is_some_and(target_filter_has_x_mana_value_constraint),
@@ -158,6 +164,7 @@ fn player_filter_has_x_mana_value_constraint(player: &PlayerFilter) -> bool {
         | PlayerFilter::VotedFor { .. }
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::ParentPlayerTarget
         | PlayerFilter::PlayerAttribute { .. }
         | PlayerFilter::ChosenPlayer { .. } => false,
     }
@@ -169,6 +176,9 @@ fn player_filter_has_x_mana_value_constraint(player: &PlayerFilter) -> bool {
 fn relax_x_mana_value_constraint_player(player: &PlayerFilter) -> PlayerFilter {
     match player {
         PlayerFilter::AllExcept { exclude } => PlayerFilter::AllExcept {
+            exclude: Box::new(relax_x_mana_value_constraint_player(exclude)),
+        },
+        PlayerFilter::OpponentExcept { exclude } => PlayerFilter::OpponentExcept {
             exclude: Box::new(relax_x_mana_value_constraint_player(exclude)),
         },
         PlayerFilter::OpponentDealtDamage {
@@ -279,6 +289,9 @@ pub(crate) fn relax_x_mana_value_constraint(filter: &TargetFilter) -> TargetFilt
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        // CR 108.3 + CR 508.1d: per-member owner anchor — no X constraint to
+        // relax, identity like the neighboring anchors.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::PostReplacementSourceController

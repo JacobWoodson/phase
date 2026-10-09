@@ -1380,6 +1380,7 @@ pub(crate) fn lower_oracle_block_ir(
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::Choose {
+                            chooser: crate::types::ability::ControllerRef::You,
                             choice_type: ChoiceType::Labeled { options: labels },
                             persist: true,
                             selection: TargetSelectionMode::Chosen,
@@ -1727,6 +1728,7 @@ fn lower_as_enters_anchor_word_modal(
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type: ChoiceType::Labeled {
                     options: labels.clone(),
                 },

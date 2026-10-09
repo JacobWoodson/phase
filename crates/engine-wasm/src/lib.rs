@@ -1121,6 +1121,12 @@ pub fn is_card_commander_eligible_for_format(name: &str, format: JsValue) -> boo
         // re-arms that for the next format, so every arm is named.
         match format {
             GameFormat::Commander | GameFormat::DuelCommander => is_commander_eligible(face),
+            // CR 903.3, unchanged by CR 810 seating: 2HG Commander decks
+            // designate commanders under Commander's own predicate.
+            GameFormat::TwoHeadedGiantCommander => is_commander_eligible(face),
+            // CR 904.13a + CR 903.3: Archenemy Commander decks designate
+            // commanders under Commander's own predicate.
+            GameFormat::ArchenemyCommander => is_commander_eligible(face),
             GameFormat::PauperCommander => is_commander_eligible(face),
             // CR 903.3, unchanged by CR 903.13f: the CR 903.13f(3) grant
             // affects PAIRING, not eligibility, so Commander Draft uses

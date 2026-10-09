@@ -4636,14 +4636,18 @@ fn resolve_ref(
         // double-count, and Archenemy's 40/20 baseline follows that controller.
         QuantityRef::LifeAboveStarting => player.map_or(0, |p| {
             crate::game::players::team_life_total(state, p.id)
-                - state.format_config.starting_life_total_for_player(p.id)
+                - state
+                    .format_config
+                    .starting_life_total_for_player(p.id, state.players.len())
         }),
         // CR 103.4 + CR 904.5: the rules starting total for the referenced
         // player or players selected by `scope`, including the archenemy's
         // 40-life baseline.
         QuantityRef::StartingLifeTotal { player: scope } => {
             resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| {
-                state.format_config.starting_life_total_for_player(p.id)
+                state
+                    .format_config
+                    .starting_life_total_for_player(p.id, state.players.len())
             })
         }
         // CR 701.57a: the mana-value limit of the discover that fired the current
@@ -8932,7 +8936,7 @@ fn resolve_per_team_life(
     match scope {
         // CR 102.2 + CR 104.3 + CR 104.5 + CR 800.4: aggregate over all
         // opponents' teams still in the game. An eliminated player's
-        // `team_life_total` reads 0 (`shared_resource_members` returns empty
+        // `team_life_total` reads 0 (`shared_life_members` returns empty
         // for a departed player off-2HG), so leaving them in this fold lets
         // 0 win a `Min` read below every live player's actual life.
         PlayerScope::Opponent { aggregate } => crate::game::players::aggregate_over_teams(
@@ -9351,6 +9355,19 @@ pub(crate) fn resolve_player_count(
                                 state, p.id, exclude, controller, source_id,
                             )
                         }
+                        // CR 102.2 + CR 102.3 + CR 608.2c + CR 109.4:
+                        // opponents except the anchor's set (count context).
+                        // The opponents-base analogue of `AllExcept`: the
+                        // base is team-aware via `players::is_opponent`
+                        // (CR 102.3) and the anchor uses the generic
+                        // predicate authority (ability-target anchors fail
+                        // closed there — no live card counts this set).
+                        PlayerFilter::OpponentExcept { exclude } => {
+                            crate::game::players::is_opponent(state, controller, p.id)
+                                && !crate::game::effects::matches_player_scope(
+                                    state, p.id, exclude, controller, source_id,
+                                )
+                        }
                         PlayerFilter::HighestSpeed => {
                             let highest_speed = state
                                 .players
@@ -9451,6 +9468,7 @@ pub(crate) fn resolve_player_count(
                         // to a single anchored player, not a counted set).
                         PlayerFilter::ParentObjectTargetController
                         | PlayerFilter::ParentObjectTargetOwner
+                        | PlayerFilter::ParentPlayerTarget
                         | PlayerFilter::ChosenPlayer { .. } => false,
                         // CR 109.4 + CR 109.5: "each [player class] who controls
                         // [comparator] [count] [filter]" — count candidates that
@@ -12015,7 +12033,7 @@ mod tests {
     /// `crates/engine/tests/integration/superlative_player_subject_control.rs`).
     /// WITHOUT that filter this read returns 0 rather than the lowest live
     /// life total, and this test fails.
-    /// Because `topology::shared_resource_members` returns EMPTY for a departed
+    /// Because `topology::shared_life_members` returns EMPTY for a departed
     /// (non-2HG) player, `team_life_total` for an eliminated player reads 0 —
     /// which becomes the new Min whenever it undercuts every live player's
     /// actual life. `Max` is unaffected (0 never wins a Max fold unless every
@@ -12380,7 +12398,9 @@ mod tests {
         }
         for (id, baseline) in [(PlayerId(0), 40), (PlayerId(1), 20)] {
             assert_eq!(
-                state.format_config.starting_life_total_for_player(id),
+                state
+                    .format_config
+                    .starting_life_total_for_player(id, state.players.len()),
                 baseline
             );
             assert_eq!(

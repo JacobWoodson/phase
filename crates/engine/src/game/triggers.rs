@@ -11683,6 +11683,7 @@ fn gate_binding_diverges_at_fire_time(condition: &AbilityCondition) -> bool {
         | AbilityCondition::EffectOutcome { .. }
         | AbilityCondition::EventOutcomeWon
         | AbilityCondition::CoinFlipOutcome { .. }
+        | AbilityCondition::ChosenLabelIs { .. }
         | AbilityCondition::WhenYouDo
         | AbilityCondition::RevealedHasCardType { .. }
         | AbilityCondition::PreviousEffectAmount { .. }
@@ -12161,6 +12162,10 @@ fn filter_binding_diverges(filter: &TargetFilter) -> bool {
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        // CR 108.3 + CR 508.1d: per-member owner anchor — a resolution-time
+        // per-member binding, matching nothing at fire time like the
+        // resolution-scoped anaphora above.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::ScopedPlayer
         // CR 608.2k: the cost-paid / effect-context referent lives on
         // `ResolvedAbility`, so this matches nothing at fire time. The
@@ -12605,10 +12610,12 @@ fn count_scope_binding_diverges(scope: &crate::types::ability::CountScope) -> bo
 fn player_filter_binding_diverges(player: &PlayerFilter) -> bool {
     match player {
         PlayerFilter::AllExcept { exclude } => player_filter_binding_diverges(exclude),
+        PlayerFilter::OpponentExcept { exclude } => player_filter_binding_diverges(exclude),
         // CR 109.4 + CR 115.1: the anchor lives on the resolving ability
         // (`targets` / `chosen_players`).
         PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::ParentPlayerTarget
         | PlayerFilter::ChosenPlayer { .. }
         // CR 608.2c: ledgers a RESOLUTION publishes — the zone-change and action
         // "this way" lists, the CR 701.38 vote ballots, the tracked sets, and
@@ -15042,6 +15049,9 @@ fn evaluate_trigger_condition_with_source(
             // CR 608.2c: a set-valued "all players except an anchor" population
             // has no single-player "whose turn" semantic. Fail-closed.
             | PlayerFilter::AllExcept { .. }
+            // CR 608.2c + CR 102.2: likewise set-valued ("opponents except an
+            // anchor") — no single-player "whose turn" semantic. Fail-closed.
+            | PlayerFilter::OpponentExcept { .. }
             | PlayerFilter::HighestSpeed
             | PlayerFilter::ZoneChangedThisWay
             | PlayerFilter::PerformedActionThisWay { .. }
@@ -15052,6 +15062,7 @@ fn evaluate_trigger_condition_with_source(
             // chosen-player anchors are effect-resolution references, not
             // turn-binding predicates — no "whose turn" semantic. Fail-closed.
             | PlayerFilter::ParentObjectTargetOwner
+            | PlayerFilter::ParentPlayerTarget
             | PlayerFilter::ChosenPlayer { .. }
             // CR 102.1: a controls-a-permanent population predicate is
             // set-valued — it has no single-player "whose turn" semantic.
@@ -45015,6 +45026,7 @@ pub mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Database,
                 Effect::Choose {
+                    chooser: crate::types::ability::ControllerRef::You,
                     choice_type: ChoiceType::creature_type(),
                     persist: true,
                     selection: TargetSelectionMode::Chosen,
@@ -45095,6 +45107,7 @@ pub mod tests {
             &mut source_less,
             &ResolvedAbility::new(
                 Effect::Choose {
+                    chooser: crate::types::ability::ControllerRef::You,
                     choice_type: choice_type.clone(),
                     persist: false,
                     selection: TargetSelectionMode::Chosen,
@@ -45132,6 +45145,7 @@ pub mod tests {
             &mut exact,
             &ResolvedAbility::new(
                 Effect::Choose {
+                    chooser: crate::types::ability::ControllerRef::You,
                     choice_type: choice_type.clone(),
                     persist: true,
                     selection: TargetSelectionMode::Chosen,
@@ -45181,6 +45195,7 @@ pub mod tests {
         );
         let mut departed_ability = ResolvedAbility::new(
             Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type: ChoiceType::CardPredicateGuess {
                     options: ChoiceType::land_or_nonland_card_predicate_options(),
                 },
@@ -45238,6 +45253,7 @@ pub mod tests {
             make_creature(&mut player_bound, PlayerId(0), "Player choice source", 2, 2);
         let mut player_ability = ResolvedAbility::new(
             Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type,
                 persist: true,
                 selection: TargetSelectionMode::Chosen,
@@ -45300,6 +45316,7 @@ pub mod tests {
         );
         let mut random_ability = ResolvedAbility::new(
             Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type: ChoiceType::Labeled {
                     options: vec!["Anchor".to_string()],
                 },

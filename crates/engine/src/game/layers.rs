@@ -3695,6 +3695,7 @@ fn player_filter_reads_zone(filter: &PlayerFilter, zone: Zone) -> bool {
             .is_some_and(|f| target_filter_reads_zone(f, zone)),
         // CR 608.2c: self-composing exclusion anchor — recurse on the exclude.
         PlayerFilter::AllExcept { exclude } => player_filter_reads_zone(exclude, zone),
+        PlayerFilter::OpponentExcept { exclude } => player_filter_reads_zone(exclude, zone),
         // CR 109.4 + CR 109.5: controls-count routes its object `filter` and its
         // comparison `count` expression.
         PlayerFilter::ControlsCount { filter, count, .. } => {
@@ -3734,6 +3735,7 @@ fn player_filter_reads_zone(filter: &PlayerFilter, zone: Zone) -> bool {
         | PlayerFilter::VotedFor { .. }
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ChosenPlayer { .. }
+        | PlayerFilter::ParentPlayerTarget
         | PlayerFilter::ParentObjectTargetOwner => false,
     }
 }
@@ -4219,6 +4221,7 @@ fn player_filter_reads_life(pf: &PlayerFilter) -> bool {
             .is_some_and(target_filter_reads_life_total),
         // CR 608.2c: self-composing exclusion anchor — recurse on the exclude.
         PlayerFilter::AllExcept { exclude } => player_filter_reads_life(exclude),
+        PlayerFilter::OpponentExcept { exclude } => player_filter_reads_life(exclude),
         // CR 109.4 + CR 109.5: controls-count routes its object `filter` and its
         // comparison `count` expression.
         PlayerFilter::ControlsCount { filter, count, .. } => {
@@ -4253,6 +4256,7 @@ fn player_filter_reads_life(pf: &PlayerFilter) -> bool {
         | PlayerFilter::VotedFor { .. }
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ChosenPlayer { .. }
+        | PlayerFilter::ParentPlayerTarget
         | PlayerFilter::ParentObjectTargetOwner => false,
     }
 }
@@ -4449,6 +4453,9 @@ fn target_filter_reads_life_total(filter: &TargetFilter) -> bool {
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        // CR 108.3 + CR 508.1d: per-member owner anchor — resolved per affected
+        // member at install, never via layer re-derivation here.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::OriginalSource
