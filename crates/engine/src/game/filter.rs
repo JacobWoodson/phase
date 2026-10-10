@@ -8252,6 +8252,7 @@ fn matches_combat_relation(
     }
 }
 
+<<<<<<< HEAD
 /// CR 702.122b + CR 702.122c + CR 400.7: does the per-turn crew ledger pair the
 /// `candidate` incarnation with the filter source's incarnation in the
 /// direction `relation` names? The source resolves through the same authority
@@ -8282,7 +8283,10 @@ fn matches_crew_relation(
     state.crew_history_this_turn.contains(&pair)
 }
 
-fn referenced_targets_for_filter(
+/// Shared with `game/quantity.rs` for `CardTypeSetSource::TargetedObjects`, whose
+/// resolver arm selects the resolving ability's object targets through this
+/// authority rather than re-deriving slot selection.
+pub(crate) fn referenced_targets_for_filter<'a>(
     state: &GameState,
     target: &TargetFilter,
     ability: Option<&ResolvedAbility>,
