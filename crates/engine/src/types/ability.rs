@@ -5180,6 +5180,20 @@ pub enum DelayedTriggerPlayerBinding {
     /// player" (its owner, CR 400.3) is resolved from the parent target at
     /// delayed-trigger creation, not assumed to be the controller.
     ParentTargetOwner,
+    /// CR 603.7a + CR 608.2c: "that player's next [phase]" where "that
+    /// player" anaphorically refers to a player CHOSEN earlier in the same
+    /// resolution — not the ability's controller and not a target's owner.
+    /// Faramir, Prince of Ithilien: "At the beginning of your end step,
+    /// choose an opponent. At the beginning of that player's next end step,
+    /// …" — "that player" is the chosen opponent, resolved from the
+    /// resolving ability's `chosen_players[index]` (the resolution-scoped
+    /// list the `NamedChoice` answer handler appends to) at delayed-trigger
+    /// creation. Bare `index: u8` mirrors `ControllerRef::ChosenPlayer`;
+    /// the delayed ability also stamps a `TargetRef::Player` so the fired
+    /// body can read the chosen player via `PlayerScope::Target`. A missing
+    /// index fails closed (creation is skipped) — never a controller
+    /// fallback.
+    ChosenPlayer { index: u8 },
 }
 
 impl DelayedTriggerPlayerBinding {
@@ -10773,6 +10787,23 @@ pub enum StaticCondition {
     /// Weathered Sentinels as future adopters via
     /// `GameState::player_attacked_player_last_turn`.
     AnyPlayerAttackedYouLastTurn,
+    /// CR 508.6: True when the `attacker` player declared one or more
+    /// creatures attacking the `defender` player this turn ("if they didn't
+    /// attack you that turn" — Faramir, Prince of Ithilien; the nom arm
+    /// emits attacker `ChosenPlayer` as an anaphor-kind placeholder and
+    /// defender `You`, and the S2 bridge lowers this to
+    /// `AbilityCondition::PlayerAttackedPlayer { attacker: Target,
+    /// defender: Controller }` wrapped in `Not`). Parser-axis params
+    /// (`ControllerRef`, precedent: `WasStartingPlayer { controller }`).
+    /// Reads the UNCOLLAPSED `attacked_players_directly_this_turn` ledger —
+    /// a planeswalker/battle attack does NOT count as attacking its
+    /// controller (Faramir ruling 2023-06-16) — never the collapsed
+    /// `attacked_defenders_this_turn` that serves defending-player and
+    /// explicit-disjunct consumers.
+    PlayerAttackedPlayer {
+        attacker: ControllerRef,
+        defender: ControllerRef,
+    },
     /// CR 701.27: True when any opponent has at least this many poison counters.
     OpponentPoisonAtLeast {
         count: u32,
@@ -11075,6 +11106,7 @@ impl StaticCondition {
             | StaticCondition::EnchantedIsFaceDown
             | StaticCondition::AdditionalCostPaid
             | StaticCondition::CastingAsVariant { .. }
+            | StaticCondition::PlayerAttackedPlayer { .. }
             | StaticCondition::None => None,
         }
     }
@@ -11191,6 +11223,7 @@ impl StaticCondition {
             | StaticCondition::SourceIsPaired
             | StaticCondition::SourceInZone { .. }
             | StaticCondition::EnchantedIsFaceDown
+            | StaticCondition::PlayerAttackedPlayer { .. }
             | StaticCondition::None => None,
         }
     }
@@ -11384,6 +11417,7 @@ impl StaticCondition {
             | StaticCondition::EnchantedIsFaceDown
             | StaticCondition::AdditionalCostPaid
             | StaticCondition::CastingAsVariant { .. }
+            | StaticCondition::PlayerAttackedPlayer { .. }
             | StaticCondition::None => visit(self),
         }
     }
@@ -25086,6 +25120,23 @@ pub enum AbilityCondition {
     /// condition resolves against the ability's controller — the canonical
     /// fallback semantics for the `ScopedPlayer`/`Controller` split.
     ScopedPlayerMatches { filter: PlayerFilter },
+    /// CR 508.6 + CR 608.2c: True when the `attacker` player declared one or
+    /// more creatures attacking the `defender` player this turn. First
+    /// `PlayerScope`-parameterized `AbilityCondition`: both endpoints resolve
+    /// via `quantity::resolve_single_player_scope` (`Target` = first
+    /// `TargetRef::Player` in `ability.targets` — the stamped chosen player
+    /// for Faramir's delayed body). Faramir, Prince of Ithilien reads
+    /// `Not { PlayerAttackedPlayer { attacker: Target, defender: Controller } }`
+    /// ("if they didn't attack you that turn"). An unresolvable scope
+    /// (including duration-timing-only `AnyTurn`/`SpecificPlayer`, which must
+    /// never reach the scope resolver's `unreachable!()`) fails closed to
+    /// `false`; card-level `Not` composes above it. Reads the UNCOLLAPSED
+    /// `attacked_players_directly_this_turn` ledger (Faramir ruling
+    /// 2023-06-16: a planeswalker/battle attack is not attacking you).
+    PlayerAttackedPlayer {
+        attacker: PlayerScope,
+        defender: PlayerScope,
+    },
 }
 
 impl AbilityCondition {
@@ -25201,6 +25252,7 @@ impl AbilityCondition {
             | AbilityCondition::Not { .. }
             | AbilityCondition::DayNightIs { .. }
             | AbilityCondition::AbilityUseCountThisTurn { .. }
+            | AbilityCondition::PlayerAttackedPlayer { .. }
             | AbilityCondition::SourceLacksKeyword { .. }
             | AbilityCondition::ScopedPlayerMatches { .. } => false,
         }
@@ -25341,7 +25393,8 @@ impl AbilityCondition {
             | AbilityCondition::DayNightIs { .. }
             | AbilityCondition::AbilityUseCountThisTurn { .. }
             | AbilityCondition::SourceLacksKeyword { .. }
-            | AbilityCondition::ScopedPlayerMatches { .. } => false,
+            | AbilityCondition::ScopedPlayerMatches { .. }
+            | AbilityCondition::PlayerAttackedPlayer { .. } => false,
         }
     }
 
