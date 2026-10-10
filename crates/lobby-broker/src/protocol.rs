@@ -60,23 +60,29 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
-/// 121 — One-time boons (#7495) add serialized `GameState` tags, and the
+/// 123 — One-time boons (#7495) add serialized `GameState` tags, and the
 ///      perpetual P/T edit is retyped. `Effect::CreateBoon` (with its granted
 ///      `TriggerDefinition`), `Effect::NoteNumber`, the `HasBoon` trigger and
 ///      static conditions, and `WaitingFor::ChooseTokenHost` are new tags with
-///      no fallback: a v120 peer fails deserialization on any of them — a
+///      no fallback: a v122 peer fails deserialization on any of them — a
 ///      conditional PARSE bump like 76/79, breaking only while a boon grant,
 ///      note, or host prompt is actually serialized.
 ///      `PerpetualModification::ModifyPowerToughness` retypes
 ///      `power_delta`/`toughness_delta: i32` to required `power`/`toughness:
-///      QuantityExpr` (plus a defaulted `keywords` rider): a v120 peer's
-///      bare-integer fields miss the new required keys, and a v121 peer's
-///      tagged exprs fail a v120 `i32` — the break is unconditional for
+///      QuantityExpr` (plus a defaulted `keywords` rider): a v122 peer's
+///      bare-integer fields miss the new required keys, and a v123 peer's
+///      tagged exprs fail a v122 `i32` — the break is unconditional for
 ///      frames carrying the edit, in BOTH directions. Saved games still
 ///      load: the former `power_delta`/`toughness_delta` keys survive as
 ///      serde aliases, with the bare ints riding the existing `QuantityExpr`
 ///      legacy-integer decoder into `Fixed`. P2P moves in lockstep (wire
-///      103); lobby messages are unchanged.
+///      105); lobby messages are unchanged.
+/// 122 — `PermissionGrantee` gains `TriggeringSourceController` (CR 603.2 + CR 109.4: a cast grant bound to the controller of the object that caused the trigger — Curse of Hospitality), serialized in the ability definitions of `GameState`, and `GameEvent::DamageDealt.source_incarnation` / `GameEvent::CombatDamageDealtToPlayer.source_incarnations` (CR 400.7) are carried in pending triggers. A v121 peer cannot deserialize the tag. Full-game peers and P2P move in lockstep (wire 104); no lobby carrier names it.
+/// 121 — `GameState::triggered_abilities_added_mana_this_turn` records
+///       (trigger definition, receiving player), so copied triggers check
+///       their own controller's successful mana history. A v120 peer cannot
+///       decode a nonempty pair ledger. P2P moves in lockstep (wire 103);
+///       lobby-only messages are unchanged.
 /// 120 — CR 601.2a spell announcement: `GameObject::spell_announcement`,
 ///      `GameState::next_spell_announcement` and the `targeter` on
 ///      `GameEvent::BecomesTarget`. A v119 peer cannot deserialize the new
@@ -931,7 +937,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 121;
+pub const PROTOCOL_VERSION: u32 = 123;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2188,12 +2194,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 121);
+        assert_eq!(PROTOCOL_VERSION, 123);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 120);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 122);
     }
 
     #[test]
