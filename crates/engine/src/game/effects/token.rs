@@ -706,13 +706,21 @@ fn build_token_spec(
     fallback_toughness: &PtValue,
     tapped: bool,
     enters_attacking: bool,
-    static_abilities: Vec<crate::types::ability::StaticDefinition>,
+    mut static_abilities: Vec<crate::types::ability::StaticDefinition>,
     enter_with_counters: Vec<(CounterType, u32)>,
     attach_to: TokenHostRequest,
     ability: &ResolvedAbility,
     state: &GameState,
 ) -> TokenSpec {
     use crate::types::proposed_event::TokenCharacteristics;
+
+    // CR 201.5a + CR 400.7: the token's statics name the incarnation that
+    // created it, so a creator that later changes zones is a different object.
+    if let Some(creator) = ability.source_ref(state) {
+        for static_def in static_abilities.iter_mut() {
+            crate::game::layers::stamp_static_granter(static_def, creator);
+        }
+    }
 
     let (display_name, power, toughness, core_types, subtypes, supertypes, colors, keywords) =
         if let Some(attrs) = parsed {
@@ -3137,6 +3145,79 @@ pub(crate) fn resolve_token_spec(
 /// This does NOT duplicate attach legality: the actual attach is performed by
 /// `attach::attach_to` / `attach::attach_to_player`, the single authority for
 /// CR 701.3a / CR 301.5 / CR 303.4 host validity.
+/// CR 303.4c + CR 608.2d: projected attach legality for one "one of them"
+/// host candidate. The Role token does not exist yet, so the verdict is
+/// judged against a synthetic projection built from the token effect's own
+/// characteristics — script attrs first, typed fallbacks second, the same
+/// precedence the spec build uses — through the shared projected authority.
+/// The projection id peeks `next_object_id` without consuming it: it cannot
+/// collide with a live object, so the self-attach/cycle arms and id-keyed
+/// 702.16n/p exemptions correctly never fire for it.
+///
+/// Untargeted-choice shroud/hexproof immunity is structural (the authority
+/// has no such arm — targeting only). When the token cannot be projected (a
+/// non-Token ability never carries a batch stamp, so this is
+/// defensive-only), no filter applies and the CR 303.4i final entry check
+/// stays the backstop.
+pub(crate) fn boon_host_passes_projected_legality(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    host: &TargetRef,
+) -> bool {
+    let Effect::Token {
+        name,
+        power,
+        toughness,
+        types,
+        colors,
+        keywords,
+        supertypes,
+        owner,
+        ..
+    } = &ability.effect
+    else {
+        return true;
+    };
+    let attrs = parse_token_script(name).or_else(|| {
+        build_token_attrs_from_effect(
+            name, power, toughness, types, colors, keywords, supertypes, state, ability,
+        )
+    });
+    let Some(attrs) = attrs else {
+        return true;
+    };
+    let projection_id = ObjectId(state.next_object_id);
+    let token_owner = resolve_token_owner(state, ability, owner);
+    let mut projection = GameObject::new(
+        projection_id,
+        CardId(0),
+        token_owner,
+        attrs.display_name,
+        Zone::Battlefield,
+    );
+    projection.controller = token_owner;
+    projection.color = attrs.colors;
+    projection.card_types.core_types = attrs.core_types;
+    projection.card_types.subtypes = attrs.subtypes;
+    projection.card_types.supertypes = attrs.supertypes;
+    projection.keywords = attrs.keywords;
+    projection.power = attrs.power;
+    projection.toughness = attrs.toughness;
+    match host {
+        TargetRef::Object(host_id) => super::attach::attachment_illegality_projected(
+            state,
+            projection_id,
+            Some(&projection),
+            *host_id,
+        )
+        .is_none(),
+        TargetRef::Player(host_player) => {
+            super::attach::player_attachment_illegality(state, Some(&projection), *host_player)
+                .is_none()
+        }
+    }
+}
+
 /// Digital-only Alchemy (no CR entry): the live host candidates for a
 /// batch-semantics boon's "one of them" token host. `Some` ⟺ the ability
 /// carries a fire-time stamped entrant set (Dunbarrow Revivalist's "one or
@@ -3145,8 +3226,10 @@ pub(crate) fn resolve_token_spec(
 /// `Pronoun` authority); `None` ⟺ existing host resolution applies
 /// unchanged. The set is filtered to incarnation-current battlefield
 /// objects (CR 400.7): an entrant that left (or left and returned) before
-/// resolution is not choosable. Attach legality itself stays `attach`'s
-/// question (the `Bound`-but-illegal CR 303.4i arm).
+/// resolution is not choosable. Candidates must also pass projected attach
+/// legality (CR 303.4c/702.16c — protection-illegal entrants are never
+/// offered, CR 608.2d); the `Bound`-but-illegal CR 303.4i final entry check
+/// remains the backstop.
 fn boon_batch_host_candidates(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -3170,6 +3253,7 @@ fn boon_batch_host_candidates(
                         .is_some_and(|obj| obj.zone == Zone::Battlefield)
             })
             .map(|pin| TargetRef::Object(pin.object_id))
+            .filter(|host| boon_host_passes_projected_legality(state, ability, host))
             .collect(),
     )
 }
@@ -3417,7 +3501,7 @@ fn classify_attach_host_authority(filter: &TargetFilter) -> AttachHostAuthority 
         // slot. It fails closed here until a host authority for the pair exists.
         TargetFilter::SourceOrPaired
         | TargetFilter::None
-        | TargetFilter::GrantingObject
+        | TargetFilter::GrantingObject { .. }
         | TargetFilter::CostPaidObject
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
@@ -4571,23 +4655,38 @@ fn catalog_rules_text_abilities(
     // independently of `parse_oracle_ir`'s single entry point, so it needs its
     // own `normalize_card_name_refs` pass here, mirroring `parse_oracle_ir`'s
     // call in `oracle.rs`.
-    let rules_text = crate::parser::oracle_util::normalize_card_name_refs(rules_text, card_name);
+    let (rules_text, refusals) =
+        crate::parser::oracle_util::normalize_card_name_refs_reporting(rules_text, card_name);
     let mut static_definitions = Vec::new();
     let mut modifications = Vec::new();
     let mut unparsed_lines = Vec::new();
-    for line in rules_text
+    for (index, line) in rules_text
         .split('\n')
         .map(str::trim)
-        .filter(|line| !line.is_empty())
+        .enumerate()
+        .filter(|(_, line)| !line.is_empty())
     {
         let parsed_statics = crate::parser::oracle_static::parse_static_line_multi(line);
+        // CR 201.5a: a granter reference the walk cannot bind, or a granter name the masker
+        // left as the host, would read the wrong object, so its line is refused as unparsed.
+        let unreached = |def: &StaticDefinition| {
+            let node = crate::types::ability_visit::DefinitionNode::Static(def);
+            refusals.contains(&index) || crate::parser::oracle::granter_reference_unreached(node)
+        };
+        let refused =
+            || crate::parser::oracle_util::render_granting_self_reference(line, card_name);
         if parsed_statics.is_empty() {
-            let parsed_modifications = crate::parser::oracle_static::classify_quoted_inner(line);
-            if parsed_modifications.is_empty() {
+            let carrier = StaticDefinition::continuous()
+                .modifications(crate::parser::oracle_static::classify_quoted_inner(line));
+            if carrier.modifications.is_empty() {
                 unparsed_lines.push(line.to_string());
+            } else if unreached(&carrier) {
+                unparsed_lines.push(refused());
             } else {
-                modifications.extend(parsed_modifications);
+                modifications.extend(carrier.modifications);
             }
+        } else if parsed_statics.iter().any(unreached) {
+            unparsed_lines.push(refused());
         } else {
             static_definitions.extend(
                 parsed_statics
@@ -9293,13 +9392,20 @@ mod tests {
             .position(|a| a.cost.as_ref().and_then(sacrifice_target).is_some())
             .expect("host must carry Rock's granted sacrifice-cost ability after evaluate_layers");
 
+        let granted = &runner.state().objects[&host].abilities[idx];
         assert_eq!(
-            runner.state().objects[&host].abilities[idx]
-                .cost
-                .as_ref()
-                .and_then(sacrifice_target),
-            Some(&TargetFilter::SpecificObject { id: rock_id }),
-            "CR 201.5a: the sacrifice cost must target Rock (the granting object), not the host"
+            granted.cost.as_ref().and_then(sacrifice_target),
+            Some(&TargetFilter::GrantingObject {
+                bound: Some(ObjectIncarnationRef::from_object(
+                    &runner.state().objects[&rock_id]
+                ))
+            })
+        );
+        assert_eq!(
+            granted.granting_object,
+            Some(ObjectIncarnationRef::from_object(
+                &runner.state().objects[&rock_id]
+            ))
         );
         assert!(
             !runner.state().objects[&host].abilities[idx]
@@ -9407,7 +9513,7 @@ mod tests {
             matches!(
                 *def.effect,
                 Effect::Sacrifice {
-                    target: TargetFilter::GrantingObject,
+                    target: TargetFilter::GrantingObject { .. },
                     ..
                 }
             )
@@ -9420,7 +9526,7 @@ mod tests {
 
         // NOTE: check the actual `description` fields directly, NOT a
         // `{:?}`-formatted dump of the tree — `Debug` escapes the raw private-use
-        // char to the literal text `\u{e0002}`, so searching a Debug string for
+        // char to the literal text `\u{e0004}`, so searching a Debug string for
         // the real character is always false regardless of whether scrubbing ran.
         let placeholder = crate::parser::oracle_util::GRANTING_SELF_PLACEHOLDER;
         let leaked = static_definitions.iter().any(|def| {
@@ -9464,7 +9570,7 @@ mod tests {
     /// this arm of the corpus property has to live here.
     ///
     /// `serde_json` rather than `format!("{:?}")` is deliberate: `Debug` escapes
-    /// the raw private-use char to the literal text `\u{e0002}`, so a `Debug`
+    /// the raw private-use char to the literal text `\u{e0004}`, so a `Debug`
     /// search for the real character is always false and the guard would be
     /// vacuous. `serde_json` emits it raw, at every depth.
     ///
@@ -9497,6 +9603,87 @@ mod tests {
             json.contains("Sacrifice Rock"),
             "CR 201.5a: the granted body must name the granting token: {json}"
         );
+    }
+
+    /// CR 201.5a: a catalog body naming the token where the masker refuses the name would
+    /// read the equipped creature, so that line is unparsed while the rest still parses.
+    #[test]
+    fn catalog_rules_text_refuses_a_granter_name_left_as_the_host() {
+        let (static_definitions, modifications, unparsed_lines) = catalog_rules_text_abilities(
+            "Equipped creature has \"{T}, Unattach Rock: This creature deals 2 damage to any target.\"\nEquip {1}",
+            "Rock",
+        );
+        assert!(
+            !static_definitions.is_empty() || !modifications.is_empty(),
+            "reach-guard: the Equip line still parses"
+        );
+        assert_eq!(
+            unparsed_lines,
+            vec!["Equipped creature has \"{T}, Unattach ~: ~ deals 2 damage to any target.\""]
+        );
+    }
+
+    /// CR 201.5a: a self-grant whose body names the token where the masker refuses the name
+    /// is unparsed too, since an object that later acquires the ability would read itself.
+    #[test]
+    fn catalog_rules_text_refuses_a_self_granted_granter_name() {
+        let (static_definitions, modifications, unparsed_lines) = catalog_rules_text_abilities(
+            "Rock has \"{T}: Rock deals 1 damage to any target.\"\nEquip {1}",
+            "Rock",
+        );
+        assert!(
+            !static_definitions.is_empty() || !modifications.is_empty(),
+            "reach-guard: the Equip line still parses"
+        );
+        assert_eq!(
+            unparsed_lines,
+            vec!["~ has \"{T}: ~ deals 1 damage to any target.\""]
+        );
+    }
+
+    /// CR 601.2i: a catalog static is cast by nobody, so "the player who cast" it is unparsed.
+    #[test]
+    fn catalog_rules_text_refuses_a_caster_reference() {
+        let (static_definitions, modifications, unparsed_lines) = catalog_rules_text_abilities(
+            "Creatures you control have \"When this creature deals damage to the player who cast Rock, draw a card.\"",
+            "Rock",
+        );
+        assert!(static_definitions.is_empty() && modifications.is_empty());
+        assert_eq!(unparsed_lines.len(), 1, "{unparsed_lines:?}");
+
+        let (static_definitions, _modifications, unparsed_lines) = catalog_rules_text_abilities(
+            "Creatures you control have \"When this creature deals damage to a player, draw a card.\"",
+            "Rock",
+        );
+        assert_eq!(static_definitions.len(), 1);
+        assert!(unparsed_lines.is_empty(), "{unparsed_lines:?}");
+    }
+
+    /// CR 201.5a + CR 115.10a: a catalog static whose granter is read from empty targets is
+    /// unparsed.
+    #[test]
+    fn catalog_rules_text_refuses_a_granter_read_from_empty_targets() {
+        for body in [
+            "{1}: Tap Rock.",
+            "{1}: Put a flying counter and a vigilance counter on Rock.",
+        ] {
+            let (static_definitions, modifications, unparsed_lines) = catalog_rules_text_abilities(
+                &format!("Creatures you control have \"{body}\""),
+                "Rock",
+            );
+            assert!(
+                static_definitions.is_empty() && modifications.is_empty(),
+                "{body}"
+            );
+            assert_eq!(unparsed_lines.len(), 1, "{body}: {unparsed_lines:?}");
+        }
+
+        let (static_definitions, _modifications, unparsed_lines) = catalog_rules_text_abilities(
+            "Creatures you control have \"{1}: Put a flying counter on Rock.\"",
+            "Rock",
+        );
+        assert_eq!(static_definitions.len(), 1);
+        assert!(unparsed_lines.is_empty(), "{unparsed_lines:?}");
     }
 
     /// CR 201.5a — the MEASURED BOUNDARY for this entry point's one un-rendered
@@ -9564,6 +9751,43 @@ mod tests {
              un-rendered `unparsed_lines` axis measurably safe. If this changed, \
              re-measure that axis rather than editing this expectation."
         );
+    }
+
+    /// CR 201.5a: a catalog body naming the token where the walk cannot bind it is refused.
+    #[test]
+    fn catalog_unreached_granter_reference_is_refused_as_unparsed() {
+        let rock = crate::game::token_presets::known_token_presets()
+            .iter()
+            .find(|preset| preset.body.display_name == "Rock")
+            .expect("the Rock preset");
+        let carries_symbol = |payload: &TokenAbilityMaterialization| {
+            serde_json::to_string(&(
+                &payload.static_definitions,
+                &payload.abilities,
+                &payload.trigger_definitions,
+                &payload.modifications,
+            ))
+            .unwrap()
+            .contains("\"type\":\"GrantingObject\"")
+        };
+        let printed = materialize_catalog_token_payload(rock);
+        assert!(printed.unparsed_rules_text_lines.is_empty());
+        assert!(
+            carries_symbol(&printed),
+            "reach-guard: Rock's sacrifice cost keeps its symbol"
+        );
+
+        // A static line, then a line only `classify_quoted_inner` parses.
+        for line in [
+            "Equipped creature has \"{T}: Draw cards equal to the number of +1/+1 counters on Rock.\"",
+            "{T}: Target creature gains \"{T}: Draw cards equal to the number of +1/+1 counters on Rock.\" until end of turn.",
+        ] {
+            let mut drawing = rock.clone();
+            drawing.rules_text = Some(format!("{line}\nEquip {{1}}"));
+            let refused = materialize_catalog_token_payload(&drawing);
+            assert_eq!(refused.unparsed_rules_text_lines, vec![line.to_string()]);
+            assert!(!carries_symbol(&refused), "{line}");
+        }
     }
 
     #[test]

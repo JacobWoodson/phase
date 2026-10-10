@@ -1344,3 +1344,230 @@ fn cross_card_notes_stay_independent() {
     assert_no_dynamic_perpetual(&runner, bear);
     assert!(held_boons(&runner).is_empty());
 }
+
+/// Soldier tokens on the battlefield, sorted by id. Shared by the M3-3
+/// protection/hexproof rows so the cast-then-drive loops index the same
+/// soldiers the tails assert on.
+fn soldier_tokens_on_battlefield(runner: &GameRunner) -> Vec<ObjectId> {
+    let mut soldiers: Vec<ObjectId> = runner
+        .state()
+        .objects
+        .values()
+        .filter(|o| {
+            o.is_token
+                && o.zone == Zone::Battlefield
+                && o.controller == P0
+                && o.card_types.subtypes.iter().any(|s| s == "Soldier")
+        })
+        .map(|o| o.id)
+        .collect();
+    soldiers.sort();
+    soldiers
+}
+
+/// Angelic Intervention, verbatim Oracle text (ONE #2): the M3-3 Giver-side
+/// witness. Its colorless branch makes one entrant attachment-illegal for
+/// the colorless Role token, so the host offer must exclude that entrant.
+const ANGELIC_INTERVENTION: &str = "Target creature or planeswalker you control gains protection from colorless or from the color of your choice until end of turn. If it's a creature, put a +1/+1 counter on it.";
+
+/// Blossoming Defense, verbatim Oracle text (KLD #145): the hexproof
+/// control. Hexproof is NOT one of the exclusion predicates, so its
+/// recipient must stay offered and must be able to receive the Role.
+const BLOSSOMING_DEFENSE: &str =
+    "Target creature you control gets +2/+2 and gains hexproof until end of turn.";
+
+#[test]
+fn dunbarrow_protected_entrant_not_offered_role() {
+    use engine::game::game_object::AttachTarget;
+    use engine::types::counter::CounterType;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let dunbarrow = scenario
+        .add_creature_to_hand_from_oracle(P0, "Dunbarrow Revivalist", 3, 3, DUNBARROW)
+        .id();
+    let alarm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Raise Alarm", false, RAISE_ALARM)
+        .id();
+    let angelic = scenario
+        .add_spell_to_hand_from_oracle(P0, "Angelic Intervention", true, ANGELIC_INTERVENTION)
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(dunbarrow).resolve();
+    drain_stack(&mut runner);
+    assert_eq!(held_boons(&runner), vec![P0]);
+
+    runner.cast(alarm).commit();
+    let mut angeliced = false;
+    for _ in 0..400 {
+        match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                let soldiers = soldier_tokens_on_battlefield(&runner);
+                if !angeliced && soldiers.len() == 2 {
+                    // The boon trigger is stacked (the stack is non-empty in
+                    // this arm). Protect the first soldier before it resolves.
+                    runner.cast(angelic).target_object(soldiers[0]).commit();
+                    angeliced = true;
+                } else {
+                    runner.pass_both_players();
+                }
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let order: Vec<usize> = (0..triggers.len()).collect();
+                runner
+                    .act(GameAction::OrderTriggers { order })
+                    .expect("order triggers");
+            }
+            WaitingFor::ChooseOneOfBranch {
+                player, branches, ..
+            } => {
+                assert_eq!(*player, P0, "the spell's controller makes the choice");
+                assert_eq!(branches.len(), 2, "colorless-or-color is two branches");
+                let index = branches
+                    .iter()
+                    .position(|b| {
+                        b.description
+                            .as_deref()
+                            .is_some_and(|d| d.to_lowercase().contains("colorless"))
+                    })
+                    .expect("a protection-from-colorless branch must exist");
+                runner
+                    .act(GameAction::ChooseBranch { index })
+                    .expect("choose colorless");
+            }
+            WaitingFor::ChooseTokenHost { legal_targets, .. } => {
+                panic!(
+                    "M3-3: only one legal host remains, so no host choice may appear: {legal_targets:?}"
+                );
+            }
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    assert!(angeliced, "Angelic Intervention must have been cast");
+    drain_stack(&mut runner);
+
+    let mut soldiers = soldier_tokens_on_battlefield(&runner);
+    soldiers.sort();
+    assert_eq!(soldiers.len(), 2);
+    // Guard: the +1/+1 counter proves Angelic resolved targeting the first
+    // soldier. The protection leg has no other board-observable mark; the
+    // exclusion below is its behavioral proof (a mis-answered branch would
+    // leave two legal hosts and trip the ChooseTokenHost panic arm).
+    assert_eq!(
+        runner.state().objects[&soldiers[0]]
+            .counters
+            .get(&CounterType::Plus1Plus1),
+        Some(&1),
+        "Angelic must have resolved on the protected soldier"
+    );
+    // One Role, auto-bound to the UNPROTECTED entrant with no prompt.
+    let roles = role_tokens(&runner);
+    assert_eq!(roles.len(), 1, "one Role must be created");
+    let role = &runner.state().objects[&roles[0]];
+    assert_eq!(
+        role.attached_to,
+        Some(AttachTarget::Object(soldiers[1])),
+        "the Role must attach to the unprotected entrant"
+    );
+    assert!(held_boons(&runner).is_empty());
+}
+
+#[test]
+fn dunbarrow_hexproof_entrant_still_offered_role() {
+    use engine::game::game_object::AttachTarget;
+    use engine::game::layers::evaluate_layers;
+    use engine::types::ability::TargetRef;
+    use engine::types::keywords::Keyword;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let dunbarrow = scenario
+        .add_creature_to_hand_from_oracle(P0, "Dunbarrow Revivalist", 3, 3, DUNBARROW)
+        .id();
+    let alarm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Raise Alarm", false, RAISE_ALARM)
+        .id();
+    let blossoming = scenario
+        .add_spell_to_hand_from_oracle(P0, "Blossoming Defense", true, BLOSSOMING_DEFENSE)
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(dunbarrow).resolve();
+    drain_stack(&mut runner);
+    assert_eq!(held_boons(&runner), vec![P0]);
+
+    runner.cast(alarm).commit();
+    let mut defended = false;
+    let mut answered = false;
+    for _ in 0..400 {
+        match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                let soldiers = soldier_tokens_on_battlefield(&runner);
+                if !defended && soldiers.len() == 2 {
+                    runner.cast(blossoming).target_object(soldiers[1]).commit();
+                    defended = true;
+                } else {
+                    runner.pass_both_players();
+                }
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let order: Vec<usize> = (0..triggers.len()).collect();
+                runner
+                    .act(GameAction::OrderTriggers { order })
+                    .expect("order triggers");
+            }
+            WaitingFor::ChooseTokenHost { legal_targets, .. } => {
+                assert_eq!(
+                    legal_targets.len(),
+                    2,
+                    "hexproof must not exclude the entrant, got {legal_targets:?}"
+                );
+                // Choose deterministically: the HEXPROOF soldier (greater id).
+                let mut soldiers: Vec<ObjectId> = legal_targets
+                    .iter()
+                    .filter_map(|t| match t {
+                        TargetRef::Object(id) => Some(*id),
+                        _ => None,
+                    })
+                    .collect();
+                soldiers.sort();
+                let chosen = soldiers[1];
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(chosen)),
+                    })
+                    .expect("choose host");
+                answered = true;
+            }
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    assert!(defended, "Blossoming Defense must have been cast");
+    assert!(answered, "the host choice must have been offered");
+    drain_stack(&mut runner);
+
+    let mut soldiers = soldier_tokens_on_battlefield(&runner);
+    soldiers.sort();
+    assert_eq!(soldiers.len(), 2);
+    // Guard: hexproof is really present on the chosen entrant — otherwise
+    // the "still offered" assertion below would pass vacuously.
+    evaluate_layers(runner.state_mut());
+    assert!(
+        runner.state().objects[&soldiers[1]].has_keyword(&Keyword::Hexproof),
+        "Blossoming must have granted hexproof to the chosen entrant"
+    );
+    // The Role attaches to the hexproof entrant: hexproof neither excludes
+    // the offer nor blocks the attachment.
+    let roles = role_tokens(&runner);
+    assert_eq!(roles.len(), 1, "one Role must be created");
+    let role = &runner.state().objects[&roles[0]];
+    assert_eq!(
+        role.attached_to,
+        Some(AttachTarget::Object(soldiers[1])),
+        "the Role must attach to the chosen hexproof entrant"
+    );
+    assert!(held_boons(&runner).is_empty());
+}
