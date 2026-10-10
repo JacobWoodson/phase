@@ -430,6 +430,12 @@ fn static_condition_to_restriction_condition(
         // it is evaluated via `layers::evaluate_condition` on the self-spell cost
         // path, so lowering here returns `None`.
         | StaticCondition::AnyPlayerAttackedYouLastTurn
+        // CR 508.6: retrospective this-turn player-pair attack test -- a
+        // delayed-resolution predicate, not a cast/activation restriction,
+        // and with no `ParsedCondition` counterpart (same vocabulary
+        // asymmetry as `AnyPlayerAttackedYouLastTurn` above). Lowering
+        // returns `None`.
+        | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::CastingAsVariant { .. } => None,
     }
 }

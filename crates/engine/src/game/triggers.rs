@@ -11347,6 +11347,11 @@ fn gate_binding_diverges_at_fire_time(condition: &AbilityCondition) -> bool {
         // CR 115.10: the per-iteration player of the RESOLVING ability, which the
         // fire-time context derives from the matched event instead.
         | AbilityCondition::ScopedPlayerMatches { .. }
+        // CR 115.1 + CR 608.2c: reads the resolving ability's declared
+        // targets via a `Target` endpoint (the stamped chosen player);
+        // empty at fire time -- same resolution-scoped class as
+        // `ScopedPlayerMatches` above.
+        | AbilityCondition::PlayerAttackedPlayer { .. }
         // CR 615.5: the post-replacement window, populated only while a
         // prevention replacement is being applied.
         | AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }

@@ -3038,6 +3038,18 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes {
             acc = acc.or(scan_controller_ref(controller));
             acc
         }
+        // Turn-structure ledger read (projected, cf. the static last-turn
+        // analog) plus the endpoint axes (`WasStartingPlayer` pattern).
+        AbilityCondition::PlayerAttackedPlayer { attacker, defender } => {
+            let mut acc = Axes {
+                event: false,
+                sibling: false,
+                projected: true,
+            };
+            acc = acc.or(scan_player_scope(attacker));
+            acc = acc.or(scan_player_scope(defender));
+            acc
+        }
         AbilityCondition::SpellCastWithVariantThisTurn { variant: _ } => Axes {
             event: false,
             sibling: false,
@@ -4232,6 +4244,18 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes {
             sibling: false,
             projected: true,
         },
+        // Turn-structure ledger read (same class as the last-turn analog
+        // above) plus the endpoint axes (WasStartingPlayer pattern).
+        StaticCondition::PlayerAttackedPlayer { attacker, defender } => {
+            let mut acc = Axes {
+                event: false,
+                sibling: false,
+                projected: true,
+            };
+            acc = acc.or(scan_controller_ref(attacker));
+            acc = acc.or(scan_controller_ref(defender));
+            acc
+        }
         StaticCondition::OpponentPoisonAtLeast { count: _ } => Axes {
             event: false,
             sibling: false,

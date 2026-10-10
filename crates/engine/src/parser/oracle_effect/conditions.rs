@@ -4874,6 +4874,48 @@ pub(crate) fn static_condition_to_ability_condition(
                 controller: controller.clone(),
             })
         }
+        // CR 508.6 + CR 608.2c: player-pair attack tests bridge
+        // endpoint-wise. Each endpoint maps only where meaning is
+        // preserved exactly: `You` reads the resolution controller;
+        // declared-target and chosen endpoints read the first
+        // `TargetRef::Player` (the V1 creation-time stamp carries the
+        // chosen player); `SpecificPlayer`, `SourceChosenPlayer`,
+        // `DefendingPlayer`, and `ScopedPlayer` are scalar-identical on
+        // both axes. Aggregates (`Opponent`), event- and parent-relative
+        // anchors, and `ActivePlayer`/`TriggeringPlayer`/`EnchantedPlayer`
+        // have no scalar counterpart -- lowering them would silently
+        // rebind (cf. `IsMonarch` below), so the whole condition stays
+        // unrepresented and coverage stays honest.
+        StaticCondition::PlayerAttackedPlayer { attacker, defender } => {
+            fn endpoint(scope: &ControllerRef) -> Option<PlayerScope> {
+                match scope {
+                    ControllerRef::You => Some(PlayerScope::Controller),
+                    ControllerRef::TargetPlayer
+                    | ControllerRef::TargetOpponent
+                    | ControllerRef::ChosenPlayer { .. } => Some(PlayerScope::Target),
+                    ControllerRef::SpecificPlayer { id } => {
+                        Some(PlayerScope::SpecificPlayer { id: *id })
+                    }
+                    ControllerRef::SourceChosenPlayer => {
+                        Some(PlayerScope::SourceChosenPlayer)
+                    }
+                    ControllerRef::DefendingPlayer => {
+                        Some(PlayerScope::DefendingPlayer)
+                    }
+                    ControllerRef::ScopedPlayer => Some(PlayerScope::ScopedPlayer),
+                    _ => None,
+                }
+            }
+            match (endpoint(attacker), endpoint(defender)) {
+                (Some(attacker), Some(defender)) => {
+                    Some(AbilityCondition::PlayerAttackedPlayer {
+                        attacker,
+                        defender,
+                    })
+                }
+                _ => None,
+            }
+        }
         // CR 702.185c: "a spell was warped this turn" — 1:1 bridge (same `variant`).
         StaticCondition::SpellCastWithVariantThisTurn { variant } => {
             Some(AbilityCondition::SpellCastWithVariantThisTurn {
@@ -5326,6 +5368,9 @@ pub(crate) fn ability_condition_to_static_condition(
         | AbilityCondition::CostPaidObjectMatchesFilter { .. }
         | AbilityCondition::ConditionInstead { .. }
         | AbilityCondition::AbilityUseCountThisTurn { .. }
+        // CR 508.6: retrospective player-pair test reads resolved targets;
+        // a resolution-flow guard with no continuous-effect form.
+        | AbilityCondition::PlayerAttackedPlayer { .. }
         | AbilityCondition::ScopedPlayerMatches { .. } => None,
         AbilityCondition::DiscardedCardMatchesFilter { .. } => None,
 

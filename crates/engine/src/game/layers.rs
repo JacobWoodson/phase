@@ -1588,6 +1588,7 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::SourceIsFaceUp
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
+            | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::None => false,
     }
 }
@@ -1731,6 +1732,7 @@ fn static_condition_characteristic_reads_at(
         | StaticCondition::EnchantedIsFaceDown
         | StaticCondition::SourceIsFaceUp
         | StaticCondition::AdditionalCostPaid
+        | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::None => CharacteristicKinds::EMPTY,
     }
@@ -1869,6 +1871,7 @@ fn entered_object_perturbs_static_condition(
         // battlefield-population-dependent and unperturbed by a battlefield
         // entry — `false` exactly like `SourceIsTapped`.
         | StaticCondition::SourceIsFaceUp
+            | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::None => false,
@@ -2075,6 +2078,36 @@ fn evaluate_condition_with_context(
         // completed turn. Existential; the defender is the controller, so a player
         // who attacked someone else — or the controller's own attacks — do not
         // satisfy it.
+        // CR 508.6: retrospective this-turn player-pair attack test.
+        // Endpoints resolve through the shared `controller_ref_player`
+        // authority (`You` reads the layer controller; choice- and
+        // target-relative endpoints need ability context that layer
+        // evaluation lacks and fail closed). Unreachable from the current
+        // static grammar -- the sole producer lowers via
+        // `static_condition_to_ability_condition` -- so this arm is a
+        // totality witness over the same uncollapsed ledger the
+        // resolution-time reader uses (Faramir ruling 2023-06-16).
+        StaticCondition::PlayerAttackedPlayer { attacker, defender } => {
+            let attacker_id = crate::game::filter::controller_ref_player(
+                state,
+                source_id,
+                Some(controller),
+                None,
+                attacker,
+            );
+            let defender_id = crate::game::filter::controller_ref_player(
+                state,
+                source_id,
+                Some(controller),
+                None,
+                defender,
+            );
+            attacker_id
+                .zip(defender_id)
+                .is_some_and(|(attacker_id, defender_id)| {
+                    state.has_attacked_player_directly_this_turn(attacker_id, defender_id)
+                })
+        }
         StaticCondition::AnyPlayerAttackedYouLastTurn => state.players.iter().any(|p| {
             p.id != controller && state.player_attacked_player_last_turn(p.id, controller)
         }),
@@ -4230,6 +4263,7 @@ fn static_condition_reads_life(condition: &StaticCondition) -> bool {
         | StaticCondition::HasEnduringStory
         | StaticCondition::CompletedADungeon
         | StaticCondition::WasStartingPlayer { .. }
+        | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
         | StaticCondition::AnyPlayerAttackedYouLastTurn
         | StaticCondition::OpponentPoisonAtLeast { .. }
