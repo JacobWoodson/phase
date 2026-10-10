@@ -19036,6 +19036,23 @@ declare_game_state! {
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_map_of_hash_set")]
     pub attacked_defenders_this_turn: HashMap<PlayerId, HashSet<PlayerId>>,
+    /// CR 508.6: For each attacking player, the set of players they attacked
+    /// DIRECTLY this turn — `AttackTarget::Player(p)` declarations only, with
+    /// NO CR 508.5 defending-player collapse. A planeswalker/battle attack
+    /// records nothing here (its target is not a player), so this ledger
+    /// answers retrospective "attacked you" predicates exactly as the
+    /// Faramir, Prince of Ithilien ruling (2023-06-16) requires:
+    /// "Attacking a planeswalker you control or battle you're protecting
+    /// doesn't count as attacking you." The sibling
+    /// `attacked_defenders_this_turn` keeps serving defending-player and
+    /// explicit-disjunct consumers (Sandswirl Wanderglyph's "or a
+    /// planeswalker you control" relies on the collapse). Recorded in
+    /// `combat::commit_attack_declaration`, cleared at turn reset beside the
+    /// sibling. PlayerId-keyed, so removal-proof by construction — same
+    /// argument as the collapsed ledger.
+    #[serde(default)]
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_map_of_hash_set")]
+    pub attacked_players_directly_this_turn: HashMap<PlayerId, HashSet<PlayerId>>,
     /// CR 508.6 + CR 514.2: For each player, the defending players they declared
     /// attackers against during that player's MOST RECENT completed turn.
     /// Snapshotted from `attacked_defenders_this_turn` at cleanup
@@ -24294,8 +24311,29 @@ impl GameState {
 
     /// CR 508.6: True if `attacker` declared one or more creatures attacking
     /// `defender` this turn (reads the per-turn attacked-defenders ledger).
+    /// SCOPE GUARD: this is the CR 508.5-COLLAPSED read (planeswalker/battle
+    /// attacks resolve to the defending player) — correct only for
+    /// defending-player and explicit-disjunct consumers. Retrospective
+    /// "attacked you" predicates without such a disjunct (Faramir) must use
+    /// `has_attacked_player_directly_this_turn` instead.
     pub fn has_attacked(&self, attacker: PlayerId, defender: PlayerId) -> bool {
         self.attacked_defenders_this_turn
+            .get(&attacker)
+            .is_some_and(|defenders| defenders.contains(&defender))
+    }
+
+    /// CR 508.6 + Faramir ruling 2023-06-16: True if `attacker` declared one
+    /// or more creatures attacking `defender` DIRECTLY this turn — the
+    /// `AttackTarget` was the player, not a planeswalker they control or a
+    /// battle they protect (those record nothing in
+    /// `attacked_players_directly_this_turn`). Backs
+    /// `AbilityCondition::PlayerAttackedPlayer`.
+    pub fn has_attacked_player_directly_this_turn(
+        &self,
+        attacker: PlayerId,
+        defender: PlayerId,
+    ) -> bool {
+        self.attacked_players_directly_this_turn
             .get(&attacker)
             .is_some_and(|defenders| defenders.contains(&defender))
     }
@@ -24582,6 +24620,7 @@ impl GameState {
             players_attacked_this_turn: HashSet::new(),
             attacking_creatures_this_turn: HashMap::new(),
             attacked_defenders_this_turn: HashMap::new(),
+            attacked_players_directly_this_turn: HashMap::new(),
             attacked_defenders_last_turn: Box::default(),
             creature_attacked_defenders_this_turn: HashMap::new(),
             combat_phases_started_this_turn: 0,
@@ -26809,6 +26848,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         players_attacked_this_turn: _,
         attacking_creatures_this_turn: _,
         attacked_defenders_this_turn: _,
+        attacked_players_directly_this_turn: _,
         attacked_defenders_last_turn: _,
         creature_attacked_defenders_this_turn: _,
         combat_phases_started_this_turn: _,
