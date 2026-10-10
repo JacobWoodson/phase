@@ -215,6 +215,13 @@ pub fn resolve(
     // because compile-time AST has no access to runtime player ids; `binding`
     // says which live player to rewrite it to. Mirrors the
     // `bind_contextual_filter_to_condition` pattern above.
+    //
+    // CR 603.7a + CR 608.2c: `chosen_player_stamp` carries the resolved
+    // `ChosenPlayer` id past this block so it can be stamped onto the built
+    // `delayed_ability.targets` below (`delayed_ability` is built fresh via
+    // `build_resolved_from_def`, so `chosen_players` does NOT survive
+    // creation→fire but `targets` does).
+    let mut chosen_player_stamp: Option<crate::types::player::PlayerId> = None;
     if let DelayedTriggerCondition::AtNextPhaseForPlayer {
         player,
         gate,
@@ -240,6 +247,28 @@ pub fn resolve(
                     TargetRef::Player(_) => None,
                 })
                 .unwrap_or(ability.controller),
+            // CR 603.7a + CR 608.2c: resolve "that player" from the Nth
+            // `Effect::Choose { Opponent }` answer recorded in the resolving
+            // ability's `chosen_players` (Faramir's "choose an opponent …
+            // at the beginning of that player's next end step"). FAIL-CLOSED:
+            // a missing index (malformed chain, no choice made) skips
+            // creation entirely — never a controller fallback, which would
+            // fire the delayed body on the wrong player's turn.
+            crate::types::ability::DelayedTriggerPlayerBinding::ChosenPlayer { index } => {
+                match ability.chosen_players.get(*index as usize) {
+                    Some(chosen) => {
+                        chosen_player_stamp = Some(*chosen);
+                        *chosen
+                    }
+                    None => {
+                        debug_assert!(
+                            false,
+                            "ChosenPlayer binding index {index} has no chosen player; skipping delayed trigger creation"
+                        );
+                        return Ok(());
+                    }
+                }
+            }
         };
         // CR 513.2 + CR 603.7a: the "on your next turn" floor only becomes
         // concrete at creation. Stamp the symbolic parse-time gate to the actual
@@ -271,6 +300,16 @@ pub fn resolve(
         delayed_source_id,
         ability.controller,
     );
+
+    // CR 603.7a + CR 608.2c: carry the `ChosenPlayer`-resolved id into the
+    // fired body as its first player target, so `PlayerScope::Target` (and
+    // `AbilityCondition::PlayerAttackedPlayer { attacker: Target, .. }`)
+    // reads the chosen player at fire time. Scoped to the `ChosenPlayer`
+    // binding only — `Controller`/`ParentTargetOwner` bodies keep their
+    // existing target shapes untouched.
+    if let Some(chosen) = chosen_player_stamp {
+        delayed_ability.targets.push(TargetRef::Player(chosen));
+    }
 
     // CR 603.7: Bind the most recent tracked set to the built ability chain's
     // effect target filter, resolving sentinel TrackedSetId(0) or

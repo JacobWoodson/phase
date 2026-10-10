@@ -4253,7 +4253,8 @@ fn condition_reads_filter_population(
         | AbilityCondition::DayNightIsNeither
         | AbilityCondition::DayNightIs { .. }
         | AbilityCondition::AbilityUseCountThisTurn { .. }
-        | AbilityCondition::SourceLacksKeyword { .. } => false,
+        | AbilityCondition::SourceLacksKeyword { .. }
+        | AbilityCondition::PlayerAttackedPlayer { .. } => false,
     }
 }
 
@@ -4732,6 +4733,10 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::AbilityUseCountThisTurn { .. }
             | AbilityCondition::SourceLacksKeyword { .. }
             | AbilityCondition::ScopedPlayerMatches { .. }
+            // CR 508.6: a live game-state gate, not a decline-alternative
+            // selector — declining the optional effect does not pick an
+            // "attacked you" branch.
+            | AbilityCondition::PlayerAttackedPlayer { .. }
             | AbilityCondition::EffectOutcome {
                 signal:
                     EffectOutcomeSignal::CurrentScopeSucceeded
@@ -17432,6 +17437,53 @@ pub(crate) fn evaluate_condition(
         AbilityCondition::ScopedPlayerMatches { filter } => {
             let candidate = ability.scoped_player.unwrap_or(ability.controller);
             scoped_player_matches_filter(state, ability, candidate, filter)
+        }
+        // CR 508.6 + CR 608.2c: retrospective this-turn player-pair attack
+        // test ("if they didn't attack you that turn" — Faramir, Prince of
+        // Ithilien, wrapped in `Not`). Both endpoints resolve via the widened
+        // `resolve_single_player_scope` (`Target` = first `TargetRef::Player`
+        // in `ability.targets` — the stamped chosen player); the printed
+        // controller anchors `original_controller` fallback exactly like the
+        // quantity path. An unresolvable scope fails closed to `false`
+        // (duration-timing-only `AnyTurn`/`SpecificPlayer` are rejected
+        // before the scope resolver's `unreachable!()`); card-level `Not`
+        // composes above it. Reads the UNCOLLAPSED direct-attack ledger
+        // (Faramir ruling 2023-06-16), never the collapsed `has_attacked`.
+        AbilityCondition::PlayerAttackedPlayer { attacker, defender } => {
+            if attacker.duration_timing_only() || defender.duration_timing_only() {
+                return false;
+            }
+            let controller = ability.original_controller.unwrap_or(ability.controller);
+            let ctx = crate::game::quantity::QuantityContext {
+                entering: None,
+                source: ability.source_id,
+                trigger_source: ability.trigger_source.clone(),
+                recipient: None,
+                scoped_player: ability.scoped_player,
+                damage_source: None,
+                event_amount: None,
+            };
+            let (Some(attacker_id), Some(defender_id)) = (
+                crate::game::quantity::resolve_single_player_scope(
+                    state,
+                    attacker,
+                    controller,
+                    ctx.clone(),
+                    &ability.targets,
+                    Some(ability),
+                ),
+                crate::game::quantity::resolve_single_player_scope(
+                    state,
+                    defender,
+                    controller,
+                    ctx,
+                    &ability.targets,
+                    Some(ability),
+                ),
+            ) else {
+                return false;
+            };
+            state.has_attacked_player_directly_this_turn(attacker_id, defender_id)
         }
     }
 }

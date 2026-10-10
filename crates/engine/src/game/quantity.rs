@@ -2300,6 +2300,7 @@ pub(crate) fn static_condition_uses_unspent_mana(condition: &StaticCondition) ->
         | StaticCondition::SourceIsFaceUp
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
+        | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::None => false,
     }
 }
@@ -8033,7 +8034,7 @@ fn resolve_object_mana_value(
 /// `PlayerId`, when one exists. Aggregate scopes (`Opponent`, `AllPlayers`)
 /// have no single-player interpretation and yield `None`. Used to resolve the
 /// `exclude` anchor of `PlayerScope::AllPlayers { exclude }`.
-fn resolve_single_player_scope(
+pub(crate) fn resolve_single_player_scope(
     state: &GameState,
     scope: &PlayerScope,
     controller: PlayerId,
