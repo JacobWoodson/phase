@@ -6052,9 +6052,15 @@ fn card_type_set_leaf_counts_population_matching(
         // of populations. (It cited CR 109.2, the battlefield-default rule for a
         // bare type description.)
         CardTypeSetSource::AnyOf { .. } => false,
-        CardTypeSetSource::Zone { .. }
-        | CardTypeSetSource::ExiledBySource
-        | CardTypeSetSource::TrackedSet { .. } => false,
+        CardTypeSetSource::TrackedSet { filter, .. } => filter.as_ref().is_some_and(filter_pred),
+        // CR 608.2c + CR 115.1: the predicate runs against the canonical slot
+        // filter via the single `targeted_objects_filter` authority — a
+        // targeted-objects population matches exactly when its slot filter
+        // does, never a hardcoded constant.
+        CardTypeSetSource::Zone { .. } | CardTypeSetSource::ExiledBySource => false,
+        CardTypeSetSource::TargetedObjects { slot } => {
+            filter_pred(&crate::types::ability::CardTypeSetSource::targeted_objects_filter(slot))
+        }
     }
 }
 

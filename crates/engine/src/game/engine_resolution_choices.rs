@@ -2255,6 +2255,9 @@ pub(super) fn handle_resolution_choice(
                 pending,
                 ignore_indices,
                 events,
+                // Suspension-resume paths have no ability in scope; the
+                // modifier keeps its established ability-blind read here.
+                None,
             )
             .map_err(|error| EngineError::InvalidAction(format!("{error}")))?;
             // CR 608.2c: re-suspended for another interactive choice, else the
