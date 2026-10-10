@@ -14378,6 +14378,26 @@ fn apply_non_priority_pass_action(
                 }
                 TargetRef::Player(id) => super::game_object::AttachTarget::Player(*id),
             };
+            // CR 400.7 (F2): the stamped incarnation pin must still be
+            // current. At the sandbox/debug boundary an offered object can
+            // leave and return during the prompt with the same stored
+            // ObjectId and a new incarnation — a new object that must not
+            // receive the Role. The pin lives in the pending ability's
+            // stamped batch (the single stamp authority); absence of a pin
+            // means a non-boon prompt, which skips this check.
+            if let TargetRef::Object(id) = &chosen {
+                let stale = pending_ability
+                    .context
+                    .boon_trigger_batch_objects
+                    .iter()
+                    .find(|pin| pin.object_id == *id)
+                    .is_some_and(|pin| !pin.is_current(state));
+                if stale {
+                    return Err(EngineError::InvalidAction(
+                        "ChooseTokenHost: chosen host is no longer the stamped object".to_string(),
+                    ));
+                }
+            }
             // CR 303.4c + CR 608.2d: re-verify projected attach legality at
             // accept time — a protection grant could have landed between the
             // offer snapshot and this answer (only prompt answers interleave,

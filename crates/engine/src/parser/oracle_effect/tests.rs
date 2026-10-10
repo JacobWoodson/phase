@@ -81205,19 +81205,36 @@ fn collect_test_tree<'a>(
     }
 }
 
+/// Root walk shared by every whole-tree boon collector: abilities, triggers,
+/// AND replacements (a grant or gap hiding in a replacement body is still in
+/// the tree). `descend_boon` keeps the outer/inner split — grant/phantom
+/// collectors pass `true`, `outer_gap_names` passes `false`.
+fn collect_parsed_roots<'a>(
+    parsed: &'a ParsedAbilities,
+    descend_boon: bool,
+    out: &mut Vec<&'a AbilityDefinition>,
+) {
+    for ability in &parsed.abilities {
+        collect_test_tree(ability, descend_boon, out);
+    }
+    for trigger in &parsed.triggers {
+        if let Some(execute) = trigger.execute.as_deref() {
+            collect_test_tree(execute, descend_boon, out);
+        }
+    }
+    for replacement in &parsed.replacements {
+        if let Some(execute) = replacement.execute.as_deref() {
+            collect_test_tree(execute, descend_boon, out);
+        }
+    }
+}
+
 /// Every `CreateBoon` grant anywhere in the parsed abilities/triggers,
 /// descending through modal branches (Bloodrage Alpha's grant is a
 /// choose-one branch, not a chain node).
 fn boon_grants(parsed: &ParsedAbilities) -> Vec<(&TargetFilter, &TriggerDefinition)> {
     let mut defs = Vec::new();
-    for ability in &parsed.abilities {
-        collect_test_tree(ability, true, &mut defs);
-    }
-    for trigger in &parsed.triggers {
-        if let Some(execute) = trigger.execute.as_deref() {
-            collect_test_tree(execute, true, &mut defs);
-        }
-    }
+    collect_parsed_roots(parsed, true, &mut defs);
     defs.into_iter()
         .filter_map(|def| match def.effect.as_ref() {
             Effect::CreateBoon { recipient, trigger } => Some((recipient, trigger.as_ref())),
@@ -81231,19 +81248,7 @@ fn boon_grants(parsed: &ParsedAbilities) -> Vec<(&TargetFilter, &TriggerDefiniti
 /// with an additional +1/+1\"") instead of a real counter.
 fn prose_counter_phantoms(parsed: &ParsedAbilities) -> Vec<String> {
     let mut defs = Vec::new();
-    for ability in &parsed.abilities {
-        collect_test_tree(ability, true, &mut defs);
-    }
-    for trigger in &parsed.triggers {
-        if let Some(execute) = trigger.execute.as_deref() {
-            collect_test_tree(execute, true, &mut defs);
-        }
-    }
-    for replacement in &parsed.replacements {
-        if let Some(execute) = replacement.execute.as_ref() {
-            collect_test_tree(execute, true, &mut defs);
-        }
-    }
+    collect_parsed_roots(parsed, true, &mut defs);
     defs.into_iter()
         .filter_map(|def| match def.effect.as_ref() {
             Effect::PutCounter {
@@ -81275,14 +81280,7 @@ fn inner_gap_names(inner: &TriggerDefinition) -> Vec<String> {
 /// Never descends into `CreateBoon` inners — those are `inner_gap_names`' job.
 fn outer_gap_names(parsed: &ParsedAbilities) -> Vec<String> {
     let mut defs = Vec::new();
-    for ability in &parsed.abilities {
-        collect_test_tree(ability, false, &mut defs);
-    }
-    for trigger in &parsed.triggers {
-        if let Some(execute) = trigger.execute.as_deref() {
-            collect_test_tree(execute, false, &mut defs);
-        }
-    }
+    collect_parsed_roots(parsed, false, &mut defs);
     defs.into_iter()
         .filter_map(|def| unimplemented_name(def).map(str::to_string))
         .collect()
@@ -82244,6 +82242,26 @@ fn boon_underbridge_warlock() {
         inner.condition.is_some(),
         "the boon inner keeps its intervening-if: {parsed:#?}"
     );
+    // F3: the scoped body the AI classifier reads — targetless loss under
+    // opponent scope, chained to a holder gain. Harm to the holder's enemies
+    // is a benefit to hold; the continuation forces a Contextual direction.
+    let body = inner.execute.as_deref().expect("grant body");
+    let Effect::LoseLife { target, amount } = body.effect.as_ref() else {
+        panic!("expected a life-loss root, got {:?}", body.effect);
+    };
+    assert_eq!(target, &None, "the loss names no target: {parsed:#?}");
+    assert_eq!(amount, &QuantityExpr::Fixed { value: 5 });
+    assert_eq!(
+        body.player_scope,
+        Some(PlayerFilter::Opponent),
+        "the loss iterates over each opponent: {parsed:#?}"
+    );
+    let sub = body.sub_ability.as_deref().expect("gain continuation");
+    let Effect::GainLife { player, amount } = sub.effect.as_ref() else {
+        panic!("expected a life-gain continuation, got {:?}", sub.effect);
+    };
+    assert_eq!(player, &TargetFilter::Controller);
+    assert_eq!(amount, &QuantityExpr::Fixed { value: 5 });
     let has_boon = parsed.triggers.iter().find(|trigger| {
         matches!(
             trigger.condition,

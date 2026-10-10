@@ -2,7 +2,7 @@ use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::game_object::GameObject;
 use engine::game::quantity::try_resolve_quantity_in_source_context;
 use engine::types::ability::{
-    AbilityKind, ContinuousModification, ControllerRef, Effect, EffectScope,
+    AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Effect, EffectScope,
     PerpetualGrantModification, PerpetualModification, PlayerFilter, PtValue, QuantityExpr,
     ResolvedAbility, SubAbilityLink, TapStateChange, TargetChoiceTiming, TargetFilter, TargetRef,
     TriggerDefinition, TypeFilter,
@@ -1723,10 +1723,10 @@ fn boon_granted_trigger_polarity(trigger: &TriggerDefinition) -> EffectPolarity 
         return replacement
             .execute
             .as_deref()
-            .map(|body| boon_body_polarity_for_holder(&body.effect))
+            .map(boon_executable_polarity_for_holder)
             .unwrap_or(EffectPolarity::Contextual);
     }
-    boon_body_polarity_for_holder(&exec.effect)
+    boon_executable_polarity_for_holder(exec)
 }
 
 fn granted_trigger_polarity(trigger: &TriggerDefinition) -> EffectPolarity {
@@ -1771,17 +1771,29 @@ enum BoonTargetSide {
 /// is a benefit to hold, a debuff on the holder's own creatures a harm.
 /// Without the flip, "target opponent loses 3 life" would read Harmful and the
 /// recipient routing would aim the weapon-grant AT the opponent.
-fn boon_body_polarity_for_holder(effect: &Effect) -> EffectPolarity {
+///
+/// Classified at the EXECUTABLE level, not the bare effect: the executable
+/// carries the `player_scope` a targetless verb inherits ("each opponent
+/// loses 5 life" harms the holder's enemies, not the holder) and the
+/// `sub_ability` / `else_ability` continuations a single-effect reading
+/// cannot see. A chained or conditional body fails closed to Contextual —
+/// the continuation's direction is uninspected — while simple scoped and
+/// unscoped bodies keep their directed readings.
+fn boon_executable_polarity_for_holder(exec: &AbilityDefinition) -> EffectPolarity {
+    if exec.sub_ability.is_some() || exec.else_ability.is_some() {
+        return EffectPolarity::Contextual;
+    }
+    let effect = exec.effect.as_ref();
     // Perpetual bodies carry no global polarity (`ApplyPerpetual` is
     // Contextual by default — the modified card's owner varies), so the boon
     // path reads the modification's own direction instead of `effect_polarity`.
     if let Effect::ApplyPerpetual { modification, .. } = effect {
         return holder_relative_polarity(
             perpetual_modification_direction(modification),
-            boon_inner_target_side(effect),
+            boon_inner_target_side(exec),
         );
     }
-    holder_relative_polarity(effect_polarity(effect), boon_inner_target_side(effect))
+    holder_relative_polarity(effect_polarity(effect), boon_inner_target_side(exec))
 }
 
 /// Re-base a target-relative reading into the boon holder's frame.
@@ -1805,13 +1817,32 @@ fn holder_relative_polarity(
 
 /// Side of a granted body's primary target via the engine's own slot accessor:
 /// `target_filter()` already resolves the Token / CopyTokenOf / ApplyPerpetual
-/// axes, and `None` is an untargeted verb (or the perpetual self-subject
-/// `Any`), which CR 608.2c defaults to the resolving controller — the holder
-/// once the install re-stamp lands.
-fn boon_inner_target_side(effect: &Effect) -> BoonTargetSide {
-    match effect.target_filter() {
-        None => BoonTargetSide::Holder,
-        Some(filter) => boon_filter_side(filter),
+/// axes. Precedence is explicit target, then executable `player_scope`, then
+/// the CR 608.2c controller default: a targetless verb under "each opponent"
+/// harms the holder's enemies (not the holder), while an untargeted unscoped
+/// verb (or the perpetual self-subject `Any`) defaults to the resolving
+/// controller — the holder once the install re-stamp lands.
+fn boon_inner_target_side(exec: &AbilityDefinition) -> BoonTargetSide {
+    if let Some(filter) = exec.effect.target_filter() {
+        return boon_filter_side(filter);
+    }
+    if let Some(scope) = exec.player_scope.as_ref() {
+        return boon_player_filter_side(scope);
+    }
+    BoonTargetSide::Holder
+}
+
+/// Side of one `PlayerFilter` in the boon holder's frame. Shared by the
+/// `PlayerMatching` target arm and the executable-scope arm so the two
+/// recipient axes cannot drift: holder-affiliated filters keep the inner
+/// reading, enemy-side filters flip it, anything else fails closed.
+fn boon_player_filter_side(player: &PlayerFilter) -> BoonTargetSide {
+    match player {
+        PlayerFilter::Controller => BoonTargetSide::Holder,
+        PlayerFilter::Opponent
+        | PlayerFilter::OpponentLostLife
+        | PlayerFilter::OpponentGainedLife => BoonTargetSide::Enemy,
+        _ => BoonTargetSide::Unknown,
     }
 }
 
@@ -1838,13 +1869,7 @@ fn boon_filter_side(filter: &TargetFilter) -> BoonTargetSide {
             Some(ControllerRef::TargetPlayer) => BoonTargetSide::Chosen,
             _ => BoonTargetSide::Unknown,
         },
-        TargetFilter::PlayerMatching { player } => match player.as_ref() {
-            PlayerFilter::Controller => BoonTargetSide::Holder,
-            PlayerFilter::Opponent
-            | PlayerFilter::OpponentLostLife
-            | PlayerFilter::OpponentGainedLife => BoonTargetSide::Enemy,
-            _ => BoonTargetSide::Unknown,
-        },
+        TargetFilter::PlayerMatching { player } => boon_player_filter_side(player.as_ref()),
         _ => BoonTargetSide::Unknown,
     }
 }
@@ -2366,6 +2391,21 @@ mod create_boon_polarity_tests {
         }
     }
 
+    fn boon_with_exec(recipient: TargetFilter, exec: AbilityDefinition) -> Effect {
+        let mut trigger = TriggerDefinition::new(TriggerMode::SpellCast);
+        trigger.execute = Some(Box::new(exec));
+        Effect::CreateBoon {
+            recipient,
+            trigger: Box::new(trigger),
+        }
+    }
+
+    fn scoped_exec(effect: Effect, scope: PlayerFilter) -> AbilityDefinition {
+        let mut exec = AbilityDefinition::new(AbilityKind::Spell, effect);
+        exec.player_scope = Some(scope);
+        exec
+    }
+
     fn opponent_recipient() -> TargetFilter {
         TargetFilter::Typed(TypedFilter {
             type_filters: Vec::new(),
@@ -2414,6 +2454,87 @@ mod create_boon_polarity_tests {
         assert_eq!(effect_polarity(&drain), EffectPolarity::Harmful);
         let bodiless = boon_with_body(TargetFilter::Player, None);
         assert_eq!(effect_polarity(&bodiless), EffectPolarity::Contextual);
+    }
+
+    /// F3: a targetless harm under opponent scope ("each opponent loses 5
+    /// life") harms the holder's enemies, so holding the boon is beneficial —
+    /// not harmful to the holder. The unscoped targetless shape keeps its
+    /// Harmful reading (see `create_boon_polarity_follows_granted_body`).
+    #[test]
+    fn boon_opponent_scoped_targetless_harm_reads_beneficial() {
+        let drain = boon_with_exec(
+            TargetFilter::Player,
+            scoped_exec(
+                Effect::LoseLife {
+                    amount: QuantityExpr::Fixed { value: 5 },
+                    target: None,
+                },
+                PlayerFilter::Opponent,
+            ),
+        );
+        assert_eq!(effect_polarity(&drain), EffectPolarity::Beneficial);
+    }
+
+    /// F3 control: the same targetless harm under holder scope ("you lose 5
+    /// life") stays Harmful — scope names the victim, it does not excuse it.
+    #[test]
+    fn boon_holder_scoped_targetless_harm_reads_harmful() {
+        let drain = boon_with_exec(
+            TargetFilter::Player,
+            scoped_exec(
+                Effect::LoseLife {
+                    amount: QuantityExpr::Fixed { value: 5 },
+                    target: None,
+                },
+                PlayerFilter::Controller,
+            ),
+        );
+        assert_eq!(effect_polarity(&drain), EffectPolarity::Harmful);
+    }
+
+    /// F3: Underbridge Warlock's full body — opponent-scoped loss chained to a
+    /// holder gain — fails closed to Contextual: the single-effect reading
+    /// cannot see the continuation's direction.
+    #[test]
+    fn boon_mixed_continuation_body_reads_contextual() {
+        let mut exec = scoped_exec(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+                target: None,
+            },
+            PlayerFilter::Opponent,
+        );
+        exec.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+                player: TargetFilter::Controller,
+            },
+        )));
+        let mixed = boon_with_exec(TargetFilter::Player, exec);
+        assert_eq!(effect_polarity(&mixed), EffectPolarity::Contextual);
+    }
+
+    /// F3: a conditional body ("... Otherwise, ...") fails closed to
+    /// Contextual: the untaken branch's direction is uninspected.
+    #[test]
+    fn boon_conditional_body_reads_contextual() {
+        let mut exec = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Controller,
+            },
+        );
+        exec.else_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: None,
+            },
+        )));
+        let conditional = boon_with_exec(TargetFilter::Player, exec);
+        assert_eq!(effect_polarity(&conditional), EffectPolarity::Contextual);
     }
 
     #[test]

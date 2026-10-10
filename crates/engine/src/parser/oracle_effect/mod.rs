@@ -12259,6 +12259,18 @@ fn perpetual_modify_pt_gap(tp: TextPair) -> Option<Effect> {
     Some(Effect::unimplemented("perpetual_modify_pt", tp.original))
 }
 
+/// Validate a perpetual arm's "that <subject>" demonstrative through the
+/// shared anaphor grammar, returning the text after the subject phrase.
+/// A compound ("that Artifact and this creature") or unmodelled noun phrase
+/// fails closed (`None` → honest gap) instead of silently becoming a
+/// single-object edit; the caller additionally requires the remainder to
+/// start with "perpetually ", so a partially consumed subject (trailing
+/// conjuncts) also fails closed.
+fn validated_that_subject_rest(head_lower: &str) -> Option<&str> {
+    let (_, rest) = parse_anaphoric_target_ref(head_lower, true)?;
+    Some(rest)
+}
+
 /// Digital-only Alchemy (no CR entry): parse the dynamic "perpetually gets
 /// +X/+X / +X/+0, where X is …" form (Rothga, Bonded Engulfer; Dragonborn
 /// Immolator; Mephit's Enthusiasm) into [`Effect::ApplyPerpetual`] with
@@ -12281,18 +12293,6 @@ fn perpetual_modify_pt_gap(tp: TextPair) -> Option<Effect> {
 /// scope rebinds to the same owner. Explicit self-references ("~'s power")
 /// never match the pronoun grammar and keep `Source`. Self subjects keep the
 /// tail's scopes as parsed.
-/// Validate a perpetual arm's "that <subject>" demonstrative through the
-/// shared anaphor grammar, returning the text after the subject phrase.
-/// A compound ("that Artifact and this creature") or unmodelled noun phrase
-/// fails closed (`None` → honest gap) instead of silently becoming a
-/// single-object edit; the caller additionally requires the remainder to
-/// start with "perpetually ", so a partially consumed subject (trailing
-/// conjuncts) also fails closed.
-fn validated_that_subject_rest(head_lower: &str) -> Option<&str> {
-    let (_, rest) = parse_anaphoric_target_ref(head_lower, true)?;
-    Some(rest)
-}
-
 fn try_parse_perpetual_modify_pt_dynamic(tp: TextPair) -> Option<Effect> {
     let (head, where_x) = lower::strip_trailing_where_x(tp);
     let where_x = where_x?;

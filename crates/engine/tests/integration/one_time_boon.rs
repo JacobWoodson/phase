@@ -11,7 +11,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
     DelayedTriggerCondition, DelayedTriggerLifetime, PerpetualModification, TargetRef,
 };
-use engine::types::actions::{GameAction, ResolutionOptionalPaymentChoice};
+use engine::types::actions::{DebugAction, GameAction, ResolutionOptionalPaymentChoice};
 use engine::types::counter::CounterType;
 use engine::types::game_state::{StackEntryKind, WaitingFor};
 use engine::types::keywords::{Keyword, KeywordKind};
@@ -1474,6 +1474,125 @@ fn dunbarrow_protected_entrant_not_offered_role() {
     assert!(held_boons(&runner).is_empty());
 }
 
+/// F1 "no legal hosts": BOTH entrants gain protection from colorless in
+/// response to the boon trigger. The pins are current and both soldiers are
+/// on the battlefield — the projection alone excludes everything, so no
+/// prompt appears and CR 303.4i denies the Aura token entirely. (The departed
+/// test covers zero candidates via staleness; this covers zero via
+/// illegality.)
+#[test]
+fn dunbarrow_all_entrants_protected_creates_no_token() {
+    use engine::types::counter::CounterType;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let dunbarrow = scenario
+        .add_creature_to_hand_from_oracle(P0, "Dunbarrow Revivalist", 3, 3, DUNBARROW)
+        .id();
+    let alarm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Raise Alarm", false, RAISE_ALARM)
+        .id();
+    let angelic_first = scenario
+        .add_spell_to_hand_from_oracle(P0, "Angelic Intervention", true, ANGELIC_INTERVENTION)
+        .id();
+    let angelic_second = scenario
+        .add_spell_to_hand_from_oracle(P0, "Angelic Intervention", true, ANGELIC_INTERVENTION)
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(dunbarrow).resolve();
+    drain_stack(&mut runner);
+    assert_eq!(held_boons(&runner), vec![P0]);
+
+    runner.cast(alarm).commit();
+    let mut first = false;
+    let mut second = false;
+    for _ in 0..400 {
+        match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                let soldiers = soldier_tokens_on_battlefield(&runner);
+                if soldiers.len() == 2 && !first {
+                    runner
+                        .cast(angelic_first)
+                        .target_object(soldiers[0])
+                        .commit();
+                    first = true;
+                } else if soldiers.len() == 2
+                    && first
+                    && !second
+                    && runner.state().objects[&soldiers[0]]
+                        .counters
+                        .get(&CounterType::Plus1Plus1)
+                        == Some(&1)
+                {
+                    // The first Angelic resolved (counter mark); protect the
+                    // other entrant before the boon trigger resolves.
+                    runner
+                        .cast(angelic_second)
+                        .target_object(soldiers[1])
+                        .commit();
+                    second = true;
+                } else {
+                    runner.pass_both_players();
+                }
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let order: Vec<usize> = (0..triggers.len()).collect();
+                runner
+                    .act(GameAction::OrderTriggers { order })
+                    .expect("order triggers");
+            }
+            WaitingFor::ChooseOneOfBranch {
+                player, branches, ..
+            } => {
+                assert_eq!(*player, P0, "the spell's controller makes the choice");
+                assert_eq!(branches.len(), 2, "colorless-or-color is two branches");
+                let index = branches
+                    .iter()
+                    .position(|b| {
+                        b.description
+                            .as_deref()
+                            .is_some_and(|d| d.to_lowercase().contains("colorless"))
+                    })
+                    .expect("a protection-from-colorless branch must exist");
+                runner
+                    .act(GameAction::ChooseBranch { index })
+                    .expect("choose colorless");
+            }
+            WaitingFor::ChooseTokenHost { legal_targets, .. } => {
+                panic!(
+                    "F1: no legal hosts remain, so no host choice may appear: {legal_targets:?}"
+                );
+            }
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    assert!(
+        first && second,
+        "both Angelics must have been cast, first={first} second={second}"
+    );
+    drain_stack(&mut runner);
+
+    // Guards: the counters prove both Angelics resolved on their soldiers.
+    let soldiers = soldier_tokens_on_battlefield(&runner);
+    assert_eq!(soldiers.len(), 2);
+    for soldier in &soldiers {
+        assert_eq!(
+            runner.state().objects[soldier]
+                .counters
+                .get(&CounterType::Plus1Plus1),
+            Some(&1),
+            "both soldiers must carry their Angelic counter"
+        );
+    }
+    assert!(
+        role_tokens(&runner).is_empty(),
+        "no Role may be created without a legal host"
+    );
+    assert!(held_boons(&runner).is_empty());
+}
+
 #[test]
 fn dunbarrow_hexproof_entrant_still_offered_role() {
     use engine::game::game_object::AttachTarget;
@@ -1570,4 +1689,371 @@ fn dunbarrow_hexproof_entrant_still_offered_role() {
         "the Role must attach to the chosen hexproof entrant"
     );
     assert!(held_boons(&runner).is_empty());
+}
+
+/// Reanimate-two witness: returns two nontoken creatures to the
+/// battlefield in one batch, so the boon stamps two blinkable entrants.
+/// (Tokens cannot blink — CR 111.8 strands them outside the battlefield.)
+const REANIMATE_TWO: &str =
+    "Return two target creature cards from your graveyard to the battlefield.";
+
+/// F2 (CR 400.7): at the sandbox/debug boundary an offered host can leave
+/// and return during the prompt with the same stored ObjectId and a new
+/// incarnation — a new object. Answering with it must be rejected while
+/// the prompt (and its continuation) is preserved; the untouched entrant
+/// must still bind.
+#[test]
+fn dunbarrow_stale_incarnation_answer_rejected() {
+    use engine::game::game_object::AttachTarget;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let dunbarrow = scenario
+        .add_creature_to_hand_from_oracle(P0, "Dunbarrow Revivalist", 3, 3, DUNBARROW)
+        .id();
+    let bear1 = scenario
+        .add_creature_to_hand_from_oracle(P0, "Grizzly Bears", 2, 2, "")
+        .id();
+    let bear2 = scenario
+        .add_creature_to_hand_from_oracle(P0, "Grizzly Bears", 2, 2, "")
+        .id();
+    let bolt1 = scenario
+        .add_spell_to_hand_from_oracle(P0, "Lightning Bolt", true, BOLT)
+        .id();
+    let bolt2 = scenario
+        .add_spell_to_hand_from_oracle(P0, "Lightning Bolt", true, BOLT)
+        .id();
+    let reanimate = scenario
+        .add_spell_to_hand_from_oracle(P0, "Reanimate Two", false, REANIMATE_TWO)
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().debug_mode = true;
+
+    // Park both bears in the graveyard BEFORE Dunbarrow arrives, so no boon
+    // trigger fires and the held boon is intact for the batch entry below.
+    for (bear, bolt) in [(bear1, bolt1), (bear2, bolt2)] {
+        runner.cast(bear).resolve();
+        drain_stack(&mut runner);
+        runner.cast(bolt).target_object(bear).resolve();
+        drain_stack(&mut runner);
+        assert_eq!(runner.state().objects[&bear].zone, Zone::Graveyard);
+    }
+    runner.cast(dunbarrow).resolve();
+    drain_stack(&mut runner);
+    assert_eq!(held_boons(&runner), vec![P0]);
+
+    // Both bears re-enter in one batch: one trigger, two stamped entrants.
+    runner
+        .cast(reanimate)
+        .target_objects(&[bear1, bear2])
+        .commit();
+    for _ in 0..400 {
+        match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => {
+                panic!("the host prompt must appear")
+            }
+            WaitingFor::Priority { .. } => runner.pass_both_players(),
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let order: Vec<usize> = (0..triggers.len()).collect();
+                runner
+                    .act(GameAction::OrderTriggers { order })
+                    .expect("order triggers");
+            }
+            WaitingFor::ChooseTokenHost { .. } => break,
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    let (bears, pin) = match &runner.state().waiting_for {
+        WaitingFor::ChooseTokenHost {
+            legal_targets,
+            pending_ability,
+            ..
+        } => {
+            assert_eq!(legal_targets.len(), 2);
+            let mut bears: Vec<ObjectId> = legal_targets
+                .iter()
+                .filter_map(|t| match t {
+                    TargetRef::Object(id) => Some(*id),
+                    _ => None,
+                })
+                .collect();
+            bears.sort();
+            assert_eq!(
+                bears,
+                {
+                    let mut expected = vec![bear1, bear2];
+                    expected.sort();
+                    expected
+                },
+                "both reanimated bears must be offered"
+            );
+            let pin = pending_ability
+                .context
+                .boon_trigger_batch_objects
+                .iter()
+                .find(|pin| pin.object_id == bears[0])
+                .cloned()
+                .expect("the offered entrant must carry a stamp pin");
+            (bears, pin)
+        }
+        other => panic!("expected the host prompt, got {other:?}"),
+    };
+    assert!(
+        pin.is_current(runner.state()),
+        "the pin must be current before the blink"
+    );
+
+    // Debug-blink the first bear: same ObjectId, new incarnation. Raw
+    // placement (no triggers/SBAs) so the prompt itself is undisturbed.
+    for to_zone in [Zone::Graveyard, Zone::Battlefield] {
+        runner
+            .act(GameAction::Debug(DebugAction::MoveToZone {
+                object_id: bears[0],
+                to_zone,
+                library_position: None,
+                simulate: false,
+            }))
+            .expect("debug move must succeed");
+    }
+    let blinked = &runner.state().objects[&bears[0]];
+    assert_eq!(
+        blinked.zone,
+        Zone::Battlefield,
+        "the blinked bear must be back on the battlefield (same id)"
+    );
+    assert!(
+        !pin.is_current(runner.state()),
+        "the blink must stale the stamp pin"
+    );
+
+    // The stale answer is rejected and the prompt is preserved.
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(bears[0])),
+        })
+        .expect_err("a stale-incarnation answer must be rejected");
+    match &runner.state().waiting_for {
+        WaitingFor::ChooseTokenHost { legal_targets, .. } => {
+            assert_eq!(legal_targets.len(), 2, "the offer must be preserved");
+        }
+        other => panic!("the prompt must be preserved, got {other:?}"),
+    }
+
+    // The untouched entrant still binds.
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(bears[1])),
+        })
+        .expect("the current entrant must bind");
+    drain_stack(&mut runner);
+    let roles = role_tokens(&runner);
+    assert_eq!(roles.len(), 1, "one Role must be created");
+    let role = &runner.state().objects[&roles[0]];
+    assert_eq!(
+        role.attached_to,
+        Some(AttachTarget::Object(bears[1])),
+        "the Role must attach to the un-blinked entrant"
+    );
+    assert!(held_boons(&runner).is_empty());
+}
+
+/// F1-gap (Matt): a stamped entrant that ceases to be a creature before the
+/// boon resolves must be excluded from the "one of them" offer — the Role's
+/// "enchant creature" filter no longer admits it (CR 303.4). Song of the
+/// Dryads is a sorcery-speed Aura, uncastable with the trigger stacked, so it
+/// rides the debug pipeline to the battlefield and attaches through the real
+/// `attach_to` authority; the layers system genuinely recomputes the victim
+/// as a land (guarded below — the exclusion is not vacuous). One legal
+/// candidate remains, so no prompt appears and the Role auto-binds to the
+/// untouched entrant.
+#[test]
+fn dunbarrow_type_changed_entrant_excluded_from_offer() {
+    use engine::game::effects::attach::attach_to;
+    use engine::game::game_object::AttachTarget;
+    use engine::types::card_type::CoreType;
+
+    const SONG: &str = "Enchant permanent\nEnchanted permanent is a colorless Forest land.";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let dunbarrow = scenario
+        .add_creature_to_hand_from_oracle(P0, "Dunbarrow Revivalist", 3, 3, DUNBARROW)
+        .id();
+    let alarm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Raise Alarm", false, RAISE_ALARM)
+        .id();
+    let song = scenario
+        .add_creature(P0, "Song of the Dryads", 0, 0)
+        .as_enchantment()
+        .from_oracle_text(SONG)
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().debug_mode = true;
+
+    // The builder leaves the Aura subtype off (mirrors issue_3279): restore
+    // it before any action so SBAs treat the Song as the Aura it is.
+    {
+        let song_obj = runner
+            .state_mut()
+            .objects
+            .get_mut(&song)
+            .expect("Song present");
+        if !song_obj.card_types.subtypes.iter().any(|s| s == "Aura") {
+            song_obj.card_types.subtypes.push("Aura".to_string());
+            song_obj.base_card_types = song_obj.card_types.clone();
+        }
+    }
+
+    runner.cast(dunbarrow).resolve();
+    drain_stack(&mut runner);
+    assert_eq!(held_boons(&runner), vec![P0]);
+    // The unattached Song is binned by SBAs during setup; it returns via the
+    // debug pipeline once there is a victim to enchant.
+    assert_eq!(
+        runner.state().objects[&song].zone,
+        Zone::Graveyard,
+        "the unattached Song must be in the graveyard after setup"
+    );
+
+    // Two soldiers enter in one batch; stop driving with the boon trigger
+    // stacked, before it resolves.
+    runner.cast(alarm).commit();
+    let mut soldiers: Vec<ObjectId> = Vec::new();
+    for _ in 0..100 {
+        let entered: Vec<ObjectId> = runner
+            .state()
+            .objects
+            .values()
+            .filter(|o| {
+                o.is_token
+                    && o.controller == P0
+                    && o.card_types.subtypes.iter().any(|s| s == "Soldier")
+            })
+            .map(|o| o.id)
+            .collect();
+        if entered.len() == 2 && !runner.state().stack.is_empty() {
+            soldiers = entered;
+            break;
+        }
+        match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => {
+                panic!("the soldiers must enter with the boon trigger stacked")
+            }
+            WaitingFor::Priority { .. } => runner.pass_both_players(),
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let order: Vec<usize> = (0..triggers.len()).collect();
+                runner
+                    .act(GameAction::OrderTriggers { order })
+                    .expect("order triggers");
+            }
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    assert_eq!(soldiers.len(), 2, "both soldiers must have entered");
+    soldiers.sort();
+
+    // The Song returns to the battlefield (raw placement: no triggers/SBAs)
+    // and enchants the first soldier through the real attach authority.
+    runner
+        .act(GameAction::Debug(DebugAction::MoveToZone {
+            object_id: song,
+            to_zone: Zone::Battlefield,
+            library_position: None,
+            simulate: false,
+        }))
+        .expect("debug move must succeed");
+    attach_to(runner.state_mut(), song, soldiers[0]);
+
+    // Guard: the victim really is a land now — the layers system applied the
+    // Song, so the offer-time exclusion below is exercised, not vacuous.
+    let victim = &runner.state().objects[&soldiers[0]];
+    assert_eq!(
+        victim.card_types.core_types,
+        vec![CoreType::Land],
+        "the Song must genuinely turn the victim into a land"
+    );
+    assert!(
+        victim.card_types.subtypes.iter().any(|s| s == "Forest"),
+        "the Song must grant the Forest subtype, got {:?}",
+        victim.card_types.subtypes
+    );
+
+    // One legal candidate: no prompt — the Role auto-binds to the untouched
+    // entrant. Driven explicitly (not `drain_stack`, which breaks silently on
+    // an empty stack with a prompt open): any host choice here panics.
+    for _ in 0..100 {
+        match &runner.state().waiting_for {
+            WaitingFor::ChooseTokenHost { legal_targets, .. } => panic!(
+                "no prompt must appear: the type-changed entrant must be excluded, got {legal_targets:?}"
+            ),
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => runner.pass_both_players(),
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let order: Vec<usize> = (0..triggers.len()).collect();
+                runner
+                    .act(GameAction::OrderTriggers { order })
+                    .expect("order triggers");
+            }
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    assert!(
+        runner.state().stack.is_empty(),
+        "stack must drain: {:?}",
+        runner.state().stack
+    );
+
+    let roles = role_tokens(&runner);
+    assert_eq!(roles.len(), 1, "one Role must be created");
+    let role = &runner.state().objects[&roles[0]];
+    assert_eq!(role.zone, Zone::Battlefield);
+    assert_eq!(
+        role.attached_to,
+        Some(AttachTarget::Object(soldiers[1])),
+        "the Role must attach to the untouched entrant"
+    );
+    assert!(
+        runner
+            .state()
+            .objects
+            .values()
+            .all(|o| { o.attached_to != Some(AttachTarget::Object(soldiers[0])) || o.id == song }),
+        "nothing but the Song may be attached to the type-changed entrant"
+    );
+    assert!(held_boons(&runner).is_empty());
+}
+
+/// F4: a composed fractional note in a non-self trigger records the EVENT
+/// subject's power, not the source's (CR 608.2c + CR 608.2k). The 2-power
+/// Chronicler notes half the died 5-power victim's power, rounded up: 3, not
+/// the Source-misbound 1. The parse-scope pins live beside the M3-1 parser
+/// tests; this is the differing-stats runtime control.
+#[test]
+fn fractional_note_in_non_self_trigger_records_event_power() {
+    const CHRONICLER: &str = "Whenever another creature dies, note half its power, rounded up.";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let chronicler = scenario
+        .add_creature_from_oracle(P0, "Fractional Chronicler", 2, 2, CHRONICLER)
+        .id();
+    let victim = scenario
+        .add_creature_from_oracle(P0, "Mighty Lynx", 5, 2, "")
+        .id();
+    let bolt = scenario
+        .add_spell_to_hand_from_oracle(P0, "Bolt", true, BOLT)
+        .id();
+    let mut runner = scenario.build();
+
+    assert_eq!(runner.state().objects[&chronicler].power, Some(2));
+    assert_eq!(runner.state().objects[&victim].power, Some(5));
+
+    runner.cast(bolt).target_object(victim).resolve();
+    drain_stack(&mut runner);
+
+    assert_eq!(
+        runner.state().players[0].noted_number,
+        Some(3),
+        "half of the DIED creature's 5 power, rounded up — not half of the source's 2"
+    );
 }

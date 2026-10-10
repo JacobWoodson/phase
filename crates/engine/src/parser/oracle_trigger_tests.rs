@@ -6592,6 +6592,18 @@ fn strict_pronoun_pt_gate_binds_source_only_on_self_trigger() {
             "{oracle}: non-self strict pronoun gate must fail closed, got {:?}",
             def.condition
         );
+        // Body-gap control: the refused guard gaps the WHOLE trigger. The
+        // generic body fallback must not rescue the guard text as a
+        // Source-bound resolution condition with no fire-time check.
+        let body = def
+            .execute
+            .as_deref()
+            .unwrap_or_else(|| panic!("{oracle}: refused trigger keeps a body slot"));
+        assert!(
+            matches!(body.effect.as_ref(), Effect::Unimplemented { .. }),
+            "{oracle}: refused leading guard must gap the whole body, got {:?}",
+            body.effect
+        );
     }
 
     // Explicit source subject on a non-self trigger: still binds Source.
@@ -12629,13 +12641,14 @@ fn subtype_intervening_if_dispatches_by_trigger_kind() {
     );
 
     // Zone-change trigger (dies): event-snapshot `ZoneChangeObjectMatchesFilter`.
-    let (_, zone_change) = extract_if_condition_with_card_name(
+    let extraction = extract_if_condition_with_card_name(
         "if it's not a spirit, draw a card",
         "",
         None,
         Some((Zone::Battlefield, Zone::Graveyard)),
         false,
     );
+    let zone_change = extraction.condition;
     let Some(TriggerCondition::Not { condition }) = zone_change else {
         panic!("expected negated condition, got {zone_change:?}");
     };

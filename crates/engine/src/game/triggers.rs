@@ -12992,9 +12992,10 @@ fn static_gate_bridge_loses_zone(condition: &StaticCondition) -> bool {
 ///
 /// Gated on `DelayedTriggerKind::Boon`: no other delayed trigger carries
 /// an embedded condition (`effects::delayed_trigger` never sets one), so
-/// this gate is inert for every existing card. `or_trigger` is always `None`
-/// for boons (one printed trigger per boon) but joins the conjunction
-/// defensively so a future disjunctive boon cannot lose half its gate.
+/// this gate is inert for every existing card. Only the FIRED alternative's
+/// gate is returned (selected by `matched_alternative`): matching fired on
+/// one alternative, so conjoining both would gate on an event that never
+/// occurred.
 fn boon_embedded_condition(
     delayed: &DelayedTrigger,
     matched_alternative: usize,
@@ -37813,22 +37814,76 @@ pub mod tests {
     /// object's incarnation, so a re-entered object is a different object for
     /// this trigger — it must not answer for the ORIGINAL entrant's
     /// provenance. Mirrors `filter.rs:3026-3032`.
+    ///
+    /// L1: every zone change below runs the production `move_to_zone`
+    /// pipeline — the entry event's `entered_incarnation`, the incarnation
+    /// bumps, and the cast-stamp clearing are all writer-observed, never
+    /// seeded. The positive controls pin that provenance before the reader
+    /// assertion runs.
     #[test]
     fn was_cast_reads_original_entrant_lki_after_leave_and_reentry() {
-        let (mut state, source, entrant, mut event) = was_cast_lki_fixture();
-        let entered_incarnation = 5;
-        if let GameEvent::ZoneChanged { record, .. } = &mut event {
-            record.entered_incarnation = Some(entered_incarnation);
-        }
-        // The entrant left and came back as a NEW object at the same storage
-        // id, two incarnations later, with no memory of its old cast stamps.
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Light-Paws, Emperor's Voice".to_string(),
+            Zone::Battlefield,
+        );
+        let entrant = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Feasting Troll King".to_string(),
+            Zone::Stack,
+        );
         {
             let obj = state.objects.get_mut(&entrant).unwrap();
-            obj.zone = Zone::Battlefield;
-            obj.incarnation = entered_incarnation + 2;
-            obj.cast_from_zone = None;
-            obj.cast_controller = None;
+            obj.cast_from_zone = Some(Zone::Hand);
+            obj.cast_controller = Some(PlayerId(0));
         }
+
+        // Production cast resolution: Stack → Battlefield. The emitted entry
+        // event carries the writer-recorded incarnation and the LKI snapshot
+        // of the cast stamps.
+        let mut first_evs = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, entrant, Zone::Battlefield, &mut first_evs);
+        let entry_incarnation = state.objects.get(&entrant).unwrap().incarnation;
+        let event = first_evs
+            .iter()
+            .find_map(|ev| match ev {
+                GameEvent::ZoneChanged { record, .. } if record.object_id == entrant => {
+                    Some(ev.clone())
+                }
+                _ => None,
+            })
+            .expect("the production entry must emit a ZoneChanged event");
+        let recorded = match &event {
+            GameEvent::ZoneChanged { record, .. } => record.entered_incarnation,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            recorded,
+            Some(entry_incarnation),
+            "the writer must pin the entry event to the entered incarnation"
+        );
+
+        // Production leave + re-entry: the same storage id comes back a new
+        // object with no memory of its old cast stamps.
+        let mut later_evs = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, entrant, Zone::Graveyard, &mut later_evs);
+        crate::game::zones::move_to_zone(&mut state, entrant, Zone::Battlefield, &mut later_evs);
+        let live = state.objects.get(&entrant).unwrap();
+        assert_eq!(live.zone, Zone::Battlefield);
+        assert_ne!(
+            live.incarnation, entry_incarnation,
+            "production zone changes must bump the incarnation"
+        );
+        assert_eq!(
+            (live.cast_from_zone, live.cast_controller),
+            (None, None),
+            "the re-entered object must not keep the original cast stamps"
+        );
 
         assert!(
             check_trigger_condition(

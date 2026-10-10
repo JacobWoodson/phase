@@ -10901,11 +10901,12 @@ fn pump_matches_oracle(
         p_match && t_match
     }
 
+    // Numeric Oracle expectations require fixed equality: a dynamic delta on
+    // a "+N/+M" line is a lowering defect (or a dynamic expectation the audit
+    // does not model), never a silent accept. The pre-existing `pt_matches`
+    // leniency above is untouched — it is not this carrier's license.
     fn expr_matches(expr: &QuantityExpr, expected: i32) -> bool {
-        match expr {
-            QuantityExpr::Fixed { value } => *value == expected,
-            _ => true, // Dynamic quantities can't be checked statically
-        }
+        matches!(expr, QuantityExpr::Fixed { value } if *value == expected)
     }
 
     match &*def.effect {
@@ -10931,8 +10932,8 @@ fn pump_matches_oracle(
         // pump effect` finding. Gated on `PerpetualPump::Allowed` so a *temporary*
         // "+N/+M until end of turn" line that mis-lowered to a permanent
         // `ApplyPerpetual` is still flagged rather than silently accepted.
-        // Live (non-`Fixed`) deltas match leniently — a dynamic quantity can't
-        // be checked statically (same rule as `pt_matches` above).
+        // Live (non-`Fixed`) deltas never satisfy a numeric expectation — a
+        // dynamic quantity on a "+N/+M" line is flagged, not excused.
         Effect::ApplyPerpetual {
             modification:
                 PerpetualModification::ModifyPowerToughness {
@@ -20280,6 +20281,61 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         assert!(
             !temporary_findings.is_empty(),
             "a temporary +N/+M line mislowered to a permanent ApplyPerpetual must still be flagged: {temporary_findings:?}"
+        );
+
+        // Numeric wrong-Fixed end-to-end: a perpetual line whose delta does not
+        // match the "+N/+M" text is flagged through the same audit boundary.
+        let mut wrong_fixed_face = make_face();
+        wrong_fixed_face.oracle_text = Some(perpetual_line.to_string());
+        wrong_fixed_face.abilities.push(perpetual_pump(2, 2));
+        let wrong_fixed_findings = audit_card_lines(perpetual_line, &wrong_fixed_face);
+        assert!(
+            wrong_fixed_findings.iter().any(|f| matches!(
+                f,
+                SemanticFinding::SilentDrop { oracle_line }
+                    if oracle_line.contains("perpetually gets +1/+1")
+            )),
+            "a perpetual +1/+1 line with an ApplyPerpetual(+2/+2) delta must be flagged: {wrong_fixed_findings:?}"
+        );
+
+        // Wrong-dynamic end-to-end (F7): a live (non-`Fixed`) delta on a numeric
+        // "+N/+M" line is a lowering defect, never a silent accept. The dynamic
+        // reference below (source power — unrelated to the +1/+1 text) must be
+        // flagged exactly like the wrong-Fixed delta above.
+        let dynamic_pump = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ApplyPerpetual {
+                target: TargetFilter::Any,
+                modification: PerpetualModification::ModifyPowerToughness {
+                    power: QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::Source,
+                        },
+                    },
+                    toughness: QuantityExpr::Ref {
+                        qty: QuantityRef::Toughness {
+                            scope: ObjectScope::Source,
+                        },
+                    },
+                    keywords: Vec::new(),
+                },
+            },
+        );
+        assert!(
+            !pump_matches_oracle(&dynamic_pump, 1, 1, PerpetualPump::Allowed),
+            "a dynamic ApplyPerpetual delta must not satisfy a numeric +N/+M expectation"
+        );
+        let mut dynamic_face = make_face();
+        dynamic_face.oracle_text = Some(perpetual_line.to_string());
+        dynamic_face.abilities.push(dynamic_pump);
+        let dynamic_findings = audit_card_lines(perpetual_line, &dynamic_face);
+        assert!(
+            dynamic_findings.iter().any(|f| matches!(
+                f,
+                SemanticFinding::SilentDrop { oracle_line }
+                    if oracle_line.contains("perpetually gets +1/+1")
+            )),
+            "a perpetual +1/+1 line with a dynamic ApplyPerpetual delta must be flagged: {dynamic_findings:?}"
         );
     }
 

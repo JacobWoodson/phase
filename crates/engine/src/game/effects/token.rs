@@ -3149,10 +3149,13 @@ pub(crate) fn resolve_token_spec(
 /// host candidate. The Role token does not exist yet, so the verdict is
 /// judged against a synthetic projection built from the token effect's own
 /// characteristics — script attrs first, typed fallbacks second, the same
-/// precedence the spec build uses — through the shared projected authority.
-/// The projection id peeks `next_object_id` without consuming it: it cannot
-/// collide with a live object, so the self-attach/cycle arms and id-keyed
-/// 702.16n/p exemptions correctly never fire for it.
+/// precedence the spec build uses — through the COMPLETE shared authority
+/// (`sba::is_valid_attachment_target_for_attacher`: protection/prohibition,
+/// the Enchant filter, and the zone gate), the same verdict the CR 303.4i
+/// entry check will reach on the real token. The projection id peeks
+/// `next_object_id` without consuming it: it cannot collide with a live
+/// object, so the self-attach/cycle arms and id-keyed 702.16n/p exemptions
+/// correctly never fire for it.
 ///
 /// Untargeted-choice shroud/hexproof immunity is structural (the authority
 /// has no such arm — targeting only). When the token cannot be projected (a
@@ -3203,14 +3206,27 @@ pub(crate) fn boon_host_passes_projected_legality(
     projection.keywords = attrs.keywords;
     projection.power = attrs.power;
     projection.toughness = attrs.toughness;
+    // CR 111.3 + CR 111.10: the complete authority reads the attacher's
+    // intrinsic payload — the Enchant filter is `Keyword::Enchant` on the
+    // token, and the script/fallback attrs never carry it. Mirror exactly
+    // what the apply path injects on the real token
+    // (`inject_predefined_token_abilities_inner`), from the same source, so
+    // the offer-time verdict and the entry-time verdict cannot drift. Only
+    // keywords and statics matter to attach legality; granted abilities and
+    // triggers ride the real token alone.
+    let materialized =
+        materialize_predefined_token_payload(&projection.name, &projection.card_types.subtypes);
+    projection.keywords.extend(materialized.keywords);
+    for def in materialized.static_definitions {
+        projection.static_definitions.push(def);
+    }
     match host {
-        TargetRef::Object(host_id) => super::attach::attachment_illegality_projected(
+        TargetRef::Object(host_id) => crate::game::sba::is_valid_attachment_target_for_attacher(
             state,
             projection_id,
-            Some(&projection),
+            &projection,
             *host_id,
-        )
-        .is_none(),
+        ),
         TargetRef::Player(host_player) => {
             super::attach::player_attachment_illegality(state, Some(&projection), *host_player)
                 .is_none()
