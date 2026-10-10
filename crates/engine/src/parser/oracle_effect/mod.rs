@@ -112,13 +112,13 @@ use crate::types::ability::{
     CombatDamageScope, Comparator, ConjureCard, ConjureSource, ContinuousModification,
     ControlWindow, ControllerRef, CopyChooseScope, CopyRetargetPermission, CopyScale,
     DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
-    DieResultBranch, Duration, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
-    GameRestriction, GuessSubject, IntensityScope, IterationKindBinding, KeeperConstraint,
-    LibraryPosition, ManaProduction, ManaSpendPermission, ManaTargetRole, MassLibraryShuffleMode,
-    MultiTargetSpec, NumberDistinctness, ObjectProperty, ObjectScope, OriginConstraint,
-    PerPlayerScope, PerpetualModification, PlayPermissionInvalidation, PlayerChoiceDistinctness,
-    PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount, PreventionScope,
-    ProhibitedActivity, PropertyAggregate, PtValue, QuantityExpr, QuantityRef,
+    DelayedTriggerPlayerBinding, DieResultBranch, Duration, Effect, EffectOutcomeSignal,
+    EffectScope, FilterProp, GameRestriction, GuessSubject, IntensityScope, IterationKindBinding,
+    KeeperConstraint, LibraryPosition, ManaProduction, ManaSpendPermission, ManaTargetRole,
+    MassLibraryShuffleMode, MultiTargetSpec, NumberDistinctness, ObjectProperty, ObjectScope,
+    OriginConstraint, PerPlayerScope, PerpetualModification, PlayPermissionInvalidation,
+    PlayerChoiceDistinctness, PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount,
+    PreventionScope, ProhibitedActivity, PropertyAggregate, PtValue, QuantityExpr, QuantityRef,
     ReciprocalZoneChoiceRole, ReplacementCondition, ReplacementDefinition, ResolutionCastWindow,
     RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition, RoundingMode, SharedQuality,
     SharedQualityRelation, SiblingCondition, SkipScope, SpellStackToGraveyardReplacement,
@@ -22899,6 +22899,73 @@ fn chain_declared_object_target(clauses: &[ClauseIr]) -> Option<&TargetFilter> {
     None
 }
 
+/// CR 608.2c + CR 109.4: ordinal of the most-recent finalized
+/// `Choose(Player|Opponent)` clause in this chain, for the "that player's
+/// next [phase]" delayed-trigger rebind (Faramir). Walks back like
+/// `chain_declared_object_target`: a conditional clause bails (later text
+/// may redirect the referent, CR 608.2c); a `Choose` with player or
+/// opponent choice type answers its ordinal among finalized chooses
+/// (0-based: 0 = the first choose, matching the runtime `chosen_players`
+/// append order, CR 109.4); any other clause bails so the table's
+/// `ParentTargetOwner` binding is preserved (Wanderer path). `None` keeps
+/// coverage honest for every non-Choose chain.
+fn chain_chosen_player_antecedent(clauses: &[ClauseIr]) -> Option<u8> {
+    let mut ordinal: u8 = 0;
+    let mut seen_choose = false;
+    for prev in clauses.iter().rev() {
+        if prev.condition.is_some() {
+            return None;
+        }
+        match &prev.parsed.effect {
+            Effect::Choose {
+                choice_type: ChoiceType::Player { .. } | ChoiceType::Opponent { .. },
+                ..
+            } => {
+                if seen_choose {
+                    ordinal = ordinal.saturating_add(1);
+                } else {
+                    seen_choose = true;
+                }
+            }
+            _ => return None,
+        }
+    }
+    seen_choose.then_some(ordinal)
+}
+
+/// CR 608.2c + CR 109.4: table-first precedence for the "that player's
+/// next [phase]" surface. Both temporal tables match it dumb
+/// (`ParentTargetOwner`, Wanderer path); when the chain carries a finalized
+/// Choose(Player|Opponent) antecedent, "that player" is the chosen player
+/// (Faramir) and the binding is rebound to the V1 `ChosenPlayer`
+/// placeholder (creation resolves `chosen_players[index]`; fail-closed on
+/// missing). `None`, non-`ParentTargetOwner` bindings, and all other
+/// conditions pass through untouched. Shared by the prefix and suffix
+/// call sites below.
+fn rebind_temporal_to_chosen_player(
+    delayed: Option<DelayedTriggerCondition>,
+    clauses: &[ClauseIr],
+) -> Option<DelayedTriggerCondition> {
+    match delayed {
+        Some(DelayedTriggerCondition::AtNextPhaseForPlayer {
+            phase,
+            player,
+            gate,
+            binding: DelayedTriggerPlayerBinding::ParentTargetOwner,
+        }) => {
+            let binding = chain_chosen_player_antecedent(clauses)
+                .map(|index| DelayedTriggerPlayerBinding::ChosenPlayer { index })
+                .unwrap_or(DelayedTriggerPlayerBinding::ParentTargetOwner);
+            Some(DelayedTriggerCondition::AtNextPhaseForPlayer {
+                phase,
+                player,
+                gate,
+                binding,
+            })
+        }
+        other => other,
+    }
+}
 /// CR 608.2c: Is the chain's MOST-RECENT object referent a just-created token
 /// (`Token`/`CopyTokenOf`/`Populate`)? A bare "it" anaphor in a following clause
 /// then binds to that token — Esper Terra: "Create a token that's a copy of
@@ -37304,6 +37371,9 @@ pub(crate) fn parse_effect_chain_ir(
         // CR 603.7a: Check for temporal prefix before suffix. When present, parse the
         // inner effect through the full pipeline and wrap in CreateDelayedTrigger.
         let (text_after_prefix, prefix_delayed) = strip_temporal_prefix(&text);
+        // CR 608.2c + CR 109.4: same Choose-antecedent rebind as the suffix
+        // path (Faramir's clause sits in prefix position).
+        let prefix_delayed = rebind_temporal_to_chosen_player(prefix_delayed, builder.clauses());
         // CR 601.2 vs CR 603.7 (issue #8721): the cast-permission back-reference
         // ("if you cast a spell this way, …" / "when you cast that spell, …") is
         // recognized HERE rather than inside `strip_temporal_prefix`, because
@@ -37602,6 +37672,10 @@ pub(crate) fn parse_effect_chain_ir(
         }
 
         let (text_no_temporal, delayed_condition) = strip_temporal_suffix(&text);
+        // CR 608.2c + CR 109.4: table-first precedence -- rebind via the
+        // shared helper (see its doc); table default preserved otherwise.
+        let delayed_condition =
+            rebind_temporal_to_chosen_player(delayed_condition, builder.clauses());
         let (text_no_qty, mut multi_target) = strip_any_number_quantifier(text_no_temporal);
         let retained_type_clause = {
             let lower = text_no_qty.to_lowercase();

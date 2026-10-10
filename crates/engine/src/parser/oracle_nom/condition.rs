@@ -6667,6 +6667,27 @@ fn parse_combat_history_condition(input: &str) -> OracleResult<'_, StaticConditi
                 tag(" attacked you during their last turn"),
             ),
         ),
+        // CR 508.6: "that player didn't/did not attack you that turn" -- the
+        // retrospective this-turn player-pair test, negated (Faramir's "if
+        // that player didn't attack you that turn, ... Otherwise, ...").
+        // Attacker is the V1 anaphor placeholder (`ChosenPlayer { index: 0 }`;
+        // the chain rewrite binds the true chosen player and the bridge maps
+        // it to the stamped target); defender is the controller ("you",
+        // CR 109.5). Pronoun subjects ("they", ...) are deliberately NOT
+        // covered: they bind a different anaphor with no producer yet.
+        value(
+            StaticCondition::Not {
+                condition: Box::new(StaticCondition::PlayerAttackedPlayer {
+                    attacker: ControllerRef::ChosenPlayer { index: 0 },
+                    defender: ControllerRef::You,
+                }),
+            },
+            (
+                tag("that player"),
+                alt((tag(" didn't attack "), tag(" did not attack "))),
+                tag("you that turn"),
+            ),
+        ),
     ))
     .parse(input)
 }
@@ -21836,6 +21857,57 @@ mod tests {
                 Ok((_, StaticCondition::AnyPlayerAttackedYouLastTurn))
             ),
             "the this-turn near-miss must not lower to the last-turn revenge gate"
+        );
+    }
+    /// CR 508.6: "that player didn't/did not attack you that turn" parses
+    /// to the negated retrospective this-turn player-pair test with the V1
+    /// anaphor placeholder (Faramir; the chain rewrite binds the true chosen
+    /// player, the bridge maps it to the stamped target).
+    #[test]
+    fn parse_inner_condition_that_player_didnt_attack_you_this_turn() {
+        for text in [
+            "that player didn't attack you that turn",
+            "that player did not attack you that turn",
+        ] {
+            let (rest, c) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "must fully consume {text:?}");
+            assert_eq!(
+                c,
+                StaticCondition::Not {
+                    condition: Box::new(StaticCondition::PlayerAttackedPlayer {
+                        attacker: ControllerRef::ChosenPlayer { index: 0 },
+                        defender: ControllerRef::You,
+                    }),
+                },
+                "{text}"
+            );
+        }
+
+        // Sibling non-shadow: the last-turn revenge gate in the same
+        // `parse_combat_history_condition` combinator keeps its own variant.
+        let (_, last) =
+            parse_inner_condition("a player attacked you during their last turn").unwrap();
+        assert!(matches!(
+            last,
+            StaticCondition::AnyPlayerAttackedYouLastTurn
+        ));
+
+        // Negative: a pronoun subject is NOT the V1 anaphor -- it binds a
+        // different referent with no producer yet, so it must not lower to
+        // the chosen-player placeholder.
+        assert!(
+            !matches!(
+                parse_inner_condition("they didn't attack you that turn"),
+                Ok((_, StaticCondition::Not { condition }))
+                    if matches!(
+                        *condition,
+                        StaticCondition::PlayerAttackedPlayer {
+                            attacker: ControllerRef::ChosenPlayer { .. },
+                            ..
+                        }
+                    )
+            ),
+            "pronoun subject must not take the V1 anaphor"
         );
     }
 
