@@ -2052,6 +2052,7 @@ fn legacy_ability_condition(x: &AbilityCondition) -> bool {
         | AbilityCondition::FirstCombatPhaseOfTurn
         | AbilityCondition::FirstEndStepOfTurn
         | AbilityCondition::DayNightIsNeither
+        | AbilityCondition::PlayerAttackedPlayer { .. }
         | AbilityCondition::DayNightIs { .. } => false,
     }
 }
@@ -2122,6 +2123,7 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         | StaticCondition::EnchantedIsFaceDown
         | StaticCondition::SourceIsFaceUp
         | StaticCondition::AdditionalCostPaid
+        | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::None => false,
     }
@@ -6908,6 +6910,9 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
         | AbilityCondition::FirstEndStepOfTurn
         | AbilityCondition::DayNightIsNeither
         | AbilityCondition::DayNightIs { .. } => RwProfile::empty(),
+        // CR 508.6: this-turn player-pair attack ledger; same turn-structure
+        // player read as the static last-turn analog (`rw_static_condition`).
+        AbilityCondition::PlayerAttackedPlayer { .. } => reads_player_of(StateKind::TurnStructure),
     }
 }
 
@@ -7106,6 +7111,12 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
             let mut p = reads_player_of(StateKind::TurnStructure);
             p.merge(frozen_source_read());
             p
+        }
+        // CR 508.6: this-turn player-pair attack ledger
+        // (`attacked_players_directly_this_turn`); same turn-structure
+        // player read as the last-turn analog above.
+        StaticCondition::PlayerAttackedPlayer { .. } => {
+            reads_player_of(StateKind::TurnStructure)
         }
         StaticCondition::SourceMatchesFilter { filter: _ } => {
             let mut p = reads_src_of(StateKind::ObjectPt);

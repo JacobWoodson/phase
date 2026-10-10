@@ -612,6 +612,7 @@ fn rewrite_cost_x_in_condition(cond: &mut crate::types::ability::AbilityConditio
         | AbilityCondition::DayNightIs { .. }
         | AbilityCondition::AbilityUseCountThisTurn { .. }
         | AbilityCondition::SourceLacksKeyword { .. }
+        | AbilityCondition::PlayerAttackedPlayer { .. }
         | AbilityCondition::ScopedPlayerMatches { .. } => {}
     }
 }
@@ -6740,6 +6741,12 @@ pub(crate) fn static_condition_to_trigger_condition(
         // is unanswerable rather than merely absent, so `None` is the honest
         // lowering and NOT an approximation that silently drops the anchor.
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        // CR 508.6: retrospective this-turn player-pair attack test -- a
+        // delayed-resolution predicate (Faramir). No intervening-if
+        // (`TriggerCondition`) equivalent (different consumer enum,
+        // different subject -- cf. the O-Kagachi note on the last-turn
+        // arm above), so lowering returns `None`.
+        | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::None => None,
 
         // CR 309.7: Dungeon completion bridges directly.
