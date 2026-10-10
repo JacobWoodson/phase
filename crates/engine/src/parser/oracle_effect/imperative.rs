@@ -1025,7 +1025,7 @@ fn parse_target_relative_life_change_this_turn(qty_text: &str) -> Option<Quantit
 
 fn parse_life_equal_quantity(
     after_verb_lower: &str,
-    bare_card_source: Option<crate::types::ability::TrackedAnaphorSource>,
+    bare_card_source: Option<crate::parser::oracle_ir::context::BareCardAggregateBinding>,
 ) -> Option<QuantityExpr> {
     let (qty_text, _) = tag::<_, _, OracleError<'_>>("life equal to ")
         .parse(after_verb_lower)
@@ -1094,7 +1094,7 @@ fn parse_numeric_imperative_ast_with_context(
 fn parse_numeric_imperative_ast_with_bare_card_source(
     text: &str,
     lower: &str,
-    bare_card_source: Option<crate::types::ability::TrackedAnaphorSource>,
+    bare_card_source: Option<crate::parser::oracle_ir::context::BareCardAggregateBinding>,
 ) -> Option<NumericImperativeAst> {
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| value((), tag("draw ")).parse(input))
         .or_else(|| {
@@ -13567,7 +13567,8 @@ pub(super) fn parse_imperative_family_ast(
                 // None for count == 1 so "roll a d6" / "roll one d6" falls through.
                 Some(ast)
             } else {
-                try_parse_roll_die_with_modifier(lower).map(|(sides, modifier)| {
+                try_parse_roll_die_with_modifier(lower, ctx.bare_card_aggregate_source).map(
+                    |(sides, modifier)| {
                     ImperativeFamilyAst::RollDie {
                         count: QuantityExpr::Fixed { value: 1 },
                         sides,
@@ -14727,6 +14728,7 @@ fn parse_reassemble_contraption_imperative(
 /// remainder must shape as a recognized add/subtract clause.
 pub(crate) fn try_parse_roll_die_with_modifier(
     lower: &str,
+    bare_card: Option<crate::parser::oracle_ir::context::BareCardAggregateBinding>,
 ) -> Option<(u8, Option<crate::types::ability::DieRollModifier>)> {
     let (sides, rest) = try_parse_roll_die_sides_with_rest(lower)?;
     let rest = rest.trim_end_matches(['.', ',', ';']).trim();
@@ -14743,7 +14745,21 @@ pub(crate) fn try_parse_roll_die_with_modifier(
     ))
     .parse(after_and)
     .ok()?;
-    let (_, value) = nom_quantity::parse_quantity_ref_complete(modifier_text).ok()?;
+    // CR 608.2c + CR 115.1: the generic quantity grammar cannot see a bare
+    // "those cards" aggregate (intentionally unavailable context-free), so when
+    // the chain established a bare-card binding, try it before refusing. The
+    // contextual parse must consume fully — a prefix-only match refuses the
+    // whole header honestly rather than silently narrowing the modifier.
+    let value = nom_quantity::parse_quantity_ref_complete(modifier_text)
+        .ok()
+        .map(|(_, qty)| qty)
+        .or_else(|| {
+            let binding = bare_card?;
+            let (rest, qty) =
+                nom_quantity::parse_contextual_bare_card_aggregate_ref(modifier_text, binding)
+                    .ok()?;
+            rest.trim().is_empty().then_some(qty)
+        })?;
     let modifier = if sign {
         crate::types::ability::DieRollModifier::Add {
             value: crate::types::ability::QuantityExpr::Ref { qty: value },

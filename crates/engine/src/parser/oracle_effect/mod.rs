@@ -180,7 +180,8 @@ use self::subject::{
 };
 use crate::parser::oracle_ir::ast::*;
 pub(crate) use crate::parser::oracle_ir::context::{
-    ChosenColorQualifierScope, ParseContext, PriorZoneChoicePartition, TokenPtFollowup,
+    BareCardAggregateBinding, ChosenColorQualifierScope, ParseContext, PriorZoneChoicePartition,
+    TokenPtFollowup,
     TriggerConditionScope,
 };
 use crate::parser::oracle_ir::effect_chain::{
@@ -34145,6 +34146,12 @@ pub(super) enum BareCardAggregatePublisher {
     ChainSetCompatible,
     EventFallbackBarrier,
     TerminalUnsupported,
+    /// CR 608.2c + CR 115.1: an `Effect::TargetOnly` publishes the ability's
+    /// own targets as the bare-aggregate referent ("those cards" names the
+    /// chosen targets, not a chain set). `ChooseObjectsIntoTrackedSet` stays
+    /// `TerminalUnsupported`: it publishes a set whose relation to the
+    /// anaphor is a separate question no measured card needs here (M3).
+    TargetSetCompatible,
 }
 
 pub(super) fn classify_bare_card_aggregate_publisher(
@@ -34157,11 +34164,10 @@ pub(super) fn classify_bare_card_aggregate_publisher(
         Some(BareCardAggregatePublisher::ChainSetCompatible)
     } else if is_token_creating_effect(effect) {
         Some(BareCardAggregatePublisher::EventFallbackBarrier)
+    } else if matches!(effect, Effect::TargetOnly { .. }) {
+        Some(BareCardAggregatePublisher::TargetSetCompatible)
     } else if publishes_aggregate_set_from_resolution(effect)
-        || matches!(
-            effect,
-            Effect::TargetOnly { .. } | Effect::ChooseObjectsIntoTrackedSet { .. }
-        )
+        || matches!(effect, Effect::ChooseObjectsIntoTrackedSet { .. })
     {
         Some(BareCardAggregatePublisher::TerminalUnsupported)
     } else {
@@ -42233,8 +42239,13 @@ fn parse_effect_chain_ir_body(
             .rev()
             .find_map(|clause| classify_latest_bare_card_publisher_in_clause(&clause.parsed));
         let bare_card_aggregate_source = match nearest_bare_card_publisher {
-            Some(BareCardAggregatePublisher::ChainSetCompatible) => {
-                Some(TrackedAnaphorSource::ChainSet)
+            Some(BareCardAggregatePublisher::ChainSetCompatible) => Some(
+                BareCardAggregateBinding::ChainSet(TrackedAnaphorSource::ChainSet),
+            ),
+            // CR 608.2c + CR 115.1: a target-set publisher binds the bare
+            // aggregate to the ability's own targets, not to any chain set.
+            Some(BareCardAggregatePublisher::TargetSetCompatible) => {
+                Some(BareCardAggregateBinding::AbilityTargets)
             }
             Some(BareCardAggregatePublisher::EventFallbackBarrier)
             | Some(BareCardAggregatePublisher::TerminalUnsupported)

@@ -6859,7 +6859,10 @@ fn matches_combat_relation(
     }
 }
 
-fn referenced_targets_for_filter(
+/// Shared with `game/quantity.rs` for `CardTypeSetSource::TargetedObjects`, whose
+/// resolver arm selects the resolving ability's object targets through this
+/// authority rather than re-deriving slot selection.
+pub(crate) fn referenced_targets_for_filter<'a>(
     state: &GameState,
     target: &TargetFilter,
     ability: Option<&ResolvedAbility>,
