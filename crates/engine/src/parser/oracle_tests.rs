@@ -30159,3 +30159,92 @@ fn printed_subject_of_a_choosing_sentence_becomes_the_target_chooser() {
     // normalization above reads off the subject's `Typed` shape.
     let _ = ControllerRef::Opponent;
 }
+
+/// CR 608.2c + CR 603.7a + CR 508.6: Faramir, Prince of Ithilien full-Oracle
+/// shape probe (phase 5a, S3a). Verbatim Oracle text (matches card-data.json
+/// oracle_text): Choose{Opponent} head, delayed trigger bound to the chosen
+/// player, draw gated by the retrospective this-turn player-pair test,
+/// Otherwise arm creates the tokens.
+#[test]
+fn faramir_prince_of_ithilien_full_oracle_shape() {
+    use crate::types::ability::{
+        ChoiceType, DelayedTriggerCondition, DelayedTriggerPlayerBinding, Effect,
+    };
+    use crate::types::phase::Phase;
+    let parsed = parse(
+        "At the beginning of your end step, choose an opponent. At the beginning of that player's next end step, you draw a card if they didn't attack you that turn. Otherwise, create three 1/1 white Human Soldier creature tokens.",
+        "Faramir, Prince of Ithilien",
+        &[],
+        &["Creature"],
+        &["Human", "Soldier"],
+    );
+    assert!(
+        !parsed_has_unimplemented(&parsed),
+        "Faramir must parse with zero Unimplemented effects: {parsed:#?}"
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.execute.is_some())
+        .expect("outer end-step trigger");
+    let execute = trigger.execute.as_deref().expect("trigger execute");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::Choose {
+                choice_type: ChoiceType::Opponent { .. },
+                ..
+            }
+        ),
+        "head must be Choose-Opponent, got {:?}",
+        execute.effect
+    );
+    let mut cursor = execute.sub_ability.as_deref();
+    let mut delayed = None;
+    while let Some(link) = cursor {
+        if matches!(link.effect.as_ref(), Effect::CreateDelayedTrigger { .. }) {
+            delayed = Some(link);
+            break;
+        }
+        cursor = link.sub_ability.as_deref();
+    }
+    let delayed = delayed.expect("chain must contain CreateDelayedTrigger");
+    let Effect::CreateDelayedTrigger {
+        condition,
+        effect: inner,
+        ..
+    } = delayed.effect.as_ref()
+    else {
+        unreachable!()
+    };
+    assert!(
+        matches!(
+            condition,
+            DelayedTriggerCondition::AtNextPhaseForPlayer {
+                phase: Phase::End,
+                binding: DelayedTriggerPlayerBinding::ChosenPlayer { index: 0 },
+                ..
+            }
+        ),
+        "delayed must target chosen player end step, got {condition:?}"
+    );
+    assert!(
+        matches!(inner.effect.as_ref(), Effect::Draw { .. }),
+        "inner head must be Draw, got {:?}",
+        inner.effect
+    );
+    assert!(
+        inner.condition.is_some(),
+        "draw must carry the retrospective condition, got {:#?}",
+        inner
+    );
+    let else_arm = inner
+        .else_ability
+        .as_deref()
+        .expect("Otherwise arm must exist");
+    assert!(
+        matches!(else_arm.effect.as_ref(), Effect::Token { .. }),
+        "Otherwise arm must create tokens, got {:?}",
+        else_arm.effect
+    );
+}

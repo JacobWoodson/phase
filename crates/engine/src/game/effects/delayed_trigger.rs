@@ -301,16 +301,6 @@ pub fn resolve(
         ability.controller,
     );
 
-    // CR 603.7a + CR 608.2c: carry the `ChosenPlayer`-resolved id into the
-    // fired body as its first player target, so `PlayerScope::Target` (and
-    // `AbilityCondition::PlayerAttackedPlayer { attacker: Target, .. }`)
-    // reads the chosen player at fire time. Scoped to the `ChosenPlayer`
-    // binding only — `Controller`/`ParentTargetOwner` bodies keep their
-    // existing target shapes untouched.
-    if let Some(chosen) = chosen_player_stamp {
-        delayed_ability.targets.push(TargetRef::Player(chosen));
-    }
-
     // CR 603.7: Bind the most recent tracked set to the built ability chain's
     // effect target filter, resolving sentinel TrackedSetId(0) or
     // TargetFilter::Any, and upgrading ChangeZone → ChangeZoneAll for delayed
@@ -502,6 +492,18 @@ pub fn resolve(
 
     delayed_ability.set_target_incarnations_recursive(target_pins);
     delayed_ability.targets = snapshot_targets;
+    // CR 603.7a + CR 608.2c: carry the `ChosenPlayer`-resolved id into the
+    // fired body as its first player target, so `PlayerScope::Target` (and
+    // `AbilityCondition::PlayerAttackedPlayer { attacker: Target, .. }`)
+    // reads the chosen player at fire time. Scoped to the `ChosenPlayer`
+    // binding only — `Controller`/`ParentTargetOwner` bodies keep their
+    // existing target shapes untouched. Placed AFTER the snapshot assignment
+    // above, which would otherwise clobber the stamp (the snapshot covers
+    // event/parent/last-created referents; the chosen-player carrier is
+    // disjoint from all three).
+    if let Some(chosen) = chosen_player_stamp {
+        delayed_ability.targets.push(TargetRef::Player(chosen));
+    }
     // CR 608.2k: Give each clause that names an event-subject anaphor its own
     // referent, so a chain naming both the event's subject and its object slot
     // does not hand one clause the other's object.

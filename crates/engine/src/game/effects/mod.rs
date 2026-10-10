@@ -38705,4 +38705,104 @@ mod tests {
             }
         ));
     }
+
+    /// CR 508.6 + CR 608.2c: unit matrix for the retrospective this-turn
+    /// player-pair attack predicate (phase 5a, Verification Matrix row 5).
+    /// Endpoints resolve via `resolve_single_player_scope` (`Target` = first
+    /// `TargetRef::Player` — the stamped chosen player); every negative below
+    /// is paired with a positive cell proving the path resolves. Revert-
+    /// discriminating: dropping the ledger read (e.g. collapsing to the
+    /// collapsed `has_attacked` gate) flips cell 1; dropping the fail-closed
+    /// arms flips cells 5-7.
+    #[test]
+    fn player_attacked_player_predicate_matrix() {
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+        fn ability_with_targets(targets: Vec<TargetRef>) -> ResolvedAbility {
+            let effect: Effect = serde_json::from_str(
+                r#"{"type":"Draw","count":{"type":"Fixed","value":1},"target":{"type":"Controller"}}"#,
+            )
+            .expect("draw effect must parse");
+            ResolvedAbility::new(effect, targets, ObjectId(1), PlayerId(0))
+        }
+        fn seeded(attacker: PlayerId, defender: PlayerId) -> GameState {
+            let mut state = GameState::new_two_player(42);
+            state
+                .attacked_players_directly_this_turn
+                .entry(attacker)
+                .or_default()
+                .insert(defender);
+            state
+        }
+        let cond = |attacker: PlayerScope, defender: PlayerScope| {
+            AbilityCondition::PlayerAttackedPlayer { attacker, defender }
+        };
+        let empty = GameState::new_two_player(42);
+        // 1. Chosen (Target=P1) attacked you (Controller=P0): ledger P1->P0.
+        assert!(evaluate_condition(
+            &cond(PlayerScope::Target, PlayerScope::Controller),
+            &seeded(p1, p0),
+            &ability_with_targets(vec![TargetRef::Player(p1)]),
+        ));
+        // 2. Same scopes, empty ledger: no attack recorded.
+        assert!(!evaluate_condition(
+            &cond(PlayerScope::Target, PlayerScope::Controller),
+            &empty,
+            &ability_with_targets(vec![TargetRef::Player(p1)]),
+        ));
+        // 3. Controller attacked chosen: ledger P0->P1.
+        assert!(evaluate_condition(
+            &cond(PlayerScope::Controller, PlayerScope::Target),
+            &seeded(p0, p1),
+            &ability_with_targets(vec![TargetRef::Player(p1)]),
+        ));
+        // 4. Controller vs controller, empty ledger: nobody attacked themselves.
+        assert!(!evaluate_condition(
+            &cond(PlayerScope::Controller, PlayerScope::Controller),
+            &empty,
+            &ability_with_targets(vec![]),
+        ));
+        // 5. Target with no stamped player target: unresolvable fails closed.
+        assert!(!evaluate_condition(
+            &cond(PlayerScope::Target, PlayerScope::Controller),
+            &seeded(p1, p0),
+            &ability_with_targets(vec![]),
+        ));
+        // 6-7. Duration-timing-only scopes never reach the resolver: false
+        // even with a matching ledger entry.
+        assert!(!evaluate_condition(
+            &cond(
+                PlayerScope::SpecificPlayer { id: p1 },
+                PlayerScope::Controller,
+            ),
+            &seeded(p1, p0),
+            &ability_with_targets(vec![TargetRef::Player(p1)]),
+        ));
+        assert!(!evaluate_condition(
+            &cond(PlayerScope::AnyTurn, PlayerScope::Controller),
+            &seeded(p1, p0),
+            &ability_with_targets(vec![TargetRef::Player(p1)]),
+        ));
+        // 8. Ordered pairs: only P0->P1 seeded, query P1->P0 is false.
+        assert!(!evaluate_condition(
+            &cond(PlayerScope::Target, PlayerScope::Controller),
+            &seeded(p0, p1),
+            &ability_with_targets(vec![TargetRef::Player(p1)]),
+        ));
+        // 9. Card-level Not composes above the leaf in both polarities.
+        let leaf = cond(PlayerScope::Target, PlayerScope::Controller);
+        let not = |inner: AbilityCondition| AbilityCondition::Not {
+            condition: Box::new(inner),
+        };
+        assert!(!evaluate_condition(
+            &not(leaf.clone()),
+            &seeded(p1, p0),
+            &ability_with_targets(vec![TargetRef::Player(p1)]),
+        ));
+        assert!(evaluate_condition(
+            &not(leaf),
+            &empty,
+            &ability_with_targets(vec![TargetRef::Player(p1)]),
+        ));
+    }
 }

@@ -35077,6 +35077,15 @@ pub(crate) fn parse_effect_chain_ir(
     // recipient through it) rather than boundary-cleared, preventing leak into
     // an unrelated later sentence.
     let mut chain_parent_target_controller_scope: Option<ControllerRef> = None;
+    // CR 603.7a + CR 608.2c: chunk indices swallowed into a preceding delayed
+    // payload. When a temporal-prefix clause's inner instruction is itself
+    // conditional ("you draw a card if they didn't attack you that turn",
+    // Faramir) and the next chunk opens an Otherwise branch, the branch is
+    // parsed as part of the inner chain (where it binds `Bound` to the inner
+    // condition) instead of as an outer sibling (where no outer conditional
+    // exists and it would fall back to `Unimplemented`). Skipped at the top
+    // of the loop before any per-iteration state is touched.
+    let mut swallowed_chunk_indices: Vec<usize> = Vec::new();
     // CR 611.2a: carried across iterations — (clause count when the stamp was set, the
     // stamping chunk's text). The residual this closes is a chunk that carries a
     // distributed leading duration but pushes NO clause at all (it instead mutates an
@@ -35097,6 +35106,13 @@ pub(crate) fn parse_effect_chain_ir(
     // statement-level `return` — so no value can escape to the caller.
     let outer_declared_object_target = ctx.chain_declared_object_target.take();
     for (chunk_idx, chunk) in chunks.iter().enumerate() {
+        // CR 603.7a: skip chunks already consumed into a delayed payload (see
+        // `swallowed_chunk_indices`). First statement so the stamp gate below
+        // never observes a chunk that emits no clause; the antecedent
+        // publication below stays path-independent (pure recompute).
+        if swallowed_chunk_indices.contains(&chunk_idx) {
+            continue;
+        }
         // CR 601.2c + CR 608.2c: FIRST statement of the body, so the antecedent
         // is published PATH-INDEPENDENTLY — ahead of `try_parse_generic_instead_clause`
         // (the producer for the "If <cond>, instead <body>" rider that carries
@@ -37510,7 +37526,56 @@ pub(crate) fn parse_effect_chain_ir(
         });
         if let Some(prefix_condition) = prefix_delayed {
             let (inner_text, inner_multi_target) = strip_any_number_quantifier(text_after_prefix);
-            let inner_ir = parse_effect_chain_ir(&inner_text, kind, ctx);
+            // CR 603.7a + CR 608.2c: a conditional delayed instruction followed
+            // by an Otherwise sentence (Faramir) parses the branch INSIDE the
+            // payload, where the inner Otherwise site binds it `Bound` to the
+            // inner condition. Without this the branch parses as an outer
+            // sibling, finds no outer conditional, and falls back to
+            // `Unimplemented`. Probed with a throwaway ctx so a failed
+            // widening leaves no diagnostics behind; only a widening that
+            // keeps the inner condition consumes the next chunk.
+            let widened_text = chunks.get(chunk_idx + 1).and_then(|next| {
+                let next_text = strip_leading_sequence_connector(&next.text).trim();
+                let next_lower = next_text.to_lowercase();
+                let matched = nom_on_lower(next_text, &next_lower, |i| {
+                    value(
+                        (),
+                        alt((
+                            tag("otherwise, "),
+                            tag("otherwise "),
+                            tag("if not, "),
+                            tag("if no player does, "),
+                            tag("if no one does, "),
+                        )),
+                    )
+                    .parse(i)
+                });
+                matched.map(|_| {
+                    // Chunks arrive with the sentence delimiter stripped, so
+                    // rejoin with ". " (idempotent when the head keeps its
+                    // period) — without the boundary the branch glues onto the
+                    // condition text and neither arm recognizes it.
+                    format!(
+                        "{}. {}",
+                        inner_text.trim_end_matches('.').trim_end(),
+                        strip_leading_sequence_connector(&next.text).trim(),
+                    )
+                })
+            });
+            let inner_ir = match widened_text {
+                Some(ref wide) => {
+                    let mut probe_ctx = ctx.clone_throwaway();
+                    let probe_def =
+                        lower_effect_chain_ir(&parse_effect_chain_ir(wide, kind, &mut probe_ctx));
+                    if probe_def.condition.is_some() {
+                        swallowed_chunk_indices.push(chunk_idx + 1);
+                        parse_effect_chain_ir(wide, kind, ctx)
+                    } else {
+                        parse_effect_chain_ir(&inner_text, kind, ctx)
+                    }
+                }
+                None => parse_effect_chain_ir(&inner_text, kind, ctx),
+            };
             let mut inner_def = lower_effect_chain_ir(&inner_ir);
             if let Some(spec) = inner_multi_target {
                 inner_def = inner_def.multi_target(spec);

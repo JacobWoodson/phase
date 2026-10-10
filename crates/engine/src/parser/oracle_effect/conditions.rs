@@ -4846,6 +4846,25 @@ fn opponent_poison_at_least_as_quantity_check(count: u32) -> AbilityCondition {
     }
 }
 
+/// CR 508.6 + CR 608.2c: endpoint map for the retrospective player-pair
+/// attack test, shared by the positive and negated bridge arms below. Each
+/// endpoint maps only where meaning is preserved exactly (see the arm doc);
+/// unmapped endpoints fail the whole condition to `None` so coverage stays
+/// honest instead of silently rebinding.
+fn player_attack_endpoint_to_scope(scope: &ControllerRef) -> Option<PlayerScope> {
+    match scope {
+        ControllerRef::You => Some(PlayerScope::Controller),
+        ControllerRef::TargetPlayer
+        | ControllerRef::TargetOpponent
+        | ControllerRef::ChosenPlayer { .. } => Some(PlayerScope::Target),
+        ControllerRef::SpecificPlayer { id } => Some(PlayerScope::SpecificPlayer { id: *id }),
+        ControllerRef::SourceChosenPlayer => Some(PlayerScope::SourceChosenPlayer),
+        ControllerRef::DefendingPlayer => Some(PlayerScope::DefendingPlayer),
+        ControllerRef::ScopedPlayer => Some(PlayerScope::ScopedPlayer),
+        _ => None,
+    }
+}
+
 /// Bridge a `StaticCondition` (from the nom condition parser) to an
 /// `AbilityCondition`. Returns `None` for variants that have no
 /// effect-resolution equivalent — the caller falls through to the next strategy.
@@ -4887,26 +4906,10 @@ pub(crate) fn static_condition_to_ability_condition(
         // rebind (cf. `IsMonarch` below), so the whole condition stays
         // unrepresented and coverage stays honest.
         StaticCondition::PlayerAttackedPlayer { attacker, defender } => {
-            fn endpoint(scope: &ControllerRef) -> Option<PlayerScope> {
-                match scope {
-                    ControllerRef::You => Some(PlayerScope::Controller),
-                    ControllerRef::TargetPlayer
-                    | ControllerRef::TargetOpponent
-                    | ControllerRef::ChosenPlayer { .. } => Some(PlayerScope::Target),
-                    ControllerRef::SpecificPlayer { id } => {
-                        Some(PlayerScope::SpecificPlayer { id: *id })
-                    }
-                    ControllerRef::SourceChosenPlayer => {
-                        Some(PlayerScope::SourceChosenPlayer)
-                    }
-                    ControllerRef::DefendingPlayer => {
-                        Some(PlayerScope::DefendingPlayer)
-                    }
-                    ControllerRef::ScopedPlayer => Some(PlayerScope::ScopedPlayer),
-                    _ => None,
-                }
-            }
-            match (endpoint(attacker), endpoint(defender)) {
+            match (
+                player_attack_endpoint_to_scope(attacker),
+                player_attack_endpoint_to_scope(defender),
+            ) {
                 (Some(attacker), Some(defender)) => {
                     Some(AbilityCondition::PlayerAttackedPlayer {
                         attacker,
@@ -6511,6 +6514,33 @@ pub(super) fn try_nom_condition_as_ability_condition(
                     static_condition_to_ability_condition(&scalar, ctx)?,
                 ],
             });
+        }
+    }
+
+    // CR 508.6 + CR 608.2c: "they didn't/did not attack you that turn" with a
+    // Choose(Player|Opponent) antecedent — "they" is the chosen player
+    // (Faramir's verbatim consequent). The nom grammar deliberately has no
+    // producer for pronoun subjects ("they" binds per-context), but this
+    // dispatcher runs with the chain's producer in `relative_player_scope`,
+    // so the anaphor resolves here to the same `ChosenPlayer` placeholder the
+    // "that player" nom arm emits; the shared bridge maps it to the stamped
+    // target. Full-consumption match only; every other scope falls through to
+    // the generic path unchanged.
+    if let Some(ControllerRef::ChosenPlayer { index }) = ctx.relative_player_scope.as_ref() {
+        let mut they_attacked_you = all_consuming(alt((
+            tag::<_, _, OracleError<'_>>("they didn't attack you that turn"),
+            tag::<_, _, OracleError<'_>>("they did not attack you that turn"),
+        )));
+        if they_attacked_you.parse(lower.as_str()).is_ok() {
+            let static_cond = StaticCondition::Not {
+                condition: Box::new(StaticCondition::PlayerAttackedPlayer {
+                    attacker: ControllerRef::ChosenPlayer { index: *index },
+                    defender: ControllerRef::You,
+                }),
+            };
+            if let Some(bridged) = static_condition_to_ability_condition(&static_cond, ctx) {
+                return Some(bridged);
+            }
         }
     }
 
