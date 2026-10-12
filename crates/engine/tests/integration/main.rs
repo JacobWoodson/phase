@@ -416,6 +416,7 @@ mod farideh_fireball_die_branch_selection;
 mod fateful_handoff_target_mana_value_draw;
 mod faunsbane_troll_sacrifice_attached_aura;
 mod favor_of_the_mighty_greatest_mana_value_protection;
+mod fealty_monarch_control;
 mod felisa_fang_of_silverquill;
 mod feral_ghoul_dies_rad_counters;
 mod festival_of_embers_graveyard_additional_cost;

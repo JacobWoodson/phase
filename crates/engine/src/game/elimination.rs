@@ -1455,6 +1455,15 @@ fn do_eliminate(
                 player_id: new_monarch,
             });
         }
+        // CR 611.3a + CR 725.4 + CR 725.5: succession (or vacancy, when nobody
+        // is left) can flip live monarch-reading statics — escalate iff any
+        // such static is live. Covers both the `None` and the succession
+        // branches above; the outer `if` already gates on the leaver having
+        // been the monarch.
+        super::layers::mark_layers_full_if_dimension_read_live(
+            state,
+            super::layers::LayerInvalidationDimension::Monarch,
+        );
     }
 
     // CR 726.4: If the player who has the initiative leaves the game,

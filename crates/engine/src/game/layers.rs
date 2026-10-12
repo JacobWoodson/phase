@@ -4039,12 +4039,39 @@ pub(crate) fn any_active_static_reads_top_of_library(state: &GameState) -> bool 
     found
 }
 
-/// CR 401.5 + CR 611.3a: Force a full layer recompute after a library-top-changing
-/// event (shuffle, mill, put-on-top, draw), but only when a `TopOfLibraryMatches`
-/// static is actually live. Single authority called by every top-changing library
-/// move and shuffle helper so a stale layer cache can't survive the change.
-pub(crate) fn mark_layers_full_if_top_of_library_static_live(state: &mut GameState) {
-    if any_active_static_reads_top_of_library(state) {
+/// CR 611.3a: the layer-invalidation dimension a guarded mutation site is
+/// escalating for. Third-dimension parameterization (monarch joins
+/// top-of-library and life — the recorded trigger below, now fulfilled): one
+/// guarded entry point (`mark_layers_full_if_dimension_read_live`), one
+/// granularity (Full), per-dimension live-reader predicates. A FOURTH
+/// dimension extends this enum — never a fourth bespoke guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LayerInvalidationDimension {
+    /// CR 401.5: library-top readers (`TopOfLibraryMatches` statics).
+    TopOfLibrary,
+    /// CR 119: life-family readers.
+    LifeTotal,
+    /// CR 725.5: monarch-designation readers (designation-anchored
+    /// modifications + `IsMonarch` / `NoMonarch` gates).
+    Monarch,
+}
+
+/// CR 611.3a: single authority for guarded layer escalation. Forces a FULL
+/// battlefield re-evaluation after a dimension-changing event, but only when
+/// a static actually reading that dimension is live — simulated changes on
+/// cold paths stay cheap. Called by every guarded mutation site with its
+/// dimension so a stale layer cache can't survive a change that flips a
+/// derived board.
+pub(crate) fn mark_layers_full_if_dimension_read_live(
+    state: &mut GameState,
+    dimension: LayerInvalidationDimension,
+) {
+    let live = match dimension {
+        LayerInvalidationDimension::TopOfLibrary => any_active_static_reads_top_of_library(state),
+        LayerInvalidationDimension::LifeTotal => any_active_static_reads_life_total(state),
+        LayerInvalidationDimension::Monarch => any_active_static_reads_monarch(state),
+    };
+    if live {
         mark_layers_full(state);
     }
 }
@@ -4084,11 +4111,11 @@ pub(crate) fn mark_layers_full_if_top_of_library_static_live(state: &mut GameSta
 // Correctness doctrine (`StaticSourceIndex`): over-include, never
 // under-include; output byte-identical.
 //
-// SIBLING-CLUSTER TRIGGER (recorded follow-up): this is the SECOND
-// `mark_layers_full_if_*_static_live` guard after the library-top guard above.
-// At the THIRD such dimension, parameterize all three into a dimension enum and
-// migrate the library-top guard in the same change, rather than adding a fourth
-// bespoke classifier family.
+// SIBLING-CLUSTER TRIGGER (recorded follow-up — FULFILLED phase 5b): the
+// monarch third dimension parameterized all three guards into
+// `LayerInvalidationDimension` + `mark_layers_full_if_dimension_read_live`
+// above, migrating every library-top and life call site in the same change.
+// A fourth dimension extends that enum — never a fourth bespoke guard.
 // ===========================================================================
 
 /// CR 119: Does a `QuantityExpr` read the life family? Expression-level walk,
@@ -4689,14 +4716,132 @@ fn any_active_static_reads_life_total(state: &GameState) -> bool {
     found
 }
 
-/// CR 611.3a + CR 119: Force a full layer recompute after a life-changing event,
-/// but only when a life-reading continuous static is actually live. Single
-/// authority called by the four guarded life-mutation sites in `effects/life.rs`
-/// so a stale layer cache can't survive a life change that flips a derived board.
-pub(crate) fn mark_layers_full_if_life_reading_static_live(state: &mut GameState) {
-    if any_active_static_reads_life_total(state) {
-        mark_layers_full(state);
+/// CR 611.3a + CR 613.1 + CR 725.5: Does a static condition read the monarch
+/// designation? Structural mirror of `static_condition_reads_life` with
+/// exactly two leaves flipped: `IsMonarch { .. }` (Dawnglade class — a monarch
+/// change flips the gate) and `NoMonarch` (vacancy flips on crowning and on
+/// elimination-succession). Every other leaf is monarch-free, enumerated
+/// explicitly (no wildcard) so a future condition variant breaks the build
+/// here instead of silently under-including a live reader.
+fn static_condition_reads_monarch(condition: &StaticCondition) -> bool {
+    match condition {
+        // CR 725.1: monarch identity and vacancy — the only condition leaves a
+        // monarch change can flip.
+        StaticCondition::IsMonarch { .. } | StaticCondition::NoMonarch => true,
+        // Recursive combinators (mirror of the life walk).
+        StaticCondition::Not { condition } => static_condition_reads_monarch(condition),
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
+            conditions.iter().any(static_condition_reads_monarch)
+        }
+        // Filter-bearing conditions: no monarch-scoped filter variant exists
+        // (Azure Fleet Admiral's "creatures the monarch controls" qualifier is
+        // dropped at parse — a pre-existing misparse, not a layer dependency),
+        // so these surfaces read no monarch. If a monarch-scoped filter is
+        // ever added, it MUST route here.
+        StaticCondition::IsPresent { .. }
+        | StaticCondition::QuantityComparison { .. }
+        | StaticCondition::DefendingPlayerControls { .. }
+        | StaticCondition::SourceMatchesFilter { .. }
+        | StaticCondition::TopOfLibraryMatches { .. }
+        | StaticCondition::RecipientMatchesFilter { .. } => false,
+        // Payload-free conditions — none read the monarch family. Enumerated
+        // explicitly (no wildcard); mirrors the life walk's leaf list.
+        StaticCondition::DevotionGE { .. }
+        | StaticCondition::ChosenColorIs { .. }
+        | StaticCondition::ChosenLabelIs { .. }
+        | StaticCondition::HasMaxSpeed
+        | StaticCondition::SpeedGE { .. }
+        | StaticCondition::DayNightIs { .. }
+        | StaticCondition::HasCounters { .. }
+        | StaticCondition::CastVariantPaid { .. }
+        | StaticCondition::RecipientHasCounters { .. }
+        | StaticCondition::ClassLevelGE { .. }
+        | StaticCondition::SourceAttackingAlone
+        | StaticCondition::SourceIsAttacking
+        | StaticCondition::SourceIsBlocking
+        | StaticCondition::SourceIsBlocked
+        | StaticCondition::IsInitiative
+        | StaticCondition::HasCityBlessing
+        | StaticCondition::HasEnduringStory
+        | StaticCondition::CompletedADungeon
+        | StaticCondition::WasStartingPlayer { .. }
+        | StaticCondition::PlayerAttackedPlayer { .. }
+        | StaticCondition::SpellCastWithVariantThisTurn { .. }
+        | StaticCondition::AnyPlayerAttackedYouLastTurn
+        | StaticCondition::OpponentPoisonAtLeast { .. }
+        | StaticCondition::UnlessPay { .. }
+        | StaticCondition::Unrecognized { .. }
+        | StaticCondition::DuringYourTurn
+        | StaticCondition::DuringOpponentsTurn
+        | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
+        | StaticCondition::SourceEnteredThisTurn
+        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::WasCast { .. }
+        | StaticCondition::IsRingBearer
+        | StaticCondition::RingLevelAtLeast { .. }
+        | StaticCondition::ControlsCommander { .. }
+        | StaticCondition::SourceIsTapped
+        | StaticCondition::IsTapped { .. }
+        | StaticCondition::SourceIsFaceUp
+        | StaticCondition::SourceIsSaddled
+        | StaticCondition::SourceControllerEquals { .. }
+        | StaticCondition::SourceIsEquipped
+        | StaticCondition::SourceIsEnchanted
+        | StaticCondition::SourceIsMonstrous
+        | StaticCondition::SourceIsHarnessed
+        | StaticCondition::SourceAttachedToCreature
+        | StaticCondition::RecipientAttackingOwnerTarget { .. }
+        | StaticCondition::SourceIsPaired
+        | StaticCondition::SourceInZone { .. }
+        | StaticCondition::EnchantedIsFaceDown
+        | StaticCondition::AdditionalCostPaid
+        | StaticCondition::CastingAsVariant { .. }
+        | StaticCondition::None => false,
     }
+}
+
+/// CR 611.3a + CR 613.1 + CR 725.5: Does a CONTINUOUS static definition depend
+/// on the monarch designation through its enabling condition or a
+/// designation-anchored modification? Two surfaces (mirrors
+/// `static_definition_reads_life_total` minus the affected-filter surface:
+/// no monarch-scoped filter variant exists, so there is nothing to route —
+/// see `static_condition_reads_monarch`; adding one later MUST extend this
+/// walk or the guard under-includes).
+fn static_definition_reads_monarch(def: &StaticDefinition) -> bool {
+    def.mode == StaticMode::Continuous
+        && (def
+            .condition
+            .as_ref()
+            .is_some_and(static_condition_reads_monarch)
+            || def.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::ChangeControllerToDesignation { .. }
+                )
+            }))
+}
+
+/// CR 611.3a: Is any functioning continuous static dependent on the monarch
+/// designation? Scans live static sources (including currently-false gates —
+/// a crowning may be exactly what flips one). Mirrors
+/// `any_active_static_reads_life_total`. NOT indexed into `StaticSourceIndex`
+/// bits by design: an off-zone generator arm is unindexed, so an indexed
+/// guard could under-include (unsound).
+fn any_active_static_reads_monarch(state: &GameState) -> bool {
+    let mut found = false;
+    for_each_static_effect_source(state, |_state, obj| {
+        if found {
+            return;
+        }
+        if obj
+            .static_definitions
+            .iter_all()
+            .any(static_definition_reads_monarch)
+        {
+            found = true;
+        }
+    });
+    found
 }
 
 /// CR 400.7 + CR 611.3a: Query zone-sensitive static dependencies on both sides
@@ -25236,6 +25381,191 @@ mod tests {
         );
     }
 
+    // -- CR 611.3a + CR 725.5 monarch invalidation guard (Phase 5b S3) --
+    //
+    // Helper: attach a CONTINUOUS static `def` to a fresh 1/1 creature (mirrors
+    // `make_life_static_source`).
+    fn make_monarch_static_source(
+        state: &mut GameState,
+        name: &str,
+        player: PlayerId,
+        def: StaticDefinition,
+    ) -> ObjectId {
+        let id = make_creature(state, name, 1, 1, player);
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .static_definitions
+            .push(def);
+        id
+    }
+
+    /// Shared reach-guard: run ONLY the monarch guard from a Clean baseline
+    /// and assert it forces a full escalation (mirrors
+    /// `assert_full_escalation_on_guard` for the life dimension).
+    fn assert_full_escalation_on_monarch_guard(state: &mut GameState) {
+        evaluate_layers(state);
+        state.layers_dirty = LayersDirty::Clean;
+        mark_layers_full_if_dimension_read_live(state, LayerInvalidationDimension::Monarch);
+        assert!(
+            matches!(state.layers_dirty, LayersDirty::Full),
+            "a live monarch-reading continuous static must force full escalation"
+        );
+    }
+
+    /// Fealty-shaped static (designation-anchored control) escalates on a
+    /// monarch change. Reverting the member arm stops escalation.
+    #[test]
+    fn monarch_member_static_escalates_on_crowning() {
+        let mut state = setup();
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+            ))
+            .modifications(vec![
+                ContinuousModification::ChangeControllerToDesignation {
+                    designation: Designation::Monarch,
+                },
+            ]);
+        make_monarch_static_source(&mut state, "Fealty-ish", P1, def);
+        assert_full_escalation_on_monarch_guard(&mut state);
+    }
+
+    /// Dawnglade-shaped static (`IsMonarch` gate) escalates on a monarch
+    /// change — the pre-existing surface the guard also covers. Reverting the
+    /// `IsMonarch` arm stops escalation.
+    #[test]
+    fn ismonarch_gated_static_escalates_on_crowning() {
+        let mut state = setup();
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
+            .condition(StaticCondition::IsMonarch {
+                player: PlayerScope::Controller,
+            })
+            .modifications(vec![ContinuousModification::AddPower { value: 1 }]);
+        make_monarch_static_source(&mut state, "Dawnglade-ish", P0, def);
+        assert_full_escalation_on_monarch_guard(&mut state);
+    }
+
+    /// No monarch reader live → the guard stays Clean (negative control so
+    /// the positives above are not passing vacuously; row 6 granularity pin:
+    /// cold paths pay nothing).
+    #[test]
+    fn monarch_guard_stays_clean_without_reader() {
+        let mut state = setup();
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
+            .modifications(vec![ContinuousModification::AddPower { value: 1 }]);
+        make_monarch_static_source(&mut state, "Plain anthem", P0, def);
+        evaluate_layers(&mut state);
+        state.layers_dirty = LayersDirty::Clean;
+        mark_layers_full_if_dimension_read_live(&mut state, LayerInvalidationDimension::Monarch);
+        assert!(
+            matches!(state.layers_dirty, LayersDirty::Clean),
+            "no live monarch reader → no escalation"
+        );
+    }
+
+    /// Classifier matrix: member / IsMonarch / NoMonarch / Not(IsMonarch)
+    /// read; plain anthem / IsInitiative / unrelated condition do not.
+    /// Revert-failing per arm.
+    #[test]
+    fn monarch_reader_classifier_matrix() {
+        use StaticCondition as C;
+        let member = StaticDefinition::continuous().modifications(vec![
+            ContinuousModification::ChangeControllerToDesignation {
+                designation: Designation::Monarch,
+            },
+        ]);
+        assert!(static_definition_reads_monarch(&member));
+        for condition in [
+            C::IsMonarch {
+                player: PlayerScope::Controller,
+            },
+            C::NoMonarch,
+            C::Not {
+                condition: Box::new(C::IsMonarch {
+                    player: PlayerScope::Target,
+                }),
+            },
+        ] {
+            let def = StaticDefinition::continuous().condition(condition);
+            assert!(
+                static_definition_reads_monarch(&def),
+                "monarch condition surface must read"
+            );
+        }
+        let plain = StaticDefinition::continuous()
+            .modifications(vec![ContinuousModification::AddPower { value: 1 }]);
+        assert!(!static_definition_reads_monarch(&plain));
+        let initiative = StaticDefinition::continuous().condition(C::IsInitiative);
+        assert!(
+            !static_definition_reads_monarch(&initiative),
+            "initiative is a different designation (CR 726)"
+        );
+        let turn_gate = StaticDefinition::continuous().condition(C::DuringYourTurn);
+        assert!(!static_definition_reads_monarch(&turn_gate));
+    }
+
+    /// CR 613.1b row 3: layer-2 join with timestamp ordering — the LATER
+    /// control effect wins EACH way (timestamps resolve at install, CR
+    /// 613.7b, so install order is timestamp order; no new ordering code).
+    #[test]
+    fn control_order_follows_later_effect_both_directions() {
+        // Leg A: designation first, source-control second → source wins.
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        state.monarch = Some(PlayerId(1));
+        let _d = add_designation_controller_effect(
+            &mut state,
+            bear,
+            bear,
+            PlayerId(0),
+            Designation::Monarch,
+        );
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&bear].controller,
+            PlayerId(1),
+            "designation alone applies the monarch"
+        );
+        let _c =
+            add_change_controller_effect(&mut state, bear, bear, PlayerId(0), Duration::Permanent);
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&bear].controller,
+            PlayerId(0),
+            "later source-control effect must win over earlier designation"
+        );
+
+        // Leg B: source-control first, designation second → designation wins.
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        state.monarch = Some(PlayerId(1));
+        let _c =
+            add_change_controller_effect(&mut state, bear, bear, PlayerId(0), Duration::Permanent);
+        evaluate_layers(&mut state);
+        assert_eq!(state.objects[&bear].controller, PlayerId(0));
+        let _d = add_designation_controller_effect(
+            &mut state,
+            bear,
+            bear,
+            PlayerId(0),
+            Designation::Monarch,
+        );
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&bear].controller,
+            PlayerId(1),
+            "later designation effect must win over earlier source-control"
+        );
+    }
+
     /// Defensive: a permanent that exits the battlefield mid-pass (e.g., SBA
     /// destroys it during a chained effect) still appears in the pre-pass
     /// snapshot. The post-pass `get_mut` must None-guard gracefully.
@@ -28551,7 +28881,7 @@ mod tests {
     // ── U3: life-gated layer escalation (CR 611.3a + CR 119) ──────────────
     //
     // Every fixture below is REVERT-FAILING: reverting the classifier arm it
-    // exercises to `=> false` makes `mark_layers_full_if_life_reading_static_live`
+    // exercises to `=> false` makes the dimension guard (`LifeTotal`)
     // a no-op, so the escalation assertion (and, where present, the differential
     // derived-board / `layers_full_eval == 1` reach-guard) fails.
 
@@ -28881,7 +29211,7 @@ mod tests {
             .life = start_life + 5;
         state.layers_dirty = LayersDirty::Clean;
         crate::game::perf_counters::reset();
-        mark_layers_full_if_life_reading_static_live(&mut state);
+        mark_layers_full_if_dimension_read_live(&mut state, LayerInvalidationDimension::LifeTotal);
         assert!(
             matches!(state.layers_dirty, LayersDirty::Full),
             "a live LifeTotal CDA must force full escalation on a life change"
@@ -29199,7 +29529,7 @@ mod tests {
         state.players.iter_mut().find(|p| p.id == P0).unwrap().life = start_life - 3;
         state.layers_dirty = LayersDirty::Clean;
         crate::game::perf_counters::reset();
-        mark_layers_full_if_life_reading_static_live(&mut state);
+        mark_layers_full_if_dimension_read_live(&mut state, LayerInvalidationDimension::LifeTotal);
         assert!(
             matches!(state.layers_dirty, LayersDirty::Clean),
             "no life-reading static ⇒ no escalation"
@@ -29769,7 +30099,7 @@ mod tests {
     fn assert_full_escalation_on_guard(state: &mut GameState) {
         evaluate_layers(state);
         state.layers_dirty = LayersDirty::Clean;
-        mark_layers_full_if_life_reading_static_live(state);
+        mark_layers_full_if_dimension_read_live(state, LayerInvalidationDimension::LifeTotal);
         assert!(
             matches!(state.layers_dirty, LayersDirty::Full),
             "a live life-reading continuous static must force full escalation"
