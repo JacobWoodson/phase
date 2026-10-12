@@ -33536,3 +33536,54 @@ fn faramir_prince_of_ithilien_full_oracle_shape() {
         else_arm.effect
     );
 }
+
+/// CR 613.1b + CR 725.5: Fealty to the Realm full-Oracle shape probe (phase
+/// 5b, S2). Verbatim Oracle text (matches card-data.json oracle_text): the
+/// ETB become-monarch trigger, the designation-anchored control static, and
+/// the must-attack / can't-attack-you pair — with zero Unimplemented (P1
+/// flips from failing to supported).
+#[test]
+fn fealty_to_the_realm_full_oracle_shape() {
+    use crate::types::ability::{ContinuousModification, Designation, Effect};
+    use crate::types::statics::StaticMode;
+    let parsed = parse(
+        "Enchant creature\nWhen this Aura enters, you become the monarch.\nThe monarch controls enchanted creature.\nEnchanted creature attacks each combat if able and can't attack you.",
+        "Fealty to the Realm",
+        &[],
+        &["Enchantment"],
+        &["Aura"],
+    );
+    assert!(
+        !parsed_has_unimplemented(&parsed),
+        "Fealty must parse with zero Unimplemented effects: {parsed:#?}"
+    );
+    // ETB become-monarch trigger still present.
+    assert!(
+        parsed.triggers.iter().any(|t| matches!(
+            t.execute.as_deref().map(|e| e.effect.as_ref()),
+            Some(Effect::BecomeMonarch { .. })
+        )),
+        "ETB become-monarch trigger must survive: {parsed:#?}"
+    );
+    // The monarch-control static carries the designation member.
+    let control = parsed
+        .statics
+        .iter()
+        .find(|s| {
+            s.mode == StaticMode::Continuous
+                && s.modifications.contains(
+                    &ContinuousModification::ChangeControllerToDesignation {
+                        designation: Designation::Monarch,
+                    },
+                )
+        })
+        .expect("designation-anchored control static");
+    match &control.affected {
+        Some(crate::types::ability::TargetFilter::Typed(tf)) => {
+            assert!(tf
+                .properties
+                .contains(&crate::types::ability::FilterProp::EnchantedBy));
+        }
+        _ => panic!("expected EnchantedBy affected filter"),
+    }
+}
