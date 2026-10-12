@@ -38,9 +38,6 @@ use crate::types::ability::{
     QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TriggerGrantProducerKey,
     TriggerProducerOrigin, TypedFilter,
 };
-use crate::types::ability_visit::{
-    each_granter_symbol, granter_symbols, granter_symbols_mut, DefinitionNode, DefinitionNodeMut,
-};
 use crate::types::attribution::EffectRef;
 use crate::types::card_type::{
     is_land_subtype, noncreature_subtype_set, CoreType, SubtypeSet, Supertype,
@@ -5545,6 +5542,11 @@ fn modification_characteristic_writes_at(
         // between controller-keyed populations, which is the read this gate
         // protects.
         ContinuousModification::ChangeController => CharacteristicKinds::CONTROLLER,
+        // CR 613.1b + CR 725.5: designation-anchored control moves the object
+        // between the same populations — same gate.
+        ContinuousModification::ChangeControllerToDesignation { .. } => {
+            CharacteristicKinds::CONTROLLER
+        }
 
         // ---- CR 613.1g + CR 613.4a-d (layer 7): power/toughness. ----
         ContinuousModification::AddPower { .. }
@@ -10708,6 +10710,19 @@ fn apply_continuous_effect_filtered(
     let modification = stamped_modification
         .as_ref()
         .unwrap_or(&effect.modification);
+    // CR 613.1b + CR 725.5: pre-read the monarch for designation-anchored
+    // control — a `Copy` scalar read before the per-recipient loop (same
+    // pattern as `all_creature_types` above), so the apply arm below never
+    // borrows `state` under the `obj` mutable borrow. Conditional like the
+    // other pre-reads: only designation-anchored effects pay for it.
+    let designation_monarch = if matches!(
+        effect.modification,
+        ContinuousModification::ChangeControllerToDesignation { .. }
+    ) {
+        state.monarch
+    } else {
+        None
+    };
 
     for &id in affected_ids {
         // CR 613.4c: When the dynamic modification's QuantityExpr depends on
@@ -11291,6 +11306,21 @@ fn apply_continuous_effect_filtered(
             // authority) rather than re-deriving from the source object.
             ContinuousModification::ChangeController => {
                 obj.controller = effect.controller;
+            }
+            // CR 613.1b (Layer 2) + CR 725.5: designation-anchored control.
+            // The holder is the LIVE designation pre-read above — deliberately
+            // NOT `effect.controller` (the holder changes without the source
+            // changing, so a queued snapshot would go stale). CR 725.5: a
+            // vacant designation is a no-op, never a default. Exhaustive over
+            // `Designation`: a future leaf breaks the build here by design.
+            ContinuousModification::ChangeControllerToDesignation { designation } => {
+                match designation {
+                    Designation::Monarch => {
+                        if let Some(monarch) = designation_monarch {
+                            obj.controller = monarch;
+                        }
+                    }
+                }
             }
             // CR 305.7: Setting a land's subtype removes all old land subtypes
             // (CR 205.3i) and all abilities generated from its rules text. Non-land
@@ -25092,6 +25122,117 @@ mod tests {
         assert!(
             state.objects[&bear_b].summoning_sick,
             "exchanged permanent B: new controller, sick (CR 302.6)"
+        );
+    }
+
+    // -- CR 613.1b + CR 725.5 designation-anchored control (Phase 5b S1) --
+    //
+    // Helper: add a Layer 2 ChangeControllerToDesignation effect targeting
+    // `target_id`. The queued effect's controller is caller-chosen so tests
+    // can separate it from the designation holder: the apply arm must read
+    // the LIVE designation, never `effect.controller`.
+    fn add_designation_controller_effect(
+        state: &mut GameState,
+        source_id: ObjectId,
+        target_id: ObjectId,
+        effect_controller: PlayerId,
+        designation: Designation,
+    ) -> u64 {
+        state.add_transient_continuous_effect(
+            source_id,
+            effect_controller,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: target_id },
+            vec![ContinuousModification::ChangeControllerToDesignation { designation }],
+            None,
+        )
+    }
+
+    /// CR 613.1b + CR 725.3: the enchanted creature's controller is the live
+    /// monarch. The queued effect's controller (P0) differs from the holder
+    /// (P1) — a snapshot-at-install arm would leave control at P0.
+    #[test]
+    fn designation_control_reads_live_monarch() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        state.monarch = Some(PlayerId(1));
+
+        let _eid = add_designation_controller_effect(
+            &mut state,
+            bear,
+            bear,
+            PlayerId(0),
+            Designation::Monarch,
+        );
+        evaluate_layers(&mut state);
+
+        assert_eq!(
+            state.objects[&bear].controller,
+            PlayerId(1),
+            "Layer 2 must apply the live monarch, not the effect controller"
+        );
+    }
+
+    /// CR 725.5: with no monarch the designation-anchored effect does
+    /// nothing — control stays at base even though the queued effect's
+    /// controller (P1) differs. A defaulting arm would hand control to P1.
+    #[test]
+    fn designation_control_vacant_leaves_base_controller() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        state.monarch = None;
+
+        let _eid = add_designation_controller_effect(
+            &mut state,
+            bear,
+            bear,
+            PlayerId(1),
+            Designation::Monarch,
+        );
+        evaluate_layers(&mut state);
+
+        assert_eq!(
+            state.objects[&bear].controller,
+            PlayerId(0),
+            "vacant designation must not move control (CR 725.5)"
+        );
+    }
+
+    /// CR 725.5 liveness: the effect applies once a monarch is crowned
+    /// WITHOUT reinstalling the Aura — P1 crowned → P1; crown passes
+    /// (vacant) → base P0; P1 crowned again → P1.
+    #[test]
+    fn designation_control_tracks_later_crowning() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        state.monarch = Some(PlayerId(1));
+
+        let _eid = add_designation_controller_effect(
+            &mut state,
+            bear,
+            bear,
+            PlayerId(0),
+            Designation::Monarch,
+        );
+        evaluate_layers(&mut state);
+        assert_eq!(state.objects[&bear].controller, PlayerId(1));
+
+        state.monarch = None;
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&bear].controller,
+            PlayerId(0),
+            "vacancy reverts to base on re-evaluation"
+        );
+
+        state.monarch = Some(PlayerId(1));
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&bear].controller,
+            PlayerId(1),
+            "later crowning re-applies with no reinstall"
         );
     }
 

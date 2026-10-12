@@ -201,6 +201,9 @@ impl ContinuousModification {
             ),
             // CR 613.2: Control-changing effects are applied in Layer 2.
             ContinuousModification::ChangeController => Layer::Control,
+            // CR 613.1b + CR 725.5: designation-anchored control is a
+            // control-changing effect — same layer, holder re-derived live.
+            ContinuousModification::ChangeControllerToDesignation { .. } => Layer::Control,
             // CR 707.9a: A copy effect that grants "this ability" makes that
             // ability part of the copiable values. Applied at Layer 1 alongside
             // CopyValues / SetName so downstream copy effects observe the

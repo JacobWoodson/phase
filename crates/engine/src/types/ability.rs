@@ -8429,7 +8429,13 @@ pub enum PlayerScope {
 /// static condition's player anchor without changing its serialized shape.
 /// CR 725.5 gives the monarch a vacancy rule that CR 726 does not give the
 /// initiative; a future designation must receive its own runtime answer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The same axis also anchors a continuous effect's controller source
+/// (`ContinuousModification::ChangeControllerToDesignation`), which is why
+/// the enum carries a tagged serde shape even though no condition serializes
+/// it directly. New leaves arrive here — never as sibling
+/// `ContinuousModification` variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub(crate) enum Designation {
     Monarch,
 }
@@ -33609,6 +33615,21 @@ pub enum ContinuousModification {
     /// CR 613.2 (Layer 2): Change the controller of the affected object to the
     /// controller of the source permanent (e.g., Control Magic auras).
     ChangeController,
+    /// CR 613.1b (Layer 2) + CR 725.5: Change the controller of the affected
+    /// object to the current holder of a game designation (e.g., Fealty to
+    /// the Realm — "The monarch controls enchanted creature"). Unlike
+    /// `ChangeController` (source-controller snapshot semantics via the
+    /// queued effect's controller field), the holder is re-derived LIVE
+    /// from game state at each layer evaluation, so a designation change
+    /// moves control with no other game action. CR 725.5: while the
+    /// designation is vacant the effect does nothing (never defaults).
+    /// Controller-source axis note: `ChangeController` (source) vs this
+    /// member (designation) differ ONLY in where the new controller comes
+    /// from — a THIRD source must parameterize both into one
+    /// controller-source axis rather than adding a third sibling.
+    ChangeControllerToDesignation {
+        designation: Designation,
+    },
     /// CR 305.7: Sets a land's subtype to a basic land type, replacing old land
     /// subtypes and their associated mana abilities.
     SetBasicLandType {

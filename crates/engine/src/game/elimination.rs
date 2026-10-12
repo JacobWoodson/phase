@@ -819,10 +819,21 @@ fn end_control_effects_for_leaving_players(
     // the FULL leaving_set (symmetric with the sweep below), so a co-leaver's
     // steal of a survivor's object reverts rather than being over-exiled.
     state.transient_continuous_effects.retain(|e| {
+        // CR 800.4a + CR 725.5: a LEAVER-controlled designation-anchored TCE
+        // ends with its controller too — even when the current holder is a
+        // survivor, the EFFECT's controller left the game. Survivor-controlled
+        // designation TCEs survive (re-derived live by the layer pass).
         !(leaving_set.contains(&e.controller)
-            && e.modifications
+            && (e
+                .modifications
                 .iter()
-                .any(|m| matches!(m, ContinuousModification::ChangeController)))
+                .any(|m| matches!(m, ContinuousModification::ChangeController))
+                || e.modifications.iter().any(|m| {
+                    matches!(
+                        m,
+                        ContinuousModification::ChangeControllerToDesignation { .. }
+                    )
+                })))
     });
 
     // CR 613.1b: recompute layers so control reverts to base_controller/owner for
