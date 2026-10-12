@@ -1,6 +1,6 @@
 import json
 
-db = json.load(open('D:/Code/phase/client/public/card-data.json', encoding='utf-8'))
+db = json.load(open('client/public/card-data.json', encoding='utf-8'))
 
 # All scheme cards: type line contains 'Scheme'
 schemes = {}

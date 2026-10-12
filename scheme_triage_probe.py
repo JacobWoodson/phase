@@ -1,6 +1,6 @@
 import json
 
-db = json.load(open('D:/Code/phase/client/public/card-data.json', encoding='utf-8'))
+db = json.load(open('client/public/card-data.json', encoding='utf-8'))
 names = ["All in Good Time","Approach My Molten Realm","Choose Your Champion","Dance, Pathetic Marionette","I Bask in Your Silent Awe","I Know All, I See All","Into the Earthen Maw","My Crushing Masterstroke","My Undead Horde Awakens","My Wish Is Your Command","Nature Demands an Offering","Nature Shields Its Own","Nothing Can Stop Me Now","Only Blood Ends Your Nightmares","The Dead Shall Serve","The Fate of the Flammable","The Very Soil Shall Shake","Which of You Burns Brightest?","Because I Have Willed It","Bow to My Command","For Each of You, a Gift","Know Evil","My Forces Are Innumerable","My Laughter Echoes","Power Without Equal","When Will You Learn?"]
 
 def walk(node, path, hits):

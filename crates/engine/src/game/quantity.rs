@@ -1708,6 +1708,12 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
             | QuantityRef::CardsDrawnThisTurn {
                 player: PlayerScope::RecipientController,
             }
+            | QuantityRef::CardsDrawnLastTurn {
+                player: PlayerScope::RecipientController,
+            }
+            | QuantityRef::OpponentSpellsCastSinceLastTurn {
+                player: PlayerScope::RecipientController,
+            }
             | QuantityRef::CardsDiscardedThisTurn {
                 player: PlayerScope::RecipientController,
             }
@@ -2243,6 +2249,8 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::BattlefieldEntriesThisTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
@@ -2576,6 +2584,8 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ZoneChangeCountThisTurn { .. }
@@ -2884,6 +2894,8 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         // CR 400.7 + CR 700.4: zone-change records store last-known information.
@@ -3149,6 +3161,8 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ZoneChangeCountThisTurn { .. }
@@ -6064,6 +6078,22 @@ fn resolve_ref(
         QuantityRef::CardsDrawnThisTurn { player } => {
             resolve_per_player_scalar(state, player, controller, ctx, targets, ability, |p| {
                 u32_to_i32_saturating(p.cards_drawn_this_turn)
+            })
+        }
+        // CR 121.1 + CR 603.4: Cards drawn during the previous turn, scoped
+        // via PlayerScope. Reads the turn-start snapshot, mirroring the
+        // this-turn arm above.
+        QuantityRef::CardsDrawnLastTurn { player } => {
+            resolve_per_player_scalar(state, player, controller, ctx, targets, ability, |p| {
+                u32_to_i32_saturating(p.cards_drawn_last_turn)
+            })
+        }
+        // CR 601.2i + CR 603.4: Spells cast by opponents since the previous
+        // turn ended, scoped via PlayerScope. Reads the per-player window
+        // counter bumped on every finalized cast.
+        QuantityRef::OpponentSpellsCastSinceLastTurn { player } => {
+            resolve_per_player_scalar(state, player, controller, ctx, targets, ability, |p| {
+                u32_to_i32_saturating(p.opponent_spells_cast_since_own_last_turn)
             })
         }
         // CR 403.3 + CR 608.2h + CR 608.2i: Battlefield entries this turn for the

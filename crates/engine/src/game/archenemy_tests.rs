@@ -591,6 +591,112 @@ fn abandon_fires_abandoned_trigger() {
     );
 }
 
+/// CR 118.12a + CR 701.33a-b: Fear My Authority's upkeep abandon behind "you
+/// discard a card or pay 3 life" — the REAL parsed trigger resolves through
+/// `resolve_ability_chain` into the unless prompt (never straight to
+/// abandon), and both directions behave: declining abandons the face-up
+/// scheme, paying 3 life keeps it face up. DISCRIMINATING: without the
+/// you-disjunction grammar the card gaps at setup (no AbandonScheme body, no
+/// prompt ever raises); without the generic unless interception the decline
+/// path would skip the prompt and the pay path would still abandon.
+#[test]
+fn fear_my_authority_unless_choice_abandons_on_decline_and_stays_on_pay() {
+    use crate::game::effects::resolve_ability_chain;
+    use crate::parser::oracle_trigger::parse_trigger_line;
+    use crate::types::ability::AbilityCost;
+    use crate::types::actions::{GameAction, UnlessCostBranch};
+
+    // Production setup: Fear's VERBATIM upkeep line through the real parser.
+    let trig = parse_trigger_line(
+        "At the beginning of your upkeep, abandon this scheme unless you discard a card or pay 3 life.",
+        "Fear My Authority",
+    );
+    let execute = trig.execute.clone().expect("trigger has a body");
+    assert!(
+        matches!(*execute.effect, Effect::AbandonScheme),
+        "body must be AbandonScheme, got {:?}",
+        execute.effect
+    );
+    // Mirror the stack-placement transfer (triggers.rs carries trigger-level
+    // `unless_pay` onto the resolving ability).
+    let unless_pay = trig.unless_pay.clone().expect("trigger carries unless_pay");
+
+    // --- Decline branch: the prompt offers both parsed branches; declining
+    // abandons the face-up scheme.
+    let mut state = GameState::new_two_player(7);
+    let arch = PlayerId(0);
+    state.active_player = arch;
+    let face = synthesized_scheme_face(vec![trig.clone()], vec![], vec![Supertype::Ongoing]);
+    let scheme_id = setup_active_scheme(&mut state, arch, "Fear My Authority", &face);
+    let mut ability = ResolvedAbility::new((*execute.effect).clone(), vec![], scheme_id, arch);
+    ability.unless_pay = Some(unless_pay.clone());
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &ability, &mut events, 0)
+        .expect("chain resolves into the unless prompt");
+    match &state.waiting_for {
+        WaitingFor::UnlessPaymentChooseCost { player, costs, .. } => {
+            assert_eq!(*player, arch, "controller must pay, got {player:?}");
+            assert_eq!(costs.len(), 2, "both branches offered, got {costs:?}");
+            assert!(matches!(costs[0], AbilityCost::Discard { .. }));
+            assert!(matches!(costs[1], AbilityCost::PayLife { .. }));
+        }
+        other => panic!("expected UnlessPaymentChooseCost, got {other:?}"),
+    }
+    let result = apply_as_current(
+        &mut state,
+        GameAction::ChooseUnlessCostBranch {
+            choice: UnlessCostBranch::Decline,
+        },
+    )
+    .expect("decline resolves");
+    assert!(
+        matches!(result.waiting_for, WaitingFor::Priority { .. }),
+        "after decline+abandon, priority must restore, got {:?}",
+        result.waiting_for
+    );
+    assert!(
+        !state.command_zone.contains(&scheme_id),
+        "declined scheme must leave the command zone"
+    );
+    assert!(
+        state.objects.get(&scheme_id).is_some_and(|o| o.face_down),
+        "declined scheme must be face down"
+    );
+
+    // --- Pay branch: fresh state, pay 3 life, the scheme stays face up.
+    let mut state = GameState::new_two_player(7);
+    state.active_player = arch;
+    state.players[0].life = 20;
+    let face = synthesized_scheme_face(vec![trig], vec![], vec![Supertype::Ongoing]);
+    let scheme_id = setup_active_scheme(&mut state, arch, "Fear My Authority", &face);
+    let mut ability = ResolvedAbility::new((*execute.effect).clone(), vec![], scheme_id, arch);
+    ability.unless_pay = Some(unless_pay);
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &ability, &mut events, 0)
+        .expect("chain resolves into the unless prompt");
+    let result = apply_as_current(
+        &mut state,
+        GameAction::ChooseUnlessCostBranch {
+            choice: UnlessCostBranch::Pay { index: 1 },
+        },
+    )
+    .expect("pay-life branch resolves");
+    assert!(
+        matches!(result.waiting_for, WaitingFor::Priority { .. }),
+        "after payment, priority must restore, got {:?}",
+        result.waiting_for
+    );
+    assert_eq!(state.players[0].life, 17, "paying 3 life from 20");
+    assert!(
+        state.command_zone.contains(&scheme_id),
+        "paid scheme must stay in the command zone"
+    );
+    assert!(
+        state.objects.get(&scheme_id).is_some_and(|o| !o.face_down),
+        "paid scheme must stay face up"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 10. synthesize_archenemy appends Command, preserving pre-existing zones
 // ---------------------------------------------------------------------------

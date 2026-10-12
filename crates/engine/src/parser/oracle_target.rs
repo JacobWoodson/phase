@@ -5969,9 +5969,10 @@ fn parse_core_type(text: &str) -> (Option<TypeFilter>, Option<String>, usize) {
 /// Parse a controller suffix like " you control", " an opponent controls", " your opponents control".
 /// Returns `(ControllerRef, bytes_consumed)` where consumed includes leading whitespace.
 ///
-/// Delegates to `nom_target::parse_controller_suffix` for the common patterns
-/// ("you control", "an opponent controls", "your opponents control"), then
-/// handles additional patterns not in the shared combinator.
+/// Delegates to `nom_filter::parse_zone_controller` for the common patterns
+/// ("you control", "an opponent controls", "your opponents control", "target
+/// player controls", "defending player controls", "the chosen player
+/// controls"), then handles additional patterns not in the shared combinator.
 fn parse_controller_suffix(text: &str, ctx: &ParseContext) -> Option<(ControllerRef, usize)> {
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();

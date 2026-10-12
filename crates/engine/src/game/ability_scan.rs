@@ -2590,6 +2590,24 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             acc = acc.or(scan_player_scope(player));
             acc
         }
+        QuantityRef::CardsDrawnLastTurn { player } => {
+            let mut acc = Axes {
+                event: false,
+                sibling: false,
+                projected: true,
+            };
+            acc = acc.or(scan_player_scope(player));
+            acc
+        }
+        QuantityRef::OpponentSpellsCastSinceLastTurn { player } => {
+            let mut acc = Axes {
+                event: false,
+                sibling: false,
+                projected: true,
+            };
+            acc = acc.or(scan_player_scope(player));
+            acc
+        }
         QuantityRef::BattlefieldEntriesThisTurn { player, filter } => {
             // CR 732.2a: axis-2 self-assertion. `record_battlefield_entry`
             // (game/restrictions.rs) APPENDS to `battlefield_entries_this_turn` on every

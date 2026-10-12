@@ -2335,6 +2335,8 @@ fn quantity_ref_contains_filter_prop(
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber
@@ -2884,6 +2886,8 @@ fn rewrite_quantity_ref_filter_props(
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber

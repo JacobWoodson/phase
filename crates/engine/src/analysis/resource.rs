@@ -8038,6 +8038,7 @@ fn project_out_player_consumables(p: &mut Player) {
         life_lost_this_turn,
         cards_drawn_this_turn,
         cards_drawn_this_step,
+        opponent_spells_cast_since_own_last_turn,
         // Strict-equality fields (NOT projected) — bound `_`, NO `..`:
         id: _,
         library: _,
@@ -8050,6 +8051,8 @@ fn project_out_player_consumables(p: &mut Player) {
         has_drawn_this_turn: _,
         lands_played_this_turn: _,
         life_lost_last_turn: _,
+        cards_drawn_last_turn: _,
+
         descended_this_turn: _,
         speed: _,
         speed_trigger_used_this_turn: _,
@@ -8078,6 +8081,11 @@ fn project_out_player_consumables(p: &mut Player) {
     *life_lost_this_turn = 0;
     *cards_drawn_this_turn = 0;
     *cards_drawn_this_step = 0;
+    // CR 601.2i: the since-window grows with every cast inside a loop but
+    // does not change the board configuration; project it out so two cycles
+    // compare as the same state. The live counter is still read by
+    // intervening-if checks on the real (post-collapse) state.
+    *opponent_spells_cast_since_own_last_turn = 0;
 }
 
 /// Clone a state through `normalize_for_loop` and additionally zero every
@@ -8310,6 +8318,8 @@ fn projected_player_axes(p: &Player) -> Vec<i64> {
         has_drawn_this_turn: _,
         lands_played_this_turn: _,
         life_lost_last_turn: _,
+        cards_drawn_last_turn: _,
+        opponent_spells_cast_since_own_last_turn: _,
         descended_this_turn: _,
         speed: _,
         speed_trigger_used_this_turn: _,
@@ -8367,6 +8377,8 @@ fn projected_player_maps(
         has_drawn_this_turn: _,
         lands_played_this_turn: _,
         life_lost_last_turn: _,
+        cards_drawn_last_turn: _,
+        opponent_spells_cast_since_own_last_turn: _,
         descended_this_turn: _,
         speed: _,
         speed_trigger_used_this_turn: _,

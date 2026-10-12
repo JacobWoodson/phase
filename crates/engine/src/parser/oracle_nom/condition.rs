@@ -4423,6 +4423,27 @@ fn parse_life_predicate(rest: &str, player: PlayerScope) -> Option<(&str, Static
         ));
     }
 
+    // CR 119 + CR 603.4: "less/greater than <quantity>" → comparison of the
+    // scoped player's life total against a composed quantity ("if that
+    // player has less than half their starting life total"). The fractional
+    // RHS composes through `parse_quantity` (CR 107.1a); "their" binds the
+    // candidate player via `PlayerScope::ScopedPlayer`, mirroring the
+    // existential static path. Canonical card: You Cannot Hide from Me.
+    if let Ok((rest, comparator)) = parse_life_total_comparator(rest) {
+        if let Ok((rest, rhs)) = nom_quantity::parse_quantity(rest) {
+            return Some((
+                rest,
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::LifeTotal { player },
+                    },
+                    comparator,
+                    rhs,
+                },
+            ));
+        }
+    }
+
     // CR 119 + CR 603.4: "N or less life" / "N or more life" → scalar
     // comparison against the scoped player's life total. Ezio Auditore da
     // Firenze canonical for the LE arm.
@@ -7572,6 +7593,7 @@ fn parse_no_attacked_this_turn(input: &str) -> OracleResult<'_, StaticCondition>
 fn parse_spell_history_condition(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
         parse_you_drew_cards_this_turn,
+        parse_you_drew_a_card_last_turn,
         parse_opponent_drew_cards_this_turn,
         // "you cast another spell this turn" / "you cast a [type] spell this turn"
         parse_you_cast_spell_this_turn,
@@ -7585,6 +7607,9 @@ fn parse_spell_history_condition(input: &str) -> OracleResult<'_, StaticConditio
         ),
         // "two or more spells were cast last turn" / "a player cast two or more spells last turn"
         parse_spells_cast_last_turn,
+        // CR 601.2i + CR 603.4: "no opponent cast a spell since your last
+        // turn ended" (I Bask in Your Silent Awe).
+        parse_no_opponent_cast_since_last_turn,
         parse_you_cast_both_spell_kinds_this_turn,
         // CR 702.185c: "a spell was warped this turn" — any player cast a spell
         // for its warp cost this turn.
@@ -7623,6 +7648,28 @@ fn parse_you_activated_loyalty_this_turn(input: &str) -> OracleResult<'_, Static
         ),
     )
     .parse(input)
+}
+
+/// CR 601.2i + CR 603.4: Parse "no opponent cast a spell since your last
+/// turn ended" → the controller's opponents cast 0 spells in the window.
+/// Reads `OpponentSpellsCastSinceLastTurn` (per-player window counter bumped
+/// on every finalized cast, reset when the controller's turn ends), not the
+/// this-turn journal — approximating as "this turn" would abandon every
+/// upkeep unconditionally. Canonical card: I Bask in Your Silent Awe.
+fn parse_no_opponent_cast_since_last_turn(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) =
+        tag::<_, _, OracleError<'_>>("no opponent cast a spell since your last turn ended")
+            .parse(input)?;
+    Ok((
+        rest,
+        make_quantity_comparison(
+            QuantityRef::OpponentSpellsCastSinceLastTurn {
+                player: PlayerScope::Controller,
+            },
+            Comparator::EQ,
+            0,
+        ),
+    ))
 }
 
 fn parse_counter_history_condition(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -8458,6 +8505,24 @@ fn parse_you_drew_cards_this_turn(input: &str) -> OracleResult<'_, StaticConditi
     parse_drawn_cards_this_turn(rest)
 }
 
+/// CR 121.1 + CR 603.4: Parse "you drew a card last turn" → the controller
+/// drew ≥ 1 card during the previous turn. The singular "a card" is the GE-1
+/// threshold idiom (drawing is the unit event; `has_drawn_this_turn` is the
+/// boolean twin). Routes through `CardsDrawnLastTurn` (turn-start snapshot),
+/// not the this-turn counter. Canonical card: Mine Is the Only Truth.
+fn parse_you_drew_a_card_last_turn(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("you drew a card last turn").parse(input)?;
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::CardsDrawnLastTurn {
+                player: PlayerScope::Controller,
+            },
+            1,
+        ),
+    ))
+}
+
 fn parse_opponent_drew_cards_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = alt((
         tag("an opponent drew "),
@@ -8799,7 +8864,15 @@ fn parse_sacrificed_this_turn_tail(input: &str) -> OracleResult<'_, StaticCondit
 /// object — the same LKI argument `parse_entered_this_turn_under_opponent_control`
 /// documents for battlefield entry.
 fn parse_died_under_control_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = parse_article(input)?;
+    // CR 603.4 + CR 700.4: an explicit threshold composes with the
+    // controller scope ("two or more creatures died under your control this
+    // turn", Dark Wings Bring Your Downfall); the bare article keeps the
+    // historical threshold of exactly-one-or-more (Morbid class).
+    let (rest, (n, comparator)) = alt((
+        parse_amount_threshold,
+        value((1, Comparator::GE), parse_article),
+    ))
+    .parse(input)?;
     let (rest, type_text) = take_until(" died under ").parse(rest)?;
     let (rest, _) = tag(" died under ").parse(rest)?;
     // CR 109.4 + CR 109.5: the possessor is a typed controller reference —
@@ -8824,13 +8897,14 @@ fn parse_died_under_control_this_turn(input: &str) -> OracleResult<'_, StaticCon
     };
     Ok((
         rest,
-        make_quantity_ge(
+        make_quantity_comparison(
             QuantityRef::ZoneChangeCountThisTurn {
                 from: Some(Zone::Battlefield),
                 to: Some(Zone::Graveyard),
                 filter: inject_controller(filter, possessor),
             },
-            1,
+            comparator,
+            n,
         ),
     ))
 }
@@ -12844,6 +12918,55 @@ mod tests {
                 );
                 assert_eq!(comparator, Comparator::GE);
                 assert_eq!(rhs, QuantityExpr::Fixed { value: 20 });
+            }
+            other => panic!("expected QuantityComparison, got {other:?}"),
+        }
+    }
+
+    /// CR 119 + CR 603.4 + CR 107.1a: "if that player has less than half their
+    /// starting life total" — the fractional-comparison tail of the
+    /// life-predicate combinator. Canonical card: You Cannot Hide from Me.
+    /// The bare "half" (no rounding suffix) defaults to rounding down, and
+    /// "their" binds the candidate player via `PlayerScope::ScopedPlayer`.
+    #[test]
+    fn test_parse_condition_that_player_less_than_half_their_starting() {
+        let (rest, c) =
+            parse_condition("if that player has less than half their starting life total").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert_eq!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::LifeTotal {
+                            player: PlayerScope::ScopedPlayer,
+                        },
+                    }
+                );
+                assert_eq!(comparator, Comparator::LT);
+                match rhs {
+                    QuantityExpr::DivideRounded {
+                        inner,
+                        divisor,
+                        rounding,
+                    } => {
+                        assert_eq!(divisor, 2);
+                        assert_eq!(rounding, RoundingMode::Down);
+                        assert!(matches!(
+                            inner.as_ref(),
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::StartingLifeTotal {
+                                    player: PlayerScope::ScopedPlayer,
+                                },
+                            }
+                        ));
+                    }
+                    other => panic!("expected DivideRounded RHS, got {other:?}"),
+                }
             }
             other => panic!("expected QuantityComparison, got {other:?}"),
         }
@@ -19656,6 +19779,49 @@ mod tests {
         );
     }
 
+    /// CR 121.1 + CR 603.4: "you drew a card last turn" — the singular GE-1
+    /// threshold over the turn-start draw snapshot. Canonical card: Mine Is
+    /// the Only Truth.
+    #[test]
+    fn you_drew_a_card_last_turn_counts_controller_last_turn_draws() {
+        let (rest, c) = parse_inner_condition("you drew a card last turn").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CardsDrawnLastTurn {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }
+        );
+    }
+
+    /// CR 601.2i + CR 603.4: "no opponent cast a spell since your last turn
+    /// ended" — the EQ-0 window over the controller's per-player
+    /// since-window counter. Canonical card: I Bask in Your Silent Awe.
+    #[test]
+    fn no_opponent_cast_since_last_turn_counts_controller_window() {
+        let (rest, c) =
+            parse_inner_condition("no opponent cast a spell since your last turn ended").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::OpponentSpellsCastSinceLastTurn {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            }
+        );
+    }
+
     #[test]
     fn opponent_cast_two_or_more_spells_this_turn_counts_opponents() {
         let (rest, c) =
@@ -20567,6 +20733,42 @@ mod tests {
                 assert_eq!(filter.controller, Some(ControllerRef::You));
             }
             other => panic!("expected controlled non-Skeleton dies count, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_two_or_more_creatures_died_under_your_control() {
+        // CR 603.4 + CR 700.4: Dark Wings Bring Your Downfall — "if two or
+        // more creatures died under your control this turn". The explicit
+        // threshold composes with the controller scope (not a bare-article
+        // Morbid check): GE 2 over your creatures' battlefield→graveyard
+        // records. Reach-guard: full consumption (rest == "") proves the
+        // threshold didn't prefix-match and leave "or more ..." behind.
+        let (rest, c) =
+            parse_inner_condition("two or more creatures died under your control this turn")
+                .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ZoneChangeCountThisTurn {
+                                from: Some(Zone::Battlefield),
+                                to: Some(Zone::Graveyard),
+                                filter: TargetFilter::Typed(filter),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 2 },
+            } => {
+                assert!(filter
+                    .type_filters
+                    .iter()
+                    .any(|filter| matches!(filter, TypeFilter::Creature)));
+                assert_eq!(filter.controller, Some(ControllerRef::You));
+            }
+            other => panic!("expected GE-2 controlled-creature dies count, got {other:?}"),
         }
     }
 

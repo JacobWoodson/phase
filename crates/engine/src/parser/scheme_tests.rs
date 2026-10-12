@@ -421,29 +421,64 @@ fn your_inescapable_doom_is_supported() {
     assert_scheme_clean("Your Inescapable Doom", oracle);
 }
 
-/// I Bask in Your Silent Awe stays HONESTLY gapped: "since your last turn
-/// ended" is a cross-turn window the turn journals cannot express (only two
-/// cards in the pool use one — this and Premature Burial, on different
-/// surfaces). Approximating it as "this turn" would abandon every upkeep
-/// unconditionally (silently wrong); the trigger must fail closed with
-/// `unparsed_condition`, never widen.
+/// CR 603.4 + CR 601.2i: I Bask in Your Silent Awe —
+/// "At the beginning of your upkeep, if no opponent cast a spell since your
+/// last turn ended, abandon this scheme." The upkeep trigger body must be
+/// `Effect::AbandonScheme` gated by the EQ-0 since-window intervening-if on
+/// the controller (not a bare abandon, not Unimplemented). The per-opponent
+/// cast restriction leg is covered by `assert_scheme_clean`; the window
+/// bump/reset transfer is covered by the ledger and turns runtime tests.
 #[test]
-fn i_bask_in_your_silent_awe_fails_closed_on_since_window() {
+fn i_bask_in_your_silent_awe_is_supported() {
     let oracle = "(An ongoing scheme remains face up until it's abandoned.)\nEach opponent can't cast more than one spell each turn.\nAt the beginning of your upkeep, if no opponent cast a spell since your last turn ended, abandon this scheme.";
+    assert_scheme_clean("I Bask in Your Silent Awe", oracle);
     let (types, subtypes) = scheme_types();
     let parsed = parse_oracle_text(oracle, "I Bask in Your Silent Awe", &[], &types, &subtypes);
-    assert_eq!(parsed.triggers.len(), 1);
-    let execute = parsed.triggers[0]
-        .execute
-        .as_deref()
-        .expect("abandon trigger body");
-    match &*execute.effect {
-        Effect::Unimplemented { name, .. } => assert_eq!(
-            name, "unparsed_condition",
-            "since-window must fail closed as unparsed_condition, got gap {name:?}"
-        ),
-        other => panic!("since-window must not widen to a bare abandon, got {other:?}"),
+    let mut found = false;
+    for trigger in &parsed.triggers {
+        let Some(execute) = trigger.execute.as_deref() else {
+            continue;
+        };
+        if !matches!(*execute.effect, Effect::AbandonScheme) {
+            continue;
+        }
+        let Some(condition) = trigger.condition.as_ref() else {
+            continue;
+        };
+        found = true;
+        match condition {
+            crate::types::ability::TriggerCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert!(
+                    matches!(comparator, crate::types::ability::Comparator::EQ),
+                    "no-opponent-cast must compare EQ, got {comparator:?}"
+                );
+                assert!(
+                    matches!(
+                        lhs,
+                        crate::types::ability::QuantityExpr::Ref {
+                            qty: crate::types::ability::QuantityRef::OpponentSpellsCastSinceLastTurn {
+                                player: crate::types::ability::PlayerScope::Controller,
+                            },
+                        }
+                    ),
+                    "must read the controller's since-window, got {lhs:?}"
+                );
+                assert!(
+                    matches!(rhs, crate::types::ability::QuantityExpr::Fixed { value: 0 }),
+                    "no-cast must threshold 0, got {rhs:?}"
+                );
+            }
+            other => panic!("I Bask: expected QuantityComparison condition, got {other:?}"),
+        }
     }
+    assert!(
+        found,
+        "I Bask in Your Silent Awe: no conditioned Effect::AbandonScheme in any trigger body"
+    );
 }
 
 #[test]
@@ -543,5 +578,254 @@ fn the_dead_shall_serve_is_supported() {
         crate::types::ability::TargetFilter::TrackedSet {
             id: crate::types::identifiers::TrackedSetId(0),
         },
+    );
+}
+
+/// CR 603.4 + CR 700.4 + CR 701.33a-b: Dark Wings Bring Your Downfall —
+/// "At the beginning of each end step, if two or more creatures died under
+/// your control this turn, abandon this scheme." The end-step trigger body
+/// must be `Effect::AbandonScheme` gated by the GE-2 controlled-deaths
+/// intervening-if (not a bare abandon, not Unimplemented). The runtime
+/// count (2 fires, 1 / opponent-controlled / non-creature do not) is covered
+/// by the trigger-condition test.
+#[test]
+fn dark_wings_bring_your_downfall_is_supported() {
+    let oracle = "At the beginning of each end step, if two or more creatures died under your control this turn, abandon this scheme.";
+    assert_scheme_clean("Dark Wings Bring Your Downfall", oracle);
+    let (types, subtypes) = scheme_types();
+    let parsed = parse_oracle_text(
+        oracle,
+        "Dark Wings Bring Your Downfall",
+        &[],
+        &types,
+        &subtypes,
+    );
+    let mut found = false;
+    for trigger in &parsed.triggers {
+        let Some(execute) = trigger.execute.as_deref() else {
+            continue;
+        };
+        if !matches!(*execute.effect, Effect::AbandonScheme) {
+            continue;
+        }
+        found = true;
+        let Some(condition) = trigger.condition.as_ref() else {
+            panic!("Dark Wings: abandon trigger must carry the intervening-if condition");
+        };
+        match condition {
+            crate::types::ability::TriggerCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert!(
+                    matches!(comparator, crate::types::ability::Comparator::GE),
+                    "two-or-more must compare GE, got {comparator:?}"
+                );
+                assert!(
+                    matches!(rhs, crate::types::ability::QuantityExpr::Fixed { value: 2 }),
+                    "threshold must be 2, got {rhs:?}"
+                );
+                assert!(
+                    matches!(
+                        lhs,
+                        crate::types::ability::QuantityExpr::Ref {
+                            qty: crate::types::ability::QuantityRef::ZoneChangeCountThisTurn { .. }
+                        }
+                    ),
+                    "must count this-turn zone changes, got {lhs:?}"
+                );
+            }
+            other => panic!("Dark Wings: expected QuantityComparison condition, got {other:?}"),
+        }
+    }
+    assert!(
+        found,
+        "Dark Wings Bring Your Downfall: no Effect::AbandonScheme in any trigger body"
+    );
+}
+
+/// CR 118.12a + CR 701.33a-b: Fear My Authority — "At the beginning of your
+/// upkeep, abandon this scheme unless you discard a card or pay 3 life."
+/// The upkeep trigger body must be `Effect::AbandonScheme` (not merely
+/// non-Unimplemented) carrying the disjunctive controller unless-cost; the
+/// runtime prompt (pay vs abandon) is covered by the archenemy upkeep test.
+#[test]
+fn fear_my_authority_is_supported() {
+    let oracle = "(An ongoing scheme remains face up until it's abandoned.)\nCreatures you control get +2/+2 and have fear.\nAt the beginning of your upkeep, abandon this scheme unless you discard a card or pay 3 life.";
+    assert_scheme_clean("Fear My Authority", oracle);
+    let (types, subtypes) = scheme_types();
+    let parsed = parse_oracle_text(oracle, "Fear My Authority", &[], &types, &subtypes);
+    let mut found = false;
+    for trigger in &parsed.triggers {
+        let Some(execute) = trigger.execute.as_deref() else {
+            continue;
+        };
+        if !matches!(*execute.effect, Effect::AbandonScheme) {
+            continue;
+        }
+        found = true;
+        // The modifier lives on the trigger (carried onto the resolving
+        // ability at stack time); the body itself stays a bare abandon.
+        let Some(unless) = &trigger.unless_pay else {
+            panic!("Fear My Authority: trigger must carry unless_pay");
+        };
+        assert_eq!(
+            unless.payer,
+            crate::types::ability::TargetFilter::Controller,
+            "you-rider payer must be the controller, got {:?}",
+            unless.payer
+        );
+        let crate::types::ability::AbilityCost::OneOf { costs } = &unless.cost else {
+            panic!(
+                "Fear My Authority: unless cost must be OneOf, got {:?}",
+                unless.cost
+            );
+        };
+        assert_eq!(costs.len(), 2, "expected two branches, got {costs:?}");
+        assert!(
+            matches!(costs[0], crate::types::ability::AbilityCost::Discard { .. }),
+            "first branch must be Discard, got {:?}",
+            costs[0]
+        );
+        assert!(
+            matches!(costs[1], crate::types::ability::AbilityCost::PayLife { .. }),
+            "second branch must be PayLife, got {:?}",
+            costs[1]
+        );
+    }
+    assert!(
+        found,
+        "Fear My Authority: no Effect::AbandonScheme in any trigger body"
+    );
+}
+
+/// CR 603.2b + CR 603.4 + CR 119 + CR 107.1a: You Cannot Hide from Me —
+/// "At the beginning of each opponent's end step, if that player has less
+/// than half their starting life total, abandon this scheme." The end-step
+/// trigger body must be `Effect::AbandonScheme` gated by the LT
+/// life-vs-half-starting intervening-if on the scoped (event) player, not a
+/// bare abandon and not Unimplemented. The fire-time ScopedPlayer binding
+/// (abandons only when THAT opponent is below half) is covered by the
+/// trigger-condition runtime test.
+#[test]
+fn you_cannot_hide_from_me_is_supported() {
+    let oracle = "(An ongoing scheme remains face up until it's abandoned.)\nAt the beginning of combat on your turn, up to one target creature gets +2/+2 and gains vigilance until end of turn. It can't be blocked this turn.\nAt the beginning of each opponent's end step, if that player has less than half their starting life total, abandon this scheme.";
+    assert_scheme_clean("You Cannot Hide from Me", oracle);
+    let (types, subtypes) = scheme_types();
+    let parsed = parse_oracle_text(oracle, "You Cannot Hide from Me", &[], &types, &subtypes);
+    let mut found = false;
+    for trigger in &parsed.triggers {
+        let Some(execute) = trigger.execute.as_deref() else {
+            continue;
+        };
+        if !matches!(*execute.effect, Effect::AbandonScheme) {
+            continue;
+        }
+        // The combat trigger has no abandon body; only the end-step leg
+        // reaches here.
+        let Some(condition) = trigger.condition.as_ref() else {
+            continue;
+        };
+        found = true;
+        match condition {
+            crate::types::ability::TriggerCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert!(
+                    matches!(comparator, crate::types::ability::Comparator::LT),
+                    "less-than-half must compare LT, got {comparator:?}"
+                );
+                assert!(
+                    matches!(
+                        lhs,
+                        crate::types::ability::QuantityExpr::Ref {
+                            qty: crate::types::ability::QuantityRef::LifeTotal {
+                                player: crate::types::ability::PlayerScope::ScopedPlayer,
+                            },
+                        }
+                    ),
+                    "must read the scoped player's life total, got {lhs:?}"
+                );
+                assert!(
+                    matches!(
+                        rhs,
+                        crate::types::ability::QuantityExpr::DivideRounded { divisor: 2, .. }
+                    ),
+                    "must compare against half starting life, got {rhs:?}"
+                );
+            }
+            other => {
+                panic!("You Cannot Hide: expected QuantityComparison condition, got {other:?}")
+            }
+        }
+    }
+    assert!(
+        found,
+        "You Cannot Hide from Me: no conditioned Effect::AbandonScheme in any trigger body"
+    );
+}
+
+/// CR 603.4 + CR 121.1: Mine Is the Only Truth —
+/// "At the beginning of your upkeep, if you drew a card last turn, abandon
+/// this scheme." The upkeep trigger body must be `Effect::AbandonScheme`
+/// gated by the GE-1 last-turn-draw intervening-if on the controller (not a
+/// bare abandon, not Unimplemented). The spell-cast draw leg is covered by
+/// `assert_scheme_clean`; the snapshot transfer (this-turn → last-turn at
+/// turn start) is covered by the turns runtime test.
+#[test]
+fn mine_is_the_only_truth_is_supported() {
+    let oracle = "(An ongoing scheme remains face up until it's abandoned.)\nWhenever a player casts a spell, you draw a card.\nAt the beginning of your upkeep, if you drew a card last turn, abandon this scheme.";
+    assert_scheme_clean("Mine Is the Only Truth", oracle);
+    let (types, subtypes) = scheme_types();
+    let parsed = parse_oracle_text(oracle, "Mine Is the Only Truth", &[], &types, &subtypes);
+    let mut found = false;
+    for trigger in &parsed.triggers {
+        let Some(execute) = trigger.execute.as_deref() else {
+            continue;
+        };
+        if !matches!(*execute.effect, Effect::AbandonScheme) {
+            continue;
+        }
+        let Some(condition) = trigger.condition.as_ref() else {
+            continue;
+        };
+        found = true;
+        match condition {
+            crate::types::ability::TriggerCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert!(
+                    matches!(comparator, crate::types::ability::Comparator::GE),
+                    "drew-a-card must compare GE, got {comparator:?}"
+                );
+                assert!(
+                    matches!(
+                        lhs,
+                        crate::types::ability::QuantityExpr::Ref {
+                            qty: crate::types::ability::QuantityRef::CardsDrawnLastTurn {
+                                player: crate::types::ability::PlayerScope::Controller,
+                            },
+                        }
+                    ),
+                    "must read the controller's last-turn draws, got {lhs:?}"
+                );
+                assert!(
+                    matches!(rhs, crate::types::ability::QuantityExpr::Fixed { value: 1 }),
+                    "a card must threshold 1, got {rhs:?}"
+                );
+            }
+            other => panic!(
+                "Mine Is the Only Truth: expected QuantityComparison condition, got {other:?}"
+            ),
+        }
+    }
+    assert!(
+        found,
+        "Mine Is the Only Truth: no conditioned Effect::AbandonScheme in any trigger body"
     );
 }

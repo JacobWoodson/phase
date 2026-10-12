@@ -9528,6 +9528,22 @@ pub enum QuantityRef {
     /// "you've drawn two or more cards this turn" and "an opponent has drawn
     /// four or more cards this turn" reuse the existing per-player aggregate axis.
     CardsDrawnThisTurn { player: PlayerScope },
+    /// CR 121.1 + CR 603.4: Number of cards drawn during the previous turn,
+    /// scoped by `player`. Reads `Player::cards_drawn_last_turn`, snapshotted
+    /// from `cards_drawn_this_turn` at turn start (`turns.rs::start_next_turn`).
+    /// Backs "if you drew a card last turn" intervening-if conditions (Mine Is
+    /// the Only Truth). The this-turn/last-turn pair mirrors the
+    /// `SpellsCastThisTurn` / `SpellsCastLastTurn` split.
+    CardsDrawnLastTurn { player: PlayerScope },
+    /// CR 601.2i + CR 603.4: Number of spells cast by `player`'s opponents
+    /// since `player`'s last turn ended. Reads
+    /// `Player::opponent_spells_cast_since_own_last_turn`, bumped on every
+    /// finalized cast and reset when `player`'s turn ends. Backs "if no
+    /// opponent cast a spell since your last turn ended" intervening-if
+    /// conditions (I Bask in Your Silent Awe). Only `Controller` scope is
+    /// meaningful (each player tracks their own window); other scopes resolve
+    /// through the generic aggregate path without special semantics.
+    OpponentSpellsCastSinceLastTurn { player: PlayerScope },
     /// CR 403.3 + CR 608.2h + CR 608.2i: Count of battlefield entries this turn by
     /// the scoped player matching `filter`, using `battlefield_entries_this_turn`
     /// snapshots. CR 608.2i is the look-back exception that makes a departed
@@ -9925,6 +9941,8 @@ impl QuantityRef {
             | QuantityRef::SacrificedThisTurn { player, .. }
             | QuantityRef::LifeGainedThisTurn { player }
             | QuantityRef::CardsDrawnThisTurn { player }
+            | QuantityRef::CardsDrawnLastTurn { player }
+            | QuantityRef::OpponentSpellsCastSinceLastTurn { player }
             | QuantityRef::StartingLifeTotal { player }
             | QuantityRef::BattlefieldEntriesThisTurn { player, .. }
             | QuantityRef::LandsPlayedThisTurn { player, .. }

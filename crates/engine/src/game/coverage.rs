@@ -1936,6 +1936,15 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::CardsDrawnThisTurn { player } => {
             format!("cards drawn this turn ({})", fmt_player_scope(player))
         }
+        QuantityRef::CardsDrawnLastTurn { player } => {
+            format!("cards drawn last turn ({})", fmt_player_scope(player))
+        }
+        QuantityRef::OpponentSpellsCastSinceLastTurn { player } => {
+            format!(
+                "opponent spells cast since last turn ({})",
+                fmt_player_scope(player)
+            )
+        }
         QuantityRef::BattlefieldEntriesThisTurn { player, filter } => format!(
             "battlefield entries this turn ({}, {})",
             fmt_target(filter),
@@ -10088,6 +10097,10 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::BendTypesThisTurn => ("BendTypesThisTurn", Handled),
         QuantityRef::LifeGainedThisTurn { .. } => ("LifeGainedThisTurn", Handled),
         QuantityRef::CardsDrawnThisTurn { .. } => ("CardsDrawnThisTurn", Handled),
+        QuantityRef::CardsDrawnLastTurn { .. } => ("CardsDrawnLastTurn", Handled),
+        QuantityRef::OpponentSpellsCastSinceLastTurn { .. } => {
+            ("OpponentSpellsCastSinceLastTurn", Handled)
+        }
         // CR 608.2h: `Handled` only when the entry-record matcher can actually evaluate the
         // filter. `battlefield_entry_matches_filter` fails closed on props the entry snapshot
         // never captured (game/restrictions.rs:517), so such a card would resolve a silent

@@ -11906,6 +11906,8 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
         | QuantityRef::PartySize { player }
         | QuantityRef::Speed { player }
         | QuantityRef::CardsDrawnThisTurn { player }
+        | QuantityRef::CardsDrawnLastTurn { player }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { player }
         | QuantityRef::CardsDiscardedThisTurn { player }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player } => {
             player_scope_unbound_at_fire_time(player)
@@ -16409,6 +16411,8 @@ fn quantity_ref_refs_cost_paid_object(qty: &QuantityRef) -> bool {
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber
@@ -18883,6 +18887,169 @@ pub mod tests {
     /// bug the definition is battlefield-only and never reaches the
     /// `EventSourceControlledBy` constraint, so the positive case would fail.
     ///
+    /// CR 603.4 + CR 700.4: Dark Wings Bring Your Downfall — "if two or more
+    /// creatures died under your control this turn". The REAL parsed
+    /// intervening-if (parser + bridge, not a hand-built condition) over
+    /// seeded death records: 2 controlled creatures fire; 1, 2 uncontrolled,
+    /// and 2 non-creatures do not. Each negative varies exactly one axis, so
+    /// a threshold/possession/type regression fails its own case.
+    #[test]
+    fn dark_wings_two_controlled_deaths_fire_but_one_or_uncontrolled_do_not() {
+        let parsed = crate::parser::oracle_trigger::parse_trigger_line(
+            "At the beginning of each end step, if two or more creatures died under your control this turn, abandon this scheme.",
+            "Dark Wings Bring Your Downfall",
+        );
+        let condition = parsed.condition.clone().expect("has intervening-if");
+        let you = PlayerId(0);
+        let foe = PlayerId(1);
+        let death = |id: u32, controller: PlayerId, creature: bool| ZoneChangeRecord {
+            name: "Victim".to_string(),
+            core_types: if creature {
+                vec![CoreType::Creature]
+            } else {
+                vec![CoreType::Land]
+            },
+            controller,
+            owner: controller,
+            ..ZoneChangeRecord::test_minimal(
+                ObjectId(id as u64),
+                Some(Zone::Battlefield),
+                Zone::Graveyard,
+            )
+        };
+        let run_case = |records: Vec<ZoneChangeRecord>| -> bool {
+            let mut state = setup();
+            state.zone_changes_this_turn = records.into();
+            check_trigger_condition(&state, &condition, you, None, None)
+        };
+        assert!(
+            run_case(vec![death(1, you, true), death(2, you, true)]),
+            "two controlled creature deaths must fire"
+        );
+        assert!(
+            !run_case(vec![death(1, you, true)]),
+            "one death must not meet two-or-more"
+        );
+        assert!(
+            !run_case(vec![death(1, foe, true), death(2, foe, true)]),
+            "opponent-controlled deaths must not count as yours"
+        );
+        assert!(
+            !run_case(vec![death(1, you, false), death(2, you, false)]),
+            "non-creature deaths must not count as creatures"
+        );
+    }
+
+    /// CR 603.2b + CR 603.4 + CR 119: You Cannot Hide from Me — "if that
+    /// player has less than half their starting life total" at an opponent's
+    /// end step. The REAL parsed intervening-if over life totals: the
+    /// below-half opponent fires; the at-half boundary, the healthy
+    /// opponent, and (critically) a dying controller with a healthy
+    /// opponent do not. The last case discriminates the ScopedPlayer
+    /// binding — resolving against the controller would wrongly fire.
+    #[test]
+    fn you_cannot_hide_below_half_scoped_opponent_fires_but_boundary_or_controller_do_not() {
+        let parsed = crate::parser::oracle_trigger::parse_trigger_line(
+            "At the beginning of each opponent's end step, if that player has less than half their starting life total, abandon this scheme.",
+            "You Cannot Hide from Me",
+        );
+        let condition = parsed.condition.clone().expect("has intervening-if");
+        let controller = PlayerId(0);
+        let opponent = PlayerId(1);
+        let phase_event = GameEvent::PhaseChanged {
+            phase: crate::types::phase::Phase::End,
+        };
+        let run_case = |controller_life: i32, opponent_life: i32| -> bool {
+            let mut state = GameState::new_two_player(7);
+            state.active_player = opponent;
+            state.players[0].life = controller_life;
+            state.players[1].life = opponent_life;
+            let source = make_creature(&mut state, controller, "Scheme Source", 1, 1);
+            check_trigger_condition(
+                &state,
+                &condition,
+                controller,
+                Some(source),
+                Some(&phase_event),
+            )
+        };
+        assert!(
+            run_case(20, 9),
+            "opponent at 9 of 20 (below half of 10) must fire"
+        );
+        assert!(
+            !run_case(20, 10),
+            "opponent exactly at half must not fire (strict less-than)"
+        );
+        assert!(!run_case(20, 20), "healthy opponent must not fire");
+        assert!(
+            !run_case(5, 20),
+            "dying controller with healthy opponent must not fire (scoped player, not controller)"
+        );
+    }
+
+    /// CR 603.4 + CR 121.1: Mine Is the Only Truth — "if you drew a card
+    /// last turn" at your upkeep. The REAL parsed intervening-if over seeded
+    /// snapshots: controller drew last turn fires (1 or 2); zero does not;
+    /// opponent-only draws do not (controller scope, not any-player). Each
+    /// negative varies exactly one axis.
+    #[test]
+    fn mine_drew_last_turn_fires_but_zero_or_opponent_only_do_not() {
+        let parsed = crate::parser::oracle_trigger::parse_trigger_line(
+            "At the beginning of your upkeep, if you drew a card last turn, abandon this scheme.",
+            "Mine Is the Only Truth",
+        );
+        let condition = parsed.condition.clone().expect("has intervening-if");
+        let you = PlayerId(0);
+        let run_case = |you_last: u32, foe_last: u32| -> bool {
+            let mut state = setup();
+            state.players[0].cards_drawn_last_turn = you_last;
+            state.players[1].cards_drawn_last_turn = foe_last;
+            check_trigger_condition(&state, &condition, you, None, None)
+        };
+        assert!(run_case(1, 0), "controller drew last turn must fire");
+        assert!(run_case(2, 0), "two draws last turn must fire");
+        assert!(!run_case(0, 0), "no draws last turn must not fire");
+        assert!(
+            !run_case(0, 3),
+            "opponent-only draws must not fire (controller scope)"
+        );
+    }
+
+    /// CR 603.4 + CR 601.2i: I Bask in Your Silent Awe — "if no opponent
+    /// cast a spell since your last turn ended" at your upkeep. The REAL
+    /// parsed intervening-if over seeded windows: an empty controller window
+    /// fires (abandons); a nonzero window does not; a nonzero OPPONENT window
+    /// with an empty controller window still fires (controller scope, not
+    /// any-player).
+    #[test]
+    fn bask_empty_window_fires_but_cast_or_opponent_window_do_not() {
+        let parsed = crate::parser::oracle_trigger::parse_trigger_line(
+            "At the beginning of your upkeep, if no opponent cast a spell since your last turn ended, abandon this scheme.",
+            "I Bask in Your Silent Awe",
+        );
+        let condition = parsed.condition.clone().expect("has intervening-if");
+        let you = PlayerId(0);
+        let run_case = |you_window: u32, foe_window: u32| -> bool {
+            let mut state = setup();
+            state.players[0].opponent_spells_cast_since_own_last_turn = you_window;
+            state.players[1].opponent_spells_cast_since_own_last_turn = foe_window;
+            check_trigger_condition(&state, &condition, you, None, None)
+        };
+        assert!(
+            run_case(0, 0),
+            "quiet window must fire (abandon the scheme)"
+        );
+        assert!(
+            !run_case(1, 0),
+            "opponent cast in the window must keep the scheme"
+        );
+        assert!(
+            run_case(0, 4),
+            "opponent's own window must not matter (controller scope)"
+        );
+    }
+
     /// Installs the *parsed* trigger (not a hand-built one) on a card in HAND and
     /// varies only the discard's cause across the three cases.
     #[test]

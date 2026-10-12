@@ -750,6 +750,16 @@ pub(crate) fn candidate_player_scalar(p: &Player, attr: &QuantityRef) -> Option<
         QuantityRef::CardsDrawnThisTurn { .. } => {
             Some(u32_to_i32_saturating(p.cards_drawn_this_turn))
         }
+        // CR 121.1 + CR 603.4: cards drawn during the previous turn, read
+        // from the turn-start snapshot per candidate player.
+        QuantityRef::CardsDrawnLastTurn { .. } => {
+            Some(u32_to_i32_saturating(p.cards_drawn_last_turn))
+        }
+        // CR 601.2i + CR 603.4: spells cast by opponents since the
+        // candidate's last turn ended, read from the per-player window.
+        QuantityRef::OpponentSpellsCastSinceLastTurn { .. } => Some(u32_to_i32_saturating(
+            p.opponent_spells_cast_since_own_last_turn,
+        )),
         // CR 101.4 + CR 608.2d: the number this candidate secretly chose during
         // the current resolution. `None` for a player who chose nothing, which
         // fails the candidate predicate CLOSED — "each player who didn't choose
@@ -5891,6 +5901,8 @@ fn quantity_ref_counts_population_matching(
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber

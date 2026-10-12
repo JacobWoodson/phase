@@ -233,6 +233,13 @@ pub fn parse_controller_suffix(input: &str) -> OracleResult<'_, ControllerRef> {
         value(ControllerRef::Opponent, tag("an opponent controls")),
         value(ControllerRef::Opponent, tag("your opponents control")),
         value(ControllerRef::TargetPlayer, tag("target player controls")),
+        // CR 607.2d: "the chosen player controls" — the source's persisted
+        // choice (schemes choose an opponent as they are set in motion, and
+        // the statics scope to permanents/creatures that player controls).
+        value(
+            ControllerRef::SourceChosenPlayer,
+            tag("the chosen player controls"),
+        ),
         // CR 109.4 + CR 102.2 / CR 102.3: opponent-constrained target-player scope.
         value(
             ControllerRef::TargetOpponent,
@@ -1062,6 +1069,26 @@ mod tests {
         let (rest2, c2) = parse_controller_suffix("an opponent controls").unwrap();
         assert_eq!(c2, ControllerRef::Opponent);
         assert_eq!(rest2, "");
+    }
+
+    #[test]
+    fn test_parse_controller_suffix_chosen_player() {
+        // CR 607.2d: "the chosen player controls" scopes to the source's
+        // persisted choice (scheme statics: Bow to My Command, Imprison This
+        // Insolent Wretch). Conscious addition per the exclusion test below:
+        // no other arm matches "the chosen player" as a controller, so this
+        // only converts previously-failing phrases into successes — unlike
+        // "defending player", it cannot re-scope a previously-successful
+        // parse, so the five remainder-coupled `parse_type_phrase` callers
+        // are unaffected. Deliberately NOT mirrored into the folding path's
+        // `nom_filter::parse_zone_controller` (which pins the absence with
+        // `zone_controller_declines_chosen_player_scope`): remainder-coupled
+        // folding callers such as the quantity "the number of" path own the
+        // trailing controller scope themselves. Static subjects compose the
+        // scope at their own site (`parse_rule_static_subject_filter`).
+        let (rest, c) = parse_controller_suffix("the chosen player controls").unwrap();
+        assert_eq!(c, ControllerRef::SourceChosenPlayer);
+        assert_eq!(rest, "");
     }
 
     // No-regression guard: the "defending player controls" controller scope is

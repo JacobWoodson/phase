@@ -2262,6 +2262,8 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
         | QuantityRef::SpellsCastThisTurn { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
@@ -6634,10 +6636,12 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         | QuantityRef::LifeGainedThisTurn { player: _ }
         | QuantityRef::DamageDealtThisTurn { .. } => reads_player_of(StateKind::JournalLife),
         QuantityRef::CardsDrawnThisTurn { player: _ }
+        | QuantityRef::CardsDrawnLastTurn { player: _ }
         | QuantityRef::CardsDiscardedThisTurn { .. } => reads_player_of(StateKind::JournalCards),
         QuantityRef::SpellsCastThisTurn { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SpellsCastLastTurn
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { player: _ }
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::PlayerActionsThisTurn { .. } => reads_player_of(StateKind::JournalCast),

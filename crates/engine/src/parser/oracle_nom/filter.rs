@@ -178,6 +178,16 @@ pub fn parse_zone_controller(input: &str) -> OracleResult<'_, ControllerRef> {
             ControllerRef::ActivePlayer,
             tag("the active player controls"),
         ),
+        // CR 607.2d: "the chosen player controls" is DELIBERATELY absent.
+        // Remainder-coupled callers of the folding type-phrase path own the
+        // trailing controller scope themselves — notably the quantity "the
+        // number of" path, whose `parse_quantity_controller_suffix` carries
+        // its own chosen-player arm and fails closed on an empty remainder
+        // (`parse_qualified_controlled_type` owns the scope split by
+        // contract). Consuming the suffix here strands those callers.
+        // Static subjects needing this scope compose it at their own site
+        // (`parse_rule_static_subject_filter`); `nom_target`'s sibling keeps
+        // its arm for the `parse_type_phrase` path.
     ))
     .parse(input)
 }
@@ -1453,5 +1463,26 @@ mod tests {
                 i + 1
             );
         }
+    }
+
+    /// CR 607.2d: `parse_zone_controller` must DECLINE "the chosen player
+    /// controls" — remainder-coupled callers of the folding path (the
+    /// quantity "the number of" path, which owns the trailing controller
+    /// scope via its own chosen-player arm) need the suffix left unconsumed.
+    /// Pin for the deliberate-absence comment on the combinator above, in
+    /// the same spirit as `nom_target`'s defending-player exclusion test.
+    #[test]
+    fn zone_controller_declines_chosen_player_scope() {
+        assert!(
+            parse_zone_controller("the chosen player controls").is_err(),
+            "parse_zone_controller must NOT consume 'the chosen player controls' \
+             (quantity path owns the trailing scope; static subjects compose it \
+             at their own site)"
+        );
+        // Positive reach-guards so the negative cannot pass vacuously.
+        let (_, you_ctrl) = parse_zone_controller("you control").unwrap();
+        assert_eq!(you_ctrl, ControllerRef::You);
+        let (_, target_ctrl) = parse_zone_controller("target player controls").unwrap();
+        assert_eq!(target_ctrl, ControllerRef::TargetPlayer);
     }
 }

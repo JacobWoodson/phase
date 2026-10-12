@@ -1836,7 +1836,23 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 614.1c: Pending ETB counters are turn-scoped (e.g., "this turn" effects).
     state.pending_etb_counters.clear();
     state.modal_modes_chosen_this_turn.clear();
+    // CR 603.4: the completed turn just ended for its shared-turn key, so
+    // every recipient's "since your last turn ended" window restarts empty.
+    // Other players' windows keep accumulating. Degrades to the completed
+    // player alone when the format has no shared team turns.
+    let window_reset_key = completed_turn_key;
+    let window_reset: Vec<PlayerId> = state
+        .players
+        .iter()
+        .map(|candidate| candidate.id)
+        .filter(|id| {
+            super::topology::normalize_shared_turn_recipient(state, *id) == window_reset_key
+        })
+        .collect();
     for player in &mut state.players {
+        if window_reset.contains(&player.id) {
+            player.opponent_spells_cast_since_own_last_turn = 0;
+        }
         player.has_drawn_this_turn = false;
         player.lands_played_this_turn = 0;
         player.life_gained_this_turn = 0;
@@ -1844,6 +1860,9 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         player.life_lost_last_turn = player.life_lost_this_turn;
         player.life_lost_this_turn = 0;
         player.descended_this_turn = false;
+        // CR 603.4: Snapshot draws before reset for "if you drew a card last
+        // turn" conditions, mirroring the life-lost snapshot above.
+        player.cards_drawn_last_turn = player.cards_drawn_this_turn;
         player.cards_drawn_this_turn = 0;
         // CR 121.1 + CR 504.1: Per-step counter is also reset at turn start so
         // a fresh turn always begins with `cards_drawn_this_step == 0` (the
@@ -6315,6 +6334,65 @@ card into your hand at the beginning of your next end step.";
         assert_eq!(state.turn_number, 2);
         assert_eq!(state.active_player, PlayerId(1));
         assert_eq!(state.priority_player, PlayerId(1));
+    }
+
+    /// CR 121.1 + CR 603.4: turn start snapshots each player's draws into
+    /// `cards_drawn_last_turn` before zeroing this-turn (Mine Is the Only
+    /// Truth's "if you drew a card last turn"). Mirrors the life-lost
+    /// snapshot in the same loop.
+    ///
+    /// DISCRIMINATION: drop the snapshot line and the previous turn's draws
+    /// are lost at the boundary, so the upkeep condition can never fire.
+    #[test]
+    fn start_next_turn_snapshots_draws_into_last_turn() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.turn_number = 1;
+        state.players[0].cards_drawn_this_turn = 3;
+        state.players[1].cards_drawn_this_turn = 0;
+
+        let mut events = Vec::new();
+        start_next_turn(&mut state, &mut events);
+
+        assert_eq!(
+            state.players[0].cards_drawn_last_turn, 3,
+            "previous turn's draws must survive as last-turn snapshot"
+        );
+        assert_eq!(
+            state.players[0].cards_drawn_this_turn, 0,
+            "this-turn counter must reset"
+        );
+        assert_eq!(
+            state.players[1].cards_drawn_last_turn, 0,
+            "a player who drew nothing snapshots zero"
+        );
+    }
+
+    /// CR 603.4: ending a turn restarts that player's "since your last turn
+    /// ended" window empty while other players' windows keep accumulating
+    /// (I Bask in Your Silent Awe).
+    ///
+    /// DISCRIMINATION: drop the reset and a stale window survives the
+    /// boundary, so the upkeep condition wrongly stays silent.
+    #[test]
+    fn start_next_turn_resets_only_completed_player_since_window() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.turn_number = 1;
+        state.players[0].opponent_spells_cast_since_own_last_turn = 2;
+        state.players[1].opponent_spells_cast_since_own_last_turn = 5;
+
+        let mut events = Vec::new();
+        start_next_turn(&mut state, &mut events);
+
+        assert_eq!(
+            state.players[0].opponent_spells_cast_since_own_last_turn, 0,
+            "completed player's window must restart empty"
+        );
+        assert_eq!(
+            state.players[1].opponent_spells_cast_since_own_last_turn, 5,
+            "other player's window must keep accumulating"
+        );
     }
 
     /// T-U7c. CR 500.8 + CR 603.7b: a "that combat" trigger whose combat never

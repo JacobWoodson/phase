@@ -27051,24 +27051,46 @@ mod tests {
         );
     }
 
-    /// CR 701.33a-b: the all-consuming guard rejects longer clauses — the
-    /// unless-cost variant (Fear My Authority) must NOT route to the bare
-    /// leaf. Reach-guard: it must reach the honest `Unsupported unless
-    /// clause` gap (proving the clause survived to unless handling) rather
-    /// than dying in an upstream short-circuit.
+    /// CR 701.33a-b + CR 118.12a: "abandon this scheme unless you discard a
+    /// card or pay 3 life" (Fear My Authority) → `Effect::AbandonScheme`
+    /// with a disjunctive controller unless-cost. Previously pinned the
+    /// honest `Unsupported unless clause` gap; the you-disjunction grammar
+    /// now binds both branches. The bare-leaf arm stays rejected: the
+    /// all-consuming guard must not swallow the unless rider.
     #[test]
-    fn abandon_unless_cost_variant_stays_honestly_unimplemented() {
+    fn abandon_unless_cost_disjunction_is_supported() {
         let def = crate::parser::oracle_effect::parse_effect_chain(
             "abandon this scheme unless you discard a card or pay 3 life",
             AbilityKind::Spell,
         );
-        match &*def.effect {
-            Effect::Unimplemented { name, .. } => assert_eq!(
-                name, "Unsupported unless clause",
-                "unless-cost abandon must reach unless handling, got gap {name:?}"
-            ),
-            other => panic!("unless-cost abandon must not route to the bare leaf, got {other:?}"),
-        }
+        assert!(
+            matches!(*def.effect, Effect::AbandonScheme),
+            "expected Effect::AbandonScheme, got {:?}",
+            def.effect
+        );
+        let Some(unless) = &def.unless_pay else {
+            panic!("expected unless_pay on abandon, got none");
+        };
+        assert_eq!(
+            unless.payer,
+            crate::types::ability::TargetFilter::Controller,
+            "you-rider payer must be the controller, got {:?}",
+            unless.payer
+        );
+        let crate::types::ability::AbilityCost::OneOf { costs } = &unless.cost else {
+            panic!("expected OneOf unless cost, got {:?}", unless.cost);
+        };
+        assert_eq!(costs.len(), 2, "expected two branches, got {costs:?}");
+        assert!(
+            matches!(costs[0], crate::types::ability::AbilityCost::Discard { .. }),
+            "first branch must be Discard, got {:?}",
+            costs[0]
+        );
+        assert!(
+            matches!(costs[1], crate::types::ability::AbilityCost::PayLife { .. }),
+            "second branch must be PayLife, got {:?}",
+            costs[1]
+        );
     }
 
     /// CR 701.12a: Soul Conduit / Axis of Mortality body — "two target players
