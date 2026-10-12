@@ -2379,8 +2379,9 @@ pub(super) fn handle_resolution_choice(
                 pending,
                 ignore_indices,
                 events,
-                // Suspension-resume paths have no ability in scope; the
-                // modifier keeps its established ability-blind read here.
+                // CR 608.2c: suspension-resume paths have no ability in
+                // scope; the parked frame's targets feed the modifier read
+                // through the parked-targets channel.
                 None,
             )
             .map_err(|error| EngineError::InvalidAction(format!("{error}")))?;
