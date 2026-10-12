@@ -33537,6 +33537,66 @@ fn faramir_prince_of_ithilien_full_oracle_shape() {
     );
 }
 
+/// CR 508.6: the they-subject retrospective condition also accepts the
+/// uncontracted "did not" form at full-Oracle scope (closes the 5a-carried
+/// LOW — the contracted "didn't" leg above is verbatim card text; the
+/// corpus carries zero uncontracted production instances, so this pins the
+/// alt-branch against rot rather than a live card).
+#[test]
+fn faramir_they_did_not_uncontracted_parses() {
+    use crate::types::ability::{DelayedTriggerPlayerBinding, Effect};
+    use crate::types::phase::Phase;
+    let parsed = parse(
+        "At the beginning of your end step, choose an opponent. At the beginning of that player's next end step, you draw a card if they did not attack you that turn. Otherwise, create three 1/1 white Human Soldier creature tokens.",
+        "Faramir, Prince of Ithilien",
+        &[],
+        &["Creature"],
+        &["Human", "Soldier"],
+    );
+    assert!(
+        !parsed_has_unimplemented(&parsed),
+        "uncontracted variant must parse with zero Unimplemented: {parsed:#?}"
+    );
+    let mut cursor = parsed.triggers.iter().filter_map(|t| t.execute.as_deref());
+    let delayed = cursor
+        .by_ref()
+        .flat_map(|link| {
+            let mut chain = vec![link];
+            let mut next = link.sub_ability.as_deref();
+            while let Some(l) = next {
+                chain.push(l);
+                next = l.sub_ability.as_deref();
+            }
+            chain
+        })
+        .find(|link| matches!(link.effect.as_ref(), Effect::CreateDelayedTrigger { .. }))
+        .expect("chain must contain CreateDelayedTrigger");
+    let Effect::CreateDelayedTrigger {
+        condition,
+        effect: inner,
+        ..
+    } = delayed.effect.as_ref()
+    else {
+        unreachable!()
+    };
+    assert!(
+        matches!(
+            condition,
+            crate::types::ability::DelayedTriggerCondition::AtNextPhaseForPlayer {
+                phase: Phase::End,
+                binding: DelayedTriggerPlayerBinding::ChosenPlayer { index: 0 },
+                ..
+            }
+        ),
+        "delayed must target chosen player end step, got {condition:?}"
+    );
+    assert!(
+        inner.condition.is_some(),
+        "uncontracted draw must carry the retrospective condition, got {:#?}",
+        inner
+    );
+}
+
 /// CR 613.1b + CR 725.5: Fealty to the Realm full-Oracle shape probe (phase
 /// 5b, S2). Verbatim Oracle text (matches card-data.json oracle_text): the
 /// ETB become-monarch trigger, the designation-anchored control static, and
