@@ -3352,6 +3352,10 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes {
                 event: false,
                 sibling: false,
                 projected: true,
+                // The uncollapsed this-turn ledger is not a `HistoryMember`;
+                // mirrors `SpellCastWithVariantThisTurn` (projected, no
+                // history axis).
+                history: HistoryReads::NONE,
             };
             acc = acc.or(scan_player_scope(attacker));
             acc = acc.or(scan_player_scope(defender));
@@ -4663,6 +4667,10 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes {
                 event: false,
                 sibling: false,
                 projected: true,
+                // The uncollapsed this-turn ledger is not a `HistoryMember`;
+                // mirrors `SpellCastWithVariantThisTurn` (projected, no
+                // history axis).
+                history: HistoryReads::NONE,
             };
             acc = acc.or(scan_controller_ref(attacker));
             acc = acc.or(scan_controller_ref(defender));

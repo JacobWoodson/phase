@@ -18,9 +18,9 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::{ExtraPhase, GameState, WaitingFor};
-use engine::types::identifiers::ObjectId;
+use engine::types::identifiers::{ExtraPhaseId, ObjectId};
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
-use engine::types::phase::Phase;
+use engine::types::phase::{Phase, PhaseGroup, TurnSegment};
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
@@ -529,9 +529,10 @@ fn decline_restriction_expires_at_end_of_combat_with_second_combat() {
     // ExtraPhase tests, which push the struct directly).
     stage.runner.state_mut().extra_phases.push(ExtraPhase {
         anchor: Phase::EndCombat,
-        phase: Phase::BeginCombat,
+        segment: TurnSegment::Phase(PhaseGroup::Combat),
         attacker_restriction: None,
         attacker_restriction_source: None,
+        id: ExtraPhaseId::default(),
     });
     // Combat 1: decline → restriction present mid-combat.
     drive_to_phase(&mut stage.runner, Phase::BeginCombat);
@@ -654,8 +655,7 @@ fn paying_prevents_restriction_and_attack_resolves() {
         .find(|p| p.id == P1)
         .expect("P1 exists")
         .mana_pool
-        .mana
-        .len();
+        .total();
     assert_eq!(pool_len, 0, "the {{3}} payment actually drained the pool");
     drive_to_phase(&mut stage.runner, Phase::DeclareAttackers);
     stage

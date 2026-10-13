@@ -13177,6 +13177,9 @@ impl StaticCondition {
             | StaticCondition::EnchantedIsFaceDown
             | StaticCondition::AdditionalCostPaid
             | StaticCondition::CastingAsVariant { .. }
+            // Absolute player-scope endpoints: nothing to re-anchor to the
+            // defending player, so the class stays unanchorable.
+            | StaticCondition::PlayerAttackedPlayer { .. }
             | StaticCondition::None => None,
         }
     }

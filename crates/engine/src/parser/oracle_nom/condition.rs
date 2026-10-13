@@ -24405,7 +24405,7 @@ mod tests {
             parse_inner_condition("a player attacked you during their last turn").unwrap();
         assert!(matches!(
             last,
-            StaticCondition::AnyPlayerAttackedYouLastTurn
+            StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
         ));
 
         // Negative: a pronoun subject is NOT the V1 anaphor -- it binds a

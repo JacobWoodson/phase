@@ -6154,6 +6154,7 @@ mod tests {
                 amount: 4,
                 is_combat: false,
                 excess: 0,
+                source_incarnation: None,
             },
             &trigger,
             &ctx,

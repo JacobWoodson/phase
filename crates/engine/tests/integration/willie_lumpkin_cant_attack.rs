@@ -585,6 +585,7 @@ fn willie_damaged_opponent_announces_the_optional_draw() {
                     activity: ProhibitedActivity::Attack {
                         defended: AttackTargetFilter::PlayerOrPermanents,
                         protected_player: Some(PROTECTED),
+                        protected_scope: None,
                     },
                     ..
                 }]

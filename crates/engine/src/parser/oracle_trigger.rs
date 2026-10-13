@@ -4685,7 +4685,9 @@ fn parse_may_pay_decline_restriction(input: &str) -> Option<ParsedEffectClause> 
 fn rebind_may_pay_quantity_to_payer(expr: &mut QuantityExpr) {
     match expr {
         QuantityExpr::Ref { qty } => match qty {
-            QuantityRef::TargetZoneCardCount { zone } => match zone {
+            // `scope`/`binding` ride along untouched: this path rebinds the
+            // count's zone reading to the payer, never its announcement slot.
+            QuantityRef::TargetZoneCardCount { zone, .. } => match zone {
                 ZoneRef::Hand => {
                     *qty = QuantityRef::HandSize {
                         player: PlayerScope::ScopedPlayer,

@@ -4789,7 +4789,9 @@ pub(super) fn reads_cast_time_snapshot(condition: &AbilityCondition) -> bool {
         | AbilityCondition::DayNightIs { .. }
         | AbilityCondition::AbilityUseCountThisTurn { .. }
         | AbilityCondition::SourceLacksKeyword { .. }
-        | AbilityCondition::ScopedPlayerMatches { .. } => false,
+        | AbilityCondition::ScopedPlayerMatches { .. }
+        // Reads the turn-history attack ledger, not the spell's cast snapshot.
+        | AbilityCondition::PlayerAttackedPlayer { .. } => false,
     }
 }
 

@@ -21022,7 +21022,11 @@ pub(crate) fn evaluate_condition(
                 recipient: None,
                 scoped_player: ability.scoped_player,
                 damage_source: None,
+                // No spell scope at a condition gate; a resolving ability is
+                // in scope, so no stamped granter is carried either.
+                spell: None,
                 event_amount: None,
+                granting_object: None,
             };
             let (Some(attacker_id), Some(defender_id)) = (
                 crate::game::quantity::resolve_single_player_scope(

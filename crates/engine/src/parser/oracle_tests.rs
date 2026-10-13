@@ -33448,6 +33448,7 @@ fn ir_facade_demotes_a_refused_granter_name() {
         &*def.effect,
         Effect::Unimplemented { name, .. } if name == "granter_reference_unreached"
     )));
+}
 /// CR 608.2c + CR 603.7a + CR 508.6: Faramir, Prince of Ithilien full-Oracle
 /// shape probe (phase 5a, S3a). Verbatim Oracle text (matches card-data.json
 /// oracle_text): Choose{Opponent} head, delayed trigger bound to the chosen
