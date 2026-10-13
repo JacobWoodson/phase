@@ -7905,7 +7905,11 @@ fn effect_counter_ability_with_source_static_absorption() {
         "sub_ability should be absorbed"
     );
     if let Effect::Counter { source_rider, .. } = &*ability.effect {
-        let CounterSourceRider::LosesAbilities { static_def, .. } = source_rider
+        let CounterSourceRider::LosesAbilities {
+            static_def,
+            source_filter,
+            duration,
+        } = source_rider
             .as_ref()
             .expect("should have a LosesAbilities source_rider")
         else {
@@ -7916,9 +7920,95 @@ fn effect_counter_ability_with_source_static_absorption() {
             static_def.modifications,
             vec![ContinuousModification::RemoveAllAbilities]
         );
+        assert_eq!(**duration, Duration::WhileHostOnBattlefield);
+        // CR 608.2c + CR 109.2: the printed type list is carried as the typed
+        // gate on the countered ability's source — exactly artifact, creature
+        // and planeswalker (no land, no enchantment).
+        let TargetFilter::Or { filters } = &**source_filter
+            .as_ref()
+            .expect("the printed type list must be carried as source_filter")
+        else {
+            panic!("expected an Or of three type filters, got {source_filter:?}");
+        };
+        let mut types: Vec<TypeFilter> = Vec::new();
+        for f in filters {
+            let TargetFilter::Typed(tf) = f else {
+                panic!("expected a Typed leg, got {f:?}");
+            };
+            assert_eq!(tf.type_filters.len(), 1, "each leg is a single card type");
+            types.extend(tf.type_filters.iter().cloned());
+        }
+        types.sort_by_key(|t| format!("{t:?}"));
+        assert_eq!(
+            types,
+            vec![
+                TypeFilter::Artifact,
+                TypeFilter::Creature,
+                TypeFilter::Planeswalker
+            ]
+        );
     } else {
         panic!("expected Counter effect");
     }
+}
+
+/// CR 608.2c: the untyped conditional "if a permanent's ability is countered
+/// this way, that permanent loses all abilities ..." carries NO type gate
+/// (`source_filter: None`) — the sibling-negative of the typed rider above.
+#[test]
+fn effect_counter_ability_untyped_loses_abilities_rider_has_no_source_filter() {
+    use crate::types::ability::CounterSourceRider;
+
+    let ability = parse_effect_chain(
+            "counter up to one target activated or triggered ability. If a permanent's ability is countered this way, that permanent loses all abilities for as long as ~ remains on the battlefield",
+            AbilityKind::Spell,
+        );
+    assert!(ability.sub_ability.is_none());
+    let Effect::Counter { source_rider, .. } = &*ability.effect else {
+        panic!("expected Counter effect, got {:?}", ability.effect);
+    };
+    assert!(
+        matches!(
+            source_rider,
+            Some(CounterSourceRider::LosesAbilities {
+                source_filter: None,
+                ..
+            })
+        ),
+        "expected an untyped LosesAbilities rider, got {source_rider:?}"
+    );
+}
+
+/// CR 608.2c: a type list the type-phrase reader cannot read must NOT be
+/// silently treated as an unrestricted rider, nor fall to the generic path as a
+/// `RemoveAllAbilities` sub-ability on the parent target. The rider-shaped clause
+/// is claimed and the whole counter is gapped with a strict-failure marker.
+#[test]
+fn effect_counter_ability_unreadable_source_type_list_is_not_an_unrestricted_rider() {
+    let ability = parse_effect_chain(
+            "counter up to one target activated or triggered ability. If an ability of a zorgle is countered this way, that permanent loses all abilities for as long as ~ remains on the battlefield",
+            AbilityKind::Spell,
+        );
+    // The clause is honestly gapped: a strict-failure marker, no executable counter.
+    let Effect::Unimplemented { name, description } = &*ability.effect else {
+        panic!("expected a strict-failure marker, got {:?}", ability.effect);
+    };
+    assert_eq!(name, "counter_source_rider_type_list");
+    assert!(
+        description.as_deref().is_some_and(|d| d.contains("zorgle")),
+        "the marker must carry the printed clause, got {description:?}"
+    );
+    // No generic-path mis-parse: no RemoveAllAbilities anywhere in the chain.
+    assert!(
+        ability.sub_ability.is_none(),
+        "the clause must not survive as a sub-ability, got {:?}",
+        ability.sub_ability
+    );
+    let rendered = format!("{ability:?}");
+    assert!(
+        !rendered.contains("RemoveAllAbilities"),
+        "no RemoveAllAbilities may be emitted for an unreadable gate: {rendered}"
+    );
 }
 
 /// CR 701.8 + CR 608.2c: "If a permanent's ability is countered this way,
@@ -25416,6 +25506,52 @@ fn connive_where_x_is_creatures_died_this_turn() {
     );
 }
 
+/// CR 701.50d + CR 608.2c: the connive arm's target sub-parse is speculative —
+/// the bound where-X clause it reads is not a target phrase, and the subject
+/// replaces its `Any`. So a caller context carrying a player antecedent must
+/// not receive that discarded parse's `TargetFallback` (Spymaster's Vault).
+#[test]
+fn connive_where_x_keeps_discarded_target_fallback_off_the_caller() {
+    let mut ctx = ParseContext {
+        relative_player_scope: Some(ControllerRef::TargetPlayer),
+        ..ParseContext::default()
+    };
+    let def = parse_effect_chain_with_context(
+        "Target creature you control connives X, where X is the number of creatures that died this turn.",
+        AbilityKind::Activated,
+        &mut ctx,
+    );
+    // Reach guard: the connive arm produced the card's effect — subject target,
+    // where-X bound count.
+    let Effect::Connive { target, count } = &*def.effect else {
+        panic!("expected Connive, got {:?}", def.effect);
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
+    );
+    assert!(
+        matches!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ZoneChangeCountThisTurn {
+                    from: Some(Zone::Battlefield),
+                    to: Some(Zone::Graveyard),
+                    ..
+                },
+            }
+        ),
+        "connive count should be the bound X, got {count:?}"
+    );
+    assert!(
+        !ctx.diagnostics
+            .iter()
+            .any(|diagnostic| matches!(diagnostic, OracleDiagnostic::TargetFallback { .. })),
+        "the discarded connive target parse must not leak a TargetFallback: {:?}",
+        ctx.diagnostics
+    );
+}
+
 #[test]
 fn phase_out_targeted() {
     let e = parse_effect("Target creature phases out");
@@ -39645,7 +39781,8 @@ fn craterhoof_where_x_binds_dynamic_pump_to_object_count() {
 /// Regression pin: the binding previously degraded to the lossy
 /// `PtValue::Variable("<raw oracle text>")` fallback, which `resolve_variable_pt`
 /// (game/effects/pump.rs) resolves to `None` — so the pump silently applied
-/// NOTHING. `QuantityRef::ExiledCardPower` is the typed home for this quantity.
+/// NOTHING. CR 607.2a + CR 607.3: X is the summed power of the cards in exile
+/// linked to this object, the `ExiledBySource` population aggregate.
 #[test]
 fn where_x_power_of_the_exiled_card_binds_exiled_card_power() {
     let def = parse_effect_chain(
@@ -39659,14 +39796,22 @@ fn where_x_power_of_the_exiled_card_binds_exiled_card_power() {
         panic!("expected Pump, got {:?}", def.effect);
     };
     let expected = QuantityExpr::Ref {
-        qty: QuantityRef::ExiledCardPower { index: 0 },
+        qty: QuantityRef::PropertyAggregate(
+            PropertyAggregate::new(
+                AggregateFunction::Sum,
+                ObjectProperty::Power,
+                CardTypeSetSource::ExiledBySource,
+            )
+            .expect("statically valid property aggregate"),
+        ),
     };
     for (stat, value) in [("power", power), ("toughness", toughness)] {
         assert_eq!(
             value,
             &PtValue::Quantity(expected.clone()),
-            "X must bind to ExiledCardPower in {stat}; an unbound PtValue::Variable \
-             resolves to no modification at all (silent no-op), got {value:?}"
+            "X must bind to the linked-exile power sum in {stat}; an unbound \
+             PtValue::Variable resolves to no modification at all (silent no-op), \
+             got {value:?}"
         );
     }
 }
