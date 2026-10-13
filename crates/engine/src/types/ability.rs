@@ -8436,7 +8436,7 @@ pub enum PlayerScope {
 /// `ContinuousModification` variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
-pub(crate) enum Designation {
+pub enum Designation {
     Monarch,
 }
 
