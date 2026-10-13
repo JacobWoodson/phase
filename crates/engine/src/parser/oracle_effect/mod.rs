@@ -6096,8 +6096,9 @@ fn try_parse_you_cant_attack_targeted_player_prohibition(
     })
 }
 
-/// CR 701.21 + CR 611.2c: duration-bound multi-object sacrifice prohibition
-/// over a snapshotted set — "you can't sacrifice those creatures this turn"
+/// CR 701.21 + CR 101.2 + CR 611.2c: duration-bound multi-object sacrifice
+/// prohibition over a snapshotted set — "you can't sacrifice those creatures
+/// this turn"
 /// (Call for Aid). Shape-C construction (`Continuous` + `AddStaticMode`, the
 /// Stilt-Man shape): the TCE pins each member as `SpecificObject` and the
 /// pre-existing sacrifice chokepoint in `game::sacrifice` reads the grant.

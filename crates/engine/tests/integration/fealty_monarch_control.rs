@@ -207,7 +207,7 @@ fn fealty_control_follows_combat_steal() {
 /// eliminated — the active player P0 (the only player left) succeeds and
 /// control follows without replaying the Aura.
 #[test]
-fn fealty_monarch_eliminated_with_no_successor() {
+fn fealty_sole_survivor_succeeds() {
     let (mut runner, host, _brute, coronation) = fealty_table();
     cast_coronation(&mut runner, coronation);
     flush_layers(runner.state_mut());

@@ -273,21 +273,25 @@ pub fn resolve(
             // `Effect::Choose { Opponent }` answer recorded in the resolving
             // ability's `chosen_players` (Faramir's "choose an opponent …
             // at the beginning of that player's next end step"). FAIL-CLOSED:
-            // a missing index (malformed chain, no choice made) skips
-            // creation entirely — never a controller fallback, which would
-            // fire the delayed body on the wrong player's turn.
+            // a missing index (malformed chain, no choice made) errors —
+            // never a controller fallback, which would fire the delayed
+            // body on the wrong player's turn.
             crate::types::ability::DelayedTriggerPlayerBinding::ChosenPlayer { index } => {
                 match ability.chosen_players.get(*index as usize) {
                     Some(chosen) => {
                         chosen_player_stamp = Some(*chosen);
                         *chosen
                     }
+                    // A missing index is a malformed chain (binding references a
+                    // choice that was never made): surface it as an error in
+                    // every build rather than silently dropping the trigger
+                    // in release while passing debug tests.
                     None => {
-                        debug_assert!(
-                            false,
-                            "ChosenPlayer binding index {index} has no chosen player; skipping delayed trigger creation"
-                        );
-                        return Ok(());
+                        return Err(crate::types::ability::EffectError::InvalidParam(
+                            format!(
+                                "ChosenPlayer binding index {index} has no chosen player; cannot create delayed trigger"
+                            ),
+                        ));
                     }
                 }
             }

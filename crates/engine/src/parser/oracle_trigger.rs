@@ -4639,9 +4639,10 @@ fn parse_may_pay_decline_restriction(input: &str) -> Option<ParsedEffectClause> 
     .parse(input)
     .ok()?;
     let (input, defended) = parse_cant_attack_defended_scope_nom(input).ok()?;
-    // A bare "can't attack" with no scope defends the player only (mirrors
-    // the shared recognizer).
-    let defended = defended.unwrap_or(AttackTargetFilter::Player);
+    // A bare "can't attack" with no scope is a blanket prohibition with no
+    // representable defended filter: decline the path (fail closed) rather
+    // than narrowing it to player-only attacks.
+    let defended = defended?;
     let (input, _) = alt((
         tag::<_, _, OracleError<'_>>(" this combat"),
         tag(" until end of combat"),
@@ -4693,7 +4694,7 @@ fn rebind_may_pay_quantity_to_payer(expr: &mut QuantityExpr) {
                         player: PlayerScope::ScopedPlayer,
                     }
                 }
-                ZoneRef::Library | ZoneRef::Graveyard => {
+                ZoneRef::Library | ZoneRef::Graveyard | ZoneRef::Exile => {
                     *qty = QuantityRef::ZoneCardCount {
                         zone: zone.clone(),
                         card_types: Vec::new(),
@@ -4701,7 +4702,6 @@ fn rebind_may_pay_quantity_to_payer(expr: &mut QuantityExpr) {
                         filter: None,
                     }
                 }
-                ZoneRef::Exile => {}
             },
             other => {
                 if let Some(scope) = other.player_scope_mut() {

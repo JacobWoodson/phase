@@ -5991,7 +5991,20 @@ fn player_attack_endpoint_to_scope(scope: &ControllerRef) -> Option<PlayerScope>
         ControllerRef::SourceChosenPlayer => Some(PlayerScope::SourceChosenPlayer),
         ControllerRef::DefendingPlayer => Some(PlayerScope::DefendingPlayer),
         ControllerRef::ScopedPlayer => Some(PlayerScope::ScopedPlayer),
-        _ => None,
+        // No exact mapping: `Opponent` needs an aggregate the source lacks,
+        // the target/event-relative refs name no single endpoint, and
+        // `DeclaredPlayer`/`TriggeringPlayer`/`EnchantedPlayer`/`ActivePlayer`
+        // have no `PlayerScope` counterpart. Each fails the condition to
+        // `None` (listed explicitly so a new `ControllerRef` breaks the
+        // build here instead of silently rebinding).
+        ControllerRef::Opponent
+        | ControllerRef::ParentTargetController
+        | ControllerRef::EventTargetController
+        | ControllerRef::ParentTargetOwner
+        | ControllerRef::TriggeringPlayer
+        | ControllerRef::EnchantedPlayer
+        | ControllerRef::ActivePlayer
+        | ControllerRef::DeclaredPlayer { .. } => None,
     }
 }
 

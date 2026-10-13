@@ -39456,9 +39456,11 @@ fn you_cant_attack_that_player_dispatches_through_public_chain() {
     );
 }
 
-/// CR 701.21 + CR 611.2c: Call for Aid's sacrifice rider emits the shape-C
-/// grant (`Continuous` + `AddStaticMode`, the Stilt-Man shape) over the
-/// V0-mandated `TrackedSet{0}` broadcast scope.
+/// CR 701.21 + CR 101.2 + CR 611.2c: Call for Aid's sacrifice rider emits the
+/// shape-C grant (`Continuous` + `AddStaticMode`, the Stilt-Man shape) over
+/// the V0-mandated `TrackedSet{0}` broadcast scope. 701.21 names the
+/// sacrificed action; 101.2 is the "can't beats can" precedence the grant
+/// enforces; 611.2c freezes the affected set at resolution.
 #[test]
 fn you_cant_sacrifice_those_creatures_emits_shape_c_grant() {
     use crate::types::identifiers::TrackedSetId;
