@@ -2858,6 +2858,13 @@ fn card_type_set_source_contains_filter_prop(
         CardTypeSetSource::Zone { .. }
         | CardTypeSetSource::ExiledBySource
         | CardTypeSetSource::TrackedSet { .. } => false,
+        // CR 608.2c + CR 115.1: a targeted-objects population's predicate
+        // reachability is the reachability of its canonical slot filter —
+        // routed through the single `targeted_objects_filter` authority.
+        CardTypeSetSource::TargetedObjects { slot } => filter_contains_filter_prop(
+            &CardTypeSetSource::targeted_objects_filter(slot),
+            predicate,
+        ),
     }
 }
 
@@ -3804,6 +3811,12 @@ fn rewrite_card_type_set_source_filter_props(
         CardTypeSetSource::Zone { .. }
         | CardTypeSetSource::ExiledBySource
         | CardTypeSetSource::TrackedSet { .. } => {}
+        // CR 608.2c + CR 115.1: nothing to rewrite in place — a
+        // targeted-objects population's filter is derived canonically per
+        // read via `targeted_objects_filter`, never stored on the source.
+        // The slot's own filter lives in the ability's target specs and is
+        // rewritten through its own path.
+        CardTypeSetSource::TargetedObjects { .. } => {}
     }
 }
 
@@ -6575,7 +6588,17 @@ fn zone_change_filter_inner(
                         return false;
                     }
                     ControllerRef::ScopedPlayer => {
-                        match scoped_player_or_controller(state, ability, source_controller, None) {
+                        // CR 109.5 + CR 120.3: the per-player binding reaches
+                        // the look-back path exactly as it reaches the live
+                        // path — without it a scoped member filter over
+                        // departed members silently falls back to the
+                        // controller.
+                        match scoped_player_or_controller(
+                            state,
+                            ability,
+                            source_controller,
+                            ctx.scoped_iteration_player,
+                        ) {
                             Some(pid) if pid == obj_ctrl => {}
                             _ => return false,
                         }
@@ -8271,7 +8294,6 @@ fn matches_combat_relation(
     }
 }
 
-<<<<<<< HEAD
 /// CR 702.122b + CR 702.122c + CR 400.7: does the per-turn crew ledger pair the
 /// `candidate` incarnation with the filter source's incarnation in the
 /// direction `relation` names? The source resolves through the same authority

@@ -25272,6 +25272,7 @@ mod tests {
                     crate::types::ability::CardTypeSetSource::TrackedSet {
                         set: crate::types::ability::TrackedAnaphorSource::ChainSet,
                         caused_by: None,
+                        filter: None,
                     },
                 )
                 .expect("statically valid property aggregate"),
@@ -25320,6 +25321,7 @@ mod tests {
                         crate::types::ability::CardTypeSetSource::TrackedSet {
                             set: crate::types::ability::TrackedAnaphorSource::ChainSet,
                             caused_by: None,
+                            filter: None,
                         },
                         crate::types::ability::CardTypeSetSource::ExiledBySource,
                     ])
@@ -25363,6 +25365,7 @@ mod tests {
                 source: crate::types::ability::CardTypeSetSource::TrackedSet {
                     set: crate::types::ability::TrackedAnaphorSource::ChainSet,
                     caused_by: None,
+                    filter: None,
                 },
             },
         };
@@ -25379,6 +25382,7 @@ mod tests {
                         crate::types::ability::CardTypeSetSource::TrackedSet {
                             set: crate::types::ability::TrackedAnaphorSource::ChainSet,
                             caused_by: None,
+                            filter: None,
                         },
                     ])
                     .expect("two-member union is valid"),

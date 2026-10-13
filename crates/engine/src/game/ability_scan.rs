@@ -2291,6 +2291,7 @@ fn scan_property_aggregate_source(source: &CardTypeSetSource, mode: ScanMode) ->
                     event: false,
                     sibling: true,
                     projected: false,
+                    history: HistoryReads::NONE,
                 }
                 .or(scan_target_filter(
                     &CardTypeSetSource::targeted_objects_filter(slot),
@@ -3075,6 +3076,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
                     event: false,
                     sibling: true,
                     projected: false,
+                    history: HistoryReads::NONE,
                 };
                 acc = acc.or(scan_target_filter(
                     &crate::types::ability::CardTypeSetSource::targeted_objects_filter(slot),
@@ -7777,6 +7779,7 @@ mod tests {
                     event: true,
                     sibling: true,
                     projected: false,
+                    history: HistoryReads::NONE,
                 },
             ),
             (
