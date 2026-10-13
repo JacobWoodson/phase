@@ -1,7 +1,7 @@
 use rand::Rng;
 use std::collections::HashSet;
 
-use crate::game::quantity::{resolve_quantity, resolve_quantity_with_targets};
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     DieRollIgnoreRule, DieRollModifier, Effect, EffectError, EffectKind, ResolvedAbility, TargetRef,
@@ -1541,7 +1541,7 @@ mod tests {
             chain_root_targets: vec![],
         };
         let mut events = Vec::new();
-        let waiting = resume_after_ignore(&mut state, pending, vec![0], &mut events).unwrap();
+        let waiting = resume_after_ignore(&mut state, pending, vec![0], &mut events, None).unwrap();
         assert!(waiting.is_none(), "no branches means no suspension");
         assert!(
             events.iter().any(|e| matches!(

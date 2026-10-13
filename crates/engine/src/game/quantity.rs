@@ -398,6 +398,11 @@ fn visit_characteristic_leaf<'s>(
         CardTypeSetSource::TrackedSet {
             set: TrackedAnaphorSource::TriggeringBatch,
             caused_by,
+            // Declaration-record members are event records, not tracked
+            // objects: member narrowing has nothing to bind to here. A
+            // TriggeringBatch aggregate with a member filter is unreachable
+            // from today's producers.
+            filter: _,
         } => {
             // CR 603.4: detection checks must prefer their explicit TLS event;
             // resolution checks instead see the current trigger event(s). For
@@ -566,14 +571,18 @@ fn visit_characteristic_leaf<'s>(
             // ability-targets (suspension-resume reads, where the ability is
             // gone but its targets survive on the parked frame) second. Both
             // go through the one positional authority — never a census.
-            let selected: Vec<&TargetRef> = match filter_ctx.ability {
+            let selected: Vec<TargetRef> = match filter_ctx.ability {
                 Some(_) => crate::game::filter::referenced_targets_for_filter(
+                    state,
                     &selector,
                     filter_ctx.ability,
                 ),
                 None => match filter_ctx.ability_targets {
                     Some(slice) => {
                         crate::game::filter::referenced_target_slice_for_filter(&selector, slice)
+                            .into_iter()
+                            .cloned()
+                            .collect()
                     }
                     None => vec![],
                 },
@@ -584,11 +593,11 @@ fn visit_characteristic_leaf<'s>(
                 };
                 let view = state
                     .objects
-                    .get(oid)
+                    .get(&oid)
                     .map(CharacteristicView::Object)
-                    .or_else(|| state.lki_cache.get(oid).map(CharacteristicView::Lki));
+                    .or_else(|| state.lki_cache.get(&oid).map(CharacteristicView::Lki));
                 if let Some(view) = view {
-                    visit(CharacteristicMember::Object(*oid), view, false);
+                    visit(CharacteristicMember::Object(oid), view, false);
                 }
             }
         }
@@ -4061,6 +4070,7 @@ pub fn resolve_quantity_with_parked_targets(
                 recipient: None,
                 scoped_player: None,
                 damage_source: None,
+                spell: None,
                 event_amount: None,
             },
             &[],
@@ -19497,6 +19507,7 @@ mod tests {
                     CardTypeSetSource::TrackedSet {
                         set: TrackedAnaphorSource::TriggeringBatch,
                         caused_by: None,
+                        filter: None,
                     },
                 )
                 .unwrap(),
@@ -23747,6 +23758,7 @@ mod tests {
             pending,
             Vec::new(),
             &mut events,
+            None,
         )
         .expect("resuming the die-roll loop must not error");
 

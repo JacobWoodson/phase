@@ -2476,17 +2476,12 @@ pub(super) fn parse_targeted_action_ast(
         } else {
             target
         };
-        // CR 608.2c: Fail closed on a dropped "this way" back-reference. When
-        // the target text still carries "this way" but the parsed filter does
-        // not reference the tracked set, the anaphor was silently dropped and
-        // the filter would enumerate the whole origin zone instead of the
-        // instruction's own moved set (Danse Macabre's "a creature card put
-        // into a graveyard this way"). Returning None surfaces the line as
-        // Unimplemented rather than claiming support. Mirrors the sibling
-        // guard in `try_parse_verb_and_target` (`mod.rs`).
-        if nom_primitives::scan_contains(&target_text.to_ascii_lowercase(), "this way")
-            && !target.references_tracked_set()
-        {
+        // CR 608.2c: Fail closed on a dropped "this way" back-reference
+        // (Danse Macabre's "a creature card put into a graveyard this way"):
+        // the single authority in `mod.rs` (`target_span_dropped_this_way_anaphor`)
+        // owns the bound-anaphor exemptions (payment amounts, reveal choices),
+        // so this call site never duplicates the predicate.
+        if super::target_span_dropped_this_way_anaphor(target_text, &target) {
             return None;
         }
 

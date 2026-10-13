@@ -6430,6 +6430,7 @@ fn trigger_pack_tactics() {
                         CardTypeSetSource::TrackedSet {
                             set: crate::types::ability::TrackedAnaphorSource::TriggeringBatch,
                             caused_by: None,
+                            filter: None,
                         },
                     )
                     .expect("statically valid property aggregate"),
