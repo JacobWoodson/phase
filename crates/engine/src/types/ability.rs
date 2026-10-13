@@ -28752,6 +28752,9 @@ impl AbilityCondition {
             | AbilityCondition::Not { .. }
             | AbilityCondition::DayNightIs { .. }
             | AbilityCondition::AbilityUseCountThisTurn { .. }
+            // Not a zone-change head: an attack-ledger predicate, never the
+            // reflexive's trigger event.
+            | AbilityCondition::PlayerAttackedPlayer { .. }
             | AbilityCondition::SourceLacksKeyword { .. }
             | AbilityCondition::ScopedPlayerMatches { .. } => None,
         }
