@@ -367,49 +367,76 @@ fn x_is_payers_hand_at_payment_offer() {
     );
 }
 
-/// V3b (row 3 residual) — PIN of the X=0 short-circuit (non-Counter fall-through
-/// in the unless interception): with a hellbent payer the restriction applies
-/// with NO prompt. Both halves asserted non-vacuously: the drive fails if a
-/// prompt ever opens, and the restriction shape is pinned present after.
-///
-/// DEFERRED (follow-up, not this phase): the rules question. CR 118.12 offers
-/// "may pay {0}" — a rational payer pays nothing and avoids the restriction,
-/// so unprompted application is the engine's short-circuit choice, not a
-/// proven rules outcome. Pinned here so the follow-up flips red-to-green.
+/// V3b (row 3) — CR 118.5 + CR 118.12a: with a hellbent payer X=0 still
+/// OPENS the prompt (a zero payment is offered, never assumed refused).
+/// Accept leg: paying {0} avoids the restriction and the attack stays legal.
+/// The offered cost is `Mana { {0} }`, kept distinct from `NoCost` (which
+/// means "no payment exists to offer").
 #[test]
-fn x_zero_applies_restriction_unprompted() {
+fn x_zero_prompts_and_accepting_avoids_restriction() {
     let mut stage = stage(P1, &[2, 0], false);
     drive_to_phase(&mut stage.runner, Phase::BeginCombat);
+    let waiting = resolve_until_settled(&mut stage.runner);
     assert!(
-        !stage.runner.state().stack.is_empty(),
-        "trigger fired with a hellbent payer (reach-guard)"
+        matches!(waiting, WaitingFor::UnlessPayment { .. }),
+        "X=0 must still prompt, got {waiting:?}"
     );
-    for _ in 0..40 {
-        assert!(
-            !matches!(
-                stage.runner.state().waiting_for,
-                WaitingFor::UnlessPayment { .. }
-            ),
-            "X=0 must never prompt"
-        );
-        if stage.runner.state().stack.is_empty() {
-            break;
-        }
-        assert!(
-            matches!(
-                stage.runner.state().waiting_for,
-                WaitingFor::Priority { .. }
-            ),
-            "only priority while resolving, got {:?}",
-            stage.runner.state().waiting_for
-        );
-        stage.runner.act(GameAction::PassPriority).expect("pass");
-    }
+    let (player, cost, _) = expect_unless_payment(stage.runner.state());
+    assert_eq!(player, P1);
+    assert_eq!(
+        cost,
+        AbilityCost::Mana {
+            cost: ManaCost::generic(0),
+        },
+        "X read the hellbent hand (0) as payable {{0}}, not NoCost, got {cost:?}"
+    );
+    stage
+        .runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("pay {0}");
+    resolve_until_settled(&mut stage.runner);
     assert!(
-        stage.runner.state().stack.is_empty(),
-        "stack drained without a prompt"
+        stage.runner.state().restrictions.is_empty(),
+        "paying {{0}} avoids the restriction, got {:?}",
+        stage.runner.state().restrictions
     );
+    assert!(
+        attack_legal(
+            stage.runner.state(),
+            P1,
+            stage.p1_bear,
+            AttackTarget::Player(P0)
+        ),
+        "after paying {{0}} the attack at P0 must be legal"
+    );
+}
+
+/// V3b decline leg: refusing the {0} payment installs the restriction and
+/// bars the attack, exactly like a nonzero decline.
+#[test]
+fn x_zero_decline_installs_restriction() {
+    let mut stage = stage(P1, &[2, 0], false);
+    drive_to_phase(&mut stage.runner, Phase::BeginCombat);
+    let waiting = resolve_until_settled(&mut stage.runner);
+    assert!(
+        matches!(waiting, WaitingFor::UnlessPayment { .. }),
+        "X=0 must still prompt, got {waiting:?}"
+    );
+    stage
+        .runner
+        .act(GameAction::PayUnlessCost { pay: false })
+        .expect("decline");
+    resolve_until_settled(&mut stage.runner);
     expect_champions_restriction(stage.runner.state());
+    assert!(
+        !attack_legal(
+            stage.runner.state(),
+            P1,
+            stage.p1_bear,
+            AttackTarget::Player(P0)
+        ),
+        "after declining {{0}} the attack at P0 must be barred"
+    );
 }
 
 /// V4 (row 4) — CR 603.4: the monarch intervening-if holds at BOTH
