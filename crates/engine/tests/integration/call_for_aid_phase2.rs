@@ -8,9 +8,10 @@
 //! effect-path sacrifice blocks; V6 snapshot freeze (late arrivals + flicker);
 //! V7 expiry boundary; V8c Stilt-Man shared-path proof; V9 readouts.
 //!
-//! PRE-EXISTING (recorded, not repaired): Call for Aid's own haste clause is
-//! broken at base (stolen creatures do not gain haste). No test below depends
-//! on haste working.
+//! Call for Aid's haste clause ("They gain haste") binds the frozen stolen set
+//! through the single-mass-antecedent assembly arm — the same `TrackedSet(0)`
+//! the untap/sacrifice siblings carry. `call_for_aid_stolen_creatures_gain_haste`
+//! proves it functionally via an immediate attack at another opponent.
 
 use engine::game::combat::{build_declare_attackers_waiting_for, declare_attackers, AttackTarget};
 use engine::game::functioning_abilities::active_static_definitions;
@@ -20,7 +21,8 @@ use engine::game::turns::execute_cleanup;
 use engine::game::zones::{create_object, move_to_zone};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    GameRestriction, ProhibitedActivity, RestrictionPlayerScope, TargetRef,
+    ContinuousModification, GameRestriction, ProhibitedActivity, RestrictionPlayerScope,
+    TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -154,6 +156,17 @@ fn stage_3p_aid() -> AidStage {
             .expect("staged creature exists")
             .summoning_sick = false;
     }
+    // Tap the soon-stolen victims: fresh creatures enter untapped, so without
+    // this the sibling `!tapped` asserts below pass vacuously. The aid must
+    // untap them for real.
+    for id in [p1_a, p1_b] {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&id)
+            .expect("staged victim exists")
+            .tapped = true;
+    }
     AidStage {
         runner,
         aid,
@@ -266,6 +279,51 @@ fn call_for_aid_protects_targeted_opponent_in_three_player() {
             bands: vec![],
         })
         .expect("submitting the attack at P2 must be accepted");
+}
+
+/// V10 (row 10) — CR 702.10b + CR 608.2c: the stolen creatures gain haste —
+/// "They gain haste" binds the frozen stolen set (the same `TrackedSet(0)`
+/// the untap/sacrifice siblings carry), so a stolen goblin attacks another
+/// opponent immediately. Without the grant it is summoning-sick under its new
+/// controller and the attack is illegal, so legality itself discriminates.
+#[test]
+fn call_for_aid_stolen_creatures_gain_haste() {
+    let mut stage = stage_3p_aid();
+    cast_aid_and_check_siblings(&mut stage);
+    // Haste proof, functional: the stolen goblin may attack the untargeted
+    // opponent immediately despite changing control this turn.
+    assert!(
+        attack_legal(
+            stage.runner.state(),
+            P0,
+            stage.p1_a,
+            AttackTarget::Player(P2)
+        ),
+        "a hasted stolen creature must attack another opponent immediately"
+    );
+    // Haste does not lift the attack prohibition at the targeted opponent.
+    assert!(
+        !attack_legal(
+            stage.runner.state(),
+            P0,
+            stage.p1_a,
+            AttackTarget::Player(P1)
+        ),
+        "the stolen creature must still not attack P1"
+    );
+    // Declare for real through the combat pipeline.
+    park_declare(&mut stage.runner, &[stage.p1_a]);
+    stage
+        .runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(stage.p1_a, AttackTarget::Player(P2))],
+            bands: vec![],
+        })
+        .expect("the hasted stolen creature's attack must be accepted");
+    assert!(
+        stage.runner.state().objects[&stage.p1_a].tapped,
+        "declaring the attack taps the attacker"
+    );
 }
 
 /// V3 (row 3) — CR 109.5 + CR 611.2c: the protection is a creation-time
@@ -547,10 +605,12 @@ fn cast_sacrifice_cost_spell(runner: &mut GameRunner, spell: ObjectId, victim: O
     runner.advance_until_stack_empty();
 }
 
-/// V5a (row 5, cost path) — CR 701.21 + CR 101.2: with only prohibited
-/// creatures available, the sacrifice cost resolves as no-sacrifice — the
-/// creature stays on the battlefield while the spell itself resolves. Paired
-/// with the unprohibited-creature reach-guard (normal payment works).
+/// V5a (row 5, cost path) — CR 118.3 + CR 109.5 + CR 701.21: the barred
+/// caster cannot fund a sacrifice cost with a stolen victim — the payment
+/// fails (rejected at announce when no victim is eligible, or at selection
+/// when the barred victim is named) so the spell never resolves and nothing
+/// moves. Paired with the unprohibited-creature reach-guard (normal payment
+/// works).
 #[test]
 fn call_for_aid_blocks_sacrifice_cost_path() {
     // Reach-guard: an unprohibited creature pays the cost normally.
@@ -588,7 +648,25 @@ fn call_for_aid_blocks_sacrifice_cost_path() {
         let mut stage = stage_2p_sac();
         cast_aid_and_check_theft(&mut stage);
         let hand_before = hand_count(&stage.runner, P0);
-        cast_sacrifice_cost_spell(&mut stage.runner, stage.rites, stage.p1_a);
+        // CR 118.3: the barred caster names a stolen victim. The payment
+        // fails at announce (empty eligible set) or at selection (barred
+        // victim rejected) — either way the spell never resolves.
+        let card_id = stage.runner.state().objects[&stage.rites].card_id;
+        let announce = stage.runner.act(GameAction::CastSpell {
+            object_id: stage.rites,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        });
+        if announce.is_ok() {
+            let selection = stage.runner.act(GameAction::SelectCards {
+                cards: vec![stage.p1_a],
+            });
+            assert!(
+                selection.is_err(),
+                "the barred cost victim must be rejected at selection"
+            );
+        }
         let state = stage.runner.state();
         assert_eq!(
             state.objects[&stage.p1_a].zone,
@@ -601,9 +679,14 @@ fn call_for_aid_blocks_sacrifice_cost_path() {
             "the other stolen creature is untouched"
         );
         assert_eq!(
+            state.objects[&stage.rites].zone,
+            Zone::Hand,
+            "the unpaid spell stays in hand"
+        );
+        assert_eq!(
             hand_count(&stage.runner, P0),
-            hand_before + 1,
-            "the cost path resolved as no-sacrifice and the spell drew two"
+            hand_before,
+            "no draw: the spell never resolved"
         );
     }
 }
@@ -673,6 +756,152 @@ fn call_for_aid_blocks_sacrifice_effect_path() {
             "the prohibition survives the edict"
         );
     }
+}
+
+/// M3 companion — CR 118.3 + CR 109.5: with mixed candidates (one
+/// stolen/barred, one normal), the eligibility filter separates them inside a
+/// single payment — the barred victim is rejected at selection while the
+/// normal one pays normally. The bar is per-object, not per-player.
+#[test]
+fn call_for_aid_mixed_sacrifice_candidates() {
+    let mut stage = stage_2p_sac();
+    cast_aid_and_check_theft(&mut stage);
+    // A normal creature entering after resolution is outside the frozen set
+    // (V6) and carries no bar.
+    let fodder = create_battlefield_creature(&mut stage.runner, P0, "Rites Fodder");
+    let hand_before = hand_count(&stage.runner, P0);
+    // One payment: the barred victim is rejected, the normal one accepted.
+    let card_id = stage.runner.state().objects[&stage.rites].card_id;
+    stage
+        .runner
+        .act(GameAction::CastSpell {
+            object_id: stage.rites,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("announce must be accepted");
+    assert!(
+        stage
+            .runner
+            .act(GameAction::SelectCards {
+                cards: vec![stage.p1_a],
+            })
+            .is_err(),
+        "the barred cost victim must be rejected at selection"
+    );
+    stage
+        .runner
+        .act(GameAction::SelectCards {
+            cards: vec![fodder],
+        })
+        .expect("the normal cost victim must be accepted");
+    stage.runner.advance_until_stack_empty();
+    assert_eq!(
+        stage.runner.state().objects[&fodder].zone,
+        Zone::Graveyard,
+        "the normal victim pays the cost"
+    );
+    assert_eq!(
+        stage.runner.state().objects[&stage.p1_a].zone,
+        Zone::Battlefield,
+        "the rejected barred victim stays"
+    );
+    assert_eq!(
+        hand_count(&stage.runner, P0),
+        hand_before + 1,
+        "spell left hand (-1), draw two (+2)"
+    );
+}
+
+/// M4 companion — CR 109.5 + CR 611.2c: the resolution-created bar binds the
+/// INSTALLER (the grant's TCE controller), not the object. When a stolen
+/// creature later passes to a third player, that player sacrifices it freely
+/// — the bar does not follow the object. Only printed statics bar all actors.
+#[test]
+fn call_for_aid_bar_does_not_follow_control_change() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let p1_a = scenario.add_creature(P1, "P1 Goblin A", 1, 1).id();
+    let p1_b = scenario.add_creature(P1, "P1 Goblin B", 1, 1).id();
+    for _ in 0..5 {
+        scenario.add_card_to_library_top(P2, "Plains");
+    }
+    let aid = scenario
+        .add_spell_to_hand_from_oracle(P0, "Call for Aid", false, CALL_FOR_AID)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 4,
+        })
+        .id();
+    let rites = scenario
+        .add_spell_to_hand_from_oracle(P2, "Village Rites", true, VILLAGE_RITES)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 0,
+        })
+        .id();
+    let mut runner = scenario.build();
+    add_mana(&mut runner, P0, ManaType::Red, 1);
+    add_mana(&mut runner, P0, ManaType::Colorless, 4);
+    add_mana(&mut runner, P2, ManaType::Black, 1);
+    runner.cast(aid).target_player(P1).resolve();
+    {
+        let state = runner.state();
+        assert_eq!(state.objects[&p1_a].controller, P0);
+        assert_eq!(state.objects[&p1_b].controller, P0);
+        assert!(
+            cant_be_sacrificed(state, p1_a) && cant_be_sacrificed(state, p1_b),
+            "both stolen creatures must carry the prohibition"
+        );
+    }
+    // Subsequent control change: end the THEFT of p1_a (drop its
+    // `ChangeController` grant) and pass it to P2. The sacrifice bar is a
+    // separate installer-bound grant and stays installed.
+    {
+        let state = runner.state_mut();
+        let grants = std::mem::take(&mut state.transient_continuous_effects);
+        state.transient_continuous_effects = grants
+            .into_iter()
+            .filter(|grant| {
+                !(grant
+                    .modifications
+                    .contains(&ContinuousModification::ChangeController)
+                    && matches!(&grant.affected, TargetFilter::SpecificObject { id } if *id == p1_a))
+            })
+            .collect();
+        state
+            .objects
+            .get_mut(&p1_a)
+            .expect("stolen goblin")
+            .controller = P2;
+    }
+    assert_eq!(
+        runner.state().objects[&p1_a].controller,
+        P2,
+        "the control change must stick for the sacrifice below to mean anything"
+    );
+    // P2 — never bound by another player's "you" — sacrifices freely.
+    runner.state_mut().priority_player = P2;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P2 };
+    let hand_before = hand_count(&runner, P2);
+    cast_sacrifice_cost_spell(&mut runner, rites, p1_a);
+    assert_eq!(
+        runner.state().objects[&p1_a].zone,
+        Zone::Graveyard,
+        "the later controller sacrifices the creature normally"
+    );
+    assert_eq!(
+        hand_count(&runner, P2),
+        hand_before + 1,
+        "spell left hand (-1), draw two (+2)"
+    );
+    // The sibling still stolen by the installer stays barred and controlled.
+    assert_eq!(runner.state().objects[&p1_b].controller, P0);
+    assert!(
+        cant_be_sacrificed(runner.state(), p1_b),
+        "the installer's bar still binds its own stolen creature"
+    );
 }
 
 /// Create a 2/2 creature directly on the battlefield (mirrors orzhov_advokist's
