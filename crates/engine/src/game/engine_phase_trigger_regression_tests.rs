@@ -6689,7 +6689,10 @@ fn citadel_siege_khans_fires_dragons_silent_on_controller_turn() {
         apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         let resolve = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
 
-        assert!(state.battlefield.contains(&siege_id));
+        // NOTE (rebase onto upstream/main): spell resolution now pauses for
+        // the as-enters choice BEFORE zone-arrival — the entry has left
+        // `state.stack` but the object lands on the battlefield only after
+        // the choice resolves. Assert arrival after `ChooseOption` below.
         match resolve.waiting_for {
             WaitingFor::NamedChoice {
                 player,
@@ -6710,6 +6713,10 @@ fn citadel_siege_khans_fires_dragons_silent_on_controller_turn() {
         )
         .unwrap();
         assert_eq!(state.objects[&siege_id].chosen_label(), Some(choice));
+        assert!(
+            state.battlefield.contains(&siege_id),
+            "{choice} mode: the siege must be on the battlefield once its as-enters choice resolves"
+        );
 
         apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         apply_as_current(&mut state, GameAction::PassPriority).unwrap();

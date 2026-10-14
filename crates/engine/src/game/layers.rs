@@ -2052,7 +2052,11 @@ fn source_condition_gate_passes(
 /// anchored entry point is guarded exactly like `evaluate_condition` and
 /// `evaluate_condition_with_recipient`. The And/Or/Not recursions deliberately
 /// bypass it by calling `evaluate_condition_inner` — preserving the pre-existing
-/// recursion shape, which never re-entered the gate.
+/// recursion shape, which never re-entered the gate. The chosen-player gate
+/// below rides the same single entry for the same reason: every public entry
+/// (`evaluate_condition`, `evaluate_condition_with_recipient`, and this one)
+/// funnels through here, so one check covers the generic conditional-static
+/// path with no per-caller wiring.
 pub(crate) fn evaluate_condition_with_context(
     state: &GameState,
     condition: &StaticCondition,
@@ -2060,7 +2064,9 @@ pub(crate) fn evaluate_condition_with_context(
     source_id: ObjectId,
     context: ConditionContext,
 ) -> bool {
-    if static_condition_has_unanswerable_designation_anchor(state, condition, context) {
+    if static_condition_has_unanswerable_designation_anchor(state, condition, context)
+        || condition.has_unanswerable_chosen_player()
+    {
         return false;
     }
     evaluate_condition_inner(state, condition, controller, source_id, context)

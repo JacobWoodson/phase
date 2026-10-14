@@ -142,6 +142,13 @@ fn fealty_control_follows_combat_steal() {
     cast_coronation(&mut runner, coronation);
     flush_layers(runner.state_mut());
     assert_eq!(controller_of(&runner, host), P1);
+    let life_before = runner
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == P1)
+        .expect("P1 exists")
+        .life;
 
     let mut attack = Some((brute, AttackTarget::Player(P1)));
     let mut guard = 0;
@@ -190,6 +197,25 @@ fn fealty_control_follows_combat_steal() {
         runner.advance_until_stack_empty();
     }
 
+    // Anti-vacuity: the staged attack was consumed by a declaration (not
+    // skipped) and P1's life dropped below starting — the brute attacked and
+    // dealt combat damage, which is what steals the crown (CR 725.2), rather
+    // than the crown moving some other way.
+    assert!(
+        attack.is_none(),
+        "the staged brute attack must have been declared"
+    );
+    let p1_life = runner
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == P1)
+        .expect("P1 exists")
+        .life;
+    assert!(
+        p1_life < life_before,
+        "P1 must have taken the brute's combat damage (was {life_before}), got life {p1_life}"
+    );
     assert_eq!(
         runner.state().monarch,
         Some(P0),

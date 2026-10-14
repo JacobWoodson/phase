@@ -250,6 +250,16 @@ fn champions_fires_only_on_opponent_turns_all_seats() {
         let (player, _, _) = expect_unless_payment(stage.runner.state());
         assert_eq!(player, seat, "prompt goes to the firing opponent");
     }
+    // Negative leg: no monarch — the `if you're the monarch` intervening-if
+    // gate (CR 603.4) keeps the trigger silent on the opponent's turn even
+    // though the phase matches. The firing legs above are the reach-guards.
+    let mut stage_nomarch = stage(P1, &[2, 5, 7], true);
+    stage_nomarch.runner.state_mut().monarch = None;
+    drive_to_phase(&mut stage_nomarch.runner, Phase::BeginCombat);
+    assert!(
+        stage_nomarch.runner.state().stack.is_empty(),
+        "without the monarch the opponent-turn trigger must not fire"
+    );
 }
 
 /// V2 (row 2) — CR 118.12 + CR 603.5: the payment prompt goes to the active
