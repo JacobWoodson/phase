@@ -1977,6 +1977,22 @@ fn fire_combat_prevention_riders(
             continue;
         };
 
+        // CR 615.13: shields whose riders already drained inline per event
+        // during the batch feed the PUBLIC aggregate event only — re-firing
+        // here would run the rider a second time with the batch total. That
+        // is the per-source reflectors (CR 615.5 binds each reflection to its
+        // own damage source, which the aggregate cannot carry) and the
+        // depletion/`AllBut` shields (whose applier arms keep the per-event
+        // stash + inline drain in `replace_combat_damage_batch`).
+        let rider_drained_inline = replacement::shield_rider_reflects_per_event(state, rid)
+            || matches!(
+                repl_def.shield_kind,
+                crate::types::ability::ShieldKind::Prevention {
+                    amount: crate::types::ability::PreventionAmount::Next(_)
+                        | crate::types::ability::PreventionAmount::AllBut(_)
+                }
+            );
+
         // CR 615.5 + CR 609.7: A rider referencing the prevented damage's source
         // ("that source's controller" — New Way Forward) resolves
         // `PostReplacementSourceController` against the drain's event source. The
@@ -1997,7 +2013,11 @@ fn fire_combat_prevention_riders(
         // total, then run the rider continuation exactly once — ONCE PER SHIELD,
         // not once per recipient, because CR 615.13 makes the application the
         // unit and CR 615.5's "that much damage was prevented" refers to the
-        // whole application.
+        // whole application. Skipped for inline-drained riders (above): theirs
+        // already fired per event during the batch.
+        if rider_drained_inline {
+            continue;
+        }
         let Some(runtime) = runtime else {
             continue;
         };

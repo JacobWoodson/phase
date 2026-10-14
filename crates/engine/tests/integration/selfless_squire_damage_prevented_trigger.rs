@@ -48,19 +48,19 @@
 //!     because CR 615.13's application spans simultaneous events that under
 //!     CR 510.2 routinely have DIFFERENT sources. No test in this file may assert
 //!     `source_id` as if it were the damage source;
-//!   * per-source-reflecting shields (Comeuppance) bypass the batch tally
-//!     entirely and still emit one event per damage event, over-firing the
-//!     trigger count under CR 615.13. That is pre-existing and out of scope;
-//!     `reflecting_shields_still_emit_per_damage_event` characterizes it so it
-//!     cannot change silently. CR 615.5 binds each reflection to its own damage
-//!     source, so it cannot simply be batched;
-//!   * `PreventionAmount::Next(N)` / `AllBut(N)` likewise never enter the tally —
-//!     populations (1)/(2) of the three per-event-bypass populations documented
-//!     in `replacement.rs`. `depletion_shields_still_emit_per_damage_event`
-//!     characterizes the `Next(N)` member the same way the `reflecting_...` row
-//!     covers population (3), so it cannot change silently either. CR 615.7's
-//!     simultaneous-damage choice is about WHICH damage the shield prevents,
-//!     not about emitting per event, so it does not defend the shape.
+//!   * per-source-reflecting shields (Comeuppance) accumulate their PUBLIC
+//!     prevented amount into the batch tally — one `DamagePrevented` per
+//!     (shield, recipient) — while each reflection still binds its own damage
+//!     source per CR 615.5 (which a batch aggregate cannot carry), draining
+//!     inline per event. `reflecting_shields_aggregate_public_event_keep_per_source_reflection`
+//!     pins both halves: one public event AND both attackers dealt back their
+//!     own damage;
+//!   * `PreventionAmount::Next(N)` / `AllBut(N)` likewise enter the tally —
+//!     `depletion_shields_aggregate_public_event` pins the `Next(N)` member's
+//!     single aggregate event alongside its unchanged depletion arithmetic.
+//!     CR 615.7's simultaneous-damage choice is about WHICH damage the shield
+//!     prevents, not about emitting per event, so it does not defend the old
+//!     fragmented shape.
 //!
 //! The positive tests are discriminating: reverting the matcher
 //! (`match_damage_prevented` → `match_unimplemented`) or the parser arm (mode →
@@ -83,6 +83,7 @@ use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::zones::Zone;
 
 /// Verbatim Selfless Squire (Scryfall). The second line is the trigger under test.
 const SELFLESS_SQUIRE_TEXT: &str = "Flash\nWhen this creature enters, prevent all damage that would be dealt to you this turn.\nWhenever damage that would be dealt to you is prevented, put that many +1/+1 counters on this creature.";
@@ -1074,29 +1075,22 @@ fn the_squire_itself_blocking_reads_only_the_player_leg() {
 }
 
 // ---------------------------------------------------------------------------
-// V11 — characterization: reflecting shields keep emitting per damage event
+// V11 — reflecting shields aggregate the public event, reflect per source
 // ---------------------------------------------------------------------------
 
-/// CHARACTERIZATION of a PRE-EXISTING residual that is out of this change's
-/// scope, pinned so it cannot move silently.
+/// CR 615.13 + CR 615.5: one prevention application over simultaneous damage
+/// events is ONE trigger, while each reflection still binds its own damage
+/// source ("that much damage to THAT creature"). A shield whose rider reflects
+/// per damage source (Comeuppance) therefore accumulates its PUBLIC prevented
+/// amount into `combat_prevention_tally` — one `DamagePrevented` per
+/// (shield, recipient) — and keeps its per-event rider stash + inline drain,
+/// so each attacker is dealt back exactly what it dealt.
 ///
-/// A shield whose rider reflects per damage source (Comeuppance) is excluded from
-/// `combat_prevention_tally` at BOTH tally writes and reaches the shared
-/// per-event emit block in `replacement.rs` instead. So it emits ONE
-/// `DamagePrevented` per damage event, and the Squire fires TWICE.
-///
-/// Under CR 615.13 that OVER-FIRES the trigger: one prevention effect applied to
-/// one or more simultaneous damage events is ONE trigger. It is not fixed here
-/// because it cannot simply be batched — CR 615.5 binds each reflection to its
-/// own damage source ("that much damage to THAT creature" / "THE SOURCE'S
-/// controller"), which a batch aggregate destroys. It is outcome-neutral for
-/// Selfless Squire only because its effect is linear in the amount (2 + 3 = 5
-/// either way); a non-linear consumer would expose it.
-///
-/// Revert-catches: this change accidentally routing reflecting shields THROUGH
-/// the tally, which would collapse these to one event and break the reflections.
+/// Revert-catches: re-fragmenting the public event (two events again) or
+/// collapsing the reflections (one attacker surviving, or the wrong amounts
+/// reflected).
 #[test]
-fn reflecting_shields_still_emit_per_damage_event() {
+fn reflecting_shields_aggregate_public_event_keep_per_source_reflection() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     stock_libraries(&mut scenario);
@@ -1130,51 +1124,53 @@ fn reflecting_shields_still_emit_per_damage_event() {
         "reach-guard: all 5 really was prevented"
     );
 
-    let mut expected = vec![(TargetRef::Player(P0), 2), (TargetRef::Player(P0), 3)];
-    expected.sort();
+    // CR 615.13: ONE application, ONE public event carrying the whole batch.
     assert_eq!(
         sorted_prevented_pairs(&events),
-        expected,
-        "CHARACTERIZATION, not an endorsement: a per-source-reflecting shield \
-         bypasses the batch tally and emits one event PER DAMAGE EVENT, so the \
-         CR 615.13 trigger count is wrong (2 firings where the rules say 1)"
+        vec![(TargetRef::Player(P0), 5)],
+        "a per-source-reflecting shield aggregates its public prevented amount \
+         like every other prevention application — one event, not one per \
+         damage event"
     );
     assert_eq!(
         counters_on(&runner, squire),
         5,
-        "two firings of 2 and 3 — outcome-neutral here only because 'that many' \
-         is linear in the amount"
+        "the Squire fires ONCE for the aggregated 5"
+    );
+    // CR 615.5: each reflection still bound its own source — Bear A (2/2)
+    // took back exactly 2 and Bear B (3/3) exactly 3, so both are dead. A
+    // collapsed single-source reflection would leave one attacker alive, and
+    // swapped amounts would spare the 3/3.
+    assert_eq!(
+        runner.state().objects[&attacker_a].zone,
+        Zone::Graveyard,
+        "Bear A must have been dealt back its own 2"
+    );
+    assert_eq!(
+        runner.state().objects[&attacker_b].zone,
+        Zone::Graveyard,
+        "Bear B must have been dealt back its own 3"
     );
 }
 
 // ---------------------------------------------------------------------------
-// V11-companion — characterization: depletion shields keep emitting per damage event
+// V11-companion — depletion shields aggregate the public event
 // ---------------------------------------------------------------------------
 
-/// CHARACTERIZATION of a PRE-EXISTING residual that is out of this change's
-/// scope, pinned so it cannot move silently. Sibling to
-/// `reflecting_shields_still_emit_per_damage_event` (V11, population (3)); this
-/// row covers population (1)/(2) of the three per-event-bypass populations
-/// documented in `replacement.rs`: `PreventionAmount::Next(N)` — and, by the
-/// same never-sets-`accumulated_in_batch` code path, `AllBut(N)` — never enter
-/// the combat batch tally.
+/// CR 615.13 + CR 615.7: one depletion application over simultaneous damage
+/// events is ONE trigger. A `Next(7)` player shield facing a simultaneous
+/// 2-and-3 batch accumulates its public prevented amount into
+/// `combat_prevention_tally` — one `DamagePrevented` per (shield, recipient).
+/// CR 615.7's choice ("the shielded player chooses which damage the shield
+/// prevents") is about WHICH damage, expressly "the number of events or
+/// sources dealing it doesn't matter", so aggregating the public event does
+/// not disturb it; the depletion arithmetic (7 − 2 − 3 → `Next(2)`) is
+/// unchanged. Sibling to
+/// `reflecting_shields_aggregate_public_event_keep_per_source_reflection`.
 ///
-/// A `Next(7)` player shield facing a simultaneous 2-and-3 batch therefore emits
-/// ONE `DamagePrevented` per damage event, and the Squire fires TWICE.
-///
-/// Under CR 615.13 that OVER-FIRES the trigger: one prevention effect applied to
-/// one or more simultaneous damage events is ONE trigger — and CR 615.7's choice
-/// ("the shielded player chooses which damage the shield prevents") is about
-/// WHICH damage, expressly "the number of events or sources dealing it doesn't
-/// matter", so it is not a defense of per-event emission. Like the V11 sibling,
-/// it is outcome-neutral for Selfless Squire only because its effect is linear
-/// in the amount (2 + 3 = 5 either way); a non-linear consumer would expose it.
-///
-/// Revert-catches: routing depletion shields THROUGH the tally (the eventual
-/// fix) collapses these to one event and reddens this row — at which point the
-/// row must be CONVERTED to the fixed expectation, not deleted.
+/// Revert-catches: re-fragmenting the public event (two events again).
 #[test]
-fn depletion_shields_still_emit_per_damage_event() {
+fn depletion_shields_aggregate_public_event() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     stock_libraries(&mut scenario);
@@ -1225,8 +1221,8 @@ fn depletion_shields_still_emit_per_damage_event() {
         ShieldKind::Prevention {
             amount: PreventionAmount::Next(2)
         },
-        "this row must exercise PreventionAmount::Next, the population that \
-         bypasses the tally — 7 minus the 2-and-3 batch leaves Next(2)"
+        "this row must exercise PreventionAmount::Next — 7 minus the 2-and-3 \
+         batch leaves Next(2)"
     );
 
     // Reach-guard: all 5 really was prevented. Without this, "5 counters" is
@@ -1237,20 +1233,17 @@ fn depletion_shields_still_emit_per_damage_event() {
         "reach-guard: all 5 really was prevented"
     );
 
-    let mut expected = vec![(TargetRef::Player(P0), 2), (TargetRef::Player(P0), 3)];
-    expected.sort();
+    // CR 615.13: ONE application, ONE public event carrying the whole batch.
     assert_eq!(
         sorted_prevented_pairs(&events),
-        expected,
-        "CHARACTERIZATION, not an endorsement: a depletion shield bypasses the \
-         batch tally and emits one event PER DAMAGE EVENT, so the CR 615.13 \
-         trigger count is wrong (2 firings where the rules say 1)"
+        vec![(TargetRef::Player(P0), 5)],
+        "a depletion shield aggregates its public prevented amount like every \
+         other prevention application — one event, not one per damage event"
     );
     assert_eq!(
         counters_on(&runner, squire),
         5,
-        "two firings of 2 and 3 — outcome-neutral here only because 'that many' \
-         is linear in the amount"
+        "the Squire fires ONCE for the aggregated 5"
     );
 }
 
