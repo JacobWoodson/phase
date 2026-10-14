@@ -49,8 +49,9 @@ use super::oracle_nom::primitives::{
 
 use super::oracle_attraction::parse_attraction_visit_triggers;
 use super::oracle_casting::{
-    extract_spend_only_on_x_prefix, parse_additional_cost_line, parse_casting_restriction_line,
-    parse_spell_casting_option_line, split_additional_cost_trailing_spell_reduction,
+    additional_cost_line_text, extract_spend_only_on_x_prefix, parse_additional_cost_line,
+    parse_casting_restriction_line, parse_spell_casting_option_line,
+    split_additional_cost_trailing_spell_reduction,
 };
 use super::oracle_class::parse_class_oracle_text;
 use super::oracle_classifier::{
@@ -3675,7 +3676,9 @@ fn is_spell_resolution_instruction_line(
         return false;
     }
 
-    if is_opening_hand_begin_game(&lower) || lower_starts_with(&lower, "as an additional cost") {
+    // CR 207.2d: one recognizer with the 8b gate, so a labeled additional-cost line ends a spell
+    // body exactly as an unlabeled one does.
+    if is_opening_hand_begin_game(&lower) || additional_cost_line_text(line).is_some() {
         return false;
     }
 
@@ -5825,9 +5828,16 @@ fn parse_normalized_oracle_ir(
         // "This spell costs {N} less..." tails on combined lines (Rottenmouth
         // Viper class). Defiler cycle lines share the prefix but route at
         // Priority 6c-defiler instead.
-        if lower_starts_with(&lower, "as an additional cost") && !is_defiler_cost_pattern(&lower) {
+        //
+        // CR 207.2c + CR 207.2d: a leading ability word or flavor word
+        // ("Fallen Warrior —") has no rules meaning; `additional_cost_line_text`
+        // reads the cost after it, and the Defiler exclusion applies to that text.
+        if let Some((cost_text, cost_text_lower)) = additional_cost_line_text(&line)
+            .map(|text| (text, text.to_lowercase()))
+            .filter(|(_, text_lower)| !is_defiler_cost_pattern(text_lower))
+        {
             let (cost_line, trailing_reduction) =
-                split_additional_cost_trailing_spell_reduction(&line, &lower);
+                split_additional_cost_trailing_spell_reduction(cost_text, &cost_text_lower);
             let cost_lower = cost_line.to_lowercase();
             result.additional_cost = parse_additional_cost_line(&cost_lower, cost_line);
             if result.additional_cost.is_some() {
@@ -5835,20 +5845,47 @@ fn parse_normalized_oracle_ir(
             }
             if let Some(reduction_text) = trailing_reduction {
                 if let Some(mut def) = parse_static_line(reduction_text) {
-                    // CR 702.166a analogue: reduction only applies when the optional
-                    // additional cost is declared, not when the player declines it.
-                    def.condition = Some(match def.condition {
-                        // CR 701.59c + CR 702.166a: the reduction's own gate already names the
-                        // linked optional additional cost ("if evidence was collected"); wrapping
-                        // it again would only duplicate the same conjunct.
-                        None | Some(StaticCondition::AdditionalCostPaid) => {
-                            StaticCondition::AdditionalCostPaid
+                    // CR 601.2f + CR 608.2c: a reduction linked to this spell's additional cost
+                    // counts what that cost did "this way". `PreviousEffectAmount` is the
+                    // look-back at the preceding instruction of a resolving ability; while the
+                    // spell is being cast no instruction has been followed, so it cannot be the
+                    // count of counters removed to pay the cost (Hierophant Bio-Titan). Surface
+                    // the reduction instead of lowering a static that reads the wrong authority.
+                    if matches!(
+                        &def.mode,
+                        StaticMode::ModifyCost {
+                            dynamic_count: Some(QuantityRef::PreviousEffectAmount { .. }),
+                            ..
                         }
-                        Some(existing) => StaticCondition::And {
-                            conditions: vec![existing, StaticCondition::AdditionalCostPaid],
-                        },
-                    });
-                    emitter.static_ir_at(item_line, StaticIr::from_definition(reduction_text, def));
+                    ) {
+                        emitter.unsupported_ir_at(
+                            item_line,
+                            UnsupportedAbilityIr::new(
+                                UnsupportedAbilityCategory::StaticStructure,
+                                reduction_text,
+                                reduction_text,
+                            ),
+                            min_x_value,
+                        );
+                    } else {
+                        // CR 702.166a analogue: reduction only applies when the optional
+                        // additional cost is declared, not when the player declines it.
+                        def.condition = Some(match def.condition {
+                            // CR 701.59c + CR 702.166a: the reduction's own gate already names
+                            // the linked optional additional cost ("if evidence was collected");
+                            // wrapping it again would only duplicate the same conjunct.
+                            None | Some(StaticCondition::AdditionalCostPaid) => {
+                                StaticCondition::AdditionalCostPaid
+                            }
+                            Some(existing) => StaticCondition::And {
+                                conditions: vec![existing, StaticCondition::AdditionalCostPaid],
+                            },
+                        });
+                        emitter.static_ir_at(
+                            item_line,
+                            StaticIr::from_definition(reduction_text, def),
+                        );
+                    }
                 }
             }
             i += 1;
@@ -8737,21 +8774,25 @@ fn holds_unlowered_guard(value: &serde_json::Value) -> bool {
 
 /// CR 614.1a + CR 608.2n (O1a) / CR 608.2c + CR 614.1a (O1b): does the assembled tree
 /// place this body under a typed owner that consumes it in the dropped guard's stead?
-/// Reads the owner head's `Effect` variant and the body's `Effect` shape — no card names,
-/// no Oracle text.
+/// Reads the owner head's `Effect` variant and the body link's `Effect` shape and outcome
+/// gate — no card names, no Oracle text.
 ///
 /// The guard's READING is deliberately not a parameter. The sole caller settles a verdict
 /// only for `GuardReading::Event`, so a `reading == Event` conjunct in any arm here would
 /// be tautological; the Event gating is stated once, at that call site.
-fn guard_owner(body: &Effect, parent: Option<&Effect>) -> bool {
+fn guard_owner(body: &AbilityDefinition, parent: Option<&Effect>) -> bool {
     match parent {
         // O1a — CR 614.1a + CR 608.2n.
         Some(Effect::CastFromZone { .. }) => {
-            cast_from_zone::graveyard_destination_rider(body).is_some()
+            cast_from_zone::graveyard_destination_rider(&body.effect, body.condition.as_ref())
+                .is_some()
         }
         // O1b — CR 608.2c + CR 614.1a. Exile only: the counter path's library/hand
         // redirect rides `countered_spell_zone`, never a sub-ability.
-        Some(Effect::Counter { .. }) => cast_from_zone::is_graveyard_exile_rider_subability(body),
+        Some(Effect::Counter { .. }) => cast_from_zone::is_graveyard_exile_rider_subability(
+            &body.effect,
+            body.condition.as_ref(),
+        ),
         // R-a. CR-neutral hygiene, not a rules claim: the parent already records this
         // clause's unsupportedness, and a second gap over the same defect double-counts it
         // — the same per-unit suppression rule `swallow_check` applies via its
@@ -8891,7 +8932,7 @@ fn resolve_guards_in_ability(def: &mut AbilityDefinition, parent: Option<&Effect
              reading,
              clause_text,
          }| {
-            (reading == GuardReading::Event && !guard_owner(&def.effect, parent)).then(|| {
+            (reading == GuardReading::Event && !guard_owner(def, parent)).then(|| {
                 // Before gapping, attempt the whole-body graveyard-redirect
                 // authority (`parse_windowed_graveyard_redirect_install`): a
                 // chain-position "If <subject> would be put into <graveyard>

@@ -46,6 +46,7 @@ use super::mana::{
     ColoredManaCount, ManaColor, ManaCost, ManaPipId, ManaType, ManaUnit, StepEndManaAction,
 };
 use super::match_config::{MatchConfig, MatchForfeitResult, MatchPhase, MatchScore};
+use super::object_map::ObjectMap;
 use super::phase::{Phase, PhaseStop, TurnDirection, TurnSegment};
 use super::player::{Player, PlayerCounterKind, PlayerId};
 use super::proposed_event::{
@@ -356,18 +357,13 @@ mod legacy_trigger_definition_ref_map {
 /// have no such proof and are rejected at the state restore boundary.
 fn deserialize_objects_with_trigger_provenance<'de, D>(
     deserializer: D,
-) -> Result<im::HashMap<ObjectId, GameObject, rustc_hash::FxBuildHasher>, D::Error>
+) -> Result<ObjectMap, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let mut objects =
-        im::HashMap::<ObjectId, GameObject, rustc_hash::FxBuildHasher>::deserialize(deserializer)?;
-    for (_, object) in objects.iter_mut() {
-        object
-            .migrate_legacy_trigger_definitions()
-            .map_err(serde::de::Error::custom)?;
-    }
-    Ok(objects)
+    ObjectMap::deserialize_with_migration(deserializer, |object| {
+        object.migrate_legacy_trigger_definitions()
+    })
 }
 
 /// Tracks whether the game is in day or night state (CR 730).
@@ -1975,11 +1971,31 @@ pub struct AttachmentSnapshot {
 
 /// CR 603.10a + CR 607.2a: Snapshot of a single card linked as "exiled with"
 /// a source at the instant before that source leaves the battlefield.
+/// Readers that consult the live card gate on [`Self::is_still_exiled`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkedExileSnapshot {
     pub exiled_id: ObjectId,
     pub owner: PlayerId,
     pub mana_value: u32,
+    /// CR 400.7: the exiled card's incarnation when the snapshot was captured. A
+    /// card that leaves exile is a new object, even if it is exiled again, so a
+    /// reader that consults the live card matches it only at this incarnation.
+    /// Legacy saves that predate this field decode to `LEGACY_INCARNATION`, which
+    /// no live object has (fail-closed, mirroring `CostPaidObjectSnapshot`).
+    #[serde(default = "crate::types::ability::legacy_incarnation")]
+    pub incarnation: u64,
+}
+
+impl LinkedExileSnapshot {
+    /// CR 607.2a + CR 400.7: Whether this snapshot's card is still the same object
+    /// in exile. Readers that consult the live card gate on this; readers of the
+    /// frozen `owner`/`mana_value` read last known information (CR 608.2h) and do not.
+    pub fn is_still_exiled(&self, state: &GameState) -> bool {
+        state
+            .objects
+            .get(&self.exiled_id)
+            .is_some_and(|obj| obj.zone == Zone::Exile && obj.incarnation == self.incarnation)
+    }
 }
 
 /// CR 400.7 + CR 607.2a + CR 607.2b + CR 113.7a: The linked exiles a source had
@@ -2694,8 +2710,8 @@ pub enum ExileLinkKind {
     /// CR 702.167c: Craft material — the card (`exiled_id`) was exiled to pay the
     /// craft activation cost of the permanent (`source_id`) that returns to the
     /// battlefield transformed. "An ability of a permanent may refer to the
-    /// exiled cards used to craft it." Unlike `TrackedBySource`, this link is
-    /// **preserved** when the craft source leaves the battlefield — the source
+    /// exiled cards used to craft it." Unlike `TrackedBySource` and `CastCost`,
+    /// this link is **preserved** when the craft source leaves the battlefield — the source
     /// self-exiles mid-activation (CR 702.167a) and returns with the SAME
     /// ObjectId, so the link must survive its battlefield exit for the returned
     /// permanent to read it. Unlike `UntilSourceLeaves` it triggers NO automatic
@@ -2703,6 +2719,14 @@ pub enum ExileLinkKind {
     /// `ExiledBySource` / `CardsExiledBySource` consumers; pruned only when a
     /// material itself leaves exile (`zones.rs` exile-exit).
     CraftMaterial,
+    /// CR 607.2q: the card (`exiled_id`) was exiled to pay a cost of casting the
+    /// permanent spell (`source_id`). Linked to that spell and to the permanent it
+    /// becomes (CR 400.7d) and to nothing after: it survives only the move onto the
+    /// stack and the stack→battlefield move (CR 608.3a); every other zone exit and a
+    /// cancelled cast (CR 733.1) end it (CR 400.7). Read live like `TrackedBySource`;
+    /// after a battlefield departure only the departed incarnation reads it
+    /// (`zones::record_linked_exile_departure`).
+    CastCost,
 }
 
 /// CR 406.3 + CR 702.75a: whom a face-down exile look link's live rule admits.
@@ -21044,11 +21068,13 @@ declare_game_state! {
     // the default SipHash RandomState: ObjectId is a thin integer key and this
     // map is looked up millions of times per large-board resolution — profiling
     // showed SipHash hashing + HAMT lookup was ~35% of resolution CPU.
+    // Each object sits behind an `Arc` inside `ObjectMap`, so a cloned state
+    // shares every object it does not write.
     #[serde(
         deserialize_with = "deserialize_objects_with_trigger_provenance",
-        serialize_with = "crate::types::deterministic_serde::im_hash_map"
+        serialize_with = "crate::types::object_map::serialize_sorted"
     )]
-    pub objects: im::HashMap<ObjectId, GameObject, rustc_hash::FxBuildHasher>,
+    pub objects: ObjectMap,
     pub next_object_id: u64,
     /// CR 603.7: persisted monotonic delayed-trigger installation allocator.
     #[serde(default)]
@@ -22685,18 +22711,26 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_etb_counters: Vec<(ObjectId, CounterType, u32)>,
 
-    /// Modal modes chosen this turn per source: (ObjectId, mode_index).
-    /// CR 700.2: "choose one that hasn't been chosen this turn"
-    /// Note: ObjectId-keyed — zone changes create new ObjectId per CR 400.7, naturally resetting tracking.
+    /// Modal modes chosen this turn per source incarnation: (source, mode_index).
+    /// CR 700.2: "choose one that hasn't been chosen this turn".
+    /// CR 400.7: keyed by the exact object incarnation, not the reused storage
+    /// `ObjectId` — a permanent that leaves and returns is a new object whose
+    /// history starts empty, while a control change (no zone change) keeps it.
+    /// CR 603.10a: a look-back trigger from a departed source reads the departed
+    /// incarnation's history, so entries are never pruned at zone exit.
+    /// Cleared at turn start. Legacy saves keyed by bare `ObjectId` load as
+    /// `LEGACY_INCARNATION`, which matches no live object.
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
-    pub modal_modes_chosen_this_turn: HashSet<(ObjectId, usize)>,
-    /// Modal modes chosen this game per source: (ObjectId, mode_index).
-    /// CR 700.2: "choose one that hasn't been chosen" (game-scoped)
-    /// Note: ObjectId-keyed — zone changes create new ObjectId per CR 400.7, naturally resetting tracking.
+    pub modal_modes_chosen_this_turn: HashSet<(ObjectIncarnationRef, usize)>,
+    /// Modal modes chosen this game per source incarnation: (source, mode_index).
+    /// CR 700.2: "choose one that hasn't been chosen" (game-scoped).
+    /// CR 400.7 + CR 603.10a: keyed by exact incarnation exactly like
+    /// `modal_modes_chosen_this_turn`; never pruned (bounded by modes chosen).
+    /// Legacy saves keyed by bare `ObjectId` load as `LEGACY_INCARNATION`.
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
-    pub modal_modes_chosen_this_game: HashSet<(ObjectId, usize)>,
+    pub modal_modes_chosen_this_game: HashSet<(ObjectIncarnationRef, usize)>,
 
     /// Cards currently revealed to all players (e.g. during a RevealHand effect).
     /// `filter_state_for_player` skips hiding these cards.
@@ -23466,8 +23500,9 @@ declare_game_state! {
     /// (CR 400.7), but an ability that sacrifices its own source as a cost and
     /// then refers to "cards exiled with this permanent" (Rod of Absorption)
     /// must still see those cards at resolution. `linked_exile_cards_for_source`
-    /// consults this as its final fallback, filtered to cards still in exile, so
-    /// stale entries (cards that later left exile) contribute nothing.
+    /// consults this as its final fallback, filtered to cards still in exile as
+    /// the object the entry captured (CR 400.7), so a card that left exile
+    /// contributes nothing, even if it was exiled again.
     /// One entry per battlefield departure (a source can leave more than once in
     /// a step), each bounded to that departure's incarnations, so a later
     /// incarnation of the same id never reads it (CR 400.7).
@@ -29173,7 +29208,7 @@ impl GameState {
             active_combat_phase_control: None,
             active_library_searches: ActiveLibrarySearches::default(),
             active_search_decision_controls: ActiveSearchDecisionControls::default(),
-            objects: im::HashMap::default(),
+            objects: ObjectMap::default(),
             next_object_id: 1,
             next_delayed_trigger_token: 1,
             next_delayed_trigger_instance: initial_delayed_trigger_instance_id(),
@@ -32023,10 +32058,7 @@ pub(crate) fn loop_states_equal(a: &GameState, b: &GameState) -> bool {
 /// [`object_content_eq`]'s own doc states and not on immutability — they are not
 /// immutable within a game; only the fields a mandatory action could change are
 /// compared.
-pub(crate) fn objects_content_eq(
-    a: &im::HashMap<ObjectId, GameObject, rustc_hash::FxBuildHasher>,
-    b: &im::HashMap<ObjectId, GameObject, rustc_hash::FxBuildHasher>,
-) -> bool {
+pub(crate) fn objects_content_eq(a: &ObjectMap, b: &ObjectMap) -> bool {
     a.len() == b.len()
         && a.iter()
             .all(|(id, x)| b.get(id).is_some_and(|y| object_content_eq(x, y)))

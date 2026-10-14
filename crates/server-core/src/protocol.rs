@@ -3346,6 +3346,20 @@ mod tests {
         }
     }
 
+    /// v143: `GameState::modal_modes_chosen_this_turn` / `_this_game` retype to
+    /// `(ObjectIncarnationRef, usize)` (CR 400.7 incarnation-keyed modal
+    /// history); a v142 peer cannot decode the object-shaped key, so it must be
+    /// refused before it receives v143 state.
+    ///
+    /// v142: `LinkedExileSnapshot` gains `incarnation` (CR 400.7), carried in
+    /// `GameState::linked_exile_lki` and the trigger and zone-change linked-exile
+    /// snapshots; a v141 peer re-encoding state drops it, so it must be refused
+    /// before it receives v142 state.
+    ///
+    /// v141: `ExileLinkKind` gains `CastCost` (CR 607.2q cast-cost exile links),
+    /// carried in `GameState::exile_links`; a v140 peer cannot parse the tag, so
+    /// it must be refused before it receives v141 state.
+    ///
     /// v140: `AttackSubject` gains `EventAttackers` (the players a trigger's
     /// attack event's attackers attacked), carried in a resolving or pending
     /// ability's `player_scope` inside `GameState`; a v139 peer cannot parse the
@@ -3544,8 +3558,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_140_for_event_attackers() {
-        assert_eq!(PROTOCOL_VERSION, 140);
+    fn protocol_version_is_143_for_modal_history_incarnation_keys() {
+        assert_eq!(PROTOCOL_VERSION, 143);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3556,7 +3570,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_140_for_event_attackers` stays
+    /// `protocol_version_is_143_for_modal_history_incarnation_keys` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

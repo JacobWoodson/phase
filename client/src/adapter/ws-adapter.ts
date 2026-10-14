@@ -210,6 +210,25 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 143 — GameState.modal_modes_chosen_this_turn / _this_game retype from
+ *      (ObjectId, usize) to (ObjectIncarnationRef, usize) (CR 400.7), so a
+ *      non-empty entry [50, 1] is now [{object_id: 50, incarnation: 0}, 1] —
+ *      see PROTOCOL_VERSION's own `/// 143` entry in
+ *      crates/lobby-broker/src/protocol.rs. A v142 peer's typed decoder
+ *      cannot read the object-shaped key; the exact-match version check at
+ *      connect refuses the pairing. Wire 125 moves with it.
+ * 142 — LinkedExileSnapshot gains incarnation (CR 400.7), carried in
+ *      GameState.linked_exile_lki and the trigger and zone-change
+ *      linked_exile_snapshot lists — see PROTOCOL_VERSION's own `/// 142`
+ *      entry in crates/lobby-broker/src/protocol.rs. A v141 peer re-encoding
+ *      state drops the key; the exact-match version check at connect refuses
+ *      the pairing. Wire 124 moves with it.
+ * 141 — ExileLinkKind gains CastCost (CR 607.2q: a card exiled to pay a cost
+ *      of casting a permanent spell, linked to the permanent it becomes),
+ *      carried in GameState.exile_links — see PROTOCOL_VERSION's own `/// 141`
+ *      entry in crates/lobby-broker/src/protocol.rs. A v140 peer cannot parse
+ *      the tag; the exact-match version check at connect refuses the pairing.
+ *      Wire 123 moves with it.
  * 140 — AttackSubject gains EventAttackers (the players a trigger's attack
  *      event's attackers attacked), carried in an ability's player_scope
  *      inside GameState — see PROTOCOL_VERSION's own `/// 140` entry in
@@ -854,7 +873,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 140;
+export const PROTOCOL_VERSION = 143;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
