@@ -12851,6 +12851,24 @@ impl StaticCondition {
         })
     }
 
+    /// CR 109.4: true when any leaf is a `PlayerAttackedPlayer` whose attacker
+    /// or defender is a resolution-scoped `ChosenPlayer` placeholder. That
+    /// index reads `ResolvedAbility.chosen_players`, which has no answer
+    /// inside the layer pipeline (no resolving ability), so the entry gate
+    /// must refuse the whole condition before `Not` can invert the leaf's
+    /// false value — mirrors `has_unanswerable_designation_anchor` (whole
+    /// tree via `any_leaf`, so nesting under `And`/`Or`/`Not` cannot bypass).
+    pub(crate) fn has_unanswerable_chosen_player(&self) -> bool {
+        self.any_leaf(|leaf| {
+            matches!(
+                leaf,
+                StaticCondition::PlayerAttackedPlayer { attacker, defender }
+                    if matches!(attacker, ControllerRef::ChosenPlayer { .. })
+                        || matches!(defender, ControllerRef::ChosenPlayer { .. })
+            )
+        })
+    }
+
     /// Engine limitation, not CR-mandated: the out-of-layer-pipeline
     /// [`ConditionContinuation`] this leaf's truth value is decided by, when it
     /// has one. See that type for why a leaf can have no answer inside the
@@ -42984,6 +43002,37 @@ mod static_condition_traversal_tests {
         assert!(!recipient.has_unanswerable_designation_anchor(|_, scope| {
             StaticMode::CantUntap.binds_designation_scope(scope)
         }));
+    }
+
+    /// CR 109.4: a `PlayerAttackedPlayer` leaf naming a resolution-scoped
+    /// `ChosenPlayer` on either endpoint is unanswerable in the layer
+    /// pipeline — at full nesting depth, like the designation view above.
+    #[test]
+    fn static_condition_chosen_player_view_recurses_to_full_depth() {
+        use crate::types::ability::ControllerRef;
+        for leaf in [
+            StaticCondition::PlayerAttackedPlayer {
+                attacker: ControllerRef::ChosenPlayer { index: 0 },
+                defender: ControllerRef::You,
+            },
+            StaticCondition::PlayerAttackedPlayer {
+                attacker: ControllerRef::You,
+                defender: ControllerRef::ChosenPlayer { index: 1 },
+            },
+        ] {
+            assert!(
+                nested_at_depth(leaf).has_unanswerable_chosen_player(),
+                "a ChosenPlayer endpoint nested under And(Or(Not(..))) must be found"
+            );
+        }
+        let bindable = nested_at_depth(StaticCondition::PlayerAttackedPlayer {
+            attacker: ControllerRef::TargetPlayer,
+            defender: ControllerRef::You,
+        });
+        assert!(
+            !bindable.has_unanswerable_chosen_player(),
+            "non-ChosenPlayer endpoints bind fine at any depth and must NOT be rejected"
+        );
     }
 
     /// CR 118.12a / CR 601.2f: leaves whose truth is decided by an

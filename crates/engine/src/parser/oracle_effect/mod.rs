@@ -26586,11 +26586,16 @@ fn chain_declared_object_target_clause(clauses: &[ClauseIr]) -> Option<(usize, &
 /// next [phase]" delayed-trigger rebind (Faramir). Walks back like
 /// `chain_declared_object_target`: a conditional clause bails (later text
 /// may redirect the referent, CR 608.2c); a `Choose` with player or
-/// opponent choice type answers its ordinal among finalized chooses
-/// (0-based: 0 = the first choose, matching the runtime `chosen_players`
-/// append order, CR 109.4); any other clause bails so the table's
-/// `ParentTargetOwner` binding is preserved (Wanderer path). `None` keeps
-/// coverage honest for every non-Choose chain.
+/// opponent choice type answers its ordinal among finalized PLAYER chooses
+/// (0-based: 0 = the first player choose, matching the runtime
+/// `chosen_players` append order, CR 109.4). Every other clause is SKIPPED,
+/// not terminal: only `Player`/`Opponent` choices append to the runtime
+/// `chosen_players` table (`game/effects/choose.rs` gates the append on
+/// exactly those two choice types), so an unrelated clause — including a
+/// non-player `Choose` — neither appends nor redirects, and the walk
+/// preserves the antecedent past it instead of dropping to the table's
+/// `ParentTargetOwner` binding (Wanderer path). `None` keeps coverage honest
+/// for chains with no player choose at all.
 fn chain_chosen_player_antecedent(clauses: &[ClauseIr]) -> Option<u8> {
     let mut ordinal: u8 = 0;
     let mut seen_choose = false;
@@ -26598,18 +26603,16 @@ fn chain_chosen_player_antecedent(clauses: &[ClauseIr]) -> Option<u8> {
         if prev.condition.is_some() {
             return None;
         }
-        match &prev.parsed.effect {
-            Effect::Choose {
-                choice_type: ChoiceType::Player { .. } | ChoiceType::Opponent { .. },
-                ..
-            } => {
-                if seen_choose {
-                    ordinal = ordinal.saturating_add(1);
-                } else {
-                    seen_choose = true;
-                }
+        if let Effect::Choose {
+            choice_type: ChoiceType::Player { .. } | ChoiceType::Opponent { .. },
+            ..
+        } = &prev.parsed.effect
+        {
+            if seen_choose {
+                ordinal = ordinal.saturating_add(1);
+            } else {
+                seen_choose = true;
             }
-            _ => return None,
         }
     }
     seen_choose.then_some(ordinal)

@@ -33545,7 +33545,9 @@ fn faramir_prince_of_ithilien_full_oracle_shape() {
 /// alt-branch against rot rather than a live card).
 #[test]
 fn faramir_they_did_not_uncontracted_parses() {
-    use crate::types::ability::{DelayedTriggerPlayerBinding, Effect};
+    use crate::types::ability::{
+        AbilityCondition, DelayedTriggerPlayerBinding, Effect, PlayerScope,
+    };
     use crate::types::phase::Phase;
     let parsed = parse(
         "At the beginning of your end step, choose an opponent. At the beginning of that player's next end step, you draw a card if they did not attack you that turn. Otherwise, create three 1/1 white Human Soldier creature tokens.",
@@ -33591,10 +33593,38 @@ fn faramir_they_did_not_uncontracted_parses() {
         ),
         "delayed must target chosen player end step, got {condition:?}"
     );
+    // Pin the exact retrospective variant — not just `is_some()`, which any
+    // fallback-arm condition would satisfy: the chosen player did not attack
+    // you. The bridge (`player_attack_endpoint_to_scope`) maps the
+    // `ChosenPlayer` attacker to the stamped `Target` player scope and `You`
+    // to `Controller` — the same shape the contracted leg produces.
     assert!(
-        inner.condition.is_some(),
-        "uncontracted draw must carry the retrospective condition, got {:#?}",
-        inner
+        matches!(
+            &inner.condition,
+            Some(AbilityCondition::Not { condition }) if matches!(
+                condition.as_ref(),
+                AbilityCondition::PlayerAttackedPlayer {
+                    attacker: PlayerScope::Target,
+                    defender: PlayerScope::Controller,
+                }
+            )
+        ),
+        "uncontracted draw must carry Not(PlayerAttackedPlayer{{Target, Controller}}), got {:#?}",
+        inner.condition
+    );
+    assert!(
+        matches!(inner.effect.as_ref(), Effect::Draw { .. }),
+        "inner head must be Draw, got {:?}",
+        inner.effect
+    );
+    let else_arm = inner
+        .else_ability
+        .as_deref()
+        .expect("Otherwise arm must exist");
+    assert!(
+        matches!(else_arm.effect.as_ref(), Effect::Token { .. }),
+        "Otherwise arm must create tokens, got {:?}",
+        else_arm.effect
     );
 }
 
@@ -33647,4 +33677,32 @@ fn fealty_to_the_realm_full_oracle_shape() {
         }
         _ => panic!("expected EnchantedBy affected filter"),
     }
+    // The aura's combat pair must ride the same enchanted-creature population:
+    // a must-attack static and a can't-attack-you static (`CantAttack` with
+    // `attack_defended = Player`, scoped to the source controller), both
+    // affecting the `EnchantedBy` filter. Without the pair the host could sit
+    // out combat or swing at its own controller's enemies freely.
+    let has_enchanted_by = |affected: &Option<crate::types::ability::TargetFilter>| {
+        matches!(
+            affected,
+            Some(crate::types::ability::TargetFilter::Typed(tf))
+                if tf.properties
+                    .contains(&crate::types::ability::FilterProp::EnchantedBy)
+        )
+    };
+    assert!(
+        parsed.statics.iter().any(|def| {
+            matches!(def.mode, crate::types::statics::StaticMode::MustAttack)
+                && has_enchanted_by(&def.affected)
+        }),
+        "must-attack static on the enchanted creature: {parsed:#?}"
+    );
+    assert!(
+        parsed.statics.iter().any(|def| {
+            matches!(def.mode, crate::types::statics::StaticMode::CantAttack)
+                && def.attack_defended == Some(crate::types::triggers::AttackTargetFilter::Player)
+                && has_enchanted_by(&def.affected)
+        }),
+        "can't-attack-you static on the enchanted creature: {parsed:#?}"
+    );
 }

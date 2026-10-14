@@ -13947,6 +13947,12 @@ fn perform_player_scope_sacrifices(
                     );
                     emit_sacrifice_batch_follow_ups(&mut completion, completed, events);
                 }
+                // CR 609.3: a mid-resolution bar means the instruction can't
+                // move this object — skip it so terminal bookkeeping derives
+                // from actual departures, not attempts.
+                crate::game::sacrifice::SacrificeOutcome::Prohibited => {
+                    completion.announced.retain(|&id| id != card);
+                }
                 crate::game::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
                     let completed = record_sacrifice_batch_events(
                         &mut completion,
