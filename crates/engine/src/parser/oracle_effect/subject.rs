@@ -47,7 +47,7 @@ use super::super::oracle_static::{
 };
 use super::super::oracle_target::{
     parse_target, parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase_folding,
-    TargetSyntax,
+    parse_type_phrase_folding_with_ctx, TargetSyntax,
 };
 use super::super::oracle_util::{
     merge_or_filters, parse_number, TextPair, SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
@@ -725,7 +725,8 @@ fn additive_type_subject_application(
     subject: &str,
     ctx: &mut ParseContext,
 ) -> Option<SubjectApplication> {
-    let (parsed_subject, rest) = parse_target(subject);
+    let (parsed_subject, rest) =
+        parse_target_with_ctx(subject, &mut ctx.clone_player_antecedents());
     if rest.trim().is_empty()
         && matches!(
             parsed_subject,
@@ -1751,7 +1752,10 @@ fn try_parse_target_and_same_name_pump_clause(
     // `SameNameAsParentTarget` gate is the load-bearing discriminator: a plain
     // "target creature and each creature you control get +1/+1" secondary lacks
     // it and returns `None`, leaving the generic path untouched.
-    let (secondary_filter, rest) = parse_target(secondary_tp.original.trim());
+    let (secondary_filter, rest) = parse_target_with_ctx(
+        secondary_tp.original.trim(),
+        &mut ctx.clone_player_antecedents(),
+    );
     if !rest.trim().is_empty() || !filter_carries_same_name_as_parent_target(&secondary_filter) {
         return None;
     }
@@ -2916,7 +2920,8 @@ fn parse_subject_application_for(
         }
         // Fallback: strip "of " and re-route through parse_target as "each <remainder>"
         let normalized = format!("each {remainder}");
-        let (filter, _) = parse_target(&normalized);
+        let (filter, _) =
+            ctx.with_player_antecedents(|scoped| parse_target_with_ctx(&normalized, scoped));
         return subject_filter_application(filter, false);
     }
     // CR 119.5: "each player's life total" / "all players' life
@@ -2941,7 +2946,8 @@ fn parse_subject_application_for(
     {
         let consumed = lower.len() - rest_lower.len();
         let phrase = &subject[consumed..];
-        let (filter, rest) = parse_type_phrase_folding(phrase);
+        let (filter, rest) = ctx
+            .with_player_antecedents(|scoped| parse_type_phrase_folding_with_ctx(phrase, scoped));
         let filter = merge_partial_type_phrase_filter(filter, rest.trim());
         return subject_filter_application(filter, false);
     }
@@ -2953,7 +2959,8 @@ fn parse_subject_application_for(
     .parse(lower.as_str())
     .is_ok()
     {
-        let (filter, _) = parse_target(subject);
+        let (filter, _) =
+            ctx.with_player_antecedents(|scoped| parse_target_with_ctx(subject, scoped));
         return Some(SubjectApplication {
             affected: filter,
             target: None,
@@ -3072,7 +3079,8 @@ fn parse_subject_application_for(
     // GainControl→GiveControl rewrite receives `recipient: Neighbor` rather than
     // a generic `Any`/`TriggeringPlayer`.
     {
-        let (neighbor_filter, rest) = parse_target(subject);
+        let (neighbor_filter, rest) =
+            parse_target_with_ctx(subject, &mut ctx.clone_player_antecedents());
         if rest.trim().is_empty() && matches!(neighbor_filter, TargetFilter::Neighbor { .. }) {
             return subject_filter_application(neighbor_filter, false);
         }
@@ -3682,7 +3690,8 @@ fn parse_subject_application_for(
     {
         let consumed = lower.len() - rest_subject.len();
         let original_rest = &subject[consumed..];
-        let (filter, rem) = parse_type_phrase_folding(original_rest);
+        let (filter, rem) =
+            parse_type_phrase_folding_with_ctx(original_rest, &mut ctx.clone_player_antecedents());
         if rem.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
             return Some(SubjectApplication {
                 affected: TargetFilter::ParentTarget,
@@ -3703,7 +3712,8 @@ fn parse_subject_application_for(
         // the remainder as a type phrase. Covers all "that [type]" patterns generically.
         let consumed = lower.len() - rest_subject.len();
         let original_rest = &subject[consumed..];
-        let (filter, rem) = parse_type_phrase_folding(original_rest);
+        let (filter, rem) =
+            parse_type_phrase_folding_with_ctx(original_rest, &mut ctx.clone_player_antecedents());
         if rem.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
             // CR 608.2k + CR 608.2c: Inside a trigger effect, "that [type]" is an
             // anaphoric back-reference to the triggering event's subject object (the
@@ -3749,7 +3759,8 @@ fn parse_subject_application_for(
         }
     }
 
-    let (filter, rest) = parse_type_phrase_folding(subject);
+    let (filter, rest) =
+        parse_type_phrase_folding_with_ctx(subject, &mut ctx.clone_player_antecedents());
     if rest.trim().is_empty() {
         return subject_filter_application(filter, false);
     }
@@ -5748,7 +5759,8 @@ fn build_become_clause(
         // `parse_target` lower-cases internally; pass it the lowercase tail so
         // its returned remainder is also lowercase (we'll feed that to
         // `parse_except_clause` whose tags are lowercase).
-        let (target, remainder) = parse_target(&after_copy_owned);
+        let (target, remainder) =
+            ctx.with_player_antecedents(|scoped| parse_target_with_ctx(&after_copy_owned, scoped));
         // CR 707.9: optional `, except <body> [and <body>]*`. The card name
         // for any SetName override comes from the parse context (set by
         // `parse_oracle_text`). When `ctx.card_name` is `None` or empty
@@ -5793,7 +5805,8 @@ fn build_become_clause(
     {
         let (after_copies_owned, mid_sentence_duration) = strip_pre_except_duration(after_copies);
         let duration = mid_sentence_duration.map(Some).unwrap_or(duration);
-        let (target, remainder) = parse_target(&after_copies_owned);
+        let (target, remainder) = ctx
+            .with_player_antecedents(|scoped| parse_target_with_ctx(&after_copies_owned, scoped));
         let card_name = ctx.card_name.as_deref().unwrap_or("");
         let additional_modifications =
             super::become_copy_except::parse_except_clause(remainder, card_name, ctx)
@@ -10752,6 +10765,31 @@ mod tests {
             "should parse another creature controlled by target player, got {:?}",
             app.affected
         );
+    }
+
+    /// CR 608.2c: the "each <type phrase>" arm binds "that player" to the
+    /// caller's player antecedent; a literal "you" stays the controller
+    /// (CR 109.5).
+    #[test]
+    fn parse_subject_each_type_phrase_binds_that_player_to_relative_scope() {
+        for (text, expected) in [
+            (
+                "each creature that player controls",
+                ControllerRef::TargetPlayer,
+            ),
+            ("each creature you control", ControllerRef::You),
+        ] {
+            let mut ctx = ParseContext {
+                relative_player_scope: Some(ControllerRef::TargetPlayer),
+                ..ParseContext::default()
+            };
+            let app = parse_subject_application(text, &mut ctx).expect(text);
+            let TargetFilter::Typed(typed) = &app.affected else {
+                panic!("{text}: expected a typed filter, got {:?}", app.affected);
+            };
+            assert!(typed.type_filters.contains(&TypeFilter::Creature), "{text}");
+            assert_eq!(typed.controller, Some(expected), "{text}");
+        }
     }
 
     /// "another target A or B you control" excludes the source from
