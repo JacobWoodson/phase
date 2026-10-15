@@ -2745,6 +2745,7 @@ mod tests {
                 granting_object: None,
                 duration_event_source: None,
                 source_name: String::new(),
+                bound_actor: None,
             });
 
         crate::game::layers::evaluate_layers(&mut state);

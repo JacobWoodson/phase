@@ -6939,6 +6939,7 @@ fn gather_ring_emblem_continuous_effects(
             mode: StaticMode::Continuous,
             characteristic_defining: false,
             granter: None,
+            bound_actor: None,
         });
     }
 }
@@ -7271,6 +7272,7 @@ fn active_continuous_effects_from_static_definitions(
                 mode: def.mode.clone(),
                 characteristic_defining: def.characteristic_defining,
                 granter: def.granting_object,
+                bound_actor: None,
             };
             // CR 113.3d + CR 604.1 + CR 611.2c: A `GrantStaticAbility` modification
             // installs the inner static onto every recipient in the host's live
@@ -7420,6 +7422,7 @@ fn expand_granted_static_effects(
                 mode: inner.mode.clone(),
                 characteristic_defining: inner.characteristic_defining,
                 granter: inner.granting_object,
+                bound_actor: None,
             });
         }
     }
@@ -8014,6 +8017,7 @@ fn expand_granted_activated_abilities(
                     mode: StaticMode::Continuous,
                     characteristic_defining: false,
                     granter: None,
+                    bound_actor: None,
                 });
                 next_mod_index += 1;
             }
@@ -8119,6 +8123,7 @@ fn expand_granted_triggered_abilities(
                     mode: StaticMode::Continuous,
                     characteristic_defining: false,
                     granter: None,
+                    bound_actor: None,
                 });
                 next_mod_index += 1;
             }
@@ -8258,6 +8263,7 @@ fn gather_transient_continuous_effects_with(
                 mode: StaticMode::Continuous,
                 characteristic_defining: false,
                 granter: tce.granting_object,
+                bound_actor: tce.bound_actor,
             };
             // CR 113.3d + CR 604.1 + CR 611.2c: Mirror the printed-static gather
             // path — a transient `GrantStaticAbility` must expand its inner
@@ -11419,6 +11425,15 @@ fn apply_continuous_effect_filtered(
                 // carrier.
                 if static_mode_needs_source_controller_anchor(&resolved_mode) {
                     def = def.source_controller(effect.controller);
+                }
+                // CR 109.5 + CR 701.21a: an installer-bound transient stamps
+                // its bound actor as the graft's anchor, so the sacrifice
+                // query can exempt exactly this actor-bound graft for other
+                // actors while object-wide grafts (anchor `None`) keep
+                // barring everyone. No-op for every existing producer: only
+                // installer-bound TCEs carry `Some`.
+                if let Some(bound) = effect.bound_actor {
+                    def = def.source_controller(bound);
                 }
                 // CR 611.2c: stamp the directing object so combat / future
                 // attribution consumers can name the object that grafted this
@@ -21177,6 +21192,7 @@ mod tests {
                 granting_object: None,
                 duration_event_source: None,
                 source_name: String::new(),
+                bound_actor: None,
             });
         let mut effects = vec![];
         gather_transient_continuous_effects(&state, &mut effects);
@@ -21213,6 +21229,7 @@ mod tests {
                 granting_object: None,
                 duration_event_source: None,
                 source_name: String::new(),
+                bound_actor: None,
             });
         let mut effects = vec![];
         gather_transient_continuous_effects(&state, &mut effects);
@@ -21261,6 +21278,7 @@ mod tests {
                     granting_object: None,
                     duration_event_source: None,
                     source_name: String::new(),
+                    bound_actor: None,
                 });
         }
 
@@ -24771,6 +24789,7 @@ mod tests {
             condition: None,
             mode: StaticMode::Continuous,
             characteristic_defining: false,
+            bound_actor: None,
         }
     }
 

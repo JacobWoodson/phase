@@ -6138,7 +6138,12 @@ fn try_parse_you_cant_sacrifice_those_creatures(tp: TextPair<'_>) -> Option<Pars
         .affected(TargetFilter::TrackedSet {
             id: TrackedSetId(0),
         })
-        .modifications(vec![ContinuousModification::AddStaticMode { mode }]);
+        .modifications(vec![ContinuousModification::AddStaticMode { mode }])
+        // CR 109.5: "you" is the resolving caster — the bar binds the
+        // installer, not whoever later holds the object. Install resolves
+        // this role; the query exempts exactly this actor-bound graft for
+        // other actors while object-wide grants keep barring everyone.
+        .bound_actor(ControllerRef::You);
     let mut clause = parsed_clause(Effect::GenericEffect {
         static_abilities: vec![def],
         duration: Some(Duration::UntilEndOfTurn),

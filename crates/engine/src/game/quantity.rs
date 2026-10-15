@@ -1457,6 +1457,7 @@ pub fn static_definition_is_cast_stable_for_pre_cast(definition: &StaticDefiniti
         protection_does_not_remove: None,
         room_door: None,
         granting_object: None,
+        bound_actor: None,
     } = definition
     else {
         // This is intentionally a positive proof over every direct static

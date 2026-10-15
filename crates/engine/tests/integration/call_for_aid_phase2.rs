@@ -858,24 +858,7 @@ fn call_for_aid_bar_does_not_follow_control_change() {
     // Subsequent control change: end the THEFT of p1_a (drop its
     // `ChangeController` grant) and pass it to P2. The sacrifice bar is a
     // separate installer-bound grant and stays installed.
-    {
-        let state = runner.state_mut();
-        let grants = std::mem::take(&mut state.transient_continuous_effects);
-        state.transient_continuous_effects = grants
-            .into_iter()
-            .filter(|grant| {
-                !(grant
-                    .modifications
-                    .contains(&ContinuousModification::ChangeController)
-                    && matches!(&grant.affected, TargetFilter::SpecificObject { id } if *id == p1_a))
-            })
-            .collect();
-        state
-            .objects
-            .get_mut(&p1_a)
-            .expect("stolen goblin")
-            .controller = P2;
-    }
+    pass_control_to(&mut runner, p1_a, P2);
     assert_eq!(
         runner.state().objects[&p1_a].controller,
         P2,
@@ -1487,6 +1470,460 @@ fn call_for_aid_protected_creature_skipped_by_payable_ward() {
         stage.runner.state().objects[&stage.ulamog].zone,
         Zone::Graveyard,
         "the paid Ward must let Murder destroy Ulamog"
+    );
+}
+
+/// MED-1 driver — subsequent control change (mirrors the M4 companion): end
+/// every theft of `object` (drop its `ChangeController` grants) and pass it
+/// to `new_controller`. Separate prohibition grants stay installed. Sets
+/// BOTH the live controller and `base_controller`: layers reseed control
+/// from base every pass (CR 613.1b), so a live-only set is wiped by the next
+/// derivation and the object silently reverts to its previous controller.
+fn pass_control_to(runner: &mut GameRunner, object: ObjectId, new_controller: PlayerId) {
+    let state = runner.state_mut();
+    let grants = std::mem::take(&mut state.transient_continuous_effects);
+    state.transient_continuous_effects = grants
+        .into_iter()
+        .filter(|grant| {
+            !(grant
+                .modifications
+                .contains(&ContinuousModification::ChangeController)
+                && matches!(&grant.affected, TargetFilter::SpecificObject { id } if *id == object))
+        })
+        .collect();
+    let obj = state
+        .objects
+        .get_mut(&object)
+        .expect("stolen object exists");
+    obj.controller = new_controller;
+    obj.base_controller = Some(new_controller);
+}
+
+/// Hand priority to P2 (CR 117.3c) so they may cast.
+fn hand_priority_to_p2(runner: &mut GameRunner) {
+    runner.state_mut().priority_player = P2;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P2 };
+}
+
+/// Drive one P0 combat in a 3-player game: the villain hits P1 once while the
+/// Stilt-Man trigger steals `steal_target` (fealty-style guarded loop —
+/// `run_combat` passes priority twice, so it stalls with three players).
+fn run_3p_stilt_combat(runner: &mut GameRunner, villain: ObjectId, steal_target: ObjectId) {
+    let mut attacked = false;
+    let mut guard = 0;
+    loop {
+        guard += 1;
+        assert!(
+            guard < 2000,
+            "never reached postcombat (phase {:?}, waiting {:?})",
+            runner.state().phase,
+            runner.state().waiting_for
+        );
+        if runner.state().phase == Phase::PostCombatMain {
+            break;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::DeclareAttackers { .. } => {
+                let attacks = if runner.state().active_player == P0 && !attacked {
+                    attacked = true;
+                    vec![(villain, AttackTarget::Player(P1))]
+                } else {
+                    vec![]
+                };
+                runner
+                    .act(GameAction::DeclareAttackers {
+                        attacks,
+                        bands: vec![],
+                    })
+                    .expect("declare attackers");
+            }
+            WaitingFor::DeclareBlockers { .. } => {
+                runner
+                    .act(GameAction::DeclareBlockers {
+                        assignments: vec![],
+                    })
+                    .expect("declare blockers");
+            }
+            WaitingFor::TriggerTargetSelection {
+                target_slots,
+                selection,
+                ..
+            }
+            | WaitingFor::TargetSelection {
+                target_slots,
+                selection,
+                ..
+            } => {
+                let slot = &target_slots[selection.current_slot];
+                let choice = slot
+                    .legal_targets
+                    .iter()
+                    .find(|t| **t == TargetRef::Object(steal_target))
+                    .cloned();
+                assert!(
+                    choice.is_some(),
+                    "the bauble must be a legal trigger target, got {:?}",
+                    slot.legal_targets
+                );
+                runner
+                    .act(GameAction::ChooseTarget { target: choice })
+                    .expect("choose trigger target must be accepted");
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("trigger ordering must be accepted");
+            }
+            _ => {
+                let _ = runner.act(GameAction::PassPriority);
+            }
+        }
+    }
+    assert!(attacked, "the villain must have attacked P1");
+}
+
+/// MED 1 (object class) — CR 109.5 + CR 701.21a: a Stilt-Man-granted "this
+/// permanent can't be sacrificed" binds the OBJECT, not the installer. When
+/// the stolen permanent later passes to a third player, that player is still
+/// barred — the bar follows the object. (Contrast the M4 companion, where a
+/// Call-for-Aid bar frees its later controller.)
+#[test]
+fn stilt_man_bar_follows_object_to_later_controller() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let _stiltman = scenario
+        .add_creature_from_oracle(P0, "Stilt-Man, Towering Terror", 4, 2, STILT_MAN)
+        .id();
+    let villain = scenario.add_creature(P0, "Villain Thug", 2, 2).id();
+    let bauble = scenario
+        .add_creature(P1, "Bauble", 0, 0)
+        .as_enchantment()
+        .id();
+    let fodder = scenario.add_creature(P2, "P2 Fodder", 1, 1).id();
+    for _ in 0..5 {
+        scenario.add_card_to_library_top(P2, "Plains");
+    }
+    let rites_a = scenario
+        .add_spell_to_hand_from_oracle(P2, "Village Rites", true, VILLAGE_RITES)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 0,
+        })
+        .id();
+    let rites_b = scenario
+        .add_spell_to_hand_from_oracle(P2, "Village Rites", true, VILLAGE_RITES)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 0,
+        })
+        .id();
+    let mut runner = scenario.build();
+    let villain_obj = runner
+        .state_mut()
+        .objects
+        .get_mut(&villain)
+        .expect("villain exists");
+    villain_obj.card_types.subtypes.push("Villain".to_string());
+    villain_obj.base_card_types = villain_obj.card_types.clone();
+    villain_obj.summoning_sick = false;
+
+    run_3p_stilt_combat(&mut runner, villain, bauble);
+    assert_eq!(
+        runner.state().objects[&bauble].controller,
+        P0,
+        "the trigger must steal the bauble (resolution reach-guard)"
+    );
+    assert!(
+        cant_be_sacrificed(runner.state(), bauble),
+        "the stolen bauble must carry the prohibition"
+    );
+
+    pass_control_to(&mut runner, bauble, P2);
+    assert_eq!(
+        runner.state().objects[&bauble].controller,
+        P2,
+        "the control change must stick for the sacrifice below to mean anything"
+    );
+
+    // Creature surgery: Village Rites needs a CREATURE victim, but Stilt-Man
+    // steals noncreatures. Stamp the bauble a 2/2 enchantment creature
+    // (mirrors the Villain-subtype + P/T stamps): the Stilt grant pins the
+    // object by id, so the bar survives the type change.
+    {
+        let obj = runner
+            .state_mut()
+            .objects
+            .get_mut(&bauble)
+            .expect("bauble exists");
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        obj.base_power = Some(2);
+        obj.base_toughness = Some(2);
+    }
+    {
+        let obj = &runner.state().objects[&bauble];
+        assert!(
+            obj.card_types.core_types.contains(&CoreType::Creature),
+            "the surgery must leave a creature for Rites to name"
+        );
+    }
+    assert!(
+        cant_be_sacrificed(runner.state(), bauble),
+        "the Stilt bar must survive the type change"
+    );
+
+    // Re-fund: pools drained on the combat phase changes (mirrors V8c).
+    add_mana(&mut runner, P2, ManaType::Black, 2);
+    hand_priority_to_p2(&mut runner);
+    let hand_before = hand_count(&runner, P2);
+
+    // Positive reach-guard: P2's Rites works in this game — the free fodder
+    // pays normally. Without this, the negative leg below could pass by
+    // P2 being unable to cast at all.
+    cast_sacrifice_cost_spell(&mut runner, rites_b, fodder);
+    assert_eq!(
+        runner.state().objects[&fodder].zone,
+        Zone::Graveyard,
+        "unprohibited payment sacrifices normally"
+    );
+    assert_eq!(
+        hand_count(&runner, P2),
+        hand_before + 1,
+        "spell left hand (-1), draw two (+2)"
+    );
+
+    // Negative: P2 — bound by the object's own bar — cannot fund a sacrifice
+    // cost with the bauble. Announce fails (empty eligible set) or selection
+    // rejects the barred victim (mirrors the V5a negative).
+    hand_priority_to_p2(&mut runner);
+    // Re-fund leg 2 separately: leg 1's stack drain may advance phases and
+    // empty the pool, which would fail the announce for lack of mana rather
+    // than for the bar.
+    add_mana(&mut runner, P2, ManaType::Black, 1);
+    let card_id = runner.state().objects[&rites_a].card_id;
+    let announce = runner.act(GameAction::CastSpell {
+        object_id: rites_a,
+        card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    });
+    if announce.is_ok() {
+        let selection = runner.act(GameAction::SelectCards {
+            cards: vec![bauble],
+        });
+        assert!(
+            selection.is_err(),
+            "the object-bound victim must be rejected at selection"
+        );
+    }
+    assert_eq!(
+        runner.state().objects[&bauble].zone,
+        Zone::Battlefield,
+        "the barred victim must stay on the battlefield"
+    );
+    assert_eq!(
+        runner.state().objects[&rites_a].zone,
+        Zone::Hand,
+        "the unpaid spell stays in hand"
+    );
+    assert_eq!(
+        hand_count(&runner, P2),
+        hand_before + 1,
+        "no further draw: the second spell never resolved"
+    );
+}
+
+const SELF_BARRED_BEAR: &str = "P1 Bear can't be sacrificed.";
+
+/// MED 1 (concurrency) — CR 109.5 + CR 701.21a: a printed object bar and a
+/// Call-for-Aid installer bar coexist on one object. When the doubly-barred
+/// creature later passes to a third player, the installer's bar frees them
+/// but the printed bar still binds — the exemption applies graft-by-graft.
+#[test]
+fn printed_bar_survives_aid_transfer_to_later_controller() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let bear = scenario
+        .add_creature_from_oracle(P1, "P1 Bear", 2, 2, SELF_BARRED_BEAR)
+        .id();
+    let fodder = scenario.add_creature(P2, "P2 Fodder", 1, 1).id();
+    for _ in 0..5 {
+        scenario.add_card_to_library_top(P2, "Plains");
+    }
+    let aid = scenario
+        .add_spell_to_hand_from_oracle(P0, "Call for Aid", false, CALL_FOR_AID)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 4,
+        })
+        .id();
+    let rites = scenario
+        .add_spell_to_hand_from_oracle(P2, "Village Rites", true, VILLAGE_RITES)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 0,
+        })
+        .id();
+    let mut runner = scenario.build();
+    add_mana(&mut runner, P0, ManaType::Red, 1);
+    add_mana(&mut runner, P0, ManaType::Colorless, 4);
+    add_mana(&mut runner, P2, ManaType::Black, 1);
+
+    assert!(
+        cant_be_sacrificed(runner.state(), bear),
+        "reach-guard: the printed bar functions before the aid"
+    );
+    runner.cast(aid).target_player(P1).resolve();
+    assert_eq!(
+        runner.state().objects[&bear].controller,
+        P0,
+        "the aid must steal the bear"
+    );
+    pass_control_to(&mut runner, bear, P2);
+    assert_eq!(
+        runner.state().objects[&bear].controller,
+        P2,
+        "the control change must stick for the sacrifice below to mean anything"
+    );
+
+    // P2 is freed by the installer's bar but still bound by the printed one.
+    // The free fodder keeps a legal victim available, so the announce
+    // succeeds (proving P2 can cast) and the barred bear is rejected
+    // deterministically at selection.
+    hand_priority_to_p2(&mut runner);
+    let hand_before = hand_count(&runner, P2);
+    let card_id = runner.state().objects[&rites].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: rites,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("announce succeeds while the free fodder can pay");
+    let selection = runner.act(GameAction::SelectCards { cards: vec![bear] });
+    assert!(
+        selection.is_err(),
+        "the printed-barred victim must be rejected at selection"
+    );
+    assert_eq!(
+        runner.state().objects[&fodder].zone,
+        Zone::Battlefield,
+        "the rejected payment sacrifices nothing"
+    );
+    assert_eq!(
+        runner.state().objects[&bear].zone,
+        Zone::Battlefield,
+        "the printed-barred victim must stay on the battlefield"
+    );
+    assert_eq!(
+        runner.state().objects[&rites].zone,
+        Zone::Hand,
+        "the unpaid spell stays in hand"
+    );
+    assert_eq!(
+        hand_count(&runner, P2),
+        hand_before,
+        "no draw: the spell never resolved"
+    );
+}
+
+/// MED 1 (multi-installer) — CR 109.5: two concurrent Call-for-Aid bars from
+/// different installers bind per-TCE. A later third controller is bound by
+/// neither and sacrifices freely.
+#[test]
+fn concurrent_aid_bars_free_later_controller() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let bear = scenario.add_creature(P1, "P1 Bear", 2, 2).id();
+    for _ in 0..5 {
+        scenario.add_card_to_library_top(P2, "Plains");
+    }
+    let aid_one = scenario
+        .add_spell_to_hand_from_oracle(P0, "Call for Aid", false, CALL_FOR_AID)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 4,
+        })
+        .id();
+    let aid_two = scenario
+        .add_spell_to_hand_from_oracle(P1, "Call for Aid", false, CALL_FOR_AID)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 4,
+        })
+        .id();
+    let rites = scenario
+        .add_spell_to_hand_from_oracle(P2, "Village Rites", true, VILLAGE_RITES)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 0,
+        })
+        .id();
+    let mut runner = scenario.build();
+    add_mana(&mut runner, P0, ManaType::Red, 1);
+    add_mana(&mut runner, P0, ManaType::Colorless, 4);
+    add_mana(&mut runner, P1, ManaType::Red, 1);
+    add_mana(&mut runner, P1, ManaType::Colorless, 4);
+    add_mana(&mut runner, P2, ManaType::Black, 1);
+
+    runner.cast(aid_one).target_player(P1).resolve();
+    assert_eq!(
+        runner.state().objects[&bear].controller,
+        P0,
+        "the first aid must steal the bear"
+    );
+    // P1's turn for the second sorcery (no cleanup runs, so both bars stay live).
+    {
+        let state = runner.state_mut();
+        state.active_player = P1;
+        state.priority_player = P1;
+        state.waiting_for = WaitingFor::Priority { player: P1 };
+    }
+    runner.cast(aid_two).target_player(P0).resolve();
+    assert_eq!(
+        runner.state().objects[&bear].controller,
+        P1,
+        "the second aid must steal the bear back"
+    );
+    let live_bars = runner
+        .state()
+        .transient_continuous_effects
+        .iter()
+        .filter(|tce| {
+            matches!(&tce.affected, TargetFilter::SpecificObject { id } if *id == bear)
+                && tce.modifications.iter().any(|m| {
+                    matches!(
+                        m,
+                        ContinuousModification::AddStaticMode {
+                            mode: StaticMode::Other(name),
+                        } if name == "CantBeSacrificed"
+                    )
+                })
+        })
+        .count();
+    assert_eq!(
+        live_bars, 2,
+        "both installers' bars must be live on the bear"
+    );
+
+    pass_control_to(&mut runner, bear, P2);
+    hand_priority_to_p2(&mut runner);
+    let hand_before = hand_count(&runner, P2);
+    cast_sacrifice_cost_spell(&mut runner, rites, bear);
+    assert_eq!(
+        runner.state().objects[&bear].zone,
+        Zone::Graveyard,
+        "the later controller sacrifices freely under concurrent installer bars"
+    );
+    assert_eq!(
+        hand_count(&runner, P2),
+        hand_before + 1,
+        "spell left hand (-1), draw two (+2)"
     );
 }
 

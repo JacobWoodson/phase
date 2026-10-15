@@ -539,10 +539,10 @@ mod tests {
 
         // CR 109.5: a resolution-created "you can't sacrifice those
         // creatures" (Call for Aid) binds "you" to the installing caster —
-        // the installed TCE carries the caster as its controller, so only
+        // the installed TCE carries the caster as its `bound_actor`, so only
         // that player is barred. Installed through the same
         // `add_transient_continuous_effect_inner` entry the resolution path
-        // (`install_transient`) uses.
+        // (`install_transient`) uses, with the same resolved binding.
         let mut state = GameState::new_two_player(42);
         let victim = create_object(
             &mut state,
@@ -562,6 +562,7 @@ mod tests {
             None,
             None,
             TransientContinuousEffectBindings::default(),
+            Some(PlayerId(0)),
         );
         assert!(
             installed.is_some(),

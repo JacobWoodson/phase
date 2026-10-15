@@ -5822,6 +5822,7 @@ fn static_binds_nothing(static_ability: &StaticDefinition) -> bool {
         protection_does_not_remove,
         room_door,
         granting_object,
+        bound_actor,
     } = static_ability;
     condition.is_none()
         && per_player_condition.is_none()
@@ -5836,6 +5837,7 @@ fn static_binds_nothing(static_ability: &StaticDefinition) -> bool {
         && protection_does_not_remove.is_none()
         && room_door.is_none()
         && granting_object.is_none()
+        && bound_actor.is_none()
 }
 
 /// CR 608.2c: the one object class a static ability granted by a

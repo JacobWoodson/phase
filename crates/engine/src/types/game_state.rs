@@ -24354,6 +24354,15 @@ pub struct TransientContinuousEffect {
     /// Giant Growth") survives the source's zone change.
     #[serde(default)]
     pub source_name: String,
+    /// CR 109.5 + CR 701.21a: the installer-resolved actor this effect's
+    /// prohibition binds (`StaticDefinition::bound_actor` lowered through
+    /// install). `Some(player)` = installer-bound player bar (Call for Aid):
+    /// only that player is barred. `None` = object characteristic (Stilt-Man
+    /// grants, printed bars): every actor is barred. Rides inside the
+    /// journaled install command. Serde-defaulted: in-flight historical
+    /// effects predate installer-bound producers and stay object-wide.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_actor: Option<PlayerId>,
 }
 
 /// CR 701.50a + CR 614.5 + CR 616.1f: deferred "then that creature connives"
@@ -30139,6 +30148,7 @@ impl GameState {
             condition,
             None,
             TransientContinuousEffectBindings::default(),
+            None,
         )
     }
 
@@ -30164,6 +30174,7 @@ impl GameState {
             condition,
             None,
             bindings,
+            None,
         )
     }
 
@@ -30196,6 +30207,7 @@ impl GameState {
             condition,
             Some(end_permission),
             TransientContinuousEffectBindings::default(),
+            None,
         )
     }
 
@@ -30210,6 +30222,7 @@ impl GameState {
         condition: Option<StaticCondition>,
         end_permission: Option<EndEffectPermission>,
         bindings: TransientContinuousEffectBindings,
+        bound_actor: Option<PlayerId>,
     ) -> Option<u64> {
         self.transient_duration_begins(source_id, controller, &duration, &affected, bindings)
             .then(|| {
@@ -30222,6 +30235,7 @@ impl GameState {
                     condition,
                     end_permission,
                     bindings,
+                    bound_actor,
                 )
             })
     }
@@ -30252,6 +30266,7 @@ impl GameState {
                     None,
                     None,
                     bindings,
+                    None,
                 );
             }
         }
@@ -30292,6 +30307,7 @@ impl GameState {
         condition: Option<StaticCondition>,
         end_permission: Option<EndEffectPermission>,
         bindings: TransientContinuousEffectBindings,
+        bound_actor: Option<PlayerId>,
     ) -> u64 {
         let id = self.next_continuous_effect_id;
         self.next_continuous_effect_id += 1;
@@ -30366,6 +30382,7 @@ impl GameState {
                 end_permission,
                 granting_object: bindings.granting_object,
                 source_name,
+                bound_actor,
             },
             expected_installed_count: self.transient_continuous_effects.len(),
             resulting_next_continuous_effect_id: self.next_continuous_effect_id,
@@ -34910,6 +34927,7 @@ mod tests {
             granting_object: None,
             duration_event_source: None,
             source_name: String::new(),
+            bound_actor: None,
         };
         let mut legacy = serde_json::to_value(effect).expect("effect serializes");
         legacy["duration_subject"] = serde_json::json!(9);

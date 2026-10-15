@@ -43256,6 +43256,7 @@ pub mod tests {
             granting_object: None,
             duration_event_source: None,
             source_name: "Jhoira".to_string(),
+            bound_actor: None,
         };
         state.transient_continuous_effects.push_back(grant.clone());
 
@@ -43352,6 +43353,7 @@ pub mod tests {
                 granting_object: None,
                 duration_event_source: None,
                 source_name: "Grant source".to_string(),
+                bound_actor: None,
             });
 
         // This is the ordinary production trigger entry point: it flushes
@@ -43499,6 +43501,7 @@ pub mod tests {
                     granting_object: None,
                     duration_event_source: None,
                     source_name: "Jhoira of the Ghitu".to_string(),
+                    bound_actor: None,
                 },
             );
             suspended.push(card);

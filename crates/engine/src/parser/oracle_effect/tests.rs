@@ -39745,6 +39745,9 @@ fn you_cant_sacrifice_those_creatures_emits_shape_c_grant() {
                             mode: crate::types::statics::StaticMode::Continuous,
                             affected: Some(TargetFilter::TrackedSet { id }),
                             modifications,
+                            bound_actor: Some(
+                                crate::types::ability::ControllerRef::You
+                            ),
                             ..
                         } if *id == TrackedSetId(0)
                             && matches!(

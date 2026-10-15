@@ -31958,7 +31958,10 @@ pub struct StaticDefinition {
     /// unconditional, bare-`SelfRef` `CantAttack` / `CantAttackOrBlock` with an
     /// eligible controller-relative defended scope. `AddStaticMode` separately
     /// sets it for controller-relative `MustBeBlocked*` filters and
-    /// `MustAttackAwayFromSource`. Other granted statics, including quoted
+    /// `MustAttackAwayFromSource`. `AddStaticMode` also copies an
+    /// installer-bound transient's `bound_actor` here, so an actor-scoped
+    /// prohibition graft (Call for Aid) carries its exact bound player while
+    /// object-wide grafts stay `None`. Other granted statics, including quoted
     /// statics with a nontrivial scope or condition, retain the carrier
     /// controller fallback when this is `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -32023,6 +32026,16 @@ pub struct StaticDefinition {
     /// CR 201.5a: granter stamp; `stamp_granter` decides which nodes carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub granting_object: Option<ObjectIncarnationRef>,
+    /// CR 109.5 + CR 701.21a: the SUBJECT this prohibition binds, in
+    /// controller-role vocabulary. `Some(You)` marks an installer-bound
+    /// player prohibition ("you can't sacrifice those creatures" — Call for
+    /// Aid): install resolves the role to the resolving caster and the bar
+    /// follows only that player. `None` marks an object characteristic
+    /// (printed "~ can't be sacrificed", granted "it gains 'this permanent
+    /// can't be sacrificed'" — Stilt-Man): the bar binds the object for every
+    /// actor. Serde-defaulted: historical defs are all object-wide.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_actor: Option<ControllerRef>,
 }
 
 /// CR 702.16n / CR 702.16p: Which attachments a protection-granting continuous
@@ -32209,6 +32222,7 @@ impl StaticDefinition {
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         }
     }
 
@@ -32312,6 +32326,14 @@ impl StaticDefinition {
 
     pub fn description(mut self, desc: String) -> Self {
         self.description = Some(desc);
+        self
+    }
+
+    /// CR 109.5: Bind this prohibition's subject in controller-role vocabulary
+    /// (see the `bound_actor` field doc). The sole producer is the "you can't
+    /// sacrifice those creatures" lowering with `ControllerRef::You`.
+    pub fn bound_actor(mut self, actor: ControllerRef) -> Self {
+        self.bound_actor = Some(actor);
         self
     }
 }
@@ -39991,6 +40013,7 @@ mod tests {
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         };
         let json = serde_json::to_string(&static_def).unwrap();
         let deserialized: StaticDefinition = serde_json::from_str(&json).unwrap();
@@ -40513,6 +40536,7 @@ mod tests {
                 protection_does_not_remove: None,
                 room_door: None,
                 granting_object: None,
+                bound_actor: None,
             }],
             duration: Some(Duration::UntilEndOfTurn),
             target: None,

@@ -2125,11 +2125,18 @@ pub fn object_has_static_other(state: &GameState, object_id: ObjectId, name: &st
 /// (`sacrifice_permanent`).
 ///
 /// A resolution-created "you can't sacrifice those <objects>" (Call for Aid)
-/// binds its "you" to the installing ability's controller (CR 109.5): the
-/// transient grant installed by that resolution carries the caster as its
-/// TCE controller, so only that player is barred — a later controller may
-/// sacrifice the same object. Printed object statics ("~ can't be
-/// sacrificed") bar every actor and keep the actor-agnostic read.
+/// binds its "you" to the installing caster (CR 109.5): the installed TCE
+/// carries the resolved caster as its `bound_actor`, and the layer-6 graft
+/// copies it onto the grafted def's `source_controller` anchor — only that
+/// player is barred, and a later controller may sacrifice the same object.
+/// Object characteristics ("~ can't be sacrificed" printed, "this permanent
+/// can't be sacrificed" granted — Stilt-Man) carry no binding and bar every
+/// actor.
+///
+/// Both scans below consult the SAME stored binding — the TCE scan for
+/// pre-derivation timing, the functioning-defs scan per graft — so exactly
+/// the actor-bound graft is exempted for other actors while an independent
+/// object-wide grant on the same object keeps barring them.
 pub(crate) fn object_cant_be_sacrificed_by(
     state: &GameState,
     actor: PlayerId,
@@ -2137,8 +2144,7 @@ pub(crate) fn object_cant_be_sacrificed_by(
 ) -> bool {
     let mode = StaticMode::Other("CantBeSacrificed".to_string());
     // Shared resolution-grant bar predicate (pin + gates + mode),
-    // controller-agnostic so the installer verdict and the graft-backing
-    // test below share one reading of each TCE.
+    // actor-agnostic: the caller pairs it with the stored binding below.
     let tce_bars = |tce: &crate::types::game_state::TransientContinuousEffect| -> bool {
         let pins_object = matches!(
             &tce.affected,
@@ -2164,29 +2170,25 @@ pub(crate) fn object_cant_be_sacrificed_by(
             )
         })
     };
-    // Class P — installer-bound player prohibitions ("you can't sacrifice
-    // those creatures", Call for Aid): the bar binds the installing player
-    // (CR 109.5 — "you" is the caster), not whoever later holds the object.
-    // CR 701.21a already restricts every sacrifice to the object's
-    // controller, so installer-scoping here never frees a legal sacrifice —
-    // it only frees players the prohibition never named.
+    // Live-TCE scan: an installer-bound TCE bars only its bound actor; an
+    // unbound (object-wide) TCE bars every actor. CR 701.21a already
+    // restricts every sacrifice to the object's controller, so
+    // installer-scoping here never frees a legal sacrifice — it only frees
+    // players the prohibition never named.
     for tce in state.transient_continuous_effects.iter() {
-        if tce.controller == actor && tce_bars(tce) {
+        if tce_bars(tce) && tce.bound_actor.is_none_or(|bound| bound == actor) {
             return true;
         }
     }
-    // Class O — object characteristics ("this permanent can't be sacrificed",
-    // printed bars and resolution grants alike) bind the object for every
-    // actor. The live object slot mixes printed defs with layers-grafted TCE
-    // applications (`layers.rs` re-derives `AddStaticMode` grants as
-    // installer-blind `SelfRef` defs every pass), so a graft BACKED by a live
-    // TCE must abstain here: the scan above already delivered that bar's
-    // installer-scoped verdict, and the graft must not re-bar other actors.
-    // A printed def (present in the graft-free `base_static_definitions`
-    // baseline) always binds. This must NOT be `object_has_static_other` or
-    // `check_static_ability`: both read the live slot, which would re-bar
-    // non-installers the TCE scan just cleared.
-    let backed = state.transient_continuous_effects.iter().any(tce_bars);
+    // Functioning-defs scan: each graft carries its own exact provenance
+    // (`source_controller`, stamped by the layer-6 arm from the backing
+    // TCE), so the exemption applies graft-by-graft — an installer-bound
+    // graft frees other actors while an independent object-wide grant on
+    // the same object keeps barring them. A printed def (present in the
+    // graft-free `base_static_definitions` baseline) always binds. This must
+    // NOT be `object_has_static_other` or `check_static_ability`: both read
+    // the live slot actor-blind, which would re-bar players the binding
+    // just cleared.
     let context = StaticCheckContext {
         target_id: Some(object_id),
         ..Default::default()
@@ -2194,7 +2196,8 @@ pub(crate) fn object_cant_be_sacrificed_by(
     crate::game::functioning_abilities::game_functioning_statics(state).any(|(obj, def)| {
         def.mode == mode
             && static_ability_match_applies(state, &mode, &context, obj, def)
-            && (obj.base_static_definitions.contains(def) || !backed)
+            && (obj.base_static_definitions.contains(def)
+                || def.source_controller.is_none_or(|bound| bound == actor))
     })
 }
 

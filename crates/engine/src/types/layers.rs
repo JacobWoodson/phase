@@ -257,6 +257,12 @@ pub struct ActiveContinuousEffect {
     pub characteristic_defining: bool,
     /// CR 201.5a: the granter stamped on the static this effect comes from.
     pub granter: Option<ObjectIncarnationRef>,
+    /// CR 109.5 + CR 701.21a: installer-resolved actor binding carried from
+    /// `TransientContinuousEffect::bound_actor` for transient-derived effects
+    /// (`None` for static-derived effects, which are always object-wide).
+    /// The layer-6 graft arm stamps it onto grafted prohibition defs as their
+    /// `source_controller` anchor so actor-bound grafts stay exact.
+    pub bound_actor: Option<PlayerId>,
 }
 
 #[cfg(test)]

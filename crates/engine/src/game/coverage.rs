@@ -14052,6 +14052,7 @@ mod tests {
                     protection_does_not_remove: None,
                     room_door: None,
                     granting_object: None,
+                    bound_actor: None,
                 }],
                 ..Default::default()
             }
@@ -19359,6 +19360,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                     protection_does_not_remove: None,
                     room_door: None,
                     granting_object: None,
+                    bound_actor: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
@@ -19410,6 +19412,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                     protection_does_not_remove: None,
                     room_door: None,
                     granting_object: None,
+                    bound_actor: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
@@ -20939,6 +20942,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -20984,6 +20988,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         assert!(
@@ -21026,6 +21031,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -21062,6 +21068,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         let findings = audit_card_lines(oracle, &face);
@@ -21741,6 +21748,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         assert!(
@@ -21776,6 +21784,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         assert!(
@@ -21821,6 +21830,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -21857,6 +21867,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -21895,6 +21906,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -21939,6 +21951,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 protection_does_not_remove: None,
                 room_door: None,
                 granting_object: None,
+                bound_actor: None,
             });
         }
 
@@ -22169,6 +22182,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         assert!(
