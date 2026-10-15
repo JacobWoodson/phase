@@ -33631,8 +33631,9 @@ fn faramir_they_did_not_uncontracted_parses() {
 
 /// MED-5 chosen-binding control: a "they didn't attack you that turn" gate
 /// WITHOUT a Choose antecedent must not bind a phantom chosen player — the
-/// dispatcher scope guard fails the pronoun closed (the nom shape is
-/// context-free by design).
+/// dispatcher scope guard fails the pronoun closed, so the whole gated clause
+/// stays `Unimplemented { name: "unparsed_condition" }` (the nom shape is
+/// context-free by design and never mints the binding itself).
 #[test]
 fn they_attack_gate_without_choose_binds_nothing() {
     use crate::types::ability::{AbilityCondition, Effect};
@@ -33643,26 +33644,44 @@ fn they_attack_gate_without_choose_binds_nothing() {
         &["Creature"],
         &["Human"],
     );
+    assert!(
+        !parsed.triggers.is_empty(),
+        "reach guard: the probe text must parse to a trigger"
+    );
+    let mut saw_unparsed_gate = false;
     for trigger in &parsed.triggers {
         let mut cursor = trigger.execute.as_deref();
         while let Some(link) = cursor {
-            if matches!(link.effect.as_ref(), Effect::Draw { .. }) {
-                assert!(
-                    !matches!(
-                        &link.condition,
-                        Some(AbilityCondition::Not { condition })
-                            if matches!(
-                                condition.as_ref(),
-                                AbilityCondition::PlayerAttackedPlayer { .. }
-                            )
-                    ),
-                    "must not bind a phantom chosen player, got {:#?}",
-                    link.condition
-                );
+            // No link anywhere may carry the retrospective pair-attack test:
+            // without a Choose producer there is no player to bind.
+            let mut cond = link.condition.as_ref();
+            while let Some(AbilityCondition::Not { condition }) = cond {
+                cond = Some(condition.as_ref());
             }
+            assert!(
+                !matches!(cond, Some(AbilityCondition::PlayerAttackedPlayer { .. })),
+                "must not bind a phantom chosen player, got {:#?}",
+                link.condition
+            );
+            // The gate must fail CLOSED (visible Unimplemented), never
+            // silently vanish into an unconditional draw.
+            if matches!(
+                link.effect.as_ref(),
+                Effect::Unimplemented { name, .. } if name == "unparsed_condition"
+            ) {
+                saw_unparsed_gate = true;
+            }
+            assert!(
+                !matches!(link.effect.as_ref(), Effect::Draw { .. }) || link.condition.is_some(),
+                "the gate must not silently drop into an unconditional draw"
+            );
             cursor = link.sub_ability.as_deref();
         }
     }
+    assert!(
+        saw_unparsed_gate,
+        "the unbindable gate must surface as Unimplemented, else the guard asserts nothing"
+    );
 }
 
 /// CR 613.1b + CR 725.5: Fealty to the Realm full-Oracle shape probe (phase
