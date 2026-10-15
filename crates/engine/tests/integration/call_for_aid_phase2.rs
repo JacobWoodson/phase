@@ -1272,3 +1272,221 @@ fn call_for_aid_prohibitions_surface_in_readouts() {
         );
     }
 }
+
+const ULAMOG_FULL_ORACLE: &str = "When you cast this spell, target opponent exiles the top half of their library, rounded up.\nWard\u{2014}Sacrifice two permanents.\nUlamog enters with a number of +1/+1 counters on it equal to the greatest mana value among cards in exile.\nUlamog has annihilator X, where X is the number of +1/+1 counters on it.";
+
+const MURDER: &str = "Destroy target creature.";
+
+/// HIGH-3 stage: P2 holds Ulamog (verbatim Oracle — Ward, sacrifice two
+/// permanents); P1 holds the steal victim; P0 holds `rocks` legal permanents
+/// plus a funded Call for Aid and a costless Murder. The aid is cast and the
+/// steal reach-guards are asserted; the caller then targets Ulamog.
+struct WardStage {
+    runner: GameRunner,
+    ulamog: ObjectId,
+    bear: ObjectId,
+    rocks: Vec<ObjectId>,
+    murder: ObjectId,
+}
+
+fn stage_ward_aid(rocks: usize) -> WardStage {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let ulamog = scenario
+        .add_creature_from_oracle(P2, "Ulamog, the Defiler", 7, 7, ULAMOG_FULL_ORACLE)
+        .id();
+    let bear = scenario.add_creature(P1, "P1 Bear", 2, 2).id();
+    let mut rock_ids = Vec::new();
+    for i in 0..rocks {
+        let name = ["P0 Rock A", "P0 Rock B"][i];
+        rock_ids.push(scenario.add_creature(P0, name, 1, 1).id());
+    }
+    let aid = scenario
+        .add_spell_to_hand_from_oracle(P0, "Call for Aid", false, CALL_FOR_AID)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 4,
+        })
+        .id();
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let mut runner = scenario.build();
+    add_mana(&mut runner, P0, ManaType::Red, 1);
+    add_mana(&mut runner, P0, ManaType::Colorless, 4);
+
+    runner.cast(aid).target_player(P1).resolve();
+    assert_eq!(runner.state().objects[&bear].controller, P0);
+    assert!(
+        cant_be_sacrificed(runner.state(), bear),
+        "the stolen bear must carry the sacrifice bar"
+    );
+    {
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+    WardStage {
+        runner,
+        ulamog,
+        bear,
+        rocks: rock_ids,
+        murder,
+    }
+}
+
+/// Cast Murder at Ulamog and drive to the Ward unless-payment prompt.
+fn reach_ward_payment(stage: &mut WardStage) {
+    stage
+        .runner
+        .cast(stage.murder)
+        .target_objects(&[stage.ulamog])
+        .commit();
+    stage.runner.advance_until_stack_empty();
+    assert!(
+        matches!(
+            stage.runner.state().waiting_for,
+            WaitingFor::UnlessPayment { player: P0, .. }
+        ),
+        "targeting Ulamog must prompt P0 for its Ward, got {:?}",
+        stage.runner.state().waiting_for
+    );
+}
+
+/// HIGH 3 — CR 118.3 + CR 702.21a: with exactly one legal permanent and one
+/// Call-for-Aid-protected creature, Ulamog's "sacrifice two permanents" Ward
+/// is an impossible full cost. Choosing to pay must NOT start a sacrifice
+/// prompt (the old code offered the barred bear, spent the rock, then
+/// stranded the payer at the Prohibited arm): the payment fails, Ward
+/// counters Murder, and nothing leaves the battlefield.
+#[test]
+fn call_for_aid_protected_creature_makes_ward_unpayable() {
+    let mut stage = stage_ward_aid(1);
+    reach_ward_payment(&mut stage);
+
+    stage
+        .runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("choosing to pay an impossible unless-cost is accepted and fails");
+    assert!(
+        !matches!(
+            stage.runner.state().waiting_for,
+            WaitingFor::WardSacrificeChoice { .. }
+        ),
+        "no sacrifice prompt may start for an impossible full cost, got {:?}",
+        stage.runner.state().waiting_for
+    );
+    stage.runner.advance_until_stack_empty();
+
+    assert_eq!(
+        stage.runner.state().objects[&stage.rocks[0]].zone,
+        Zone::Battlefield,
+        "the legal permanent must not be spent on an impossible cost"
+    );
+    assert_eq!(
+        stage.runner.state().objects[&stage.bear].zone,
+        Zone::Battlefield,
+        "the protected bear must survive"
+    );
+    assert_eq!(
+        stage.runner.state().objects[&stage.ulamog].zone,
+        Zone::Battlefield,
+        "unpaid Ward must counter Murder, leaving Ulamog alive"
+    );
+    assert_eq!(
+        stage.runner.state().objects[&stage.murder].zone,
+        Zone::Graveyard,
+        "the countered Murder must be in the graveyard"
+    );
+    assert!(
+        stage.runner.state().stack.is_empty(),
+        "the stack must be empty after the Ward settles"
+    );
+}
+
+/// HIGH 3 control — CR 118.3 + CR 702.21a: with two legal permanents plus the
+/// protected bear, the Ward IS fully payable. The prompt must offer exactly
+/// the legal permanents (the barred bear excluded), both sacrifices pay, and
+/// the paid Ward lets Murder destroy Ulamog.
+#[test]
+fn call_for_aid_protected_creature_skipped_by_payable_ward() {
+    let mut stage = stage_ward_aid(2);
+    reach_ward_payment(&mut stage);
+
+    stage
+        .runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("a fully payable Ward must offer its sacrifice prompt");
+    match &stage.runner.state().waiting_for {
+        WaitingFor::WardSacrificeChoice {
+            permanents,
+            remaining: 2,
+            ..
+        } => {
+            assert_eq!(
+                permanents.len(),
+                2,
+                "exactly the two legal permanents must be offered, got {permanents:?}"
+            );
+            assert!(
+                permanents.contains(&stage.rocks[0]) && permanents.contains(&stage.rocks[1]),
+                "both rocks must be offered, got {permanents:?}"
+            );
+            assert!(
+                !permanents.contains(&stage.bear),
+                "the protected bear must be excluded, got {permanents:?}"
+            );
+        }
+        other => panic!("a payable Ward must prompt its sacrifice choice, got {other:?}"),
+    }
+
+    stage
+        .runner
+        .act(GameAction::SelectCards {
+            cards: vec![stage.rocks[0]],
+        })
+        .expect("the first legal sacrifice pays");
+    match &stage.runner.state().waiting_for {
+        WaitingFor::WardSacrificeChoice {
+            permanents,
+            remaining: 1,
+            ..
+        } => assert_eq!(
+            permanents,
+            &vec![stage.rocks[1]],
+            "the re-prompt must offer only the remaining legal permanent"
+        ),
+        other => panic!("one sacrifice must remain, got {other:?}"),
+    }
+    stage
+        .runner
+        .act(GameAction::SelectCards {
+            cards: vec![stage.rocks[1]],
+        })
+        .expect("the second legal sacrifice pays");
+    stage.runner.advance_until_stack_empty();
+
+    for rock in &stage.rocks {
+        assert_eq!(
+            stage.runner.state().objects[rock].zone,
+            Zone::Graveyard,
+            "each paid permanent must be sacrificed"
+        );
+    }
+    assert_eq!(
+        stage.runner.state().objects[&stage.bear].zone,
+        Zone::Battlefield,
+        "the protected bear must survive the paid Ward"
+    );
+    assert!(
+        cant_be_sacrificed(stage.runner.state(), stage.bear),
+        "the bear must stay protected after the paid Ward"
+    );
+    assert_eq!(
+        stage.runner.state().objects[&stage.ulamog].zone,
+        Zone::Graveyard,
+        "the paid Ward must let Murder destroy Ulamog"
+    );
+}
+
