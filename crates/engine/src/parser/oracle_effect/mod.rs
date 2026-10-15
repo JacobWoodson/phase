@@ -3201,16 +3201,20 @@ fn try_parse_copy_next_spell_when_cast(tp: TextPair) -> Option<ParsedEffectClaus
     ))
 }
 
+/// `antecedents` carries the document's player antecedents into the
+/// at-next-phase body (Siren's Call's "that player"); see
+/// `try_parse_at_next_phase_delayed_trigger`.
 pub(crate) fn try_parse_temporal_delayed_trigger_ability(
     text: &str,
     kind: AbilityKind,
+    antecedents: &ParseContext,
 ) -> Option<AbilityIr> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
     let clause = try_parse_whenever_this_turn_from(tp, UnwindowedWhenever::PrintedLine)
         .or_else(|| try_parse_when_next_event(tp))
         .or_else(|| try_parse_copy_next_spell_when_cast(tp))
-        .or_else(|| try_parse_at_next_phase_delayed_trigger(text, kind))?;
+        .or_else(|| try_parse_at_next_phase_delayed_trigger(text, kind, antecedents))?;
     Some(AbilityIr {
         source_text: text.to_string(),
         body: EffectChainIr::single_clause(text, kind, clause, None, None, false),
@@ -3224,13 +3228,16 @@ pub(crate) fn try_parse_temporal_delayed_trigger_ability(
 /// CR 603.7a: Pact-cycle instants ("At the beginning of your next upkeep, pay
 /// {2}{G}{G}. If you don't, you lose the game.") install a one-shot delayed
 /// trigger when the spell resolves — not a printed battlefield Phase trigger.
+/// CR 113.3a + CR 608.2c: the body is part of the same spell ability as the
+/// paragraphs before it, so it parses on their player antecedents.
 fn try_parse_at_next_phase_delayed_trigger(
     text: &str,
     kind: AbilityKind,
+    antecedents: &ParseContext,
 ) -> Option<ParsedEffectClause> {
     let (effect_text, condition) = strip_temporal_prefix(text);
     let condition = condition?;
-    let mut ctx = ParseContext::default();
+    let mut ctx = antecedents.clone_player_antecedents();
     let inner = parse_effect_chain_with_context(effect_text, kind, &mut ctx);
     Some(ParsedEffectClause {
         unlowered_guard: None,
@@ -10475,10 +10482,11 @@ fn rebind_owned_scope(filter: &mut TargetFilter, to: ControllerRef) {
 /// scope rebinding; `rebind_owned_scope` above is the pre-existing
 /// `ScopedPlayer → <target>` specialization kept as-is per the #6505 review.
 ///
-/// CR 109.4 + CR 115.10a (issue #6505): used to lift a battlefield resolution-pick
-/// leg's default `You` scope (the anaphoric "they control" lowered without a
-/// parse-time relative-scope pin) to `ScopedPlayer`, so the resolution-time
-/// `scoped_player` stamp binds the chooser to the target player, not the caster.
+/// CR 109.4 + CR 115.10a + CR 608.2d (issue #6505): used to lift a resolution-pick
+/// leg's subject-seeded scope (the anaphoric "they control" bound to the
+/// subject's target player by `lower_subject_predicate_ast`'s seed) to
+/// `ScopedPlayer`, so the resolution-time `scoped_player` stamp binds the chooser
+/// to the target player, not the caster.
 fn rebind_controller_scope(filter: &mut TargetFilter, from: ControllerRef, to: ControllerRef) {
     use crate::types::ability::FilterProp;
     match filter {
@@ -19321,7 +19329,7 @@ fn for_each_quantity_context(original: &str, ctx: &ParseContext) -> ParseContext
     // merges either back.
     let mut quantity_ctx = ctx.clone_throwaway();
     let mut subject_ctx = ctx.clone_throwaway();
-    if quantity_ctx.third_person_player_controller_ref().is_none()
+    if quantity_ctx.player_antecedents().third_person.is_none()
         && for_each_subject_application(original, &mut subject_ctx)
             .is_some_and(|app| app.target.is_some() && is_player_filter(&app.affected))
     {
@@ -26322,7 +26330,8 @@ fn chain_declared_slot_registry(clauses: &[ClauseIr]) -> DeclaredSlotRegistry {
                 &def.effect,
                 def.multi_target.as_ref(),
                 def.optional_targeting,
-                def.target_choice_timing,
+                // CR 115.10a + CR 608.2d: the sub node's assembled timing.
+                lower::target_choice_timing_for_clause_sub(clause, def),
             ));
             sub = def.sub_ability.as_deref();
         }
@@ -26923,6 +26932,23 @@ fn bare_they_player_declaration(clauses: &[ClauseIr]) -> bool {
     })
 }
 
+/// CR 608.2c: the object set the nearest earlier clause acts on, when its direct
+/// operand is the chain's tracked set ("Untap those creatures"), so a following
+/// bare "they" can name it. Only the nearest clause counts: any other operand
+/// there is the nearer antecedent.
+fn chain_prior_object_set(clauses: &[ClauseIr]) -> Option<TargetFilter> {
+    clauses
+        .last()
+        .and_then(|prev| prev.parsed.effect.target_filter())
+        .filter(|operand| {
+            matches!(
+                operand,
+                TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
+            )
+        })
+        .cloned()
+}
+
 /// CR 608.2c: a bare "they" names one player only when the declaring clause
 /// announces exactly one, as a player and not as "any target" or a plural
 /// ("two target players each ... They each ...").
@@ -27047,11 +27073,58 @@ fn target_announcer_from_subject(
     }
 }
 
+/// CR 608.2c: Lower a subject-predicate clause with the subject seeded as the
+/// antecedent of the predicate's "that player" / "they". The seed only fills an
+/// empty relative scope: a scope an enclosing trigger, mode or for-each already
+/// pinned is the nearer antecedent and is kept.
+///
+/// A declared player subject (`TargetPlayer` / `TargetOpponent`) is carried in
+/// the binder's declared rungs (`declared_player_scope` +
+/// `prior_player_declaration`); every other seed (an object subject's
+/// controller) is carried in `relative_player_scope`. Both are restored before
+/// returning, so the seed never leaks past this clause.
 fn lower_subject_predicate_ast(
     subject: SubjectPhraseAst,
     predicate: PredicateAst,
     ctx: &mut ParseContext,
     original_clause: &str,
+) -> ParsedEffectClause {
+    let seed = if ctx.relative_player_scope.is_none() {
+        subject::subject_player_antecedent(&subject)
+    } else {
+        None
+    };
+    match seed {
+        Some(seed @ (ControllerRef::TargetPlayer | ControllerRef::TargetOpponent)) => {
+            let prev_declared = ctx.declared_player_scope.replace(seed.clone());
+            let prev_prior = std::mem::replace(&mut ctx.prior_player_declaration, true);
+            let lowered = lower_subject_predicate_ast_body(
+                subject,
+                predicate,
+                ctx,
+                original_clause,
+                Some(&seed),
+            );
+            ctx.declared_player_scope = prev_declared;
+            ctx.prior_player_declaration = prev_prior;
+            lowered
+        }
+        Some(seed) => ctx.with_player_scope(seed.clone(), |ctx| {
+            lower_subject_predicate_ast_body(subject, predicate, ctx, original_clause, Some(&seed))
+        }),
+        None => lower_subject_predicate_ast_body(subject, predicate, ctx, original_clause, None),
+    }
+}
+
+/// The body of [`lower_subject_predicate_ast`]. `seeded` is the subject
+/// antecedent the entry wrote into the context (whichever field carries it), or
+/// `None` when the entry seeded nothing.
+fn lower_subject_predicate_ast_body(
+    subject: SubjectPhraseAst,
+    predicate: PredicateAst,
+    ctx: &mut ParseContext,
+    original_clause: &str,
+    seeded: Option<&ControllerRef>,
 ) -> ParsedEffectClause {
     // CR 115.1d: Propagate multi_target from the subject phrase (e.g., "any number of
     // target creatures", "up to two target artifacts") into the lowered clause so the
@@ -27513,12 +27586,22 @@ fn lower_subject_predicate_ast(
                     let moved_object_is_resolution_pick = match &clause.effect {
                         Effect::ChangeZone { origin, target, .. }
                         | Effect::ChangeZoneAll { origin, target, .. } => {
-                            lower::change_zone_target_choice_timing(
-                                *origin,
-                                target,
-                                clause.multi_target.is_some(),
-                                &pred_lower,
-                            ) == crate::types::ability::TargetChoiceTiming::Resolution
+                            // CR 608.2d + CR 115.10a: a disjunctive moved object
+                            // ("a creature or planeswalker they control") is the
+                            // subject player's resolution pick exactly when each
+                            // disjunct is.
+                            let legs: &[TargetFilter] = match target {
+                                TargetFilter::Or { filters } if !filters.is_empty() => filters,
+                                other => std::slice::from_ref(other),
+                            };
+                            legs.iter().all(|leg| {
+                                lower::change_zone_target_choice_timing(
+                                    *origin,
+                                    leg,
+                                    clause.multi_target.is_some(),
+                                    &pred_lower,
+                                ) == crate::types::ability::TargetChoiceTiming::Resolution
+                            })
                         }
                         Effect::PutAtLibraryPosition { .. } => {
                             !nom_primitives::scan_contains(&pred_lower, "target ")
@@ -27536,26 +27619,24 @@ fn lower_subject_predicate_ast(
                     // slots: TargetOnly player + companion TargetPlayer slot +
                     // Stack ChangeZone card slot.
                     //
-                    // CR 115.10a (issue #6505, review follow-up): the battlefield
-                    // resolution-pick leg's anaphoric "they control" lowered to
-                    // the default `ControllerRef::You`
-                    // (oracle_target::parse_controller_suffix, no scope pinned),
-                    // so rewrite ONLY this moved-object leg's `You` scope to
-                    // `ScopedPlayer` here. The runtime `scoped_player` stamp then
-                    // binds the chooser to the target player. Gated on the "they
-                    // control" anaphor so a "you control" caster leg (also `You`)
-                    // is never mis-rebound; Relic's "their graveyard" leg is
-                    // already `Owned{ScopedPlayer}` and needs no rewrite.
-                    let moved_object_is_they_control_pick = moved_object_is_resolution_pick
-                        && scan_contains_phrase(&pred_lower, "they control");
-                    if moved_object_is_they_control_pick {
+                    // CR 115.10a + CR 608.2d (issue #6505): the entry seeded the
+                    // subject player as the antecedent of the predicate's "they
+                    // control" / "that player controls", so a resolution-pick
+                    // leg's controller reads that seed. Rewrite exactly the seed
+                    // to `ScopedPlayer` on this moved-object leg: the runtime
+                    // `scoped_player` stamp then binds both the chooser and the
+                    // candidates to the target player. An explicit "you control"
+                    // leg reads `You`, never the seed, so it is never rebound;
+                    // Relic's "their graveyard" leg is already
+                    // `Owned{ScopedPlayer}` and needs no rewrite.
+                    if let Some(seed) = seeded.filter(|_| moved_object_is_resolution_pick) {
                         match &mut clause.effect {
                             Effect::ChangeZone { target, .. }
                             | Effect::ChangeZoneAll { target, .. }
                             | Effect::PutAtLibraryPosition { target, .. } => {
                                 rebind_controller_scope(
                                     target,
-                                    ControllerRef::You,
+                                    seed.clone(),
                                     ControllerRef::ScopedPlayer,
                                 );
                             }
@@ -28033,17 +28114,28 @@ fn coordinated_player_member(second: &TargetFilter, ctx: &ParseContext) -> Optio
     }
 }
 
-/// CR 115.1: True for the two conjuncts that declare their own player target
-/// ("target player", "target opponent" — the grammar's exact values). Shared by
-/// the member mapping and the `TargetOnly` head rule so both read one decision.
-fn is_targeted_player_conjunct(second: &TargetFilter) -> bool {
-    match second {
-        TargetFilter::Player => true,
-        TargetFilter::Typed(filter) => {
-            *filter == TypedFilter::default().controller(ControllerRef::Opponent)
+/// CR 115.1: The `ControllerRef` naming the single player a "target player" /
+/// "target opponent" phrase declares (the grammar's exact values). `None` for
+/// every other filter. The one shape authority read by the coordinated-member
+/// mapping, the `TargetOnly` head rule, the declared damage recipient and the
+/// subject antecedent.
+pub(super) fn declared_player_controller_ref(filter: &TargetFilter) -> Option<ControllerRef> {
+    match filter {
+        TargetFilter::Player => Some(ControllerRef::TargetPlayer),
+        TargetFilter::Typed(tf)
+            if *tf == TypedFilter::default().controller(ControllerRef::Opponent) =>
+        {
+            Some(ControllerRef::TargetOpponent)
         }
-        _ => false,
+        _ => None,
     }
+}
+
+/// CR 115.1: True for the two conjuncts that declare their own player target
+/// ("target player", "target opponent"). Shared by the member mapping and the
+/// `TargetOnly` head rule so both read one decision.
+fn is_targeted_player_conjunct(second: &TargetFilter) -> bool {
+    declared_player_controller_ref(second).is_some()
 }
 
 /// CR 101.4 + CR 101.4a + CR 101.4b + CR 608.2e: True when a coordinated body may
@@ -28377,27 +28469,6 @@ pub(crate) fn target_filter_controller_ref(filter: &TargetFilter) -> Option<Cont
         }
         TargetFilter::Not { filter } => target_filter_controller_ref(filter),
         _ => None,
-    }
-}
-
-/// Mutating sibling of [`target_filter_controller_ref`]: recursively rewrite the
-/// `controller` of every `Typed` node reachable through `And`/`Or`/`Not` to
-/// `controller`. Used by the Siren's Call card-assembly pass to bind the delayed
-/// punisher's "that player controls" anaphor to the active player named by the
-/// sibling coerce clause.
-pub(crate) fn set_target_filter_controller_ref(
-    filter: &mut TargetFilter,
-    controller: ControllerRef,
-) {
-    match filter {
-        TargetFilter::Typed(tf) => tf.controller = Some(controller),
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            for inner in filters.iter_mut() {
-                set_target_filter_controller_ref(inner, controller.clone());
-            }
-        }
-        TargetFilter::Not { filter } => set_target_filter_controller_ref(filter, controller),
-        _ => {}
     }
 }
 
@@ -43745,6 +43816,7 @@ fn parse_effect_chain_ir_body(
             // counters on it"). Cleared by an intervening explicit typed target.
             token_created_in_chain: chain_prior_referent_is_created_token(builder.clauses()),
             prior_player_declaration: bare_they_player_declaration(builder.clauses()),
+            chain_prior_object_set: chain_prior_object_set(builder.clauses()),
             declared_player_scope,
             clause_declared_group: None,
             // CR 608.2c + CR 301.5 + CR 303.4: bind a bare "it" in this chunk's
@@ -44221,6 +44293,18 @@ fn parse_effect_chain_ir_body(
                 None
             }
         });
+        // CR 608.2c + CR 608.2d + CR 118.12: an "any opponent / any player / any other
+        // player may" body is performed by the player who accepts, so its third-person
+        // anaphors name that player. Only when no rung above supplied a scope, the seed
+        // is applied to a counterfactual parse of the body and recorded as operand
+        // bindings (`lower::accepting_player_bindings`), emitted under
+        // `lower_effect_chain_ir`'s confinement check. It never enters the chunk context.
+        let accepting_player_bindings = match opponent_may_scope {
+            Some(_) if ctx.relative_player_scope.is_none() => {
+                lower::accepting_player_bindings(&text_no_qty, ctx)
+            }
+            _ => Vec::new(),
+        };
         let (clause, repeat_for) = if let Some(retained_type_clause) = retained_type_clause {
             let duration_binding = retained_type_duration_binding(builder.clauses());
             (retained_type_clause.lower(duration_binding), repeat_for)
@@ -45821,6 +45905,7 @@ fn parse_effect_chain_ir_body(
             .condition(condition)
             .is_optional(is_optional)
             .opponent_may_scope(opponent_may_scope)
+            .accepting_player_bindings(accepting_player_bindings)
             .repeat_for(repeat_for)
             .player_scope(player_scope)
             .starting_with(starting_with.clone())
@@ -47887,7 +47972,7 @@ fn compose_exile_graveyard_origin_and_target(
     });
     if (scope == EffectScope::All && owner.is_none())
         || (owner == Some(&ControllerRef::ScopedPlayer)
-            && ctx.third_person_player_controller_ref() != Some(ControllerRef::ScopedPlayer))
+            && ctx.player_antecedents().third_person != Some(ControllerRef::ScopedPlayer))
     {
         return (origin, target);
     }
@@ -49099,11 +49184,14 @@ mod change_targets_stack_object_tests {
 /// fixture these tests use to separate returning from continuing.
 #[cfg(test)]
 mod chain_declared_object_target_tests {
-    use super::chain_declared_object_target;
+    use super::{chain_declared_object_target, chain_prior_object_set};
     use crate::parser::oracle_ir::ast::parsed_clause;
     use crate::parser::oracle_ir::effect_chain::{ClauseDisposition, ClauseIrBuilder};
-    use crate::types::ability::{Effect, QuantityExpr, TargetFilter, TypeFilter, TypedFilter};
+    use crate::types::ability::{
+        Effect, EffectScope, QuantityExpr, TapStateChange, TargetFilter, TypeFilter, TypedFilter,
+    };
     use crate::types::counter::CounterType;
+    use crate::types::identifiers::TrackedSetId;
 
     fn emit() -> ClauseDisposition {
         ClauseDisposition::Emit {
@@ -49369,6 +49457,131 @@ mod chain_declared_object_target_tests {
             None,
             "a nearer player-target clause must BLOCK the walk and return None",
         );
+    }
+
+    /// "Untap those creatures": the chain's tracked set as a direct operand.
+    fn untap_those_creatures() -> Effect {
+        Effect::SetTapState {
+            target: TargetFilter::TrackedSet {
+                id: TrackedSetId(0),
+            },
+            scope: EffectScope::Single,
+            state: TapStateChange::Untap,
+        }
+    }
+
+    /// CR 608.2c: `chain_prior_object_set` reads only the NEAREST earlier clause,
+    /// and only its tracked-set operand. (a)/(d) are the paired positives for the
+    /// `None` legs; (b) is the nearer player-action antecedent; (c) is number
+    /// agreement (a single typed object is "it", not "they").
+    #[test]
+    fn chain_prior_object_set_reads_only_the_nearest_operand() {
+        let tracked = TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        };
+
+        // (a) [gain control of target artifact, untap those creatures] → the set.
+        let mut builder =
+            ClauseIrBuilder::new("gain control of target artifact. untap those creatures");
+        builder
+            .clause(
+                "gain control of target artifact",
+                parsed_clause(gain_control_artifact()),
+                None,
+                emit(),
+            )
+            .push();
+        builder
+            .clause(
+                "untap those creatures",
+                parsed_clause(untap_those_creatures()),
+                None,
+                emit(),
+            )
+            .push();
+        assert_eq!(builder.clauses().len(), 2);
+        assert_eq!(
+            chain_prior_object_set(builder.clauses()),
+            Some(tracked.clone()),
+            "the nearest clause's tracked-set operand is the antecedent",
+        );
+
+        // (b) [untap those creatures, draw a card] → None: the nearer clause's
+        // operand is the nearer antecedent, so the walk never reaches past it.
+        let mut builder = ClauseIrBuilder::new("untap those creatures. draw a card");
+        builder
+            .clause(
+                "untap those creatures",
+                parsed_clause(untap_those_creatures()),
+                None,
+                emit(),
+            )
+            .push();
+        builder
+            .clause(
+                "draw a card",
+                parsed_clause(Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                }),
+                None,
+                emit(),
+            )
+            .push();
+        assert_eq!(builder.clauses().len(), 2);
+        assert_eq!(
+            chain_prior_object_set(builder.clauses()),
+            None,
+            "a farther tracked set must not reach past a nearer clause",
+        );
+
+        // (c) [gain control of target artifact] → None: a typed operand is a
+        // single object, not a set.
+        let mut builder = ClauseIrBuilder::new("gain control of target artifact");
+        builder
+            .clause(
+                "gain control of target artifact",
+                parsed_clause(gain_control_artifact()),
+                None,
+                emit(),
+            )
+            .push();
+        assert_eq!(builder.clauses().len(), 1);
+        assert_eq!(
+            chain_prior_object_set(builder.clauses()),
+            None,
+            "a typed operand is not an object set",
+        );
+
+        // (d) a filtered tracked-set operand is admitted too.
+        let filtered = TargetFilter::TrackedSetFiltered {
+            id: TrackedSetId(0),
+            filter: Box::new(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                ..Default::default()
+            })),
+            caused_by: None,
+        };
+        let mut builder = ClauseIrBuilder::new("untap the creatures revealed this way");
+        builder
+            .clause(
+                "untap the creatures revealed this way",
+                parsed_clause(Effect::SetTapState {
+                    target: filtered.clone(),
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
+                }),
+                None,
+                emit(),
+            )
+            .push();
+        assert_eq!(builder.clauses().len(), 1);
+        assert_eq!(chain_prior_object_set(builder.clauses()), Some(filtered));
+
+        // (e) no earlier clause → None.
+        let builder = ClauseIrBuilder::new("untap those creatures");
+        assert_eq!(builder.clauses().len(), 0);
+        assert_eq!(chain_prior_object_set(builder.clauses()), None);
     }
 }
 

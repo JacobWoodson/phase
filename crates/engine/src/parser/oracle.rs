@@ -78,7 +78,8 @@ use super::oracle_effect::{
     ability_chain_grants_chosen_color_keyword, lower_ability_ir, parse_ability_ir_standalone,
     parse_ability_ir_with_context, parse_additional_cost_instead_condition_fragment,
     parse_effect_chain, parse_effect_chain_with_context, parse_windowed_replacement_install_ir,
-    rewrite_condition_keyword, try_parse_temporal_delayed_trigger_ability,
+    rewrite_condition_keyword, target_filter_controller_ref,
+    try_parse_temporal_delayed_trigger_ability,
 };
 use super::oracle_ir::ast::parsed_clause;
 use super::oracle_ir::context::ParseContext;
@@ -115,13 +116,13 @@ use super::oracle_modal::{
     strip_flavor_word_with_name, AnchorModeIr, OracleBlockIr, FLAVOR_WORD_COST_LABEL_MAX_WORDS,
 };
 use super::oracle_replacement::{
-    as_long_as_gate_is_unparsed, damage_prevention_fails_closed, enters_with_gate_fails_closed,
+    as_long_as_gate_is_unparsed, damage_prevention_fails_closed, enters_with_fails_closed,
     find_copy_verb_present, is_as_self_enters_frame, lower_as_enters_becomes_choice_modal,
     lower_as_enters_or_face_up_counters, lower_replacement_ir,
     parse_as_enters_one_shot_replacement, parse_bidirectional_damage_prevention,
     parse_oneshot_damage_replacement, parse_replacement_line, parse_replacement_line_ir,
     parse_whenever_you_cast_enters_with_outcome, parse_windowed_graveyard_redirect_install,
-    CastEntersWithOutcome,
+    CastEntersWithOutcome, EntersWithGap,
 };
 use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
 use super::oracle_spacecraft::parse_spacecraft_threshold_lines;
@@ -250,27 +251,48 @@ pub(crate) fn is_commander_permission_sentence(line: &str) -> bool {
     parsed
 }
 
+/// `Ok(Some(_))`: every sentence is a replacement; `Ok(None)`: not this shape
+/// (the caller retries the line whole); `Err(gap)`: a sentence fails closed, so
+/// the whole line is one gap.
 fn parse_replacement_sentence_sequence_ir(
     line: &str,
     card_name: &str,
-) -> Option<Vec<ReplacementIr>> {
+) -> Result<Option<Vec<ReplacementIr>>, EntersWithGap> {
     // CR 614.1c: Effects that read "[This permanent] enters with ...",
     // "As [this permanent] enters ...", or "[This permanent] enters as ..."
     // are replacement effects.
     // CR 614.12: Some replacement effects modify how a permanent enters the battlefield.
-    let (_, sentences) = parse_replacement_sentences(line).ok()?;
+    let Ok((_, sentences)) = parse_replacement_sentences(line) else {
+        return Ok(None);
+    };
     if sentences.len() < 2 {
-        return None;
+        return Ok(None);
     }
 
-    let mut replacements = Vec::with_capacity(sentences.len());
+    let mut replacements = Some(Vec::with_capacity(sentences.len()));
     for sentence in sentences {
         if !is_replacement_pattern(&sentence.to_lowercase()) {
-            return None;
+            return Ok(None);
         }
-        replacements.push(parse_replacement_line_ir(sentence, card_name)?);
+        match parse_replacement_line_ir(sentence, card_name) {
+            Some(ir) => {
+                if let Some(parsed) = replacements.as_mut() {
+                    parsed.push(ir);
+                }
+            }
+            // CR 614.1c + CR 122.6: a sentence that prints a counter placement
+            // no reader reads fails closed for the whole line. Retrying the line
+            // whole would read only the FIRST sentence's "with" payload and drop
+            // this one while reporting the line supported.
+            None if enters_with_fails_closed(sentence, card_name)
+                == Some(EntersWithGap::Clause) =>
+            {
+                return Err(EntersWithGap::Clause);
+            }
+            None => replacements = None,
+        }
     }
-    Some(replacements)
+    Ok(replacements)
 }
 
 /// Split a replacement line into its period-terminated sentences, requiring the
@@ -4368,7 +4390,7 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
 
     // CR 607.1 + CR 610.3: Two-trigger exile-return synthesis (Journey to
     // Nowhere, Oblivion Ring — see `DocumentRelationIr::EtbExileLtbReturn`).
-    // CR 102.1 + CR 608.2c: active-player punisher rebinding (Siren's
+    // CR 102.1 + CR 608.2c: active-player punisher continuity fold (Siren's
     // Call — see `DocumentRelationIr::ActivePlayerPunisher`). Applied here, after
     // the swallow audit, to preserve the pre-relocation order in which the two
     // former `synthesize`/`bind` passes ran (the audit reads `result` first).
@@ -4451,27 +4473,33 @@ fn convert_terminal_attachment_host_references(
 
 // --- CR 102.1 + CR 608.2c: active-player coerce → delayed punisher --
 
-/// Whether an ability is the mass-`MustAttack` coerce clause over an
-/// `ActivePlayer` subject (Siren's Call, first line).
-fn ability_is_active_player_coerce(def: &AbilityDefinition) -> bool {
-    use crate::parser::oracle_effect::target_filter_controller_ref;
+/// CR 102.1 + CR 608.2c: the player whose creatures a mass-`MustAttack` coerce
+/// clause names ("Creatures the active player controls attack this turn if
+/// able"): the antecedent of a later paragraph's "that player". The relation
+/// detector and the delayed-trigger antecedent writer read this one predicate.
+fn coerce_subject_controller(def: &AbilityDefinition) -> Option<ControllerRef> {
     let Effect::GenericEffect {
         static_abilities, ..
     } = def.effect.as_ref()
     else {
-        return false;
+        return None;
     };
-    static_abilities.iter().any(|st| {
-        matches!(st.mode, StaticMode::MustAttack)
-            && st.affected.as_ref().and_then(target_filter_controller_ref)
-                == Some(ControllerRef::ActivePlayer)
-    })
+    static_abilities
+        .iter()
+        .filter(|st| matches!(st.mode, StaticMode::MustAttack))
+        .find_map(|st| st.affected.as_ref().and_then(target_filter_controller_ref))
+}
+
+/// Whether an ability is the mass-`MustAttack` coerce clause over an
+/// `ActivePlayer` subject (Siren's Call, first line).
+fn ability_is_active_player_coerce(def: &AbilityDefinition) -> bool {
+    coerce_subject_controller(def) == Some(ControllerRef::ActivePlayer)
 }
 
 /// Whether an ability is the sibling delayed `DestroyAll` punisher whose
-/// "that player controls" anaphor defaulted to `You` (Siren's Call, second line).
+/// "that player controls" anaphor is bound to `ActivePlayer` by the coerce
+/// clause's document antecedent (Siren's Call, second line).
 fn ability_is_active_player_punisher(def: &AbilityDefinition) -> bool {
-    use crate::parser::oracle_effect::target_filter_controller_ref;
     let Effect::CreateDelayedTrigger { effect, .. } = def.effect.as_ref() else {
         return false;
     };
@@ -4479,7 +4507,7 @@ fn ability_is_active_player_punisher(def: &AbilityDefinition) -> bool {
         return false;
     };
     target_filter_has_not_attacked_this_turn(target)
-        && target_filter_controller_ref(target) == Some(ControllerRef::You)
+        && target_filter_controller_ref(target) == Some(ControllerRef::ActivePlayer)
 }
 
 /// CR 102.1 + CR 608.2c: Pair the mass-attack coerce clause
@@ -4501,15 +4529,15 @@ fn detect_active_player_punisher(items: &[OracleItemIr], relations: &mut Vec<Doc
     }
 }
 
-/// Rebind the punisher's destroyed-set controller from `You` to `ActivePlayer`
-/// and fold the CR 302.6 / CR 508.1a continuous-control exemption sibling into
-/// the set predicate. Applied to the punisher ability resolved by id.
+/// Fold the CR 302.6 / CR 508.1a continuous-control exemption sibling into the
+/// punisher's destroyed-set predicate. The set's controller is already
+/// `ActivePlayer`, bound by the document antecedent at parse time. Applied to
+/// the punisher ability resolved by id.
 fn apply_active_player_punisher(
     result: &mut ParsedAbilities,
     relations: &[DocumentRelationIr],
     ability_ids: &[OracleItemId],
 ) {
-    use crate::parser::oracle_effect::set_target_filter_controller_ref;
     for relation in relations {
         let DocumentRelationIr::ActivePlayerPunisher { punisher, .. } = relation else {
             continue;
@@ -4525,7 +4553,6 @@ fn apply_active_player_punisher(
         let Effect::DestroyAll { target, .. } = inner.effect.as_mut() else {
             continue;
         };
-        set_target_filter_controller_ref(target, ControllerRef::ActivePlayer);
         // CR 302.6 + CR 508.1a: Siren's Call exemption — "Ignore this effect for
         // each creature the player didn't control continuously since the
         // beginning of the turn." Attach the continuity predicate to the
@@ -6614,9 +6641,24 @@ fn parse_normalized_oracle_ir(
         // trigger-shaped temporal text through the effect parser before generic
         // trigger dispatch.
         if is_spell && has_trigger_prefix(&lower) {
-            if let Some(ability) =
-                try_parse_temporal_delayed_trigger_ability(&line, AbilityKind::Spell)
-            {
+            // CR 113.3a + CR 608.2c: every paragraph of an instant or sorcery is
+            // one spell ability, so a later paragraph's "that player" names the
+            // player an earlier paragraph's coerce clause made its subject
+            // (Siren's Call). The antecedent is the immediately preceding spell
+            // item's coerce subject, carried on the context rung the body's
+            // chunk ladder inherits.
+            let document_antecedents = ParseContext {
+                relative_player_scope: emitter
+                    .last_ability_definition()
+                    .as_ref()
+                    .and_then(coerce_subject_controller),
+                ..ParseContext::default()
+            };
+            if let Some(ability) = try_parse_temporal_delayed_trigger_ability(
+                &line,
+                AbilityKind::Spell,
+                &document_antecedents,
+            ) {
                 emitter.ability_ir_at(item_line, ability);
                 i += 1;
                 continue;
@@ -7097,18 +7139,24 @@ fn parse_normalized_oracle_ir(
             // replacement parsers; the legacy `as long as` precondition still
             // routes the duration-gated replacement fallback.
             if find_copy_verb_present(&lower) {
-                if let Some(replacement_irs) =
-                    parse_replacement_sentence_sequence_ir(&line, card_name)
-                {
-                    for replacement_ir in replacement_irs {
-                        emitter.emit_at(
-                            item_line,
-                            OracleNodeIr::Replacement(replacement_ir),
-                            OuterRoute::Replacement,
-                        );
+                match parse_replacement_sentence_sequence_ir(&line, card_name) {
+                    Ok(Some(replacement_irs)) => {
+                        for replacement_ir in replacement_irs {
+                            emitter.emit_at(
+                                item_line,
+                                OracleNodeIr::Replacement(replacement_ir),
+                                OuterRoute::Replacement,
+                            );
+                        }
+                        i += 1;
+                        continue;
                     }
-                    i += 1;
-                    continue;
+                    Err(gap) => {
+                        emitter.ability_at(item_line, gap.gap_ability(&line));
+                        i += 1;
+                        continue;
+                    }
+                    Ok(None) => {}
                 }
                 if let Some(replacement_ir) = parse_replacement_line_ir(&line, card_name) {
                     emitter.emit_at(
@@ -7546,17 +7594,24 @@ fn parse_normalized_oracle_ir(
             // A single Oracle paragraph can contain multiple independent ETB
             // replacement sentences. Parse each replacement sentence instead of
             // letting the first successful parser drop sibling modifiers.
-            if let Some(replacement_irs) = parse_replacement_sentence_sequence_ir(&line, card_name)
-            {
-                for replacement_ir in replacement_irs {
-                    emitter.emit_at(
-                        item_line,
-                        OracleNodeIr::Replacement(replacement_ir),
-                        OuterRoute::Replacement,
-                    );
+            match parse_replacement_sentence_sequence_ir(&line, card_name) {
+                Ok(Some(replacement_irs)) => {
+                    for replacement_ir in replacement_irs {
+                        emitter.emit_at(
+                            item_line,
+                            OracleNodeIr::Replacement(replacement_ir),
+                            OuterRoute::Replacement,
+                        );
+                    }
+                    i += 1;
+                    continue;
                 }
-                i += 1;
-                continue;
+                Err(gap) => {
+                    emitter.ability_at(item_line, gap.gap_ability(&line));
+                    i += 1;
+                    continue;
+                }
+                Ok(None) => {}
             }
             if let Some(replacement_ir) = parse_replacement_line_ir(&line, card_name) {
                 emitter.emit_at(
@@ -7576,18 +7631,24 @@ fn parse_normalized_oracle_ir(
             // exactly as the unprefixed Blind Obedience / Authority of the
             // Consuls lines do.
             if let Some(effect_text) = strip_ability_word(&line) {
-                if let Some(replacement_irs) =
-                    parse_replacement_sentence_sequence_ir(&effect_text, card_name)
-                {
-                    for replacement_ir in replacement_irs {
-                        emitter.emit_at(
-                            item_line,
-                            OracleNodeIr::Replacement(replacement_ir),
-                            OuterRoute::Replacement,
-                        );
+                match parse_replacement_sentence_sequence_ir(&effect_text, card_name) {
+                    Ok(Some(replacement_irs)) => {
+                        for replacement_ir in replacement_irs {
+                            emitter.emit_at(
+                                item_line,
+                                OracleNodeIr::Replacement(replacement_ir),
+                                OuterRoute::Replacement,
+                            );
+                        }
+                        i += 1;
+                        continue;
                     }
-                    i += 1;
-                    continue;
+                    Err(gap) => {
+                        emitter.ability_at(item_line, gap.gap_ability(&line));
+                        i += 1;
+                        continue;
+                    }
+                    Ok(None) => {}
                 }
                 if let Some(replacement_ir) = parse_replacement_line_ir(&effect_text, card_name) {
                     emitter.emit_at(
@@ -7613,19 +7674,11 @@ fn parse_normalized_oracle_ir(
                 i += 1;
                 continue;
             }
-            // CR 614.1c: "[This permanent] enters with …" is a replacement effect. When the
-            // condition printed on it cannot be represented, the whole line is recorded as an
-            // `Effect::unimplemented` gap rather than shipped as an ungated replacement or left
-            // for a later route (the effect-first `dispatch_line_nom`) to claim.
-            if enters_with_gate_fails_closed(&line, card_name) {
-                emitter.ability_at(
-                    item_line,
-                    AbilityDefinition::new(
-                        AbilityKind::Spell,
-                        Effect::unimplemented("enters_with_gate", &line),
-                    )
-                    .description(line.clone()),
-                );
+            // CR 614.1c + CR 122.6: record the parser-owned gate or Clause
+            // decline when the preceding replacement attempts did not claim
+            // this line. Earlier successful parses are unchanged.
+            if let Some(gap) = enters_with_fails_closed(&line, card_name) {
+                emitter.ability_at(item_line, gap.gap_ability(&line));
                 i += 1;
                 continue;
             }
