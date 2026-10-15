@@ -1995,4 +1995,5 @@ mod decline_branch_not_graveyard_rider;
 mod event_source_lift_referent_stops;
 mod exile_origin_target_acquisition;
 mod keyword_activation_cancel;
+mod starting_intensity_keyword;
 mod tidebinder_source_type_gate;
