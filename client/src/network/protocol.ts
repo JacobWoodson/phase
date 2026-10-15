@@ -106,6 +106,11 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  126 — game_setup and state_update carry GameState whose ability aggregates
+ *       may name CardTypeSetSource TargetedObjects (CR 608.2c + CR 115.1: the
+ *       resolving ability's chosen targets) and whose TrackedSet populations
+ *       may carry a member filter a v125 peer would silently drop. Bumped in
+ *       lockstep with full-game protocol 144.
  *  125 — game_setup and state_update carry GameState whose modal no-repeat
  *       history (modal_modes_chosen_this_turn / _this_game) is keyed by
  *       object incarnation, not bare ObjectId (CR 400.7). Bumped in lockstep
@@ -678,7 +683,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 125 as const;
+export const WIRE_PROTOCOL_VERSION = 126 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

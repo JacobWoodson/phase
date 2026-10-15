@@ -60,6 +60,18 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 144 — `CardTypeSetSource` gains `TargetedObjects`
+///      (`{"type":"TargetedObjects"}`, CR 608.2c + CR 115.1: the resolving
+///      ability's chosen targets, read by identity for "those cards"
+///      aggregates — Song of Inspiration, Command the Dreadhorde),
+///      serialized inside `GameState` wherever a resolving or pending ability
+///      carries a property aggregate; a v143 peer cannot parse the tag. The
+///      same version gives `TrackedSet` a semantics-bearing `filter` (member
+///      restriction, `#[serde(default)]`): a v143 peer parses the shape but
+///      silently drops the restriction and counts unfiltered members.
+///      Full-game peers and P2P move in lockstep (wire 126); no lobby carrier
+///      names it.
+///
 /// 143 — `GameState.modal_modes_chosen_this_turn` and
 ///      `GameState.modal_modes_chosen_this_game` retype from
 ///      `HashSet<(ObjectId, usize)>` to `HashSet<(ObjectIncarnationRef, usize)>`
@@ -1070,7 +1082,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 143;
+pub const PROTOCOL_VERSION: u32 = 144;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the

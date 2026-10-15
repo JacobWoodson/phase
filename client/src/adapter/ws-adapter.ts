@@ -210,6 +210,14 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 144 — CardTypeSetSource gains TargetedObjects (CR 608.2c + CR 115.1: the
+ *      resolving ability's chosen targets, read by identity for "those cards"
+ *      aggregates), carried in a property aggregate inside GameState — see
+ *      PROTOCOL_VERSION's own `/// 144` entry in
+ *      crates/lobby-broker/src/protocol.rs. A v143 peer cannot parse the tag,
+ *      and silently drops the new TrackedSet member filter it does parse; the
+ *      exact-match version check at connect refuses the pairing. Wire 126
+ *      moves with it.
  * 143 — GameState.modal_modes_chosen_this_turn / _this_game retype from
  *      (ObjectId, usize) to (ObjectIncarnationRef, usize) (CR 400.7), so a
  *      non-empty entry [50, 1] is now [{object_id: 50, incarnation: 0}, 1] —
@@ -873,7 +881,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 143;
+export const PROTOCOL_VERSION = 144;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
