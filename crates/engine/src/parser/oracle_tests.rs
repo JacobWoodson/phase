@@ -33629,6 +33629,42 @@ fn faramir_they_did_not_uncontracted_parses() {
     );
 }
 
+/// MED-5 chosen-binding control: a "they didn't attack you that turn" gate
+/// WITHOUT a Choose antecedent must not bind a phantom chosen player — the
+/// dispatcher scope guard fails the pronoun closed (the nom shape is
+/// context-free by design).
+#[test]
+fn they_attack_gate_without_choose_binds_nothing() {
+    use crate::types::ability::{AbilityCondition, Effect};
+    let parsed = parse(
+        "At the beginning of your end step, you draw a card if they didn't attack you that turn.",
+        "Chooseless Probe",
+        &[],
+        &["Creature"],
+        &["Human"],
+    );
+    for trigger in &parsed.triggers {
+        let mut cursor = trigger.execute.as_deref();
+        while let Some(link) = cursor {
+            if matches!(link.effect.as_ref(), Effect::Draw { .. }) {
+                assert!(
+                    !matches!(
+                        &link.condition,
+                        Some(AbilityCondition::Not { condition })
+                            if matches!(
+                                condition.as_ref(),
+                                AbilityCondition::PlayerAttackedPlayer { .. }
+                            )
+                    ),
+                    "must not bind a phantom chosen player, got {:#?}",
+                    link.condition
+                );
+            }
+            cursor = link.sub_ability.as_deref();
+        }
+    }
+}
+
 /// CR 613.1b + CR 725.5: Fealty to the Realm full-Oracle shape probe (phase
 /// 5b, S2). Verbatim Oracle text (matches card-data.json oracle_text): the
 /// ETB become-monarch trigger, the designation-anchored control static, and

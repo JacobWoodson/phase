@@ -11,7 +11,7 @@ use nom::Parser;
 use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
 use super::super::oracle_nom::condition as nom_condition;
 use super::super::oracle_nom::condition::{
-    inject_controller_you, parse_cast_using_teamwork_phrase,
+    inject_controller_you, parse_cast_using_teamwork_phrase, parse_pair_attack_predicate,
     parse_scoped_player_opponent_and_has_condition, parse_spell_target_superlative_suffix,
     parse_you_put_onto_battlefield_this_way_clause, parse_zone_changed_this_way_clause,
     DamagedThisWayRecipient,
@@ -7734,20 +7734,23 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
         }
     }
 
-    // CR 508.6 + CR 608.2c: "they didn't/did not attack you that turn" with a
+    // CR 508.6 + CR 608.2c: "they <attack-predicate>" with a
     // Choose(Player|Opponent) antecedent — "they" is the chosen player
-    // (Faramir's verbatim consequent). The nom grammar deliberately has no
-    // producer for pronoun subjects ("they" binds per-context), but this
-    // dispatcher runs with the chain's producer in `relative_player_scope`,
-    // so the anaphor resolves here to the same `ChosenPlayer` placeholder the
-    // "that player" nom arm emits; the shared bridge maps it to the stamped
-    // target. Full-consumption match only; every other scope falls through to
-    // the generic path unchanged.
+    // (Faramir's verbatim consequent). The pronoun binds per-context, so the
+    // dispatcher matches it here under the chain's `relative_player_scope`
+    // gate — but the attack SHAPE is not re-matched as complete sentences:
+    // the shared nom predicate (`parse_pair_attack_predicate`, polarity via
+    // `parse_didnt` plus endpoint) parses it, and the contextual index binds
+    // below before the shared bridge maps it to the stamped target.
+    // Full-consumption match only; every other scope falls through to the
+    // generic path unchanged (nom deliberately has no "they" subject, so an
+    // early scopeless pass keeps failing here exactly as before, preserving
+    // the chain's scope-enrichment passes).
     if let Some(ControllerRef::ChosenPlayer { index }) = ctx.relative_player_scope.as_ref() {
-        let mut they_attacked_you = all_consuming(alt((
-            tag::<_, _, OracleError<'_>>("they didn't attack you that turn"),
-            tag::<_, _, OracleError<'_>>("they did not attack you that turn"),
-        )));
+        let mut they_attacked_you = all_consuming((
+            tag::<_, _, OracleError<'_>>("they"),
+            parse_pair_attack_predicate,
+        ));
         if they_attacked_you.parse(lower.as_str()).is_ok() {
             let static_cond = StaticCondition::Not {
                 condition: Box::new(StaticCondition::PlayerAttackedPlayer {
