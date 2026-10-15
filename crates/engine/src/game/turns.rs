@@ -398,13 +398,18 @@ pub fn end_turn_to_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // cleanup step" — drop scheduled extra phases for this (now-ending) turn,
     // together with its inserted-unit records.
     discard_scheduled_units(state);
-    // CR 724.1d + CR 511.3: if the turn ends during combat, all creatures are
-    // removed from combat and the combat phase is over. Clear any active
-    // additional-combat attacker restriction (Last Night Together / Bumi) — the
-    // normal cleanup path via Phase::EndCombat or end_combat_phase_to_postcombat
-    // is skipped, so we must expire the restriction here.
-    state.current_combat_attacker_restriction = None;
-    state.current_combat_attacker_restriction_source = None;
+    // CR 724.1d + CR 511.2/511.3: if the turn ends during a combat phase, the
+    // combat phase is over even though it is skipped, not completed — run the
+    // same end-of-combat teardown the normal EndCombat transition uses, so
+    // "until end of combat" effects, replacements, and game restrictions
+    // (Champions of Minas Tirith's decline ban) expire instead of leaking
+    // into a later combat. Guard on the PHASE, not on combat presence:
+    // EndTheTurn already cleared `state.combat` before calling here. The
+    // teardown subsumes the old attacker-restriction clear (Last Night
+    // Together / Bumi), which only ever fires in this same case.
+    if state.phase.is_combat() {
+        complete_end_combat_teardown(state);
+    }
     enter_phase(state, Phase::Cleanup, events, None);
 }
 

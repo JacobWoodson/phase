@@ -222,6 +222,55 @@ fn payload_targets_for(state: &GameState, attacker: ObjectId) -> Vec<AttackTarge
     }
 }
 
+const TIME_STOP: &str = "End the turn.";
+
+/// Fund `count` mana of `ty` (`add_mana` is colorless-only; Time Stop needs
+/// blue). Called after driving to the spending phase (CR 500.5).
+fn add_typed_mana(runner: &mut GameRunner, player: PlayerId, ty: ManaType, count: usize) {
+    let target = runner
+        .state_mut()
+        .players
+        .iter_mut()
+        .find(|p| p.id == player)
+        .expect("player exists");
+    for _ in 0..count {
+        target
+            .mana_pool
+            .add(ManaUnit::new(ty, ObjectId(0), false, vec![]));
+    }
+}
+
+/// Drive across whole turns until the next UnlessPayment prompt opens (here:
+/// the next Champions offer), answering everything else: priority passes,
+/// empty attack/block declarations. Bounded; panics on any other prompt.
+fn drive_to_next_unless_payment(runner: &mut GameRunner) {
+    for _ in 0..300 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::UnlessPayment { .. } => return,
+            WaitingFor::DeclareAttackers { .. } => {
+                runner
+                    .act(GameAction::DeclareAttackers {
+                        attacks: vec![],
+                        bands: vec![],
+                    })
+                    .expect("decline to attack");
+            }
+            WaitingFor::DeclareBlockers { .. } => {
+                runner
+                    .act(GameAction::DeclareBlockers {
+                        assignments: vec![],
+                    })
+                    .expect("decline to block");
+            }
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            other => panic!("unexpected prompt while driving turns, got {other:?}"),
+        }
+    }
+    panic!("never reached the next offer");
+}
+
 /// V1 (row 1) — CR 603.2 + CR 500.1: standing fire behavior in all three
 /// seats. Controller's own BeginCombat is silent (reach-guard: the phase-3
 /// constraint holds end to end); each opponent's BeginCombat fires (prompt).
@@ -888,4 +937,127 @@ fn end_of_combat_prune_covers_both_callers_selectively() {
             state.restrictions[0]
         );
     }
+}
+
+/// MED 3 — CR 724.1d + CR 511.2: declining Champions then ending the turn
+/// mid-combat expires the EndOfCombat ban through the end-of-combat teardown
+/// (cleanup provably spares it — V8). A later combat with a paid fresh offer
+/// attacks freely: the old ban is gone.
+#[test]
+fn champions_decline_then_end_turn_expires_ban_before_later_paid_combat() {
+    // Custom stage: like stage(P1, &[2, 3], false) plus Time Stop in P1's
+    // hand and stocked libraries (two full turns of draws + monarch).
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature_from_oracle(P0, "Champions of Minas Tirith", 3, 4, CHAMPIONS)
+        .id();
+    let p1_bear = scenario.add_creature(P1, "P1 Bear", 2, 2).id();
+    scenario.add_creature(P1, "P1 Bear B", 2, 2);
+    hand(&mut scenario, P0, 2);
+    hand(&mut scenario, P1, 3);
+    let time_stop = scenario
+        .add_spell_to_hand_from_oracle(P1, "Time Stop", true, TIME_STOP)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![
+                engine::types::mana::ManaCostShard::Blue,
+                engine::types::mana::ManaCostShard::Blue,
+            ],
+            generic: 4,
+        })
+        .id();
+    for _ in 0..8 {
+        scenario.add_card_to_library_top(P0, "Plains");
+        scenario.add_card_to_library_top(P1, "Plains");
+    }
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.monarch = Some(P0);
+        state.active_player = P1;
+        state.priority_player = P1;
+        state.waiting_for = WaitingFor::Priority { player: P1 };
+    }
+
+    // Turn N (P1): decline the offer at BeginCombat; the ban installs.
+    drive_to_phase(&mut runner, Phase::BeginCombat);
+    let waiting = resolve_until_settled(&mut runner);
+    assert!(
+        matches!(waiting, WaitingFor::UnlessPayment { .. }),
+        "must prompt, got {waiting:?}"
+    );
+    runner
+        .act(GameAction::PayUnlessCost { pay: false })
+        .expect("decline");
+    resolve_until_settled(&mut runner);
+    expect_champions_restriction(runner.state());
+    assert!(
+        !attack_legal(runner.state(), P1, p1_bear, AttackTarget::Player(P0)),
+        "reach-guard: the decline bars the attack"
+    );
+
+    // Still mid-combat: P1 casts Time Stop; the turn ends through cleanup.
+    add_typed_mana(&mut runner, P1, ManaType::Colorless, 4);
+    add_typed_mana(&mut runner, P1, ManaType::Blue, 2);
+    let turn_before = runner.state().turn_number;
+    runner.cast(time_stop).resolve();
+    assert_eq!(
+        runner.state().phase,
+        Phase::Cleanup,
+        "Time Stop must jump out of combat to cleanup (reach-guard)"
+    );
+    assert!(
+        runner.state().restrictions.is_empty(),
+        "the EndOfCombat ban must expire via the combat teardown, got {:?}",
+        runner.state().restrictions
+    );
+    // Complete cleanup into P0's turn (no triggers, no discards expected).
+    for _ in 0..24 {
+        if runner.state().turn_number != turn_before {
+            break;
+        }
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "expected priority while finishing cleanup, got {:?}",
+            runner.state().waiting_for
+        );
+        runner.act(GameAction::PassPriority).expect("pass");
+    }
+    assert_eq!(
+        runner.state().turn_number,
+        turn_before + 1,
+        "cleanup must complete into the next turn"
+    );
+
+    // P0's turn plus P1's next turn, up to the fresh offer.
+    drive_to_next_unless_payment(&mut runner);
+    let (player, cost, _) = expect_unless_payment(runner.state());
+    assert_eq!(player, P1, "the fresh offer goes to P1");
+    // Fund generously: the exact X is hand-counting (V3 owns that claim);
+    // paying is what matters here.
+    let _ = cost;
+    add_typed_mana(&mut runner, P1, ManaType::Colorless, 10);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("pay the fresh offer");
+    resolve_until_settled(&mut runner);
+    assert!(
+        runner.state().restrictions.is_empty(),
+        "paid: no restriction installed, got {:?}",
+        runner.state().restrictions
+    );
+
+    // The later paid combat attacks freely: the old ban is gone.
+    drive_to_phase(&mut runner, Phase::DeclareAttackers);
+    runner
+        .declare_attackers(&[(p1_bear, AttackTarget::Player(P0))])
+        .expect("P1 attacks P0 in the later paid combat");
+    drive_to_phase(&mut runner, Phase::DeclareBlockers);
+    runner.declare_blockers(&[]).expect("P0 declines to block");
+    let outcome = runner.combat_damage();
+    assert_eq!(
+        outcome.life_delta(P0),
+        -2,
+        "unblocked 2/2 connects in the later paid combat"
+    );
 }
