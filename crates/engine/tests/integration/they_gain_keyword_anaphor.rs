@@ -116,24 +116,24 @@ fn and_they_gain_emits_keyword_list() {
 }
 
 /// Runtime proof for the frozen-set binding: the counter clause lazily
-/// publishes its affected population, and the "they gain" grant bound to the
-/// `TrackedSet{0}` sentinel lands on exactly those creatures. The Unbreakable
-/// Formation addendum shape ("put a +1/+1 counter on each creature you control
-/// and they gain vigilance until end of turn"), driven synthetically through
-/// `resolve_ability_chain` so no card-data fixture entry is needed.
+/// publishes its affected population, and the "they gain" grant bound by the
+/// parser lands on exactly those creatures. The Unbreakable Formation
+/// addendum shape ("put a +1/+1 counter on each creature you control and they
+/// gain vigilance until end of turn"), driven from parsed spell text through
+/// the production parse/lower/resolve pipeline (`parse_effect_chain` +
+/// `build_resolved_from_def_with_targets` + `resolve_ability_chain`) so no
+/// card-data fixture entry is needed — and so the test reds if the parser
+/// ever binds "they" to `ParentTarget` instead of the frozen set.
 #[test]
 fn counter_chain_they_gain_vigilance_lands_on_countered_creatures() {
+    use engine::game::ability_utils::build_resolved_from_def_with_targets;
     use engine::game::effects::resolve_ability_chain;
     use engine::game::zones::create_object;
-    use engine::types::ability::{
-        ControllerRef, Duration, QuantityExpr, ResolvedAbility, StaticDefinition, TypedFilter,
-    };
     use engine::types::card_type::CoreType;
     use engine::types::counter::CounterType;
     use engine::types::game_state::GameState;
-    use engine::types::identifiers::{CardId, TrackedSetId};
+    use engine::types::identifiers::CardId;
     use engine::types::player::PlayerId;
-    use engine::types::statics::StaticMode;
     use engine::types::zones::Zone;
 
     let mut state = GameState::new_two_player(42);
@@ -167,50 +167,13 @@ fn counter_chain_they_gain_vigilance_lands_on_countered_creatures() {
         Zone::Battlefield,
     );
 
-    let grant = ResolvedAbility::new(
-        Effect::GenericEffect {
-            static_abilities: vec![StaticDefinition {
-                mode: StaticMode::Continuous,
-                affected: Some(TargetFilter::TrackedSet {
-                    id: TrackedSetId(0),
-                }),
-                modifications: vec![ContinuousModification::AddKeyword {
-                    keyword: Keyword::Vigilance,
-                }],
-                condition: None,
-                per_player_condition: None,
-                affected_zone: None,
-                effect_zone: None,
-                active_zones: vec![],
-                characteristic_defining: false,
-                description: None,
-                attack_defended: None,
-                source_controller: None,
-                source_object: None,
-                bypass_beneficiary: None,
-                protection_does_not_remove: None,
-                room_door: None,
-                granting_object: None,
-            }],
-            duration: Some(Duration::UntilEndOfTurn),
-            target: None,
-            end_cost: None,
-        },
-        vec![],
-        source,
-        PlayerId(0),
+    let def = parse_effect_chain(
+        "Put a +1/+1 counter on each creature you control and they gain vigilance until end of turn.",
+        engine::types::ability::AbilityKind::Spell,
     );
-    let mut head = ResolvedAbility::new(
-        Effect::PutCounterAll {
-            counter_type: CounterType::Plus1Plus1,
-            count: QuantityExpr::Fixed { value: 1 },
-            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
-        },
-        vec![],
-        source,
-        PlayerId(0),
-    );
-    head.sub_ability = Some(Box::new(grant));
+    assert_no_unimplemented(&def);
+    assert_eq!(they_gain_keywords(&def), vec![Keyword::Vigilance]);
+    let head = build_resolved_from_def_with_targets(&def, source, PlayerId(0), vec![]);
 
     let mut events = Vec::new();
     resolve_ability_chain(&mut state, &head, &mut events, 0).unwrap();
