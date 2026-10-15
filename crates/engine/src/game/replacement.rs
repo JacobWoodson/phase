@@ -2227,6 +2227,36 @@ fn shield_has_per_event_execute_followup(state: &GameState, rid: ReplacementId) 
     repl.is_some_and(|r| r.execute.is_some() && r.runtime_execute.is_none())
 }
 
+/// CR 615.5: `Next`/`AllBut` shields stash their rider per event and drain it
+/// inline during the combat-damage batch (`replace_combat_damage_batch`); the
+/// post-batch aggregate drain explicitly skips re-firing them
+/// (`combat_damage.rs`). An ordinary `runtime_execute` rider installed by a
+/// resolving spell (Test of Faith's "for each 1 damage prevented this way"
+/// counters) resolves `EventContextAmount` at that inline drain, so the
+/// per-event prevented amount must be stamped even though the public
+/// `DamagePrevented` event is deferred to the post-batch aggregate.
+/// `execute`-template riders are covered by
+/// `shield_has_per_event_execute_followup`; per-source reflectors by
+/// `shield_rider_reflects_per_event`.
+fn shield_has_inline_runtime_rider(state: &GameState, rid: ReplacementId) -> bool {
+    let repl = if rid.source == ObjectId(0) {
+        state.pending_damage_replacements.get(rid.index)
+    } else {
+        state
+            .objects
+            .get(&rid.source)
+            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+    };
+    repl.is_some_and(|r| {
+        matches!(
+            r.shield_kind,
+            ShieldKind::Prevention {
+                amount: PreventionAmount::Next(_) | PreventionAmount::AllBut(_)
+            }
+        ) && r.runtime_execute.is_some()
+    })
+}
+
 /// CR 615.5 + CR 120.1: True when a prevention `runtime_execute` rider reflects
 /// against the PER-EVENT prevented damage source — a `PostReplacementDamageSource`
 /// reflection target or a `PostReplacementDamageSourceMatchesFilter` source-type
@@ -3090,10 +3120,13 @@ fn damage_done_applier(
             // `combat_damage.rs` — emitting them per-source here would fragment
             // the rider's `EventContextAmount` across attackers.
             //
-            // Exception: `execute`-template shields (Mindskinner, Weeping Angel)
-            // drain per-event inside `replace_combat_damage_batch` and need the
-            // per-event prevented amount stamped here so `EventContextAmount`
-            // resolves when that inline drain runs.
+            // Exceptions (stamp only; the public event still aggregates
+            // post-batch): `execute`-template shields (Mindskinner, Weeping
+            // Angel) and ordinary `Next`/`AllBut` `runtime_execute` riders
+            // (Test of Faith) drain per-event inside
+            // `replace_combat_damage_batch` and need the per-event prevented
+            // amount stamped here so `EventContextAmount` resolves when that
+            // inline drain runs.
             //
             // CR 615.13: every prevention arm above accumulates into
             // `combat_prevention_tally` when a batch is active
@@ -3114,7 +3147,8 @@ fn damage_done_applier(
             // nothing) and reflect the wrong amount.
             let per_event_execute_followup = accumulated_in_batch
                 && (shield_has_per_event_execute_followup(state, rid)
-                    || shield_rider_reflects_per_event(state, rid));
+                    || shield_rider_reflects_per_event(state, rid)
+                    || shield_has_inline_runtime_rider(state, rid));
             if prevented_amount > 0 && (!accumulated_in_batch || per_event_execute_followup) {
                 if !accumulated_in_batch {
                     events.push(GameEvent::DamagePrevented {
