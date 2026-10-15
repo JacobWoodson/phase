@@ -11,8 +11,15 @@
 //!
 //! Splitting the conjunct routes "they gain <kw list>" through
 //! `parse_clause_ast` → `try_parse_subject_continuous_clause`, where "they"
-//! resolves to `ParentTarget` (CR 608.2c) and the comma-and keyword list lowers
-//! to one `AddKeyword` per keyword carrying the grant's duration (CR 611.2c).
+//! binds the frozen mass population as a `TrackedSet{0}` sentinel (CR 608.2c:
+//! the population the counter clause acted on, frozen at resolution).
+//! `ParentTarget` is target-relative — on a spell that declares a target
+//! (Call for Aid's "target opponent") it misbinds to that target instead of
+//! the population — so the sentinel is the uniformly-correct binding, and the
+//! comma-and keyword list lowers to one `AddKeyword` per keyword carrying the
+//! grant's duration (CR 611.2c). At resolution the sentinel binds the chain
+//! tracked set the counter clause lazily publishes (`CounterAdded` harvest in
+//! `affected_objects_from_events`).
 //!
 //! Cards unlocked: Unbreakable Formation (addendum), Overseer of Vault 76
 //! (reflexive remove-counters trigger), and the multi-keyword list form shared
@@ -23,7 +30,10 @@ use engine::types::ability::{AbilityDefinition, ContinuousModification, Effect, 
 use engine::types::keywords::Keyword;
 
 /// Walk the sub_ability chain and collect every `AddKeyword` granted to an
-/// anaphoric `ParentTarget` subject (the "they gain ..." continuous grant).
+/// anaphoric frozen-population subject (the "they gain ..." continuous grant).
+/// After a same-chain mass ("each ...") clause, "they" binds the `TrackedSet`
+/// sentinel for the frozen population — never the target-relative
+/// `ParentTarget`, which misbinds on spells that declare a target.
 fn they_gain_keywords(def: &AbilityDefinition) -> Vec<Keyword> {
     let mut cur = Some(def);
     while let Some(d) = cur {
@@ -33,7 +43,7 @@ fn they_gain_keywords(def: &AbilityDefinition) -> Vec<Keyword> {
         {
             let is_anaphor = static_abilities
                 .iter()
-                .any(|s| matches!(s.affected, Some(TargetFilter::ParentTarget)));
+                .any(|s| matches!(s.affected, Some(TargetFilter::TrackedSet { .. })));
             if is_anaphor {
                 let kws: Vec<Keyword> = static_abilities
                     .iter()
@@ -102,5 +112,133 @@ fn and_they_gain_emits_keyword_list() {
     assert_eq!(
         they_gain_keywords(&def),
         vec![Keyword::Vigilance, Keyword::Indestructible, Keyword::Haste]
+    );
+}
+
+/// Runtime proof for the frozen-set binding: the counter clause lazily
+/// publishes its affected population, and the "they gain" grant bound to the
+/// `TrackedSet{0}` sentinel lands on exactly those creatures. The Unbreakable
+/// Formation addendum shape ("put a +1/+1 counter on each creature you control
+/// and they gain vigilance until end of turn"), driven synthetically through
+/// `resolve_ability_chain` so no card-data fixture entry is needed.
+#[test]
+fn counter_chain_they_gain_vigilance_lands_on_countered_creatures() {
+    use engine::game::effects::resolve_ability_chain;
+    use engine::game::zones::create_object;
+    use engine::types::ability::{
+        ControllerRef, Duration, QuantityExpr, ResolvedAbility, StaticDefinition, TypedFilter,
+    };
+    use engine::types::card_type::CoreType;
+    use engine::types::counter::CounterType;
+    use engine::types::game_state::GameState;
+    use engine::types::identifiers::{CardId, TrackedSetId};
+    use engine::types::player::PlayerId;
+    use engine::types::statics::StaticMode;
+    use engine::types::zones::Zone;
+
+    let mut state = GameState::new_two_player(42);
+    let mk_creature = |state: &mut GameState, card: u64, owner: PlayerId, name: &str| {
+        let id = create_object(
+            state,
+            CardId(card),
+            owner,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        id
+    };
+    let ally_a = mk_creature(&mut state, 1, PlayerId(0), "Ally A");
+    let ally_b = mk_creature(&mut state, 2, PlayerId(0), "Ally B");
+    let foe = mk_creature(&mut state, 3, PlayerId(1), "Foe");
+    // The spell source is not a creature, so "each creature you control" is
+    // exactly the two allies (mirrors Unbreakable Formation's spell source).
+    let source = create_object(
+        &mut state,
+        CardId(99),
+        PlayerId(0),
+        "Unbreakable Formation".to_string(),
+        Zone::Battlefield,
+    );
+
+    let grant = ResolvedAbility::new(
+        Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition {
+                mode: StaticMode::Continuous,
+                affected: Some(TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                }),
+                modifications: vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Vigilance,
+                }],
+                condition: None,
+                per_player_condition: None,
+                affected_zone: None,
+                effect_zone: None,
+                active_zones: vec![],
+                characteristic_defining: false,
+                description: None,
+                attack_defended: None,
+                source_controller: None,
+                source_object: None,
+                bypass_beneficiary: None,
+                protection_does_not_remove: None,
+                room_door: None,
+                granting_object: None,
+            }],
+            duration: Some(Duration::UntilEndOfTurn),
+            target: None,
+            end_cost: None,
+        },
+        vec![],
+        source,
+        PlayerId(0),
+    );
+    let mut head = ResolvedAbility::new(
+        Effect::PutCounterAll {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        },
+        vec![],
+        source,
+        PlayerId(0),
+    );
+    head.sub_ability = Some(Box::new(grant));
+
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &head, &mut events, 0).unwrap();
+    engine::game::layers::flush_layers(&mut state);
+
+    for ally in [ally_a, ally_b] {
+        assert_eq!(
+            state.objects[&ally]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            1,
+            "ally must receive the +1/+1 counter"
+        );
+        assert!(
+            state.objects[&ally].has_keyword(&Keyword::Vigilance),
+            "ally must gain vigilance from the frozen-set grant"
+        );
+    }
+    assert!(
+        !state.objects[&foe]
+            .counters
+            .contains_key(&CounterType::Plus1Plus1),
+        "opponent's creature must not receive a counter"
+    );
+    assert!(
+        !state.objects[&foe].has_keyword(&Keyword::Vigilance),
+        "opponent's creature must not gain vigilance"
     );
 }
