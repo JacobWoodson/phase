@@ -32882,6 +32882,8 @@ impl PartialEq for GameState {
             && self.players_attacked_this_turn == other.players_attacked_this_turn
             && self.attacking_creatures_this_turn == other.attacking_creatures_this_turn
             && self.attacked_defenders_this_turn == other.attacked_defenders_this_turn
+            && self.attacked_players_directly_this_turn
+                == other.attacked_players_directly_this_turn
             && self.attacked_defenders_last_turn == other.attacked_defenders_last_turn
             && self.creature_attacked_defenders_this_turn
                 == other.creature_attacked_defenders_this_turn
@@ -43010,6 +43012,32 @@ mod tests {
         assert!(
             !loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop()),
             "a tapped-vs-untapped object difference must NOT confirm (no wrongful draw)"
+        );
+    }
+
+    /// CR 104.4b + CR 508.6: the direct-attack ledger is rule-relevant
+    /// resolution state — `AbilityCondition::PlayerAttackedPlayer` reads it to
+    /// choose Faramir's draw versus tokens — so two states differing ONLY in
+    /// it must NOT compare equal, through `PartialEq` and through its
+    /// `loop_states_equal` consumer alike. Revert-failing: dropping the
+    /// `attacked_players_directly_this_turn` conjunct from
+    /// `impl PartialEq for GameState` makes all three assertions fail.
+    #[test]
+    fn direct_attack_ledger_compared_in_state_equality() {
+        let a = GameState::new_two_player(7);
+        let mut b = a.clone();
+        b.attacked_players_directly_this_turn
+            .entry(PlayerId(0))
+            .or_default()
+            .insert(PlayerId(1));
+        assert_ne!(a, b, "reach guard: the raw positions differ");
+        assert!(
+            !loop_states_equal(&a, &b),
+            "states differing only in direct-attack history must NOT confirm (no wrongful draw)"
+        );
+        assert!(
+            loop_states_equal(&a, &a.clone()),
+            "identical states must confirm as a repeat"
         );
     }
 
