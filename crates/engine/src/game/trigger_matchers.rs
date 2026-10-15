@@ -4343,10 +4343,11 @@ pub(super) fn damage_received_filters_match(
 ///
 /// CR 603.2c: "An ability triggers only once each time its trigger event
 /// occurs." The "once" in `DamagePreventedOnce` is therefore a property of the
-/// EVENT STREAM, not of this predicate: the combat path already emits ONE
-/// aggregate `DamagePrevented` per shield per simultaneous batch
-/// (`combat_damage.rs::fire_combat_prevention_riders`), and the non-combat path
-/// emits one per event because no batch exists. This matcher MUST stay a pure
+/// EVENT STREAM, not of this predicate: every simultaneous batch emits ONE
+/// aggregate `DamagePrevented` per shield per simultaneous batch — combat or
+/// noncombat (`EachSourceDealsDamage`) — via
+/// `combat_damage.rs::fire_batch_prevention_riders`; only genuinely
+/// sequential damage emits one per event. This matcher MUST stay a pure
 /// per-event predicate — adding dedup or a once-per-turn latch here would
 /// double-count the abstraction and break the CR 510.4 first-strike case, where
 /// two combat damage steps are two separate applications and must produce two

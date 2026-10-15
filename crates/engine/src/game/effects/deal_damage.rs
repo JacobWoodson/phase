@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::game::ability_utils::append_to_sub_chain;
 use crate::game::effects::player_counter;
@@ -2765,6 +2765,21 @@ pub fn resolve_each_deals_equal_to_power(
 /// are computed across the whole batch; a replacement pause mid-batch resumes the
 /// remaining sources with PER-SOURCE identity preserved
 /// (`stash_remaining_each_source_damage`).
+/// CR 615.13: drain the shared simultaneous-batch prevention tally accumulated
+/// during a noncombat Phase B, emitting one aggregate `DamagePrevented` per
+/// (shield, recipient) and firing each `All` rider once — the same authority
+/// the combat batch uses (`fire_batch_prevention_riders`). No-op when the
+/// tally is absent or empty. Takes (deactivates) the tally; callers restore
+/// the surrounding value.
+fn flush_noncombat_prevention_tally(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    if let Some(tally) = state.combat_prevention_tally.take() {
+        if !tally.is_empty() {
+            let entries = crate::game::combat_damage::sorted_prevention_entries(tally);
+            crate::game::combat_damage::fire_batch_prevention_riders(state, &entries, events);
+        }
+    }
+}
+
 pub fn resolve_each_source_deals_damage(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -2922,6 +2937,13 @@ pub fn resolve_each_source_deals_damage(
     let mut replaced: Vec<(DamageContext, ProposedEvent)> = Vec::new();
     let mut phase_b_paused_at: Option<usize> = None;
     let mut phase_b_waiting_for_player: Option<crate::types::player::PlayerId> = None;
+    // CR 615.13: activate the shared simultaneous-batch prevention tally so
+    // multi-source damage to one recipient aggregates into ONE prevention
+    // application (one aggregate event + one rider firing), exactly like the
+    // combat batch. Save/restore the surrounding value: a nested batch (e.g. a
+    // rider that deals damage) aggregates separately.
+    let restore_tally = state.combat_prevention_tally.take();
+    state.combat_prevention_tally = Some(HashMap::new());
     for (i, (_src, ctx, target, dmg)) in entries.iter().enumerate() {
         let Some(proposed) = pre_replacement_damage_gate(state, ctx, target, *dmg, false, events)
         else {
@@ -2956,6 +2978,16 @@ pub fn resolve_each_source_deals_damage(
     }
 
     if let (Some(pause_at), Some(player)) = (phase_b_paused_at, phase_b_waiting_for_player) {
+        // CR 615.13: a replacement choice pauses Phase B mid-batch. Flush the
+        // completed prefix as one aggregate application now — the tally is
+        // `#[serde(skip)]` transient state that cannot span the player-visible
+        // pause — then restore the surrounding tally so the paused entry and
+        // the stashed tail resolve per-event through the preserved continuation
+        // machinery. Documented deviation: a batch that pauses mid-Phase-B
+        // yields one prefix application plus per-event tail applications
+        // instead of a single whole-batch application.
+        flush_noncombat_prevention_tally(state, events);
+        state.combat_prevention_tally = restore_tally;
         state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
         // Source `pause_at` is mid-Phase-B (replacement choice in flight via
         // `waiting_for`); `handle_replacement_choice` will call
@@ -2971,6 +3003,15 @@ pub fn resolve_each_source_deals_damage(
         mark_pending_continuation_parent(state, EffectKind::EachSourceDealsDamage);
         return Ok(());
     }
+
+    // CR 615.13: Phase B completed without pause — flush the whole batch as
+    // one application per (shield, recipient) BEFORE Phase C applies marks, so
+    // aggregate riders fire and `last_effect_count` carries the batch total
+    // while no further replacement can overwrite it. (Phase C pauses stash
+    // post-replacement survivors that bypass the pipeline, so flushing here
+    // is unaffected by them.)
+    flush_noncombat_prevention_tally(state, events);
+    state.combat_prevention_tally = restore_tally;
 
     // Phase C — apply all already-replaced damage events. If any source's
     // Phase C needs a choice (e.g. life-gain or lifelink replacement per CR

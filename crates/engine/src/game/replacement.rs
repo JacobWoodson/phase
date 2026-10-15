@@ -2213,7 +2213,7 @@ fn shield_kind_for_rid(state: &GameState, rid: ReplacementId) -> Option<ShieldKi
 /// CR 615.5 + CR 510.2: Oracle-text prevention shields carry riders in
 /// `execute`; resolving spells install `runtime_execute` instead. During a
 /// combat-damage batch, `replace_combat_damage_batch` drains `execute` riders
-/// per prevented event inline, while `fire_combat_prevention_riders` handles
+/// per prevented event inline, while `fire_batch_prevention_riders` handles
 /// only `runtime_execute`.
 fn shield_has_per_event_execute_followup(state: &GameState, rid: ReplacementId) -> bool {
     let repl = if rid.source == ObjectId(0) {
@@ -2296,7 +2296,7 @@ fn rider_reflects_per_event_damage_source(rider: &ResolvedAbility) -> bool {
 /// source) — it keeps its per-event stash + inline drain so each reflection
 /// binds its own damage source and prevented amount. The shield's PUBLIC
 /// prevented amount still aggregates into the combat batch tally (CR 615.13);
-/// `fire_combat_prevention_riders` emits the aggregate event but does not
+/// `fire_batch_prevention_riders` emits the aggregate event but does not
 /// re-fire the rider.
 pub(crate) fn shield_rider_reflects_per_event(state: &GameState, rid: ReplacementId) -> bool {
     let repl = if rid.source == ObjectId(0) {
@@ -2321,7 +2321,7 @@ pub(crate) fn shield_rider_reflects_per_event(state: &GameState, rid: Replacemen
 /// Returns whether the amount was accumulated (tally active and nonzero).
 /// Callers store that in `accumulated_in_batch` so the shared emit block
 /// defers the public `DamagePrevented` to the post-batch aggregate in
-/// `fire_combat_prevention_riders` instead of fragmenting one event per
+/// `fire_batch_prevention_riders` instead of fragmenting one event per
 /// damage event.
 ///
 /// Rider continuations are NOT deferred here: shields whose riders drain
@@ -2815,7 +2815,7 @@ fn damage_done_applier(
             //     THIS event's amount (CR 615.5; mirrors Branch 2's stamp);
             //   * inside a batch, accumulate into the per-replacement tally — the
             //     single `DamagePrevented` and the aggregate `last_effect_count`
-            //     stamp happen post-batch in `fire_combat_prevention_riders`
+            //     stamp happen post-batch in `fire_batch_prevention_riders`
             //     (CR 510.2 + CR 615.13), so nothing is emitted or stamped here;
             //   * exception (mirrors Branch 2): an `execute`-template follow-up
             //     drains per-event inside `replace_combat_damage_batch` and needs
@@ -2927,7 +2927,7 @@ fn damage_done_applier(
     // stays per-event: each reflection binds its own damage source and
     // prevented amount, which a batch aggregate cannot carry. The rider keeps
     // its per-event stash + inline drain; Phase D emits the aggregate event
-    // but does not re-fire the rider (see `fire_combat_prevention_riders`).
+    // but does not re-fire the rider (see `fire_batch_prevention_riders`).
     if let Some(ShieldKind::Prevention { amount }) = shield_kind {
         if let ProposedEvent::Damage {
             source_id,
@@ -9907,7 +9907,7 @@ fn apply_single_replacement(
                 // resolving spell (e.g. Inkshield) captures a `runtime_execute`
                 // rider at resolution time and fires it once post-batch against the
                 // aggregate prevented amount. Suppress the per-event stash here for
-                // such shields so `fire_combat_prevention_riders` owns the single
+                // such shields so `fire_batch_prevention_riders` owns the single
                 // continuation.
                 //
                 // Static permanent-ability shields (e.g. Weeping Angel's "prevent
@@ -9919,7 +9919,7 @@ fn apply_single_replacement(
                 // CR 615.5 + CR 120.1: A rider that reflects PER SOURCE (Comeuppance:
                 // "if damage from a creature source is prevented this way, deal that
                 // much damage to that creature") cannot ride the aggregate batch path
-                // — `fire_combat_prevention_riders` only pins a single CHOSEN source
+                // — `fire_batch_prevention_riders` only pins a single CHOSEN source
                 // (`shield_specific_source`), so a class-scoped `damage_source_filter`
                 // leaves the drain's `event_source` unset and the per-source
                 // reflection/gate never resolves. Such riders must fire per-event so
@@ -20199,7 +20199,7 @@ mod tests {
     /// CR 510.2 + CR 615.13: inside a combat-damage batch, `PreventionMinus`
     /// must defer BOTH the `DamagePrevented` emission and the
     /// `last_effect_count` stamp to the post-batch aggregate — it accumulates
-    /// into the per-replacement tally that `fire_combat_prevention_riders`
+    /// into the per-replacement tally that `fire_batch_prevention_riders`
     /// consumes (which emits the single event and stamps the batch total),
     /// mirroring the `Prevention::All` shield batching.
     #[test]

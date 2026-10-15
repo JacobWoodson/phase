@@ -12,8 +12,8 @@ use crate::types::ability::{ShieldKind, TargetRef};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CombatDamageAssignmentMode, CombatDamageSubStep, DamageSlot, GameState, PendingCombatLifelink,
-    PendingLifelinkGain, PreventedDamageEntry, WaitingFor,
+    CombatDamageAssignmentMode, CombatDamageSubStep, CombatPreventionTally, DamageSlot, GameState,
+    PendingCombatLifelink, PendingLifelinkGain, PreventedDamageEntry, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
@@ -1784,32 +1784,7 @@ pub(crate) fn apply_combat_damage(
     // would let the same batch serialize — and emit its rider events —
     // differently across saves and AI clones. The ids are not `Ord`, so sort on
     // their inner integers, exactly as `blocker_ids` is sorted above.
-    let mut prevention_tally: Vec<PreventedDamageEntry> = prevention_tally
-        .into_iter()
-        .map(|((key, recipient), amount)| PreventedDamageEntry {
-            key,
-            recipient,
-            amount,
-        })
-        .collect();
-    // `AppliedReplacementKey` is the PRIMARY sort rank, so each shield's entries
-    // are contiguous and `chunk_by` in `fire_combat_prevention_riders` recovers
-    // the whole recipient group as one CR 615.13 prevention application. The
-    // CR 120.3 recipient (derived `Ord`) breaks ties inside a group so a parked
-    // batch still serializes byte-identically across saves and AI clones.
-    prevention_tally.sort_by_key(|entry| {
-        let rank = match entry.key {
-            AppliedReplacementKey::Object { source, index } => (0u8, source.0, index, 0u8),
-            AppliedReplacementKey::Floating { index } => (1, 0, index, 0),
-            AppliedReplacementKey::StepEndMana { index } => (2, 0, index, 0),
-            AppliedReplacementKey::EntryControllerChoice {
-                source,
-                index,
-                controller,
-            } => (3, source.0, index, controller.0),
-        };
-        (rank, entry.recipient.clone())
-    });
+    let prevention_tally = sorted_prevention_entries(prevention_tally);
 
     drain_combat_lifelink(
         state,
@@ -1899,7 +1874,7 @@ fn drain_combat_lifelink(
     // CR 615.5 + CR 615.13: Phase D fires once per shield, and only here — after
     // the last gain, so no rider continuation can ever run while a CR 616.1
     // prompt is open, and after nothing else can stamp `last_effect_count`.
-    fire_combat_prevention_riders(state, &record.prevention_tally, &mut record.batch_events);
+    fire_batch_prevention_riders(state, &record.prevention_tally, &mut record.batch_events);
     // CR 510.2 + CR 732.2a: the simultaneous batch is the EVENT the loop-ring life
     // prohibition keys on, and this is the last statement that can move life in it.
     // The batch moves life in three places and only a call here sees all three:
@@ -1917,9 +1892,46 @@ fn drain_combat_lifelink(
     CombatDamageBatch::Complete(record.batch_events)
 }
 
-/// CR 615.5 + CR 615.13: After a simultaneous combat-damage batch, fire each
-/// `Prevention::All` shield's `runtime_execute` rider exactly once against the
-/// aggregate prevented amount.
+/// CR 615.13: convert a `HashMap`-backed prevention tally into the deterministically
+/// ordered entry list the batch drain fires. Shared by the combat batch (which
+/// parks it in `PendingCombatLifelink`) and simultaneous noncombat batches
+/// (`EachSourceDealsDamage`), so both aggregate identically.
+///
+/// `AppliedReplacementKey` is the PRIMARY sort rank, so each shield's entries
+/// are contiguous and `chunk_by` in `fire_batch_prevention_riders` recovers
+/// the whole recipient group as one CR 615.13 prevention application. The
+/// CR 120.3 recipient (derived `Ord`) breaks ties inside a group so a parked
+/// batch still serializes byte-identically across saves and AI clones.
+pub(crate) fn sorted_prevention_entries(
+    prevention_tally: CombatPreventionTally,
+) -> Vec<PreventedDamageEntry> {
+    let mut entries: Vec<PreventedDamageEntry> = prevention_tally
+        .into_iter()
+        .map(|((key, recipient), amount)| PreventedDamageEntry {
+            key,
+            recipient,
+            amount,
+        })
+        .collect();
+    entries.sort_by_key(|entry| {
+        let rank = match entry.key {
+            AppliedReplacementKey::Object { source, index } => (0u8, source.0, index, 0u8),
+            AppliedReplacementKey::Floating { index } => (1, 0, index, 0),
+            AppliedReplacementKey::StepEndMana { index } => (2, 0, index, 0),
+            AppliedReplacementKey::EntryControllerChoice {
+                source,
+                index,
+                controller,
+            } => (3, source.0, index, controller.0),
+        };
+        (rank, entry.recipient.clone())
+    });
+    entries
+}
+
+/// CR 615.5 + CR 615.13: After a simultaneous damage batch (combat or
+/// noncombat), fire each `Prevention::All` shield's `runtime_execute` rider
+/// exactly once against the aggregate prevented amount.
 ///
 /// Each `DamagePrevented` event for the batch is emitted here (the per-source
 /// applier suppressed them so the rider sees one un-fragmented amount), ONE per
@@ -1933,7 +1945,7 @@ fn drain_combat_lifelink(
 /// rider call so the rider's `QuantityRef::EventContextAmount` (e.g. Inkshield's
 /// "for each 1 damage prevented this way") resolves against the whole batch
 /// total.
-fn fire_combat_prevention_riders(
+pub(crate) fn fire_batch_prevention_riders(
     state: &mut GameState,
     prevention_tally: &[PreventedDamageEntry],
     events: &mut Vec<GameEvent>,
@@ -3430,7 +3442,7 @@ mod tests {
     /// (`eventNormalizer.ts`) closes its window one index before the aggregate.
     ///
     /// REVERT PROBE: move `drain_combat_lifelink` after
-    /// `fire_combat_prevention_riders` and the first two indices invert.
+    /// `fire_batch_prevention_riders` and the first two indices invert.
     #[test]
     fn completed_batch_emits_gain_then_aggregate_then_prevention_rider() {
         let mut state = setup();

@@ -17378,7 +17378,7 @@ pub type CombatPreventionTally = HashMap<(AppliedReplacementKey, TargetRef), i32
 /// recipient the pipeline actually prevented damage for.
 ///
 /// CR 615.13 still fixes the TRIGGER COUNT at one per prevention application:
-/// `fire_combat_prevention_riders` groups these by `key` and fires each shield's
+/// `fire_batch_prevention_riders` groups these by `key` and fires each shield's
 /// CR 615.5 rider exactly once, against the group's total.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreventedDamageEntry {

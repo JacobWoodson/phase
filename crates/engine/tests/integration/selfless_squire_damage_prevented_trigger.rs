@@ -1429,3 +1429,160 @@ fn prevention_for_another_player_does_not_trigger_the_squire() {
     outcome.assert_life_delta(P0, 0);
     outcome.assert_counters(squire, CounterType::Plus1Plus1, 4);
 }
+
+// ---------------------------------------------------------------------------
+// PR #9867 review (HIGH: noncombat simultaneous-batch aggregation)
+// ---------------------------------------------------------------------------
+
+/// Verbatim Rakdos Charm (Scryfall), mode 3: each creature deals 1 damage to
+/// its controller — the `EachSourceDealsDamage` simultaneous batch.
+const RAKDOS_CHARM_TEXT: &str = "Choose one \u{2014}\n\u{2022} Exile target player's graveyard.\n\u{2022} Destroy target artifact.\n\u{2022} Each creature deals 1 damage to its controller.";
+
+/// Verbatim Hardened Scales (Scryfall): the nonlinear counter amplifier that
+/// discriminates one 3-counter placement (4 total) from three 1-counter
+/// placements (6 total).
+const HARDENED_SCALES_TEXT: &str = "If one or more +1/+1 counters would be put on a creature you control, put that many plus one +1/+1 counters on it instead.";
+
+/// CR 615.13 + CR 120.3: three simultaneous 1-damage events (two bears plus
+/// the Squire itself) to one shielded player are ONE prevention application —
+/// one `DamagePrevented` event, one Squire trigger placing 3 at once, +1 from
+/// Hardened Scales = 4. Per-event fragmentation would fire 3 triggers for
+/// (1+1) × 3 = 6.
+///
+/// Revert-catches: deactivating the batch tally in
+/// `resolve_each_source_deals_damage` restores 3 events / 6 counters.
+#[test]
+fn rakdos_charm_simultaneous_batch_fires_one_squire_trigger() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    stock_libraries(&mut scenario);
+
+    let squire = scenario
+        .add_creature_to_hand_from_oracle(P0, "Selfless Squire", 1, 1, SELFLESS_SQUIRE_TEXT)
+        .with_mana_cost(free_cost())
+        .id();
+    let scales = scenario
+        .add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES_TEXT)
+        .id();
+    let _bear_a = scenario.add_creature(P0, "Bear A", 2, 2).id();
+    let _bear_b = scenario.add_creature(P0, "Bear B", 2, 2).id();
+    let charm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Rakdos Charm", true, RAKDOS_CHARM_TEXT)
+        .with_mana_cost(free_cost())
+        .id();
+    let mut runner = scenario.build();
+
+    // The Squire must be cast for real so its ETB installs the shield.
+    runner.cast(squire).resolve();
+    assert!(
+        runner.state().objects[&squire].zone == Zone::Battlefield,
+        "reach guard: the Squire must be on the battlefield with its ETB shield"
+    );
+    assert!(
+        !runner.state().objects[&scales]
+            .replacement_definitions
+            .is_empty(),
+        "reach guard: Hardened Scales must be installed on the battlefield"
+    );
+
+    let life_before = runner.state().players[P0.0 as usize].life;
+    let outcome = runner.cast(charm).modes(&[2]).resolve();
+
+    // Reach-guard: all 3 damage really was PREVENTED, not merely never dealt.
+    outcome.assert_life_delta(P0, 0);
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        life_before,
+        "the Squire's shield must have absorbed all 3 damage"
+    );
+
+    // CR 615.13: ONE application over the simultaneous batch.
+    assert_eq!(
+        prevented_pairs(outcome.events()),
+        vec![(TargetRef::Player(P0), 3)],
+        "the batch must emit one aggregate event naming the shielded player"
+    );
+    assert_eq!(
+        counters_on(&runner, squire),
+        4,
+        "one trigger placing 3 at once, +1 from Hardened Scales (3 triggers would make 6)"
+    );
+}
+
+/// PR #9867 review (HIGH: pause-path control) — one source (the Squire
+/// itself) with TWO co-applicable shields (its ETB shield plus Safe Passage),
+/// so Phase B pauses for a CR 616.1 ordering choice. The tally is
+/// `#[serde(skip)]` transient state and cannot span the player-visible pause:
+/// the (empty) prefix flushes at pause time, the tally restores, and the
+/// paused entry resumes per-event through the preserved continuation
+/// machinery. Driven manually so the test PROVES the pause prompt appeared
+/// (two candidates) rather than merely tolerating it.
+///
+/// NOTE (pre-existing, out of scope): a multi-entry batch that pauses loses
+/// its stashed tail on the base commit too (verified by stashing this
+/// change) — a continuation-drain defect independent of batch aggregation,
+/// flagged for follow-up. This control uses one source to pin the
+/// pause/resume mechanics without depending on tail re-entry.
+#[test]
+fn rakdos_charm_batch_with_ordering_pause_completes_per_event_after_flush() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    stock_libraries(&mut scenario);
+
+    let squire = scenario
+        .add_creature_to_hand_from_oracle(P0, "Selfless Squire", 1, 1, SELFLESS_SQUIRE_TEXT)
+        .with_mana_cost(free_cost())
+        .id();
+    let passage = add_instant_from_oracle(&mut scenario, P0, "Safe Passage", SAFE_PASSAGE_TEXT);
+    let charm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Rakdos Charm", true, RAKDOS_CHARM_TEXT)
+        .with_mana_cost(free_cost())
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(squire).resolve();
+    runner.cast(passage).resolve();
+    assert!(
+        runner.state().objects[&squire].zone == Zone::Battlefield,
+        "reach guard: the Squire must be on the battlefield with its ETB shield"
+    );
+
+    let life_before = runner.state().players[P0.0 as usize].life;
+    // No auto-answer: the driver must HALT at the ordering prompt.
+    let outcome = runner.cast(charm).modes(&[2]).resolve();
+    let WaitingFor::ReplacementChoice { candidates, .. } = outcome.final_waiting_for() else {
+        panic!(
+            "the batch must pause for a CR 616.1 ordering choice, got {:?}",
+            outcome.final_waiting_for()
+        );
+    };
+    assert_eq!(
+        candidates.len(),
+        2,
+        "both shields must be offered as ordering candidates"
+    );
+
+    // Answer and drive to a clean priority window.
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the ordering choice must be answerable");
+    runner.advance_until_stack_empty();
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "resolution must complete to a clean priority window, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // The resumed entry prevented its 1 damage and the Squire's trigger
+    // (which observes prevention from ANY source) fired exactly once.
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        life_before,
+        "the resumed entry must prevent its damage"
+    );
+    assert_eq!(
+        counters_on(&runner, squire),
+        1,
+        "one resumed entry fires the trigger once"
+    );
+}
