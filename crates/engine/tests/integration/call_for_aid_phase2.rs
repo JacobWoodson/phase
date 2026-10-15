@@ -723,14 +723,11 @@ fn call_for_aid_blocks_sacrifice_effect_path() {
         let mut stage = stage_2p_sac();
         cast_aid_and_check_theft(&mut stage);
         hand_priority_to_p1(&mut stage.runner);
-        // The choice prompt lists prohibited creatures as candidates; P0
-        // chooses one and the sacrifice resolves as no-sacrifice (CR 701.21).
-        let outcome = stage
-            .runner
-            .cast(stage.edict)
-            .target_player(P0)
-            .effect_zone(&[stage.p1_a])
-            .resolve();
+        // Both candidates are barred, so no choice prompt is raised at all:
+        // the pool excludes prohibited permanents (CR 608.2d) and the empty
+        // pool resolves as a no-op (CR 609.3) — the edict can no longer be
+        // answered by naming a barred victim and evading.
+        let outcome = stage.runner.cast(stage.edict).target_player(P0).resolve();
         // Anti-vacuity: the edict RESOLVED (not halted at a choice prompt).
         assert_eq!(
             outcome.state().objects[&stage.edict].zone,
@@ -971,10 +968,10 @@ fn call_for_aid_covers_snapshotted_set_only() {
 
     // Behavioral close: edicts take each free creature; the covered member
     // survives both. P1 controls only the flickered creature (singleton fast
-    // path); P0 controls the covered member plus the late arrival (both
-    // members are listed -- prohibited creatures are not filtered from
-    // candidates -- so the harness explicitly chooses the free late arrival
-    // via EffectZoneChoice).
+    // path); P0 controls the covered member plus the late arrival (only the
+    // free late arrival is listed -- prohibited creatures are excluded from
+    // candidates (CR 608.2d) -- so the harness chooses it via
+    // EffectZoneChoice).
     hand_priority_to_p1(&mut stage.runner);
     stage.runner.cast(stage.edict).target_player(P1).resolve();
     assert_eq!(
@@ -983,8 +980,8 @@ fn call_for_aid_covers_snapshotted_set_only() {
         "the flickered creature is sacrificable"
     );
     hand_priority_to_p1(&mut stage.runner);
-    // Both remaining creatures are listed (prohibited included); P0 chooses
-    // the free late arrival.
+    // Only the free late arrival is listed (the covered member is excluded);
+    // P0 chooses it.
     stage
         .runner
         .cast(stage.edict_two)
@@ -1927,3 +1924,86 @@ fn concurrent_aid_bars_free_later_controller() {
     );
 }
 
+/// MED 2 — CR 608.2d + CR 609.3 + the Call for Aid ruling: with mixed
+/// candidates (stolen/barred + free), a Diabolic Edict offers ONLY the free
+/// creature; naming the protected victim is rejected at submission, and the
+/// free one is sacrificed. Answering a mandatory sacrifice by naming a barred
+/// victim and evading is gone.
+#[test]
+fn diabolic_edict_excludes_aid_protected_victim() {
+    let mut stage = stage_2p_sac();
+    cast_aid_and_check_theft(&mut stage);
+    // Two free creatures so the edict raises a real prompt (a singleton
+    // pool takes the no-prompt fast path) whose offered set is observable.
+    let fodder_a = create_battlefield_creature(&mut stage.runner, P0, "Edict Fodder A");
+    let fodder_b = create_battlefield_creature(&mut stage.runner, P0, "Edict Fodder B");
+    hand_priority_to_p1(&mut stage.runner);
+
+    stage.runner.cast(stage.edict).target_player(P0).commit();
+    stage.runner.advance_until_stack_empty();
+    match &stage.runner.state().waiting_for {
+        WaitingFor::EffectZoneChoice {
+            cards, player: P0, ..
+        } => {
+            assert_eq!(
+                cards.len(),
+                2,
+                "only the two free creatures may be offered, got {cards:?}"
+            );
+            assert!(
+                cards.contains(&fodder_a) && cards.contains(&fodder_b),
+                "both free creatures must be offered, got {cards:?}"
+            );
+            assert!(
+                !cards.contains(&stage.p1_a) && !cards.contains(&stage.p1_b),
+                "neither protected victim may be offered, got {cards:?}"
+            );
+        }
+        other => panic!("the edict must prompt its sacrifice choice, got {other:?}"),
+    }
+    // The barred victim is not among the offered cards, so naming it is
+    // rejected at submission (membership and the bar revalidation agree),
+    // and the prompt persists for a legal pick.
+    assert!(
+        stage
+            .runner
+            .act(GameAction::SelectCards {
+                cards: vec![stage.p1_a],
+            })
+            .is_err(),
+        "naming the protected victim must be rejected at submission"
+    );
+    stage
+        .runner
+        .act(GameAction::SelectCards {
+            cards: vec![fodder_a],
+        })
+        .expect("the free victim must be accepted");
+    stage.runner.advance_until_stack_empty();
+
+    assert_eq!(
+        stage.runner.state().objects[&fodder_a].zone,
+        Zone::Graveyard,
+        "the chosen free creature is sacrificed"
+    );
+    assert_eq!(
+        stage.runner.state().objects[&fodder_b].zone,
+        Zone::Battlefield,
+        "the unchosen free creature survives"
+    );
+    assert_eq!(
+        stage.runner.state().objects[&stage.p1_a].zone,
+        Zone::Battlefield,
+        "the protected victim survives"
+    );
+    assert_eq!(
+        stage.runner.state().objects[&stage.p1_b].zone,
+        Zone::Battlefield,
+        "the other protected victim survives"
+    );
+    assert!(
+        cant_be_sacrificed(stage.runner.state(), stage.p1_a)
+            && cant_be_sacrificed(stage.runner.state(), stage.p1_b),
+        "the prohibition survives the edict"
+    );
+}

@@ -13842,6 +13842,12 @@ fn player_scope_sacrifice_step(
                 obj.controller == player
                     && !obj.is_emblem
                     && crate::game::filter::matches_target_filter(state, *id, target, &ctx)
+                    // CR 608.2d: same candidate legality as the ordinary
+                    // sacrifice-effect pool — a permanent its chooser is
+                    // barred from sacrificing is not offered.
+                    && !crate::game::static_abilities::object_cant_be_sacrificed_by(
+                        state, player, *id,
+                    )
                     && !crate::game::static_abilities::triggered_cause_sacrifice_or_exile_muzzled(
                         state, &scoped, *id, player,
                     )

@@ -6189,6 +6189,20 @@ pub(super) fn handle_resolution_choice(
                         zone
                     )));
                 }
+                // CR 608.2d: a resolving player can't choose an illegal
+                // option. The pool excluded barred permanents when the
+                // prompt was issued, but a bar granted in the window — or a
+                // stale client submission — must reject here, before the
+                // performer, not evade via its mid-resolution skip.
+                if matches!(effect_kind, EffectKind::Sacrifice)
+                    && crate::game::static_abilities::object_cant_be_sacrificed_by(
+                        state, player, *card_id,
+                    )
+                {
+                    return Err(EngineError::InvalidAction(
+                        "Selected permanent can't be sacrificed by this player".to_string(),
+                    ));
+                }
             }
 
             // CR 608.2c: For an up-to choice ("You may put a card from among
