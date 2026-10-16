@@ -50,11 +50,11 @@ use super::oracle_util::{
     parse_ordinal, rewrite_quantity_expr_rounding, strip_after, strip_reminder_text, TextPair,
 };
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, CombatDamageScope,
-    Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit, CountScope,
-    CounterReplacementSubject, DamageModification, DamageRedirectTarget, DamageTargetFilter,
-    DamageTargetPlayerScope, DieRollIgnoreRule, DrawReplacementScope, Duration, Effect,
-    EffectScope, FilterProp, LibraryInstructionActor, LibraryPosition, ManaModification,
+    AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, ChooseOneOfKind,
+    CombatDamageScope, Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit,
+    CountScope, CounterReplacementSubject, DamageModification, DamageRedirectTarget,
+    DamageTargetFilter, DamageTargetPlayerScope, DieRollIgnoreRule, DrawReplacementScope, Duration,
+    Effect, EffectScope, FilterProp, LibraryInstructionActor, LibraryPosition, ManaModification,
     ManaReplacementScope, ManaSpendPermission, PermissionGrantee, PlayerFilter, PreventionAmount,
     PreventionFormula, QuantityExpr, QuantityModification, QuantityRef, RedirectionLifetime,
     ReplacementChoiceAuthority, ReplacementCondition, ReplacementDefinition, ReplacementMode,
@@ -660,8 +660,8 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     // — Gev, Scaled Scorch) use "enter"/"escape" rather than the singular
     // "enters"/"escapes", so accept both at word boundaries.
     if has_enters_with_counter_tokens(&lower) {
-        if let Some(def) = parse_enters_with_counters(&norm_lower, &text) {
-            return Some(def);
+        if let ControlFlow::Break(claimed) = parse_enters_with_counters(&norm_lower, &text) {
+            return claimed;
         }
     }
 
@@ -1040,6 +1040,7 @@ fn parse_search_found_replacement(original: &str, lower: &str) -> Option<Replace
                 single_use: false,
                 cast_cost_modifier: None,
                 alt_ability_cost: None,
+                without_paying_mana_cost: false,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 invalidation: None,
             },
@@ -4035,6 +4036,18 @@ fn parse_distributive_subject(work_text: &str) -> Option<(&str, SubjectScope)> {
     .ok()
 }
 
+/// CR 614.12: recognize an explicit or bare-plural distributive enters-with
+/// subject before checking whether its filter is supported by the typed path.
+fn recognize_enters_with_distributive_subject(work_text: &str) -> Option<(&str, SubjectScope)> {
+    parse_distributive_subject(work_text).or_else(|| {
+        // CR 614.12 + issue #7821: only the plural verb marks a bare subject;
+        // singular self-subject lines use "enters with" or "escapes with".
+        (nom_primitives::scan_contains(work_text, "enter with")
+            || nom_primitives::scan_contains(work_text, "escape with"))
+        .then_some((work_text, SubjectScope::Distributive))
+    })
+}
+
 /// Extract life payment amount from "pay N life" pattern.
 fn extract_life_payment(text: &str) -> Option<i32> {
     let after_pay = strip_after(text, "pay ")?;
@@ -4081,11 +4094,25 @@ pub(crate) fn rewrite_variable_x_to_cost_x_paid(expr: &mut QuantityExpr) {
 /// Handles self ("~ enters with"), other ("each other creature ... enters with"),
 /// escape ("~ escapes with", CR 702.138c), and kicker-conditional
 /// ("if ~ was kicked, it enters with", CR 702.33d).
+///
+/// `Break(Some(def))` claims the line; `Break(None)` ends replacement dispatch
+/// for a clause that fails closed on an unread placement; `Continue` lets later
+/// replacement parsers try the line.
 fn parse_enters_with_counters(
     norm_lower: &str,
     original_text: &str,
-) -> Option<ReplacementDefinition> {
-    enters_with_counters_outcome(norm_lower, original_text).ok()
+) -> ControlFlow<Option<ReplacementDefinition>> {
+    match enters_with_counters_outcome(norm_lower, original_text) {
+        Ok(def) => ControlFlow::Break(Some(def)),
+        // CR 614.1c + CR 122.6: preserve this Clause decline at the
+        // general replacement boundary instead of trying the remaining
+        // replacement parsers on a quoted rider or sibling sentence.
+        Err(EntersWithDecline::FailsClosed(EntersWithGap::Clause)) => ControlFlow::Break(None),
+        // Gate declines and ordinary failures keep base's dispatch behavior.
+        Err(
+            EntersWithDecline::FailsClosed(EntersWithGap::Gate) | EntersWithDecline::NotThisShape,
+        ) => ControlFlow::Continue(()),
+    }
 }
 
 /// Why `enters_with_counters_outcome` declined a line.
@@ -4094,16 +4121,52 @@ enum EntersWithDecline {
     /// The line is not an "enters with [counters]" payload this parser reads —
     /// later routes may claim it.
     NotThisShape,
-    /// CR 614.1c: the line IS an "enters with" replacement, but a printed gate
-    /// is present and cannot be carried (or two gates co-occur in the single
-    /// condition slot). The line must land as `Effect::unimplemented`, never as
-    /// an ungated replacement or a later route's reading.
-    GateFailsClosed,
+    /// CR 614.1c: a printed gate, counter placement, or choice subject cannot be carried.
+    /// Consumers decide whether to preserve the decline at their boundary.
+    FailsClosed(EntersWithGap),
+}
+
+/// CR 614.1c: the printed part of an "enters with" replacement the parser
+/// cannot carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EntersWithGap {
+    /// A printed gate is present and cannot be carried (or two gates co-occur
+    /// in the single condition slot).
+    Gate,
+    /// CR 614.12 + CR 122.6 + CR 608.2c: a printed counter clause cannot be carried
+    /// (a further placement, list rounding or X entries under a where-X definition,
+    /// or a distributive subject the self-only counter choice cannot represent).
+    Clause,
+}
+
+impl EntersWithGap {
+    /// The `Effect::unimplemented` gap name the route records for the line.
+    pub(crate) fn gap_name(self) -> &'static str {
+        match self {
+            Self::Gate => "enters_with_gate",
+            Self::Clause => "enters_with_clause",
+        }
+    }
+
+    /// CR 614.1c: Build the explicit gap used by the general replacement boundary
+    /// and replacement-sentence sequence when they observe a closed decline.
+    /// The Class fallback records its gap through unsupported replacement IR.
+    /// The implementation preserves Clause declines at the general replacement
+    /// boundary, the replacement-sentence sequence, and the Class replacement-decline
+    /// fallback; earlier successful parses and independent container/effect routes
+    /// remain outside this guarantee.
+    pub(crate) fn gap_ability(self, line: &str) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::unimplemented(self.gap_name(), line),
+        )
+        .description(line.to_string())
+    }
 }
 
 /// CR 614.1c: The "enters with [counters]" parser with a typed decline, so the
-/// route can tell "not my shape" from "my shape, gate fails closed"
-/// (`enters_with_gate_fails_closed`).
+/// route can tell "not my shape" from "my shape, fails closed"
+/// (`enters_with_fails_closed`).
 fn enters_with_counters_outcome(
     norm_lower: &str,
     original_text: &str,
@@ -4147,6 +4210,52 @@ fn enters_with_counters_outcome(
     .parse(after_with)
     .map_or(after_with, |(rest, _)| rest);
 
+    // Determine valid_card filter: self vs a general subset of permanents.
+    // CR 614.1c: Effects that read "[permanent] enters with ..." are
+    // replacement effects. CR 614.12 distinguishes effects that affect "only
+    // that permanent" (self-ETB → SelfRef) from those affecting "a general
+    // subset of permanents that includes it" (distributive → typed filter).
+    //
+    // Two distributive shapes exist:
+    //   - "each other [type] you control enters with ..." (Giada) — explicitly
+    //     EXCLUDES the source, so `FilterProp::Another` must be injected.
+    //   - "each [type] you control enters with ..." (Dragonstorm Globe) — the
+    //     general subset INCLUDES the source if it matches the type; per
+    //     CR 614.12 the subset "includes it", so NO `Another` is injected. (The
+    //     artifact source simply doesn't match a Dragon type filter, so no
+    //     self-application occurs here — but the class must not exclude itself.)
+    //
+    // Recognition is independent of the type-validity gate: property-only
+    // heads can yield empty type_filters, and unions need not yield Typed.
+    // The single-placement path still accepts only a concrete type/subtype;
+    // unsupported filters retain its existing SelfRef fallback.
+    let distributive_subject = recognize_enters_with_distributive_subject(work_text);
+    let subject = distributive_subject.and_then(|(subject_text, scope)| {
+        // CR 105.2a-105.2c: peel a leading color-quality word ("colorless "/
+        // "monocolored "/"multicolored ") so the type detector sees the
+        // noun and the quality survives as a filter property.
+        let (after_color, color_prop) =
+            crate::parser::oracle_static::peel_color_quality_prefix(subject_text);
+        let (filter, _) = parse_type_phrase_folding(after_color);
+        let is_valid = matches!(
+            &filter,
+            TargetFilter::Typed(TypedFilter { type_filters, .. })
+                if !type_filters.is_empty()
+                    && type_filters.as_slice() != [TypeFilter::Any]
+        );
+        if !is_valid {
+            return None;
+        }
+        let filter = match (filter, color_prop) {
+            (TargetFilter::Typed(mut tf), Some(prop)) => {
+                tf.properties.insert(0, prop);
+                TargetFilter::Typed(tf)
+            }
+            (other, _) => other,
+        };
+        Some((filter, scope))
+    });
+
     // CR 614.12a + CR 608.2d: "~ enters with your choice of <counter-choice-list>
     // on it" — the controller chooses WHICH counter as the permanent enters, and
     // that choice is made before the permanent enters (CR 614.12a). Detect the
@@ -4157,6 +4266,19 @@ fn enters_with_counters_outcome(
     // always the recipient). Runtime folds the chosen counter pre-entry via the
     // deferred-entry-events capture in `engine_replacement.rs` /
     // `engine_resolution_choices.rs`.
+    // CR 614.12: the choice replacement below is built for the entering
+    // permanent alone (`valid_card: SelfRef`, every branch on `SelfRef`). A
+    // distributive choice subject cannot be represented, even when an unread
+    // target or rider prevents the option list from parsing.
+    // Preserve this Clause decline at the general replacement boundary,
+    // replacement-sentence sequence, and Class decline fallback; earlier
+    // successful parses and independent container/effect routes remain outside
+    // this guarantee.
+    if distributive_subject.is_some() && strip_enters_with_choice_marker(after_additional).is_some()
+    {
+        return Err(EntersWithDecline::FailsClosed(EntersWithGap::Clause));
+    }
+
     let choice_branches: Option<Vec<AbilityDefinition>> = if let Some((choices, _on)) =
         strip_enters_with_choice_target(after_additional)
     {
@@ -4165,7 +4287,13 @@ fn enters_with_counters_outcome(
                 // `classify_and_parse_counter_choice_list` already requires len >= 2.
                 entries
                     .into_iter()
-                    .map(|(counter_type, count)| {
+                    .map(|(counter_type, mut count)| {
+                        // CR 107.3m + CR 614.12: an option's "X" is the X paid for
+                        // the spell that became the permanent — the entering
+                        // object's `cost_x_paid` (an unrewritten `Variable("X")`
+                        // reads trigger-event sources and is empty here), as in
+                        // the single-placement and list paths.
+                        rewrite_variable_x_to_cost_x_paid(&mut count);
                         let mut def = AbilityDefinition::new(
                             AbilityKind::Spell,
                             Effect::PutCounter {
@@ -4221,6 +4349,7 @@ fn enters_with_counters_outcome(
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Controller,
                 branches,
+                kind: ChooseOneOfKind::Ordinary,
             },
         );
         let mut choice = choice;
@@ -4259,7 +4388,7 @@ fn enters_with_counters_outcome(
         let other_suffix =
             enters_with_condition_suffix(is_escape, &kicker_condition, work_text, after_with);
         match resolve_enters_with_condition(&unless_outcome, &leading_if_outcome, &other_suffix) {
-            None => return Err(EntersWithDecline::GateFailsClosed),
+            None => return Err(EntersWithDecline::FailsClosed(EntersWithGap::Gate)),
             Some(Some(cond)) => def = def.condition(cond),
             Some(None) => {}
         }
@@ -4278,7 +4407,10 @@ fn enters_with_counters_outcome(
     // so handing it the unstripped text is strictly more permissive — it also
     // picks up "an additional +1/+1 counter and a lifelink counter on it", which
     // the strip likewise used to break.
-    let counter_entries = parse_enters_counter_entries(after_with);
+    let (counter_entries, list_rest) = match parse_enters_counter_entries_with_rest(after_with) {
+        Some((entries, rest)) => (Some(entries), Some(rest)),
+        None => (None, None),
+    };
     // CR 614.1c + CR 122.6: the clause's count slot — a printed count, the
     // article of "an additional <type>", or none for the "a number of …
     // equal to <qty>" / "<type> counters on it equal to <qty>" forms, whose
@@ -4325,11 +4457,34 @@ fn enters_with_counters_outcome(
     // ("…a +1/+1 counter and a number of charge counters on it…"), publishing
     // the first placement alone would drop the rest — and the "equal to"
     // reader below would hand the dropped placement's quantity to the first.
-    // Decline as `NotThisShape`, not `GateFailsClosed`: no gate is involved, and
-    // no later route claims an enters-with counter list, so the line lands as
-    // an `Effect::unimplemented` gap.
-    if counter_entries.is_none() && continues_with_unread_counter_placement(after_counter) {
-        return Err(EntersWithDecline::NotThisShape);
+    // Preserve this Clause decline at the general replacement boundary;
+    // the replacement-sentence sequence and Class replacement-decline fallback
+    // consult the same parser-owned result.
+    //
+    // The same holds when the first placement's recipient is already consumed —
+    // by the single path ("…a +1/+1 counter on it and a number of charge
+    // counters on it…") or by the list reader's terminal " on it" ("…two +1/+1
+    // counters and a lifelink counter on it and a trample counter on it"): a
+    // placement that follows the recipient is as unread as one that follows the
+    // counter noun. A list's terminal rounding postmodifier is unread too: the
+    // list does not record which entry it rounds (CR 107.1a).
+    let list_tail_unread =
+        list_rest.is_some_and(|rest| list_tail_is_unread(clause_before_where_x(rest)));
+    if counter_entries.is_none() && continues_with_unread_counter_placement(after_counter)
+        || list_tail_unread
+    {
+        return Err(EntersWithDecline::FailsClosed(EntersWithGap::Clause));
+    }
+    // CR 107.3 + CR 107.3i: a trailing "where X is <q>" defines the X of every
+    // entry that prints one. A list keeps the printed counts of its entries
+    // (see the where-X note below), so an X-bearing entry would publish the
+    // cost X where the definition belongs — decline instead of binding.
+    if where_x_tail.is_some()
+        && counter_entries
+            .as_ref()
+            .is_some_and(|entries| entries.iter().any(|(_, count)| count_reads_paid_x(count)))
+    {
+        return Err(EntersWithDecline::FailsClosed(EntersWithGap::Clause));
     }
     if let Some(combined) =
         parse_enters_base_plus_additional_for_each(after_counter, &counter_type, &count_expr)
@@ -4365,10 +4520,11 @@ fn enters_with_counters_outcome(
     // a foreign possessive, an unreadable definition) is unread text of this
     // clause and fails closed.
     //
-    // List placements are #9662's: their counts do not see the where-X
-    // binding. On a list line this gate only preserves base's accept/decline
-    // (the enters-with where-X reader decides; its value is not published), so
-    // the list path is neither fixed nor widened here (CR 107.3).
+    // List placements do not see the where-X binding: their counts come from
+    // the entries. A list entry that prints X was declined above, so what
+    // reaches this gate is an X-free list, whose only dependence on the
+    // definition is base's accept/decline (the enters-with where-X reader
+    // decides; its value is not published) (CR 107.3).
     if let Some(where_x) = where_x_tail {
         let bound = if counter_entries.is_some() {
             parse_enters_where_x_tail_quantity(where_x)
@@ -4405,63 +4561,6 @@ fn enters_with_counters_outcome(
         put_counter
     };
 
-    // Determine valid_card filter: self vs a general subset of permanents.
-    // CR 614.1c: Effects that read "[permanent] enters with ..." are
-    // replacement effects. CR 614.12 distinguishes effects that affect "only
-    // that permanent" (self-ETB → SelfRef) from those affecting "a general
-    // subset of permanents that includes it" (distributive → typed filter).
-    //
-    // Two distributive shapes exist:
-    //   - "each other [type] you control enters with ..." (Giada) — explicitly
-    //     EXCLUDES the source, so `FilterProp::Another` must be injected.
-    //   - "each [type] you control enters with ..." (Dragonstorm Globe) — the
-    //     general subset INCLUDES the source if it matches the type; per
-    //     CR 614.12 the subset "includes it", so NO `Another` is injected. (The
-    //     artifact source simply doesn't match a Dragon type filter, so no
-    //     self-application occurs here — but the class must not exclude itself.)
-    //
-    // `parse_distributive_subject` strips the prefix and reports the scope, then
-    // `parse_type_phrase_folding` acts as the type detector: accept the subject iff the
-    // parse yields a typed filter with a concrete type/subtype (not the `Any`
-    // fallback). A non-type subject parses to the `[Any]` fallback and is
-    // rejected, falling through to the `SelfRef` self-ETB branch.
-    let subject = parse_distributive_subject(work_text)
-        .or_else(|| {
-            // CR 614.12 + issue #7821: bare-plural distributive subject —
-            // "Colorless creatures you control enter with two additional +1/+1
-            // counters on them" (Curator Beastie). Only the PLURAL verb marks a
-            // bare subject: singular lines are the self-ETB "~ enters with"
-            // shape or carry the explicit each/other prefix handled above; the
-            // type-validity gate below still rejects non-subject plurals.
-            (nom_primitives::scan_contains(work_text, "enter with")
-                || nom_primitives::scan_contains(work_text, "escape with"))
-            .then_some((work_text, SubjectScope::Distributive))
-        })
-        .and_then(|(subject_text, scope)| {
-            // CR 105.2a-105.2c: peel a leading color-quality word ("colorless "/
-            // "monocolored "/"multicolored ") so the type detector sees the
-            // noun and the quality survives as a filter property.
-            let (after_color, color_prop) =
-                crate::parser::oracle_static::peel_color_quality_prefix(subject_text);
-            let (filter, _) = parse_type_phrase_folding(after_color);
-            let is_valid = matches!(
-                &filter,
-                TargetFilter::Typed(TypedFilter { type_filters, .. })
-                    if !type_filters.is_empty()
-                        && type_filters.as_slice() != [TypeFilter::Any]
-            );
-            if !is_valid {
-                return None;
-            }
-            let filter = match (filter, color_prop) {
-                (TargetFilter::Typed(mut tf), Some(prop)) => {
-                    tf.properties.insert(0, prop);
-                    TargetFilter::Typed(tf)
-                }
-                (other, _) => other,
-            };
-            Some((filter, scope))
-        });
     let valid_card = if let Some((filter, scope)) = subject {
         // CR 614.12: only the "other" scope excludes the source from the subset.
         let filter = match (filter, scope) {
@@ -4518,7 +4617,7 @@ fn enters_with_counters_outcome(
     let other_suffix =
         enters_with_condition_suffix(is_escape, &kicker_condition, work_text, after_with);
     match resolve_enters_with_condition(&unless_outcome, &leading_if_outcome, &other_suffix) {
-        None => return Err(EntersWithDecline::GateFailsClosed),
+        None => return Err(EntersWithDecline::FailsClosed(EntersWithGap::Gate)),
         Some(Some(cond)) => def = def.condition(cond),
         Some(None) => {}
     }
@@ -5000,11 +5099,10 @@ enum EntersWithGate {
     /// A gate is present but unrecognized — the caller MUST fail closed so the
     /// line lands in `Effect::unimplemented`.
     ///
-    /// `parse_enters_with_counters` returns `None` both for "not my shape" and
-    /// for "my shape, gate unparseable", so this decline is typed separately as
-    /// `EntersWithDecline::GateFailsClosed`: the Priority-8 guard in `oracle.rs`
-    /// (`enters_with_gate_fails_closed`) lands the line as `Effect::unimplemented`
-    /// before any LATER route can claim it as an ungated reading.
+    /// `parse_enters_with_counters` lets later replacement parsers try the line
+    /// for both ordinary failures and unparseable gates, preserving base's
+    /// dispatch behavior. If those parsers decline too, the Priority-8 guard
+    /// records `EntersWithDecline::FailsClosed(EntersWithGap::Gate)`.
     Unparsed,
 }
 
@@ -5292,12 +5390,8 @@ fn strip_additional_counter_qualifier(input: &str) -> &str {
         .map_or(input, |(rest, _)| rest)
 }
 
-fn parse_enters_counter_entries(after_with: &str) -> Option<Vec<(CounterType, QuantityExpr)>> {
-    parse_enters_counter_entries_with_rest(after_with).map(|(entries, _rest)| entries)
-}
-
-/// As [`parse_enters_counter_entries`], but also returns the text left AFTER the
-/// list's `" on it"` terminator.
+/// Read a conjoined "enters with" counter list, returning its entries and the text
+/// left AFTER the list's `" on it"` terminator.
 ///
 /// The remainder is what lets a caller tell a complete clause from one that
 /// still has a printed instruction attached — "…counter and deathtouch counter
@@ -5428,7 +5522,58 @@ fn parse_enters_counter_list_separator(input: &str) -> OracleResult<'_, ()> {
 /// a genuinely single one. A conjunct that is not a counter placement ("and you
 /// draw a card", "and with haste") does not match: it has no count anchor and
 /// names no counter.
+/// After the first placement's recipient (and an optional rounding postmodifier)
+/// the same question is asked again, using the same placement grammar.
 fn continues_with_unread_counter_placement(after_counter: &str) -> bool {
+    separator_then_counter_placement(after_counter)
+        || after_counter_recipient(clause_before_where_x(after_counter))
+            .is_some_and(placement_follows_recipient)
+}
+
+/// The text after the first placement's counter noun and its recipient:
+/// `<noun>[s] on <recipient>`. `None` when no recipient follows.
+fn after_counter_recipient(after_counter: &str) -> Option<&str> {
+    let (rest, _) = (
+        opt(tag::<_, _, OracleError<'_>>("s")),
+        tag(" on "),
+        alt((tag("~"), nom_primitives::parse_object_recipient_pronoun)),
+    )
+        .parse(after_counter)
+        .ok()?;
+    Some(rest)
+}
+
+/// Whether a further counter placement follows a consumed recipient, after an
+/// optional rounding postmodifier (`, rounded up|down`).
+fn placement_follows_recipient(after_recipient: &str) -> bool {
+    let (after_rounding, _) = opt(nom_quantity::parse_explicit_rounding_suffix)
+        .parse(after_recipient)
+        .unwrap_or((after_recipient, None));
+    separator_then_counter_placement(after_rounding)
+}
+
+/// CR 107.1a + CR 122.6: whether the text after a counter list's terminal
+/// recipient still carries part of the clause the list reader does not read: a
+/// rounding postmodifier (which list entry it rounds is not recorded) or a
+/// further placement.
+fn list_tail_is_unread(after_recipient: &str) -> bool {
+    nom_quantity::parse_explicit_rounding_suffix(after_recipient).is_ok()
+        || separator_then_counter_placement(after_recipient)
+}
+
+/// CR 107.3m: whether a count reads the X paid for the entering permanent's spell.
+fn count_reads_paid_x(count: &QuantityExpr) -> bool {
+    count.any_ref(&mut |qty| matches!(qty, QuantityRef::CostXPaid))
+}
+
+/// CR 107.3: a trailing ", where X is <q>" defines X; it is not part of the placement clause.
+fn clause_before_where_x(text: &str) -> &str {
+    nom_primitives::split_once_on(text, ", where x is ").map_or(text, |(_, (head, _))| head)
+}
+
+/// A list separator directly followed by a further counter placement (the
+/// body of [`continues_with_unread_counter_placement`], unchanged from #9880).
+fn separator_then_counter_placement(after_counter: &str) -> bool {
     let Ok((after_sep, ())) =
         preceded(opt(tag("s")), parse_enters_counter_list_separator).parse(after_counter)
     else {
@@ -5465,9 +5610,17 @@ fn parse_counter_noun_within_clause(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+/// Strip the marker shared by both enters-with counter-choice shapes.
+fn strip_enters_with_choice_marker(after_with: &str) -> Option<&str> {
+    tag::<_, _, OracleError<'_>>("your choice of ")
+        .parse(after_with)
+        .ok()
+        .map(|(rest, _)| rest)
+}
+
 /// CR 614.12a: For "your choice of <list> on it", split off the trailing
-/// self-referential target. Given the text AFTER "your choice of " (e.g.
-/// "a +1/+1, first strike, or vigilance counter on it."), return
+/// self-referential target. Given the text AFTER "enters with " (e.g.
+/// "your choice of a +1/+1, first strike, or vigilance counter on it."), return
 /// `Some((choices, target))` where `choices` is the disjunctive counter list
 /// ("a +1/+1, first strike, or vigilance counter") and `target` is the
 /// self-reference ("it"). Returns `None` when the target is NOT a self-reference
@@ -5477,10 +5630,7 @@ fn parse_counter_noun_within_clause(input: &str) -> OracleResult<'_, ()> {
 /// <target>", then the target (with trailing punctuation stripped) is validated
 /// against the self/object pronoun set (`it` / `~`).
 fn strip_enters_with_choice_target(after_choice: &str) -> Option<(&str, &str)> {
-    // Detect the "your choice of " marker via nom (no string dispatch).
-    let (after_marker, _) = tag::<_, _, OracleError<'_>>("your choice of ")
-        .parse(after_choice)
-        .ok()?;
+    let after_marker = strip_enters_with_choice_marker(after_choice)?;
     // Split list from trailing " on <target>".
     let (after_on, choices) = take_until::<_, _, OracleError<'_>>(" on ")
         .parse(after_marker)
@@ -5502,8 +5652,9 @@ fn strip_enters_with_choice_target(after_choice: &str) -> Option<(&str, &str)> {
 /// permanent itself. The list TRAILS the self-reference here — the mirror of
 /// `strip_enters_with_choice_target`'s "<list> on it" order.
 fn strip_enters_with_two_different_from_among(after_choice: &str) -> Option<&str> {
-    let (rest, _) = tag::<_, _, OracleError<'_>>("your choice of two different counters on ")
-        .parse(after_choice)
+    let after_marker = strip_enters_with_choice_marker(after_choice)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("two different counters on ")
+        .parse(after_marker)
         .ok()?;
     // CR 614.12a: the recipient must be the entering permanent itself.
     let (rest, _) = alt((tag::<_, _, OracleError<'_>>("it"), tag("~")))
@@ -5570,11 +5721,18 @@ fn build_enters_counter_ability(entries: Vec<(CounterType, QuantityExpr)>) -> Ab
 ///
 /// Returns the (controller-constrained) spell filter and the text after
 /// `"enters with "`.
-fn parse_cast_enters_with_prefix(norm_lower: &str) -> Option<(TypedFilter, &str)> {
-    // Prefix.
-    let (rest, _) = tag::<_, _, OracleError<'_>>("whenever you cast ")
-        .parse(norm_lower)
-        .ok()?;
+fn parse_cast_enters_with_prefix(norm_lower: &str) -> Option<(TypedFilter, &str, bool)> {
+    // Prefix. CR 603.1: "when" and "whenever" are both trigger words; the
+    // repeatable form ("whenever") appears on permanents while one-time
+    // boon inners print the singular ("when you cast a creature spell, that
+    // creature enters with …"). Longer word first so the shared prefix can
+    // never partially match.
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("whenever you cast "),
+        tag("when you cast "),
+    ))
+    .parse(norm_lower)
+    .ok()?;
 
     // Drop the article before the spell filter.
     let (rest, _) = alt((
@@ -5602,7 +5760,12 @@ fn parse_cast_enters_with_prefix(norm_lower: &str) -> Option<(TypedFilter, &str)
     // The Oracle text says "you cast" — constrain to the controller.
     spell_typed.controller = Some(ControllerRef::You);
 
-    // Subject — "creature", "permanent", or "spell" — and " enters with ".
+    // Subject — "creature", "permanent", or "spell" — and the enters frame.
+    // CR 614.12: "enters with" and "enters the battlefield with" are the same
+    // replacement frame (boon inners print both: March Toward Perfection vs
+    // Tenacious Pup). "Enters tapped and with" (Loch Larent's boon) adds a
+    // tap rider, reported via the returned flag so the payload builder can
+    // compose `SetTapState` ahead of the counters. Longest frame first.
     let (rest, _subject) = alt((
         tag::<_, _, OracleError<'_>>("creature "),
         tag("permanent "),
@@ -5610,21 +5773,77 @@ fn parse_cast_enters_with_prefix(norm_lower: &str) -> Option<(TypedFilter, &str)
     ))
     .parse(after_that_text)
     .ok()?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>("enters with ")
-        .parse(rest)
-        .ok()?;
+    let (rest, tapped) = alt((
+        value(
+            true,
+            tag::<_, _, OracleError<'_>>("enters tapped and with "),
+        ),
+        value(false, tag("enters the battlefield with ")),
+        value(false, tag("enters with ")),
+    ))
+    .parse(rest)
+    .ok()?;
 
-    Some((spell_typed, rest))
+    Some((spell_typed, rest, tapped))
 }
 
 fn parse_whenever_you_cast_enters_with(
     norm_lower: &str,
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
-    let (spell_typed, rest) = parse_cast_enters_with_prefix(norm_lower)?;
+    let (spell_typed, rest, tapped) = parse_cast_enters_with_prefix(norm_lower)?;
+
+    // CR 614.12a + CR 608.2d: "… enters with your choice of <counter-list> on
+    // it" (Champions of Tyr's boon) — the same controller-picks-the-counter
+    // construction the self-ETB path builds, routed through the same two
+    // authorities (`strip_enters_with_choice_target` +
+    // `classify_and_parse_counter_choice_list`) so the grammars cannot drift
+    // apart. Branches are `SelfRef` `PutCounter`s: the entering permanent is
+    // the recipient once this floating replacement applies to it.
+    if let Some((choices, _on)) = strip_enters_with_choice_target(rest) {
+        let entries =
+            crate::parser::oracle_effect::classify_and_parse_counter_choice_list(choices)?;
+        let branches: Vec<AbilityDefinition> = entries
+            .into_iter()
+            .map(|(counter_type, count)| {
+                let mut def = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::PutCounter {
+                        counter_type: counter_type.clone(),
+                        count,
+                        target: TargetFilter::SelfRef,
+                    },
+                );
+                def.description = Some(format!("a {} counter", counter_type.display_phrase()));
+                def
+            })
+            .collect();
+        // No separate remainder gate is needed here (unlike the conjoined
+        // list below): `strip_enters_with_choice_target` only succeeds when
+        // EVERYTHING past the final " on " is the bare entering-permanent
+        // pronoun, so a trailing rider ("… on it and with haste") fails the
+        // pronoun check and the whole recognizer falls through to `None`.
+        let mut choice = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches,
+                kind: ChooseOneOfKind::Ordinary,
+            },
+        );
+        choice.description = Some("your choice of counter".to_string());
+        let execute = compose_cast_enters_with_tap(choice, tapped);
+        return Some(
+            ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+                .execute(execute)
+                .valid_card(TargetFilter::Typed(spell_typed))
+                .destination_zone(Zone::Battlefield)
+                .description(original_text.to_string()),
+        );
+    }
 
     // A CONJOINED counter list ("an additional +1/+1 counter and deathtouch
-    // counter on it") routes through `parse_enters_counter_entries` — the same
+    // counter on it") routes through `parse_enters_counter_entries_with_rest` — the same
     // reader the self-ETB replacement path uses, so this grammar has ONE
     // authority instead of the bespoke single-counter parse below. The bespoke
     // parse stays as the fallback for everything the list reader declines.
@@ -5655,7 +5874,7 @@ fn parse_whenever_you_cast_enters_with(
         // fewer counters.
         //
         // This gate is scoped to THIS route on purpose. The self-ETB path shares
-        // `parse_enters_counter_entries` and has always tolerated a trailing
+        // `parse_enters_counter_entries_with_rest` and has always tolerated a trailing
         // rider; tightening it there would fail closed on the nine Invasion
         // kicker cards and drop the counters they place today (#7721), trading a
         // partial parse for no parse at all.
@@ -5664,7 +5883,10 @@ fn parse_whenever_you_cast_enters_with(
         }
         return Some(
             ReplacementDefinition::new(ReplacementEvent::ChangeZone)
-                .execute(build_enters_counter_ability(entries))
+                .execute(compose_cast_enters_with_tap(
+                    build_enters_counter_ability(entries),
+                    tapped,
+                ))
                 .valid_card(TargetFilter::Typed(spell_typed))
                 .destination_zone(Zone::Battlefield)
                 .description(original_text.to_string()),
@@ -5674,37 +5896,41 @@ fn parse_whenever_you_cast_enters_with(
     // Count prefix: "an additional" | "N additional" | plain "N" | "x additional" | "x".
     // Mirrors `try_parse_enters_with_additional_counters` — the Wildgrowth
     // family always uses "additional" but the underlying shape matches.
-    let (rest, fixed_count) =
-        if let Ok((r, _)) = tag::<_, _, OracleError<'_>>("an additional ").parse(rest) {
-            (r, Some(1u32))
-        } else if let Ok((r, _)) = alt((
-            tag::<_, _, OracleError<'_>>("x additional "),
-            tag("X additional "),
-        ))
-        .parse(rest)
-        {
-            // X is dynamic — actual value comes from the trailing "where X is …" clause.
-            (r, None)
-        } else if let Ok((r, n)) = nom_primitives::parse_number(rest) {
-            let (r, _) = tag::<_, _, OracleError<'_>>(" additional ")
-                .parse(r)
-                .or_else(|_| tag::<_, _, OracleError<'_>>(" ").parse(r))
-                .ok()?;
-            (r, Some(n))
-        } else {
-            return None;
-        };
-
-    // Counter type.
-    let (rest, counter_type) = alt((
-        value(
-            CounterType::Plus1Plus1,
-            tag::<_, _, OracleError<'_>>("+1/+1"),
-        ),
-        value(CounterType::Minus1Minus1, tag("-1/-1")),
+    // Digital-only Alchemy (no CR entry): the bare article ("a stun counter",
+    // Loch Larent's boon; "a lifelink counter", Klement) is count one. Tried
+    // AFTER "an additional " so the longer prefix wins.
+    let (rest, fixed_count) = if let Ok((r, _)) =
+        tag::<_, _, OracleError<'_>>("an additional ").parse(rest)
+    {
+        (r, Some(1u32))
+    } else if let Ok((r, _)) = alt((
+        tag::<_, _, OracleError<'_>>("x additional "),
+        tag("X additional "),
     ))
     .parse(rest)
-    .ok()?;
+    {
+        // X is dynamic — actual value comes from the trailing "where X is …" clause.
+        (r, None)
+    } else if let Ok((r, n)) = nom_primitives::parse_number(rest) {
+        let (r, _) = tag::<_, _, OracleError<'_>>(" additional ")
+            .parse(r)
+            .or_else(|_| tag::<_, _, OracleError<'_>>(" ").parse(r))
+            .ok()?;
+        (r, Some(n))
+    } else if let Ok((r, _)) = alt((tag::<_, _, OracleError<'_>>("an "), tag("a "))).parse(rest) {
+        (r, Some(1u32))
+    } else {
+        return None;
+    };
+
+    // Counter type — the shared vocabulary (P/T, keyword, named, generic),
+    // so "a stun counter" (Loch Larent's boon) and "a lifelink counter"
+    // (Klement) lower here instead of falling through to the generic
+    // trigger parser's pending-counters rider. Only the floating
+    // replacement this route builds can carry the "enters tapped" rider
+    // (CR 110.5: a resolving trigger cannot tap a permanent that has not
+    // entered yet), so routing tapped shapes here is load-bearing.
+    let (rest, counter_type) = nom_primitives::parse_counter_type_typed(rest).ok()?;
 
     // " counter on it" / " counters on it" with optional trailing punctuation.
     let (rest, _) = alt((
@@ -5723,7 +5949,18 @@ fn parse_whenever_you_cast_enters_with(
     // expression, misrouting the whole ability to the generic self-ETB
     // fallback (Runadi, Behemoth Caller — issue #6492).
     let count_expr = match fixed_count {
-        Some(n) => QuantityExpr::Fixed { value: n as i32 },
+        Some(n) => {
+            // CR 614.12: the fixed-count arm must not publish a
+            // complete-looking replacement while silently dropping a trailing
+            // rider ("… on it and it gains haste"). Require the same complete
+            // suffix consumption the conjoined-list route above enforces — a
+            // rider this route cannot compose stays an honest gap. (The
+            // dynamic-X arm already fails closed via `?`.)
+            if !counter_list_remainder_is_exhausted(rest) {
+                return None;
+            }
+            QuantityExpr::Fixed { value: n as i32 }
+        }
         None => parse_enters_with_where_x_suffix(rest)?,
     };
 
@@ -5740,11 +5977,31 @@ fn parse_whenever_you_cast_enters_with(
     // entering the battlefield also receive counters (Metallic Mimic + creature tokens).
     Some(
         ReplacementDefinition::new(ReplacementEvent::ChangeZone)
-            .execute(put_counter)
+            .execute(compose_cast_enters_with_tap(put_counter, tapped))
             .valid_card(TargetFilter::Typed(spell_typed))
             .destination_zone(Zone::Battlefield)
             .description(original_text.to_string()),
     )
+}
+
+/// CR 614.1c: compose the "enters tapped" rider ahead of the entering-with
+/// counters (Loch Larent's boon: "that creature enters tapped and with a
+/// stun counter on it"). Tap-first chaining mirrors the self-ETB path's
+/// `SetTapState.sub_ability(core)` composition; `SelfRef` is the entering
+/// permanent once this floating replacement applies to it.
+fn compose_cast_enters_with_tap(core: AbilityDefinition, tapped: bool) -> AbilityDefinition {
+    if !tapped {
+        return core;
+    }
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::SetTapState {
+            target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+        },
+    )
+    .sub_ability(core)
 }
 
 /// CR 603.1 + CR 603.3 + CR 614.1c/614.12: The actual recognizer for "Whenever
@@ -6191,6 +6448,10 @@ fn replacement_condition_from_static(
         | StaticCondition::EnchantedIsFaceDown
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
+        // Digital-only Alchemy (no CR entry): "if you have a boon" has no
+        // `ReplacementCondition` carrier — fail closed like the other
+        // uncarriable gates.
+        | StaticCondition::HasBoon { .. }
         | StaticCondition::None => None,
     }
 }
@@ -11167,6 +11428,7 @@ fn parse_optional_token_substitution_choice(
                 Effect::ChooseOneOf {
                     chooser: PlayerFilter::Controller,
                     branches,
+                    kind: ChooseOneOfKind::Ordinary,
                 },
             ))
             .description(original_text.to_string()),
@@ -12901,19 +13163,22 @@ pub(crate) fn as_long_as_gate_is_unparsed(text: &str, card_name: &str) -> bool {
     )
 }
 
-/// CR 614.1c: parser-owned predicate for the Priority-8 enters-with guard — true
-/// when `text` is an "enters with [counters]" replacement line whose printed gate
-/// fails closed (`EntersWithDecline::GateFailsClosed`). Normalizes exactly as
+/// CR 614.1c: parser-owned predicate for the Priority-8 enters-with guard — why
+/// `text`, an "enters with [counters]" replacement line, fails closed, if it
+/// does (`EntersWithDecline::FailsClosed`): a printed gate or a counter
+/// placement the parser cannot carry. Normalizes exactly as
 /// `parse_replacement_line_inner` does and applies the same reach gate, so the
 /// route and the parser cannot drift.
-pub(crate) fn enters_with_gate_fails_closed(text: &str, card_name: &str) -> bool {
+pub(crate) fn enters_with_fails_closed(text: &str, card_name: &str) -> Option<EntersWithGap> {
     let text = strip_reminder_text(text);
     let norm_lower = replace_self_refs(&text, card_name).to_lowercase();
-    has_enters_with_counter_tokens(&norm_lower)
-        && matches!(
-            enters_with_counters_outcome(&norm_lower, &text),
-            Err(EntersWithDecline::GateFailsClosed)
-        )
+    if !has_enters_with_counter_tokens(&norm_lower) {
+        return None;
+    }
+    match enters_with_counters_outcome(&norm_lower, &text) {
+        Err(EntersWithDecline::FailsClosed(gap)) => Some(gap),
+        Ok(_) | Err(EntersWithDecline::NotThisShape) => None,
+    }
 }
 
 /// CR 615.1a: subject-first prevention recipient "<subject> would be dealt …".
@@ -20271,7 +20536,9 @@ mod tests {
                 Some(TargetFilter::SelfRef),
                 "valid_card should be SelfRef: {text}"
             );
-            let Effect::ChooseOneOf { chooser, branches } = &*def.execute.as_ref().unwrap().effect
+            let Effect::ChooseOneOf {
+                chooser, branches, ..
+            } = &*def.execute.as_ref().unwrap().effect
             else {
                 panic!("expected ChooseOneOf execute, got {:?}", def.execute);
             };
@@ -20410,7 +20677,10 @@ mod tests {
         )
         .unwrap();
         let execute = def.execute.as_ref().unwrap();
-        let Effect::ChooseOneOf { chooser, branches } = &*execute.effect else {
+        let Effect::ChooseOneOf {
+            chooser, branches, ..
+        } = &*execute.effect
+        else {
             panic!("expected ChooseOneOf, got {:?}", execute.effect);
         };
         assert_eq!(*chooser, PlayerFilter::Controller);
@@ -20950,33 +21220,34 @@ mod tests {
         }
     }
 
-    /// CR 107.3 + CR 122.6: #9662-adjacent gate-parity pins. A conjoined counter
-    /// list publishes its own entries, whose counts do not see the where-X
-    /// binding (#9662), so on a list line the where-X tail is only an
-    /// accept/decline gate — and that gate must stay the enters-with where-X
-    /// reader's, exactly as at base. The definitions below are read by the
-    /// possessive-free core where-X reader but NOT by the enters-with reader
-    /// (probed, asserted as reach guards), so both list heads — one whose head
-    /// count prints no X ("a +1/+1 counter"), one composite ("twice X") — must
-    /// fail closed (probed: `None`) rather than publish the X entry as the cost
-    /// X. The same heads with a definition the enters-with reader reads parse
-    /// (positive reach guard; their counts are #9662's and are not asserted).
-    /// SYNTHETIC: no printed card has this shape.
+    /// CR 107.3 + CR 122.6: a conjoined counter list publishes its own entries,
+    /// whose counts do not see a where-X binding, so on an X-FREE list line the
+    /// where-X tail is only an accept/decline gate — and that gate stays the
+    /// enters-with where-X reader's, exactly as at base. The definitions below
+    /// are read by the possessive-free core where-X reader but NOT by the
+    /// enters-with reader (probed, asserted as reach guards), so the X-free list
+    /// head must fail closed on each. The same head with a definition the
+    /// enters-with reader reads parses (positive reach guard). SYNTHETIC: no
+    /// printed card has this shape.
     #[test]
     fn enters_with_counter_list_where_x_gate_matches_the_enters_reader() {
-        const HEADS: [&str; 2] = [
-            "This creature enters with a +1/+1 counter and X charge counters on it, where X is ",
-            "This creature enters with twice X +1/+1 counters and a lifelink counter on it, \
-             where X is ",
-        ];
+        const HEAD: &str =
+            "This creature enters with two +1/+1 counters and a lifelink counter on it, where X is ";
         const READABLE: &str = "the number of creatures you control.";
-        for head in HEADS {
-            let readable = format!("{head}{READABLE}");
-            assert!(
-                parse_replacement_line(&readable, "Test Creature").is_some(),
-                "reach guard: {readable:?} should parse"
-            );
-        }
+        let readable = format!("{HEAD}{READABLE}");
+        assert_eq!(
+            put_counters_in_chain(
+                &parse_replacement_line(&readable, "Test Creature")
+                    .unwrap_or_else(|| panic!("reach guard: {readable:?} should parse"))
+            ),
+            vec![
+                (CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 2 }),
+                (
+                    CounterType::Keyword(crate::types::keywords::KeywordKind::Lifelink),
+                    QuantityExpr::Fixed { value: 1 }
+                ),
+            ]
+        );
         type CoreReading = fn(&QuantityRef) -> bool;
         let witnesses: [(&str, CoreReading); 3] = [
             (
@@ -21004,15 +21275,488 @@ mod tests {
                 None,
                 "reach guard: the enters-with where-X reader does not read {definition:?}"
             );
-            for head in HEADS {
-                let line = format!("{head}{definition}");
-                assert!(
-                    parse_replacement_line(&line, "Test Creature").is_none(),
-                    "a counter list keeps the enters-with where-X gate and must fail \
-                     closed: {line:?}"
-                );
+            let line = format!("{HEAD}{definition}");
+            assert!(
+                parse_replacement_line(&line, "Test Creature").is_none(),
+                "a counter list keeps the enters-with where-X gate and must fail \
+                 closed: {line:?}"
+            );
+        }
+    }
+
+    /// CR 107.3 + CR 107.3i: "where X is <q>" defines the X of every entry that
+    /// prints one, but a list publishes its entries' printed counts — an
+    /// X-bearing entry would keep the cost X (`CostXPaid`) where the definition
+    /// belongs. At base, readable lists retained their CostXPaid entry counts,
+    /// the repeated-recipient witness published only the first placement, and
+    /// the on-him witness was already declined by #9880. All witnesses below
+    /// decline now.
+    /// SYNTHETIC: no printed card has this shape.
+    #[test]
+    fn enters_with_counter_list_with_x_entry_and_where_x_fails_closed() {
+        const DEFINITION: &str = ", where X is the number of creatures you control.";
+        for head in [
+            // The issue's items (b) and (c), plus the `on it` twin of (b).
+            "This creature enters with a +1/+1 counter and X charge counters on him",
+            "This creature enters with a +1/+1 counter and X charge counters on it",
+            "This creature enters with X +1/+1 counters on it and X charge counters on it",
+            // Composite entries, rounding, an elided entry after an X entry.
+            "This creature enters with twice X +1/+1 counters and a lifelink counter on it",
+            "This creature enters with half X +1/+1 counters and a lifelink counter on it, \
+             rounded up",
+            "This creature enters with X +1/+1 counters, X charge counters, and X lifelink \
+             counters on it",
+            "If this creature was kicked, it enters with X +1/+1 counters and a lifelink \
+             counter on it",
+        ] {
+            let line = format!("{head}{DEFINITION}");
+            assert!(
+                parse_replacement_line(&line, "Test Creature").is_none(),
+                "an X-bearing counter list with a where-X tail must fail closed: {line:?}"
+            );
+        }
+        // Reach guards: the same grammar without an X entry parses and keeps its
+        // printed counts; an X-bearing list WITHOUT a definition keeps the cost X.
+        let x_free = parse_replacement_line(
+            "This creature enters with a +1/+1 counter and a lifelink counter on it, where X is \
+             the number of creatures you control.",
+            "Test Creature",
+        )
+        .expect("an X-free list with a readable definition parses");
+        assert_eq!(
+            put_counters_in_chain(&x_free),
+            vec![
+                (CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 1 }),
+                (
+                    CounterType::Keyword(crate::types::keywords::KeywordKind::Lifelink),
+                    QuantityExpr::Fixed { value: 1 }
+                ),
+            ]
+        );
+        let conjoined = parse_replacement_line(
+            "This creature enters with X +1/+1 counters and X charge counters on it.",
+            "Test Creature",
+        )
+        .expect("a conjoined X list without a definition parses");
+        assert_eq!(
+            put_counters_in_chain(&conjoined),
+            vec![
+                (
+                    CounterType::Plus1Plus1,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CostXPaid
+                    },
+                ),
+                (
+                    CounterType::Generic("charge".to_string()),
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CostXPaid
+                    },
+                ),
+            ],
+        );
+    }
+
+    /// CR 614.1c + CR 122.6 + CR 608.2c: a placement that follows an
+    /// already-consumed recipient is as unread as one that follows the counter
+    /// noun. Each line below parsed at base as a supported replacement that
+    /// placed the FIRST placement only (probed). They fail closed now, and each
+    /// carries a readable twin that places every counter. SYNTHETIC: no printed
+    /// card has this shape.
+    #[test]
+    fn second_placement_after_a_consumed_recipient_fails_closed() {
+        const A_NUMBER_OF: &str = "a number of charge counters on it equal to the number of \
+                                   creatures you control";
+        for line in [
+            // The issue's item (a), and every recipient the reader steps over.
+            format!("This creature enters with a +1/+1 counter on it and {A_NUMBER_OF}."),
+            "This creature enters with a +1/+1 counter on them and X charge counters on them."
+                .to_string(),
+            "This creature enters with a +1/+1 counter on him and a lifelink counter on him."
+                .to_string(),
+            "This creature enters with a +1/+1 counter on her and a lifelink counter on her."
+                .to_string(),
+            "This creature enters with a +1/+1 counter on this creature and a lifelink counter \
+             on this creature."
+                .to_string(),
+            // A non-self recipient for the second placement does not make it read.
+            "This creature enters with a +1/+1 counter on it and a lifelink counter on target \
+             creature."
+                .to_string(),
+            // Oxford comma, three placements, a trailing rider.
+            "This creature enters with a +1/+1 counter on it, a lifelink counter on it, and a \
+             trample counter on it."
+                .to_string(),
+            format!(
+                "This creature enters with a +1/+1 counter on it and {A_NUMBER_OF}, and with haste."
+            ),
+            // Item (c): X on both placements, with and without the definition.
+            "This creature enters with X +1/+1 counters on it and X charge counters on it, where \
+             X is the number of creatures you control."
+                .to_string(),
+            "This creature enters with X +1/+1 counters on it and X charge counters on it equal \
+             to the number of creatures you control."
+                .to_string(),
+            // A rounding postmodifier between the recipient and the next placement.
+            "This creature enters with half X +1/+1 counters on it, rounded up, and a lifelink \
+             counter on it, where X is the number of creatures you control."
+                .to_string(),
+            "This creature enters with half X +1/+1 counters on it, rounded down and a lifelink \
+             counter on it."
+                .to_string(),
+            // Kicker-gated and distributive subjects, enters tapped.
+            format!(
+                "If this creature was kicked, it enters with a +1/+1 counter on it and {A_NUMBER_OF}."
+            ),
+            format!(
+                "Each other creature you control enters with a +1/+1 counter on it and {A_NUMBER_OF}."
+            ),
+            format!(
+                "This creature enters tapped with a +1/+1 counter on it and {A_NUMBER_OF}."
+            ),
+            // The list reader's own terminal recipient, then a further placement.
+            "This creature enters with two +1/+1 counters and a lifelink counter on it and a \
+             trample counter on it."
+                .to_string(),
+            "This creature enters with two +1/+1 counters and a lifelink counter on it, rounded \
+             up, and a trample counter on it."
+                .to_string(),
+            format!(
+                "This creature enters with two +1/+1 counters and a lifelink counter on it and {A_NUMBER_OF}."
+            ),
+        ] {
+            assert!(
+                parse_replacement_line(&line, "Test Creature").is_none(),
+                "an unread second placement must fail closed: {line:?}"
+            );
+        }
+
+        // Reach guards: the readable twins place every counter.
+        let twins: [(&str, Vec<(CounterType, QuantityExpr)>); 4] = [
+            (
+                "This creature enters with a +1/+1 counter on it.",
+                vec![(CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 1 })],
+            ),
+            (
+                "This creature enters with two +1/+1 counters and a lifelink counter on it.",
+                vec![
+                    (CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 2 }),
+                    (
+                        CounterType::Keyword(crate::types::keywords::KeywordKind::Lifelink),
+                        QuantityExpr::Fixed { value: 1 },
+                    ),
+                ],
+            ),
+            (
+                "This creature enters with a +1/+1 counter on it and with haste.",
+                vec![(CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 1 })],
+            ),
+            (
+                "This creature enters with a +1/+1 counter on it, rounded up.",
+                vec![(CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 1 })],
+            ),
+        ];
+        for (line, expected) in twins {
+            let def = parse_replacement_line(line, "Test Creature")
+                .unwrap_or_else(|| panic!("reach guard: {line:?} should parse"));
+            assert_eq!(put_counters_in_chain(&def), expected, "{line:?}");
+        }
+    }
+
+    /// CR 107.1a + CR 122.6: a counter list's terminal rounding postmodifier
+    /// rounds some entry the list reader does not record, so the list declines
+    /// rather than publishing its default rounding (probed at base: every line
+    /// below parsed as supported with `RoundingMode::Down`). A list whose tail is
+    /// a keyword rider (Voidpouncer's shape) or nothing still parses.
+    /// SYNTHETIC: no printed list carries a rounding postmodifier.
+    #[test]
+    fn counter_list_with_a_terminal_rounding_postmodifier_fails_closed() {
+        for line in [
+            "This creature enters with half X +1/+1 counters and a lifelink counter on it, rounded up.",
+            "This creature enters with a lifelink counter and half X +1/+1 counters on it, rounded up.",
+            "This creature enters with half X +1/+1 counters and half X charge counters on it, round down.",
+            "If this creature was kicked, it enters with half X +1/+1 counters and a lifelink counter \
+             on it, rounded up.",
+        ] {
+            assert!(
+                parse_replacement_line(line, "Test Creature").is_none(),
+                "a list's unread rounding postmodifier must fail closed: {line:?}"
+            );
+        }
+        for (line, entries) in [
+            (
+                "This creature enters with half X +1/+1 counters and a lifelink counter on it.",
+                2,
+            ),
+            (
+                "If this creature was kicked, it enters with two +1/+1 counters and a trample \
+                 counter on it and with haste.",
+                2,
+            ),
+        ] {
+            let def = parse_replacement_line(line, "Test Creature")
+                .unwrap_or_else(|| panic!("reach guard: {line:?} should parse"));
+            assert_eq!(put_counters_in_chain(&def).len(), entries, "{line:?}");
+        }
+    }
+
+    /// The decline detector is a superset of #9880's by construction: every
+    /// shape it recognized is still recognized (the first alternative is its
+    /// body, unchanged), and a placement after a consumed recipient and an
+    /// optional rounding postmodifier is recognized in addition. A where-X
+    /// definition is cut before the recipient is stepped over, and a conjunct
+    /// that is not a counter placement is not one. Direct predicate pins.
+    #[test]
+    fn continues_with_unread_counter_placement_steps_over_the_recipient() {
+        for after_counter in [
+            // #9880's shapes: a separator directly after the counter noun.
+            " and a lifelink counter on it",
+            "s, and X charge counters on it",
+            "s and half X, rounded up charge counters on target creature",
+            // New: the recipient (and a rounding postmodifier) comes first.
+            "s on it and a number of charge counters on it equal to the number of creatures",
+            " on them, a lifelink counter on them",
+            " on him, and a lifelink counter on him",
+            " on her and X charge counters on her",
+            " on ~ and a lifelink counter on ~",
+            "s on it, rounded up, and a lifelink counter on it",
+            "s on it, round down, and a lifelink counter on it",
+            "s on it and X charge counters on it, where X is the number of creatures you control",
+        ] {
+            assert!(
+                continues_with_unread_counter_placement(after_counter),
+                "{after_counter:?} continues with an unread placement"
+            );
+        }
+        for after_counter in [
+            "",
+            " on it",
+            "s on it.",
+            "s on it, rounded up.",
+            " on it and with haste",
+            " on it and you draw a card",
+            " on it, then you may put a +1/+1 counter on target creature",
+            // A where-X definition is not a placement, even when it names counters.
+            "s on it, where X is the number of +1/+1 counters on this creature",
+            "s on it, where X is the number of counters on this creature",
+        ] {
+            assert!(
+                !continues_with_unread_counter_placement(after_counter),
+                "{after_counter:?} is a single placement"
+            );
+        }
+    }
+
+    /// CR 107.3m + CR 614.12a: the X of a "your choice of X ..." option is the X
+    /// paid for the spell that became the permanent — the entering object's
+    /// `cost_x_paid`. An unrewritten `Variable("X")` reads trigger-event sources
+    /// (empty during entry), so base placed nothing. Every option count goes
+    /// through the same rewrite the single-placement and list paths use.
+    /// SYNTHETIC: no printed card has an X choice.
+    #[test]
+    fn enters_with_choice_options_read_the_paid_x() {
+        let paid = || QuantityExpr::Ref {
+            qty: QuantityRef::CostXPaid,
+        };
+        let choice_counts = |line: &str| -> Vec<(CounterType, QuantityExpr)> {
+            let def = parse_replacement_line(line, "Test Creature")
+                .unwrap_or_else(|| panic!("reach guard: {line:?} should parse"));
+            let mut node = def.execute.as_deref().expect("execute");
+            if matches!(*node.effect, Effect::SetTapState { .. }) {
+                node = node.sub_ability.as_deref().expect("choice after the tap");
+            }
+            let Effect::ChooseOneOf { branches, .. } = &*node.effect else {
+                panic!("{line:?}: expected a counter choice, got {:?}", node.effect);
+            };
+            branches
+                .iter()
+                .map(|branch| match &*branch.effect {
+                    Effect::PutCounter {
+                        counter_type,
+                        count,
+                        target: TargetFilter::SelfRef,
+                    } => (counter_type.clone(), count.clone()),
+                    other => panic!("{line:?}: expected a self-targeted PutCounter, got {other:?}"),
+                })
+                .collect()
+        };
+        assert_eq!(
+            choice_counts(
+                "This creature enters with your choice of X +1/+1 counters or X charge counters on it."
+            ),
+            vec![
+                (CounterType::Plus1Plus1, paid()),
+                (CounterType::Generic("charge".to_string()), paid()),
+            ]
+        );
+        assert_eq!(
+            choice_counts(
+                "This creature enters tapped with your choice of X +1/+1 counters, X charge counters, or a lifelink counter on it."
+            ),
+            vec![
+                (CounterType::Plus1Plus1, paid()),
+                (CounterType::Generic("charge".to_string()), paid()),
+                (
+                    CounterType::Keyword(crate::types::keywords::KeywordKind::Lifelink),
+                    QuantityExpr::Fixed { value: 1 },
+                ),
+            ]
+        );
+        // Arithmetic around X survives the rewrite.
+        let arithmetic = choice_counts(
+            "This creature enters with your choice of twice X +1/+1 counters or three minus X charge counters on it.",
+        );
+        assert_eq!(
+            arithmetic[0].1,
+            QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(paid()),
+            }
+        );
+        assert!(
+            count_reads_paid_x(&arithmetic[1].1) && !arithmetic[1].1.contains_x(),
+            "{:?}",
+            arithmetic[1].1
+        );
+        // Printed counts are untouched (Denry Klin / Grimdancer class).
+        assert_eq!(
+            choice_counts(
+                "This creature enters with your choice of two +1/+1 counters or three charge counters on it."
+            ),
+            vec![
+                (CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 2 }),
+                (
+                    CounterType::Generic("charge".to_string()),
+                    QuantityExpr::Fixed { value: 3 },
+                ),
+            ]
+        );
+        // A where-X / equal-to / foreign-recipient tail still declines the choice.
+        for line in [
+            "This creature enters with your choice of X +1/+1 counters or X charge counters on it, where X is the number of creatures you control.",
+            "This creature enters with your choice of X +1/+1 counters or X charge counters on it equal to the number of creatures you control.",
+            "This creature enters with your choice of X +1/+1 counters or X charge counters on him.",
+        ] {
+            assert!(
+                parse_replacement_line(line, "Test Creature").is_none(),
+                "a choice with an unread tail must fail closed: {line:?}"
+            );
+        }
+    }
+
+    /// CR 614.12: the choice replacement is built for the entering permanent
+    /// alone, so a recognized distributive subject yields a Clause decline instead of
+    /// giving the source the chosen counters. The single path's validity gate is unchanged.
+    /// SYNTHETIC: no printed card has a distributive counter choice.
+    #[test]
+    fn enters_with_choice_with_a_distributive_subject_declines() {
+        let mut unexpected = Vec::new();
+        for line in [
+            "Each other creature you control enters with your choice of X +1/+1 counters or X charge counters on it.",
+            "Each creature you control enters with your choice of a +1/+1 counter or a lifelink counter on it.",
+            "Other creatures you control enter with your choice of X +1/+1 counters or X charge counters on them.",
+            "Colorless creatures you control enter with your choice of X +1/+1 counters or X charge counters on them.",
+            "Each other creature you control enters tapped with your choice of X +1/+1 counters or X charge counters on it.",
+            "Each other creature you control enters with your choice of two different counters on it from among menace, deathtouch, and lifelink.",
+            "Each other commander you control enters with your choice of X +1/+1 counters or X charge counters on it.",
+            "Other commander you control enters with your choice of X +1/+1 counters or X charge counters on it.",
+            "Each commander you control enters with your choice of X +1/+1 counters or X charge counters on it.",
+            "Commanders you control enter with your choice of X +1/+1 counters or X charge counters on it.",
+            "Each other token you control enters with your choice of X +1/+1 counters or X charge counters on it.",
+            "Each other artifact or creature you control enters with your choice of X +1/+1 counters or X charge counters on it.",
+            "Each other creature or planeswalker you control enters with your choice of X +1/+1 counters or X charge counters on it.",
+            "Tokens you control enter with your choice of X +1/+1 counters or X charge counters on them.",
+        ] {
+            if enters_with_counters_outcome(&line.to_lowercase(), line).err()
+                != Some(EntersWithDecline::FailsClosed(EntersWithGap::Clause))
+                || parse_replacement_line(line, "Test Creature").is_some()
+            {
+                unexpected.push(line);
             }
         }
+        assert!(
+            unexpected.is_empty(),
+            "distributive choices did not preserve the Clause decline: {unexpected:#?}"
+        );
+        // Reach guards: the self subject with the same options parses — bare,
+        // kicked, tapped, escaped, and Grimdancer's from-among form.
+        for line in [
+            "This creature enters with your choice of X +1/+1 counters or X charge counters on it.",
+            "If this creature was kicked, it enters with your choice of X +1/+1 counters or X charge counters on it.",
+            "This creature enters tapped with your choice of X +1/+1 counters or X charge counters on it.",
+            "This creature escapes with your choice of X +1/+1 counters or X charge counters on it.",
+            "This creature enters with your choice of two different counters on it from among menace, deathtouch, and lifelink.",
+        ] {
+            let def = parse_replacement_line(line, "Test Creature")
+                .unwrap_or_else(|| panic!("reach guard: {line:?} should parse"));
+            assert_eq!(def.valid_card, Some(TargetFilter::SelfRef), "{line:?}");
+        }
+    }
+
+    /// CR 614.1c + CR 122.6: these unread-placement fixtures stop the
+    /// general replacement dispatch before the quoted rider or sibling
+    /// sentence can supply a replacement. The production-entry integration
+    /// test covers the corresponding route boundary.
+    #[test]
+    fn unread_placement_ends_replacement_dispatch() {
+        const Q2: &str = "\"If one or more counters would be put on this creature, twice that many of those counters are put on it instead.\"";
+        const QT: &str = "\"If one or more tokens would be created under your control, twice that many of those tokens are created instead.\"";
+        const DOUBLER: &str = "If one or more counters would be put on this creature, twice that many of those counters are put on it instead.";
+        let lines = [
+            format!("This creature enters with a +1/+1 counter on it and a lifelink counter on target creature and with {Q2}"),
+            format!("This creature enters with a +1/+1 counter on it and a number of charge counters on it equal to the number of creatures you control and with {Q2}"),
+            format!("This creature enters with a +1/+1 counter on it and a lifelink counter on it and with {Q2}"),
+            format!("This creature enters with a +1/+1 counter on it and a lifelink counter on it and with {QT}"),
+            format!("{DOUBLER} This creature enters with a +1/+1 counter on it and a lifelink counter on it."),
+            format!("{DOUBLER} This creature enters with a +1/+1 counter on it and a lifelink counter on target creature."),
+            format!("This creature enters with a +1/+1 counter and a lifelink counter on him and with {Q2}"),
+            format!("This creature enters with two +1/+1 counters and a lifelink counter on it and a trample counter on it and with {Q2}"),
+            format!("This creature enters with half X +1/+1 counters and a lifelink counter on it, rounded up, and with {Q2}"),
+        ];
+        for line in &lines {
+            assert_eq!(
+                enters_with_fails_closed(line, "Test Creature"),
+                Some(EntersWithGap::Clause),
+                "{line:?}"
+            );
+            assert!(
+                parse_replacement_line(line, "Test Creature").is_none(),
+                "{line:?}: the general replacement boundary preserves the Clause decline"
+            );
+        }
+        // Reach guards: the rider's and sentence's own replacement parsers fire
+        // on those fragments alone, and a fully read clause with the same rider
+        // keeps its enters-with reading.
+        for fragment in [
+            DOUBLER,
+            "If one or more tokens would be created under your control, twice that many of those tokens are created instead.",
+        ] {
+            assert!(parse_replacement_line(fragment, "Test Creature").is_some(), "{fragment:?}");
+            assert_eq!(enters_with_fails_closed(fragment, "Test Creature"), None);
+        }
+        let read = parse_replacement_line(
+            &format!("This creature enters with a +1/+1 counter on it and with {Q2}"),
+            "Test Creature",
+        )
+        .expect("reach guard: a single placement with a rider parses");
+        assert_eq!(read.event, ReplacementEvent::Moved);
+        // A where-X definition the enters-with reader cannot read is not an
+        // unread placement and keeps base's dispatch.
+        assert_eq!(
+            enters_with_fails_closed(
+                "This creature enters with X +1/+1 counters on it, where X is the mystery total.",
+                "Test Creature"
+            ),
+            None
+        );
+        // Gate declines keep base's dispatch: the gate guard still names them.
+        assert_eq!(
+            enters_with_fails_closed(
+                "This creature enters with two +1/+1 counters on it if you didn't go first this game.",
+                "Test Creature"
+            ),
+            Some(EntersWithGap::Gate)
+        );
     }
 
     /// CR 107.3 + CR 107.3i: a bare X count IS the where-X definition, read by
@@ -26644,7 +27388,7 @@ mod tests {
     /// The `Fixed`-only gate on the list route is what keeps the two count axes
     /// apart; without it this count silently becomes `CostXPaid`.
     /// The shared-list route must not publish a trigger for a clause it only
-    /// half-consumed. `parse_enters_counter_entries` stops at `" on it"`, so a
+    /// half-consumed. `parse_enters_counter_entries_with_rest` stops at `" on it"`, so a
     /// printed instruction after it ("… on it and with haste") would otherwise
     /// be dropped while this route returned a complete-looking
     /// `AddTargetReplacement` — a rules-bearing sentence reported as fully
@@ -27349,6 +28093,69 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// M6: a fixed article counter followed by a trailing rider must fail
+    /// closed — the route cannot compose the rider, so publishing the bare
+    /// counter replacement would silently drop rules text.
+    #[test]
+    fn fixed_article_counter_with_trailing_rider_fails_closed() {
+        let text = "Whenever you cast a creature spell, that creature enters with a stun counter on it and it gains haste.";
+        assert!(
+            parse_whenever_you_cast_enters_with(&text.to_lowercase(), text).is_none(),
+            "article counter + rider must fail the route closed, not drop the rider"
+        );
+        assert!(
+            parse_whenever_you_cast_enters_with_trigger(text, "Filler").is_none(),
+            "the trigger recognizer must also fail closed when its payload builder does"
+        );
+    }
+
+    /// M6: the same trailing-rider gate covers the numeric fixed-count arm,
+    /// which shared the accept-and-discard weakness.
+    #[test]
+    fn fixed_numeric_counter_with_trailing_rider_fails_closed() {
+        let text = "Whenever you cast a creature spell, that creature enters with two +1/+1 counters on it and it gains haste.";
+        assert!(
+            parse_whenever_you_cast_enters_with(&text.to_lowercase(), text).is_none(),
+            "numeric counter + rider must fail the route closed, not drop the rider"
+        );
+        assert!(
+            parse_whenever_you_cast_enters_with_trigger(text, "Filler").is_none(),
+            "the trigger recognizer must also fail closed when its payload builder does"
+        );
+    }
+
+    /// M6 no-regression: Loch Larent's boon body ("that creature enters
+    /// tapped and with a stun counter on it") has no trailing rider — the
+    /// tap composes ahead of the counters, so the route still accepts it.
+    #[test]
+    fn fixed_article_counter_simple_body_still_parses() {
+        let text =
+            "When you cast a creature spell, that creature enters tapped and with a stun counter on it.";
+        let trigger =
+            parse_whenever_you_cast_enters_with_trigger(text, "Loch Larent").expect("should parse");
+        let exec = trigger.execute.as_ref().expect("execute set");
+        let Effect::AddTargetReplacement { replacement, .. } = &*exec.effect else {
+            panic!("expected AddTargetReplacement, got {:?}", exec.effect);
+        };
+        let tap = replacement.execute.as_ref().expect("execute set");
+        assert!(
+            matches!(&*tap.effect, Effect::SetTapState { .. }),
+            "tapped rider must compose ahead of the counters, got {:?}",
+            tap.effect
+        );
+        let put_counter = tap.sub_ability.as_ref().expect("counter payload chained");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            ..
+        } = &*put_counter.effect
+        else {
+            panic!("expected PutCounter payload, got {:?}", put_counter.effect);
+        };
+        assert_eq!(*counter_type, CounterType::Stun);
+        assert_eq!(count, &QuantityExpr::Fixed { value: 1 });
     }
 
     /// #5656 + CR 614.1a: Archmage Ascension's "As long as ~ has six
@@ -29528,8 +30335,8 @@ mod tests {
         );
     }
 
-    /// CR 614.1c: the typed decline separates "my shape, gate fails closed" from
-    /// "not my shape".
+    /// CR 614.1c: the typed decline separates "my shape, gate fails closed" and
+    /// "my shape, a placement is unread" from "not my shape".
     #[test]
     fn enters_with_counters_outcome_types_its_decline() {
         assert_eq!(
@@ -29538,7 +30345,25 @@ mod tests {
                 "Patient Turtle enters with two +1/+1 counters on it if you didn't go first this game.",
             )
             .err(),
-            Some(EntersWithDecline::GateFailsClosed)
+            Some(EntersWithDecline::FailsClosed(EntersWithGap::Gate))
+        );
+        assert_eq!(
+            enters_with_counters_outcome(
+                "~ enters with a +1/+1 counter on it and a lifelink counter on it.",
+                "This creature enters with a +1/+1 counter on it and a lifelink counter on it.",
+            )
+            .err(),
+            Some(EntersWithDecline::FailsClosed(EntersWithGap::Clause))
+        );
+        // A where-X definition the enters-with reader cannot read is not an
+        // unread placement: it stays `NotThisShape`.
+        assert_eq!(
+            enters_with_counters_outcome(
+                "~ enters with x +1/+1 counters on it, where x is the mystery total.",
+                "This creature enters with X +1/+1 counters on it, where X is the mystery total.",
+            )
+            .err(),
+            Some(EntersWithDecline::NotThisShape)
         );
         assert_eq!(
             enters_with_counters_outcome("~ enters tapped.", "This creature enters tapped.").err(),
