@@ -2328,19 +2328,15 @@ pub(crate) fn shield_rider_reflects_per_event(state: &GameState, rid: Replacemen
 /// inline per event (per-source reflectors per CR 615.5, depletion/`AllBut`
 /// shields keeping their per-event stash) still stash + drain per event —
 /// Phase D emits their aggregate event but does not re-fire the rider.
-fn accumulate_batch_prevention(
-    state: &mut GameState,
-    applied_key: AppliedReplacementKey,
-    recipient: &TargetRef,
-    prevented_amount: u32,
-) -> bool {
-    if prevented_amount == 0 {
-        return false;
-    }
-    // CR 615.13 + CR 616.1e: a resumed batch rehydrates its parked tally on
-    // first accumulation — save/load may have dropped the transient, and the
-    // record is authoritative (kept current by the write-through below). Gated
-    // on a suspended batch, so the common path is one emptiness check.
+/// CR 615.13 + CR 616.1e: materialize the top parked batch's tally as the
+/// live transient. The single hydration authority, called before replacement
+/// dispatch (`apply_single_replacement`) so every tally-sensitive reader —
+/// the shield-counter applier, the batch rider-stash suppression gate, and
+/// the accumulator below — observes the resumed scope. Save/load may have
+/// dropped the transient, and the record is authoritative (kept current by
+/// the write-through below and re-parked whole on any further pause). Gated
+/// on a suspended batch, so the common path is one emptiness check.
+fn hydrate_parked_batch_prevention_tally(state: &mut GameState) {
     if state.combat_prevention_tally.is_none() && !state.pending_each_source_batches.is_empty() {
         let parked = state
             .pending_each_source_batches
@@ -2350,6 +2346,20 @@ fn accumulate_batch_prevention(
         state.combat_prevention_tally =
             Some(crate::game::effects::deal_damage::tally_map_from_record_entries(&parked));
     }
+}
+
+fn accumulate_batch_prevention(
+    state: &mut GameState,
+    applied_key: AppliedReplacementKey,
+    recipient: &TargetRef,
+    prevented_amount: u32,
+) -> bool {
+    if prevented_amount == 0 {
+        return false;
+    }
+    // CR 615.13 + CR 616.1e (Matt C3): a resumed batch rehydrates its parked
+    // tally on first accumulation, through the shared authority above.
+    hydrate_parked_batch_prevention_tally(state);
     let accumulated = if let Some(tally) = state.combat_prevention_tally.as_mut() {
         *tally.entry((applied_key, recipient.clone())).or_insert(0) += prevented_amount as i32;
         true
@@ -3491,18 +3501,17 @@ fn apply_shield_counter_replacement(
             // CR 510.2 + CR 122.1c: one shield counter prevents all simultaneous
             // combat damage dealt to the permanent in the batch. Defer counter
             // removal until the post-batch aggregation fires exactly once.
-            if let Some(tally) = state.combat_prevention_tally.as_mut() {
-                // CR 120.3: the recipient rides with the aggregate. This arm's
-                // own `matches!` guard already pins it to `Object(rid.source)`,
-                // so the entry is single-valued here — it is threaded anyway so
-                // the read side has one uniform shape and cannot drift back to
-                // re-deriving a recipient.
-                *tally
-                    .entry((
-                        AppliedReplacementKey::for_event(&event, rid),
-                        target.clone(),
-                    ))
-                    .or_insert(0) += amount as i32;
+            // CR 615.13 + CR 616.1e (Matt C3): route through the shared
+            // accumulation/write-through authority — a resumed batch hydrates
+            // its parked prefix first, so the resumed entry joins the SAME
+            // aggregate application (one counter at drain) instead of burning
+            // a counter immediately plus a second at drain.
+            if accumulate_batch_prevention(
+                state,
+                AppliedReplacementKey::for_event(&event, rid),
+                &target,
+                amount,
+            ) {
                 return Err(ApplyResult::Prevented);
             }
 
@@ -9811,6 +9820,11 @@ fn apply_single_replacement(
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
     events: &mut Vec<GameEvent>,
 ) -> Result<ProposedEvent, ApplyResult> {
+    // CR 615.13 + CR 616.1e (Matt C3): activate the parked batch scope before
+    // replacement dispatch, so the shield-counter applier and the batch
+    // rider-stash suppression gate below read the resumed tally instead of a
+    // dropped transient. No-op unless a batch is suspended.
+    hydrate_parked_batch_prevention_tally(state);
     // CR 703.4q + CR 614.1a: Path A carve-out for step-end empty-mana events.
     // Step-end mana handlers carry no `ReplacementDefinition` (no execute /
     // decline ability, no event-modifier sub-ability work, no runtime_execute)
