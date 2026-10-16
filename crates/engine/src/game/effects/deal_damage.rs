@@ -2887,6 +2887,7 @@ pub(crate) fn flush_pending_each_source_batches(
                 }
                 state.pending_each_source_batches.extend(rider_frames);
                 state.combat_prevention_tally = None;
+                let waiting_for = *waiting_for;
                 state.waiting_for = waiting_for.clone();
                 return Some(waiting_for);
             }

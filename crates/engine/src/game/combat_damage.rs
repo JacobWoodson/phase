@@ -1945,7 +1945,7 @@ pub(crate) fn sorted_prevention_entries(
 pub(crate) enum BatchRiderDrainOutcome {
     Completed,
     Paused {
-        waiting_for: WaitingFor,
+        waiting_for: Box<WaitingFor>,
         published_entries: usize,
     },
 }
@@ -2100,7 +2100,7 @@ pub(crate) fn fire_batch_prevention_riders(
             });
             if let Some(waiting_for) = fresh_choice {
                 return BatchRiderDrainOutcome::Paused {
-                    waiting_for,
+                    waiting_for: Box::new(waiting_for),
                     published_entries,
                 };
             }
