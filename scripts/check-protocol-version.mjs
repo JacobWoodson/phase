@@ -160,11 +160,13 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +70: v141 adds `ExileLinkKind::CastCost` to `GameState.exile_links`.
 // +71: v142 adds `LinkedExileSnapshot.incarnation` to GameState's linked-exile snapshots.
 // +72: v143 retypes `GameState.modal_modes_chosen_this_{turn,game}` keys to `ObjectIncarnationRef`.
-// +73: v144 adds `CardTypeSetSource::TargetedObjects` (the resolving ability's
+// +63: v134 adds `GameEvent::AbilityActivated.stack_entry` (the activation's stack object).
+// +73: v144 adds one-time boon tags (CreateBoon, NoteNumber, HasBoon,
+// ChooseTokenHost) and retypes the perpetual P/T edit to QuantityExpr.
+// +74: v145 adds `CardTypeSetSource::TargetedObjects` (the resolving ability's
 //      chosen targets) and the semantics-bearing `TrackedSet.filter` member
 //      restriction to ability aggregates in GameState.
-// +63: v134 adds `GameEvent::AbilityActivated.stack_entry` (the activation's stack object).
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 73;
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 74;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -259,10 +261,11 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +69: wire 123 moves with full-game v141 for `ExileLinkKind::CastCost`.
 // +70: wire 124 moves with full-game v142 for `LinkedExileSnapshot.incarnation`.
 // +71: wire 125 moves with full-game v143 for incarnation-keyed modal history.
-// +72: wire 126 moves with full-game v144 for `TargetedObjects` aggregates and
-//      the `TrackedSet.filter` member restriction.
 // +62: wire 116 moves with full-game v134 for `AbilityActivated.stack_entry`.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 72;
+// +72: wire 126 moves with full-game v144 for one-time boons.
+// +73: wire 127 moves with full-game v145 for `TargetedObjects` aggregates and
+//      the `TrackedSet.filter` member restriction.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 73;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

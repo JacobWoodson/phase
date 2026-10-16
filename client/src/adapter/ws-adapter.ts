@@ -211,14 +211,20 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 144 — CardTypeSetSource gains TargetedObjects (CR 608.2c + CR 115.1: the
+ * 145 — CardTypeSetSource gains TargetedObjects (CR 608.2c + CR 115.1: the
  *      resolving ability's chosen targets, read by identity for "those cards"
  *      aggregates), carried in a property aggregate inside GameState — see
- *      PROTOCOL_VERSION's own `/// 144` entry in
- *      crates/lobby-broker/src/protocol.rs. A v143 peer cannot parse the tag,
+ *      PROTOCOL_VERSION's own `/// 145` entry in
+ *      crates/lobby-broker/src/protocol.rs. A v144 peer cannot parse the tag,
  *      and silently drops the new TrackedSet member filter it does parse; the
- *      exact-match version check at connect refuses the pairing. Wire 126
+ *      exact-match version check at connect refuses the pairing. Wire 127
  *      moves with it.
+ * 144 — One-time boons (#7495): new Effect.CreateBoon / Effect.NoteNumber tags,
+ *       HasBoon conditions, and WaitingFor.ChooseTokenHost; the perpetual P/T
+ *       edit retypes power_delta/toughness_delta to required QuantityExpr
+ *       power/toughness. A v143 peer cannot parse the new shapes; the
+ *       exact-match handshake refuses the pairing. P2P moves in lockstep
+ *       (wire 126).
  * 143 — GameState.modal_modes_chosen_this_turn / _this_game retype from
  *      (ObjectId, usize) to (ObjectIncarnationRef, usize) (CR 400.7), so a
  *      non-empty entry [50, 1] is now [{object_id: 50, incarnation: 0}, 1] —
@@ -882,7 +888,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 144;
+export const PROTOCOL_VERSION = 145;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

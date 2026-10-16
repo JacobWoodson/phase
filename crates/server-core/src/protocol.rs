@@ -3346,6 +3346,18 @@ mod tests {
         }
     }
 
+    /// v145: `CardTypeSetSource` gains `TargetedObjects` (CR 608.2c + CR 115.1:
+    /// the resolving ability's chosen targets), carried in a property aggregate
+    /// inside `GameState`, and `TrackedSet` gains a semantics-bearing `filter`
+    /// member restriction. A v144 peer cannot parse the tag and silently drops
+    /// the restriction, so it must be refused before it receives v145 state.
+    ///
+    /// v144: one-time boons (#7495) add `Effect::CreateBoon`, `Effect::NoteNumber`,
+    /// the `HasBoon` conditions, and `WaitingFor::ChooseTokenHost` tags, and
+    /// retype the perpetual P/T edit's `power_delta`/`toughness_delta` to
+    /// required `QuantityExpr` `power`/`toughness`. A v143 peer cannot parse
+    /// the new shapes, so it must be refused before it receives v144 state.
+    ///
     /// v143: `GameState::modal_modes_chosen_this_turn` / `_this_game` retype to
     /// `(ObjectIncarnationRef, usize)` (CR 400.7 incarnation-keyed modal
     /// history); a v142 peer cannot decode the object-shaped key, so it must be
@@ -3558,8 +3570,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_144_for_targeted_objects_and_tracked_set_filter() {
-        assert_eq!(PROTOCOL_VERSION, 144);
+    fn protocol_version_is_145_for_targeted_objects_and_tracked_set_filter() {
+        assert_eq!(PROTOCOL_VERSION, 145);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3570,7 +3582,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_144_for_targeted_objects_and_tracked_set_filter`
+    /// `protocol_version_is_145_for_targeted_objects_and_tracked_set_filter`
     /// stays green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {
