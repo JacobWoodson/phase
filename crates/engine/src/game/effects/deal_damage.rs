@@ -20,6 +20,7 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CombatPreventionTally, DamageRecord, EachSourceBatchFrame, GameState, PreventedDamageEntry,
+    WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::KeywordKind;
@@ -2777,7 +2778,11 @@ fn flush_noncombat_prevention_tally(state: &mut GameState, events: &mut Vec<Game
     if let Some(tally) = state.combat_prevention_tally.take() {
         if !tally.is_empty() {
             let entries = crate::game::combat_damage::sorted_prevention_entries(tally);
-            crate::game::combat_damage::fire_batch_prevention_riders(state, &entries, events);
+            // Fire-all: the unpaused path keeps its standing shape (a pausing
+            // rider's prompt propagates via `state.waiting_for`, as before).
+            let _ = crate::game::combat_damage::fire_batch_prevention_riders(
+                state, &entries, events, false,
+            );
         }
     }
 }
@@ -2819,30 +2824,74 @@ pub(crate) fn tally_map_from_record_entries(
 /// batch and discarded on restore, or written through into an outer frame.
 /// Rider-created frames are restored above the outers, so the cascade still
 /// unwinds innermost-first.
+///
+/// CR 616.1e + CR 117.2e (Matt C2): returns the FRESH rider-created choice
+/// when a rider pauses mid-drainage, with parent frames left parked (the
+/// unpublished remainder re-parks below any rider frames, so the rider
+/// subtree drains first on resume). Returns `None` when every frame unwound.
+/// Callers propagate the fresh choice instead of any cached Priority.
 pub(crate) fn flush_pending_each_source_batches(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
-) {
+) -> Option<WaitingFor> {
+    use crate::game::combat_damage::BatchRiderDrainOutcome;
     while let Some(frame) = state.pending_each_source_batches.pop() {
         // Matt C1: deactivate the completed batch's transient BEFORE its
         // riders dispatch — a live transient here would absorb rider-created
         // prevention into the already-popped batch.
         state.combat_prevention_tally = None;
-        if !frame.tally.is_empty() {
-            // Matt C1: suspend the surrounding scope for the dispatch, so a
-            // rider cannot hydrate from or write through into an outer frame.
-            let suspended = std::mem::take(&mut state.pending_each_source_batches);
-            let map = tally_map_from_record_entries(&frame.tally);
-            let entries = crate::game::combat_damage::sorted_prevention_entries(map);
-            crate::game::combat_damage::fire_batch_prevention_riders(state, &entries, events);
-            let rider_frames = std::mem::take(&mut state.pending_each_source_batches);
-            state.pending_each_source_batches = suspended;
-            state.pending_each_source_batches.extend(rider_frames);
+        if frame.tally.is_empty() {
+            state.combat_prevention_tally = frame
+                .restore_tally
+                .map(|entries| tally_map_from_record_entries(&entries));
+            continue;
         }
-        state.combat_prevention_tally = frame
-            .restore_tally
-            .map(|entries| tally_map_from_record_entries(&entries));
+        // Matt C1: suspend the surrounding scope for the dispatch, so a
+        // rider cannot hydrate from or write through into an outer frame.
+        let suspended = std::mem::take(&mut state.pending_each_source_batches);
+        let map = tally_map_from_record_entries(&frame.tally);
+        let entries = crate::game::combat_damage::sorted_prevention_entries(map);
+        let outcome = crate::game::combat_damage::fire_batch_prevention_riders(
+            state, &entries, events, true,
+        );
+        let rider_frames = std::mem::take(&mut state.pending_each_source_batches);
+        match outcome {
+            BatchRiderDrainOutcome::Completed => {
+                state.pending_each_source_batches = suspended;
+                state.pending_each_source_batches.extend(rider_frames);
+                state.combat_prevention_tally = frame
+                    .restore_tally
+                    .map(|entries| tally_map_from_record_entries(&entries));
+            }
+            BatchRiderDrainOutcome::Paused {
+                waiting_for,
+                published_entries,
+            } => {
+                // Matt C2: stop unwinding parent frames. The unpublished
+                // remainder re-parks with the same surrounding restore, BELOW
+                // the rider frames (the rider subtree owns the live prompt
+                // and drains first); the surrounding value survives only in
+                // the records until their frames unwind. An empty remainder
+                // still re-parks when it carries a surrounding restore —
+                // otherwise the outer scope would be dropped silently.
+                debug_assert!(published_entries <= entries.len());
+                let mut remainder = entries;
+                remainder.drain(..published_entries.min(remainder.len()));
+                state.pending_each_source_batches = suspended;
+                if !remainder.is_empty() || frame.restore_tally.is_some() {
+                    state.pending_each_source_batches.push(EachSourceBatchFrame {
+                        tally: remainder,
+                        restore_tally: frame.restore_tally,
+                    });
+                }
+                state.pending_each_source_batches.extend(rider_frames);
+                state.combat_prevention_tally = None;
+                state.waiting_for = waiting_for.clone();
+                return Some(waiting_for);
+            }
+        }
     }
+    None
 }
 
 pub fn resolve_each_source_deals_damage(

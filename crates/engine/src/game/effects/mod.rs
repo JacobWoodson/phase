@@ -1377,7 +1377,10 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             && !waits_for_resolution_choice(&state.waiting_for)
             && state.active_ability_continuation().is_none()
         {
-            deal_damage::flush_pending_each_source_batches(state, events);
+            // Matt C2: a fresh rider-created choice stays parked in
+            // `state.waiting_for` (synced by the flush); the gates below
+            // read it from state, so no local propagation is needed here.
+            let _fresh_choice = deal_damage::flush_pending_each_source_batches(state, events);
         }
         if let Some(kind) = parent_kind {
             events.push(GameEvent::EffectResolved {

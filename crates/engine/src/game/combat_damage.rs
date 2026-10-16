@@ -1874,7 +1874,9 @@ fn drain_combat_lifelink(
     // CR 615.5 + CR 615.13: Phase D fires once per shield, and only here — after
     // the last gain, so no rider continuation can ever run while a CR 616.1
     // prompt is open, and after nothing else can stamp `last_effect_count`.
-    fire_batch_prevention_riders(state, &record.prevention_tally, &mut record.batch_events);
+    // Fire-all: combat keeps its standing shape (see the `stop_on_fresh_choice`
+    // contract on `fire_batch_prevention_riders`).
+    let _ = fire_batch_prevention_riders(state, &record.prevention_tally, &mut record.batch_events, false);
     // CR 510.2 + CR 732.2a: the simultaneous batch is the EVENT the loop-ring life
     // prohibition keys on, and this is the last statement that can move life in it.
     // The batch moves life in three places and only a call here sees all three:
@@ -1929,6 +1931,20 @@ pub(crate) fn sorted_prevention_entries(
     entries
 }
 
+/// CR 615.13 + CR 616.1e (Matt C2): what one aggregate drainage produced.
+/// Either every group dispatched, or a rider parked a FRESH choice mid-frame:
+/// `published_entries` is the leading entry count fully resolved (events
+/// pushed, riders dispatched-or-skipped), so the caller can re-park the
+/// unpublished remainder and stop unwinding instead of firing later groups
+/// ahead of the pending choice.
+pub(crate) enum BatchRiderDrainOutcome {
+    Completed,
+    Paused {
+        waiting_for: WaitingFor,
+        published_entries: usize,
+    },
+}
+
 /// CR 615.5 + CR 615.13: After a simultaneous damage batch (combat or
 /// noncombat), fire each `Prevention::All` shield's `runtime_execute` rider
 /// exactly once against the aggregate prevented amount.
@@ -1945,11 +1961,17 @@ pub(crate) fn sorted_prevention_entries(
 /// rider call so the rider's `QuantityRef::EventContextAmount` (e.g. Inkshield's
 /// "for each 1 damage prevented this way") resolves against the whole batch
 /// total.
+///
+/// `stop_on_fresh_choice` (Matt C2, parked-frame drainage only): stop after
+/// the first rider that parks a fresh choice and report it, so later groups
+/// do not execute ahead of the pending prompt. The combat and unpaused-inline
+/// callers pass `false` and keep the standing fire-all shape.
 pub(crate) fn fire_batch_prevention_riders(
     state: &mut GameState,
     prevention_tally: &[PreventedDamageEntry],
     events: &mut Vec<GameEvent>,
-) {
+    stop_on_fresh_choice: bool,
+) -> BatchRiderDrainOutcome {
     // CR 615.13 + CR 120.3: the tally arrives sorted with each shield's entries
     // contiguous, so one chunk IS one prevention application over the CR 510.2
     // simultaneous batch. The application is the trigger unit and the CR 615.5
@@ -1960,7 +1982,16 @@ pub(crate) fn fire_batch_prevention_riders(
     // recipient, carrying the amount prevented FOR THAT RECIPIENT — which is what
     // a trigger scoped to "damage that would be dealt to you" (Selfless Squire)
     // must read for its "that many" to be right.
+    // Matt C2: the caller's prompt restored on completion, so any
+    // non-Priority deviation after a dispatch is a fresh rider-created choice
+    // (covers dispatches whose return is dropped on a nested path too).
+    // Snapshotted only in stop mode; the fire-all callers never read it.
+    let pre_drain_waiting = stop_on_fresh_choice.then(|| state.waiting_for.clone());
+    let mut published_entries = 0usize;
     for group in prevention_tally.chunk_by(|a, b| a.key == b.key) {
+        // Every group counts exactly once — resolved means events pushed (or
+        // standing-behavior skipped), whether or not a rider dispatched.
+        published_entries += group.len();
         let rid = group[0].key.as_replacement_id();
         let total_prevented: i32 = group.iter().map(|entry| entry.amount).sum();
         if total_prevented <= 0 {
@@ -2050,10 +2081,28 @@ pub(crate) fn fire_batch_prevention_riders(
                 drain.event_source = Some(source);
             }
         }
-        let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
-            state, None, None, None, events,
-        );
+        let dispatch_wait =
+            crate::game::engine_replacement::apply_pending_post_replacement_effect(
+                state, None, None, None, events,
+            );
+        // Matt C2: in stop mode a fresh rider-created choice ends the frame
+        // here — later groups must not execute ahead of the pending prompt.
+        if stop_on_fresh_choice {
+            let fresh_choice = dispatch_wait.or_else(|| {
+                let pre = pre_drain_waiting.as_ref()?;
+                (!matches!(state.waiting_for, WaitingFor::Priority { .. })
+                    && state.waiting_for != *pre)
+                    .then(|| state.waiting_for.clone())
+            });
+            if let Some(waiting_for) = fresh_choice {
+                return BatchRiderDrainOutcome::Paused {
+                    waiting_for,
+                    published_entries,
+                };
+            }
+        }
     }
+    BatchRiderDrainOutcome::Completed
 }
 
 /// CR 120.3 + CR 615.13: one `DamagePrevented` per recipient this shield

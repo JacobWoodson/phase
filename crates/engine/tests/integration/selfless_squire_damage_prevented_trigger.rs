@@ -128,6 +128,10 @@ const FOG_TEXT: &str = "Prevent all combat damage that would be dealt this turn.
 /// makes the Bear event (and only it) a two-shield CR 616.1 ordering pause.
 const NEW_WAY_FORWARD_TEXT: &str = "The next time a source of your choice would deal damage to you this turn, prevent that damage. When damage is prevented this way, New Way Forward deals that much damage to that source's controller and you draw that many cards.";
 
+/// Verbatim Abundance. Its optional draw replacement is the rider-created
+/// child choice for the C2 drain-hook controls.
+const ABUNDANCE_TEXT: &str = "If you would draw a card, you may instead choose land or nonland and reveal cards from the top of your library until you reveal a card of the chosen kind. Put that card into your hand and put all other cards revealed this way on the bottom of your library in any order.";
+
 /// Verbatim Comeuppance. Per-source-reflecting, so it bypasses the batch tally
 /// entirely and keeps the pre-existing per-damage-event emission.
 const COMEUPPANCE_TEXT: &str = "Prevent all damage that would be dealt to you and planeswalkers you control this turn by sources you don't control. If damage from a creature source is prevented this way, Comeuppance deals that much damage to that creature. If damage from a noncreature source is prevented this way, Comeuppance deals that much damage to the source's controller.";
@@ -1895,6 +1899,339 @@ fn rakdos_charm_rider_reflection_prevents_as_separate_application() {
     assert!(
         runner.state().pending_each_source_batches.is_empty(),
         "the pause record must be consumed by the completion cascade"
+    );
+}
+
+/// Pass priority until `player` holds it (bounded; the loop returns the
+/// moment the target holds priority, so the phase can never advance past an
+/// empty stack).
+fn pass_priority_to(runner: &mut GameRunner, player: PlayerId) {
+    for _ in 0..4 {
+        if runner.state().priority_player == player {
+            return;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("passing priority must succeed");
+    }
+    panic!("priority never reached {player:?}");
+}
+
+/// CR 615.13 + CR 616.1e + CR 117.2e (Matt C2): aggregate drainage must
+/// return completion versus a FRESH rider-created choice, and the drain hooks
+/// must propagate it instead of the cached Priority.
+///
+/// P1 Bear first, P0 Squire last; P1 holds NWF naming Bear plus Abundance;
+/// P0 holds the Squire ETB shield plus Safe Passage. The Bear prefix prevents
+/// under NWF alone (no pause); the final Squire event pauses between the two
+/// P0 shields. Answering Squire completes the batch with no raw tail, so the
+/// answer hook drains the prefix — and NWF's rider draws P1 a card, which
+/// Abundance replaces with a live child choice. Pre-fix the hook overwrote
+/// that child with the cached Priority, stranding the draw.
+#[test]
+fn rakdos_charm_rider_draw_choice_propagates_through_drain_hooks() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    stock_libraries(&mut scenario);
+
+    // Bear enters first (battlefield order = batch order: Bear, then Squire).
+    let bear = scenario.add_creature(P1, "Bear", 2, 2).id();
+    scenario.add_enchantment_from_oracle(P1, "Abundance", ABUNDANCE_TEXT);
+    scenario.add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES_TEXT);
+    let way = add_instant_from_oracle(&mut scenario, P1, "New Way Forward", NEW_WAY_FORWARD_TEXT);
+    let squire = scenario
+        .add_creature_to_hand_from_oracle(P0, "Selfless Squire", 1, 1, SELFLESS_SQUIRE_TEXT)
+        .with_mana_cost(free_cost())
+        .id();
+    let passage = add_instant_from_oracle(&mut scenario, P0, "Safe Passage", SAFE_PASSAGE_TEXT);
+    let charm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Rakdos Charm", true, RAKDOS_CHARM_TEXT)
+        .with_mana_cost(free_cost())
+        .id();
+    let mut runner = scenario.build();
+
+    // NWF resolves BEFORE the Squire's ETB shield exists, so the NWF
+    // aggregate group drains first and its rider's draw pauses ahead of the
+    // Squire group — leaving a parked remainder behind.
+    pass_priority_to(&mut runner, P1);
+    runner.cast(way).resolve();
+    let WaitingFor::DamageSourceChoice { .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "New Way Forward must ask for its damage source, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    runner
+        .act(GameAction::ChooseDamageSource { source: bear })
+        .expect("naming the Bear must be answerable");
+    pass_priority_to(&mut runner, P0);
+    runner.cast(squire).resolve();
+    runner.cast(passage).resolve();
+    let battlefield_creatures: Vec<ObjectId> = runner
+        .state()
+        .battlefield
+        .iter()
+        .filter(|id| runner.state().objects[id].power.is_some())
+        .copied()
+        .collect();
+    assert_eq!(
+        battlefield_creatures,
+        vec![bear, squire],
+        "reach guard: the batch must iterate Bear first, Squire last"
+    );
+
+    let p0_life_before = runner.state().players[P0.0 as usize].life;
+    let p1_life_before = runner.state().players[P1.0 as usize].life;
+    let p1_hand_before = runner.state().players[P1.0 as usize].hand.len();
+    let p1_library_before = runner.state().players[P1.0 as usize].library.len();
+    let mut log: Vec<GameEvent> = Vec::new();
+    let outcome = runner.cast(charm).modes(&[2]).resolve();
+    log.extend(outcome.events().iter().cloned());
+    let WaitingFor::ReplacementChoice { candidates, .. } = outcome.final_waiting_for() else {
+        panic!(
+            "the Squire event must pause for a CR 616.1 ordering choice, got {:?}",
+            outcome.final_waiting_for()
+        );
+    };
+    assert_eq!(
+        candidates.len(),
+        2,
+        "the Squire event must offer both P0 shields as ordering candidates"
+    );
+    let squire_index = candidates
+        .iter()
+        .position(|c| c.source_name.contains("Selfless Squire"))
+        .expect("one candidate must be the Squire's ETB shield");
+
+    // Answer Squire: with no raw tail the answer hook drains the prefix, and
+    // NWF's rider draw must surface Abundance's live child choice — NOT the
+    // cached Priority.
+    let result = runner
+        .act(GameAction::ChooseReplacement { index: squire_index })
+        .expect("the ordering choice must be answerable");
+    log.extend(result.events);
+    let WaitingFor::ReplacementChoice { candidates, .. } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "the rider's Abundance choice must propagate (not cached Priority), got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|c| c.description.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Accept", "Decline"],
+        "the live child must be Abundance's optional replacement"
+    );
+    // The Squire group was still unpublished when the NWF rider paused: the
+    // remainder stays parked BELOW (parent frames stop unwinding).
+    assert_eq!(
+        runner.state().pending_each_source_batches.len(),
+        1,
+        "the unpublished Squire group must stay parked as a remainder"
+    );
+    assert_eq!(
+        runner.state().pending_each_source_batches[0]
+            .tally
+            .iter()
+            .map(|entry| entry.amount)
+            .sum::<i32>(),
+        1,
+        "the remainder must hold the Squire group's 1 prevented"
+    );
+
+    // Decline through production actions: the natural draw resolves, the
+    // rider chain completes, and the cascade publishes the remainder.
+    let result = runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("declining Abundance must be answerable");
+    log.extend(result.events);
+    runner.advance_until_stack_empty();
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "resolution must complete to a clean priority window, got {:?}",
+        runner.state().waiting_for
+    );
+
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        p0_life_before,
+        "P0's damage was prevented"
+    );
+    assert_eq!(
+        runner.state().players[P1.0 as usize].life,
+        p1_life_before - 1,
+        "NWF reflected 1 to P1 with no shield to stop it"
+    );
+    assert_eq!(
+        runner.state().players[P1.0 as usize].hand.len(),
+        p1_hand_before + 1,
+        "the rider's draw must resolve (declined Abundance draws naturally)"
+    );
+    assert_eq!(
+        runner.state().players[P1.0 as usize].library.len(),
+        p1_library_before - 1,
+        "exactly one card drawn from P1's library"
+    );
+    assert_eq!(
+        prevented_pairs(&log),
+        vec![(TargetRef::Player(P1), 1), (TargetRef::Player(P0), 1)],
+        "NWF application first, Squire remainder after the child answer"
+    );
+    assert_eq!(
+        counters_on(&runner, squire),
+        2,
+        "one Squire trigger of 1, +1 from Hardened Scales"
+    );
+    assert!(
+        runner.state().pending_each_source_batches.is_empty(),
+        "the remainder must be consumed by the completion cascade"
+    );
+}
+
+/// CR 615.13 + CR 616.1e persistence (Matt C2): the rider-draw control above,
+/// save/loaded THROUGH Abundance's child prompt with the remainder parked —
+/// the remainder, the paused rider dispatch, and the child prompt all survive
+/// the authoritative round trip, and declining after restore completes
+/// identically.
+#[test]
+fn rakdos_charm_rider_draw_choice_survives_save_load() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    stock_libraries(&mut scenario);
+
+    let bear = scenario.add_creature(P1, "Bear", 2, 2).id();
+    scenario.add_enchantment_from_oracle(P1, "Abundance", ABUNDANCE_TEXT);
+    scenario.add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES_TEXT);
+    let way = add_instant_from_oracle(&mut scenario, P1, "New Way Forward", NEW_WAY_FORWARD_TEXT);
+    let squire = scenario
+        .add_creature_to_hand_from_oracle(P0, "Selfless Squire", 1, 1, SELFLESS_SQUIRE_TEXT)
+        .with_mana_cost(free_cost())
+        .id();
+    let passage = add_instant_from_oracle(&mut scenario, P0, "Safe Passage", SAFE_PASSAGE_TEXT);
+    let charm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Rakdos Charm", true, RAKDOS_CHARM_TEXT)
+        .with_mana_cost(free_cost())
+        .id();
+    let mut runner = scenario.build();
+
+    pass_priority_to(&mut runner, P1);
+    runner.cast(way).resolve();
+    runner
+        .act(GameAction::ChooseDamageSource { source: bear })
+        .expect("naming the Bear must be answerable");
+    pass_priority_to(&mut runner, P0);
+    runner.cast(squire).resolve();
+    runner.cast(passage).resolve();
+
+    let p1_life_before = runner.state().players[P1.0 as usize].life;
+    let p1_hand_before = runner.state().players[P1.0 as usize].hand.len();
+    let p1_library_before = runner.state().players[P1.0 as usize].library.len();
+    let mut log: Vec<GameEvent> = Vec::new();
+    let outcome = runner.cast(charm).modes(&[2]).resolve();
+    log.extend(outcome.events().iter().cloned());
+    let WaitingFor::ReplacementChoice { candidates, .. } = outcome.final_waiting_for() else {
+        panic!(
+            "the Squire event must pause for a CR 616.1 ordering choice, got {:?}",
+            outcome.final_waiting_for()
+        );
+    };
+    let squire_index = candidates
+        .iter()
+        .position(|c| c.source_name.contains("Selfless Squire"))
+        .expect("one candidate must be the Squire's ETB shield");
+    let result = runner
+        .act(GameAction::ChooseReplacement { index: squire_index })
+        .expect("the ordering choice must be answerable");
+    log.extend(result.events);
+
+    // Save/load THROUGH the Abundance child prompt with the remainder parked.
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "reach guard: the Abundance child prompt must be live, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner.state().pending_each_source_batches.len(),
+        1,
+        "reach guard: the Squire remainder must be parked"
+    );
+    let saved = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+        .expect("the authoritative paused state serializes");
+    let restored: PersistedGameState =
+        serde_json::from_str(&saved).expect("the authoritative paused state deserializes");
+    let mut runner = GameRunner::from_state(
+        restored
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract"),
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "the Abundance child prompt must survive restore, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner.state().pending_each_source_batches.len(),
+        1,
+        "the parked remainder must survive authoritative restore"
+    );
+    assert_eq!(
+        runner.state().pending_each_source_batches[0]
+            .tally
+            .iter()
+            .map(|entry| entry.amount)
+            .sum::<i32>(),
+        1,
+        "the remainder (Squire group's 1 prevented) must survive restore"
+    );
+
+    let result = runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("declining Abundance must be answerable after restore");
+    log.extend(result.events);
+    runner.advance_until_stack_empty();
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "resolution must complete to a clean priority window, got {:?}",
+        runner.state().waiting_for
+    );
+
+    assert_eq!(
+        runner.state().players[P1.0 as usize].life,
+        p1_life_before - 1,
+        "NWF reflected 1 to P1 with no shield to stop it"
+    );
+    assert_eq!(
+        runner.state().players[P1.0 as usize].hand.len(),
+        p1_hand_before + 1,
+        "the rider's draw must resolve after restore"
+    );
+    assert_eq!(
+        runner.state().players[P1.0 as usize].library.len(),
+        p1_library_before - 1,
+        "exactly one card drawn from P1's library"
+    );
+    assert_eq!(
+        prevented_pairs(&log),
+        vec![(TargetRef::Player(P1), 1), (TargetRef::Player(P0), 1)],
+        "NWF application first, Squire remainder after the child answer"
+    );
+    assert_eq!(
+        counters_on(&runner, squire),
+        2,
+        "one Squire trigger of 1, +1 from Hardened Scales"
+    );
+    assert!(
+        runner.state().pending_each_source_batches.is_empty(),
+        "the remainder must be consumed by the completion cascade"
     );
 }
 

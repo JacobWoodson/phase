@@ -2099,7 +2099,15 @@ fn finish_action_boundary_with_lifecycle(
         && matches!(result.waiting_for, WaitingFor::Priority { .. })
         && state.active_ability_continuation().is_none()
     {
-        super::effects::deal_damage::flush_pending_each_source_batches(state, &mut result.events);
+        // Matt C2: propagate a fresh rider-created choice onto the result —
+        // the cached Priority is stale once drainage pauses. The flush
+        // already synced `state.waiting_for`.
+        if let Some(fresh) = super::effects::deal_damage::flush_pending_each_source_batches(
+            state,
+            &mut result.events,
+        ) {
+            result.waiting_for = fresh;
+        }
     }
     // A reversed activation (CR 602.2b + CR 601.2h) already had its pre-action
     // state restored by `apply_action_boundary_core`: nothing happened, so it

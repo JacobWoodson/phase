@@ -196,7 +196,15 @@ pub(super) fn handle_replacement_choice(
         && matches!(waiting_for, WaitingFor::Priority { .. })
         && state.active_ability_continuation().is_none()
     {
-        super::effects::deal_damage::flush_pending_each_source_batches(state, events);
+        // CR 616.1e + CR 117.2e (Matt C2): a rider that pauses mid-drainage
+        // parks a FRESH choice — it wins over the cached Priority, and the
+        // lifelink tail below must not run while a prompt is open. The flush
+        // already synced `state.waiting_for`.
+        if let Some(fresh) =
+            super::effects::deal_damage::flush_pending_each_source_batches(state, events)
+        {
+            return Ok(fresh);
+        }
     }
     // CR 616.1f: a second ordering choice, or any nested prompt, leaves the record
     // parked for the next answer; only a settled round trip may close the batch.
