@@ -97,15 +97,23 @@ fn can_activate_loyalty_ability_impl(
 
     // CR 606.3: Only if no player has previously activated a loyalty ability of
     // that permanent that turn. The per-permanent activation count is the
-    // authoritative gate; effects like `Effect::GrantExtraLoyaltyActivations`
-    // (The Chain Veil class) raise the per-planeswalker cap for the controller
-    // by adding to `extra_loyalty_activations_this_turn[controller]`.
+    // authoritative gate; `ModifyActivationLimit { keyword: "loyalty" }` statics
+    // (Oath of Teferi class, read live per CR 611.3a) SET the base cap via max
+    // semantics, while effects like `Effect::GrantExtraLoyaltyActivations`
+    // (The Chain Veil class) ADD to it via
+    // `extra_loyalty_activations_this_turn[controller]`.
     let extra_grants = state
         .extra_loyalty_activations_this_turn
         .get(&player)
         .copied()
         .unwrap_or(0);
-    let cap = 1u32.saturating_add(extra_grants);
+    let static_cap = super::restrictions::loyalty_activation_cap_from_statics(
+        state,
+        player,
+        planeswalker_id,
+        restriction_gates,
+    );
+    let cap = static_cap.saturating_add(extra_grants);
     if obj.loyalty_activations_this_turn >= cap {
         return false;
     }
