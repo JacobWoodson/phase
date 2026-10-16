@@ -2809,15 +2809,35 @@ pub(crate) fn tally_map_from_record_entries(
 /// pop restores the surrounding transient that frame suspended, so nesting
 /// unwinds exactly. Empty frames (a scope whose tally already published
 /// inline) restore without publishing.
+///
+/// CR 615.5 (Matt C1): a frame's riders dispatch SCOPELESS — the completed
+/// batch's transient is deactivated first (the popped record is authoritative
+/// for publishing), and the remaining outer frames are suspended aside for
+/// the dispatch, exactly like combat Phase-D dispatch. Rider-created
+/// prevention therefore owns a fresh scope (per-event emission, or a fresh
+/// top-level batch scope of its own) instead of being absorbed into the dead
+/// batch and discarded on restore, or written through into an outer frame.
+/// Rider-created frames are restored above the outers, so the cascade still
+/// unwinds innermost-first.
 pub(crate) fn flush_pending_each_source_batches(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) {
     while let Some(frame) = state.pending_each_source_batches.pop() {
+        // Matt C1: deactivate the completed batch's transient BEFORE its
+        // riders dispatch — a live transient here would absorb rider-created
+        // prevention into the already-popped batch.
+        state.combat_prevention_tally = None;
         if !frame.tally.is_empty() {
+            // Matt C1: suspend the surrounding scope for the dispatch, so a
+            // rider cannot hydrate from or write through into an outer frame.
+            let suspended = std::mem::take(&mut state.pending_each_source_batches);
             let map = tally_map_from_record_entries(&frame.tally);
             let entries = crate::game::combat_damage::sorted_prevention_entries(map);
             crate::game::combat_damage::fire_batch_prevention_riders(state, &entries, events);
+            let rider_frames = std::mem::take(&mut state.pending_each_source_batches);
+            state.pending_each_source_batches = suspended;
+            state.pending_each_source_batches.extend(rider_frames);
         }
         state.combat_prevention_tally = frame
             .restore_tally

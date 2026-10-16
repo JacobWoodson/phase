@@ -1762,6 +1762,142 @@ fn rakdos_charm_nonempty_prefix_pause_keeps_one_prevention_application() {
     );
 }
 
+/// CR 615.13 + CR 615.5 + CR 616.1e (Matt C1): the completed batch's
+/// accumulation scope must be deactivated BEFORE its riders dispatch. Same
+/// nonempty-prefix pause as above, but the final Bear event is answered with
+/// New Way Forward: the batch publishes TWO aggregate applications
+/// (Squire-shield 1, NWF 1), then NWF's rider reflects 1 to P0 and draws 1 —
+/// and the Squire ETB shield still prevents that reflected damage as a THIRD,
+/// separate application (its own event + Squire trigger). Pre-fix the
+/// reflection was absorbed into the already-popped batch and discarded on
+/// restore, losing the separate event/trigger.
+#[test]
+fn rakdos_charm_rider_reflection_prevents_as_separate_application() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    stock_libraries(&mut scenario);
+
+    let squire = scenario
+        .add_creature_to_hand_from_oracle(P0, "Selfless Squire", 1, 1, SELFLESS_SQUIRE_TEXT)
+        .with_mana_cost(free_cost())
+        .id();
+    let bear = scenario
+        .add_creature_to_hand(P0, "Bear", 2, 2)
+        .with_mana_cost(free_cost())
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES_TEXT);
+    let way = add_instant_from_oracle(&mut scenario, P0, "New Way Forward", NEW_WAY_FORWARD_TEXT);
+    let charm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Rakdos Charm", true, RAKDOS_CHARM_TEXT)
+        .with_mana_cost(free_cost())
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(squire).resolve();
+    runner.cast(bear).resolve();
+    runner.cast(way).resolve();
+    let WaitingFor::DamageSourceChoice { .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "New Way Forward must ask for its damage source, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    runner
+        .act(GameAction::ChooseDamageSource { source: bear })
+        .expect("naming the Bear must be answerable");
+    let battlefield_creatures: Vec<ObjectId> = runner
+        .state()
+        .battlefield
+        .iter()
+        .filter(|id| runner.state().objects[id].power.is_some())
+        .copied()
+        .collect();
+    assert_eq!(
+        battlefield_creatures,
+        vec![squire, bear],
+        "reach guard: the batch must iterate Squire first, Bear last"
+    );
+
+    let life_before = runner.state().players[P0.0 as usize].life;
+    let hand_before = runner
+        .state()
+        .objects
+        .values()
+        .filter(|o| o.controller == P0 && o.zone == Zone::Hand)
+        .count();
+    let mut log: Vec<GameEvent> = Vec::new();
+    let outcome = runner.cast(charm).modes(&[2]).resolve();
+    log.extend(outcome.events().iter().cloned());
+    let WaitingFor::ReplacementChoice { candidates, .. } = outcome.final_waiting_for() else {
+        panic!(
+            "the Bear event must pause for a CR 616.1 ordering choice, got {:?}",
+            outcome.final_waiting_for()
+        );
+    };
+    assert_eq!(
+        candidates.len(),
+        2,
+        "the Bear event must offer both shields as ordering candidates"
+    );
+    let way_index = candidates
+        .iter()
+        .position(|c| c.source_name.is_empty())
+        .expect("one candidate must be New Way Forward's floating shield");
+    assert_eq!(
+        runner.state().pending_each_source_batches.len(),
+        1,
+        "the pause must park exactly one batch record"
+    );
+
+    // Answer with New Way Forward: the batch prevents under TWO shields (two
+    // applications), and NWF's rider reflects 1 to P0 — still shielded — plus
+    // draws 1.
+    let result = runner
+        .act(GameAction::ChooseReplacement { index: way_index })
+        .expect("the ordering choice must be answerable");
+    log.extend(result.events);
+    runner.advance_until_stack_empty();
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "resolution must complete to a clean priority window, got {:?}",
+        runner.state().waiting_for
+    );
+
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        life_before,
+        "all damage (batch + reflected) must be prevented"
+    );
+    assert_eq!(
+        prevented_pairs(&log),
+        vec![
+            (TargetRef::Player(P0), 1),
+            (TargetRef::Player(P0), 1),
+            (TargetRef::Player(P0), 1),
+        ],
+        "two batch applications plus the separate reflected prevention"
+    );
+    assert_eq!(
+        counters_on(&runner, squire),
+        6,
+        "three triggers of 1, each +1 from Hardened Scales (a lost reflection would make 4)"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .objects
+            .values()
+            .filter(|o| o.controller == P0 && o.zone == Zone::Hand)
+            .count(),
+        hand_before,
+        "the Charm left the hand and New Way Forward's rider drew exactly 1"
+    );
+    assert!(
+        runner.state().pending_each_source_batches.is_empty(),
+        "the pause record must be consumed by the completion cascade"
+    );
+}
+
 /// CR 615.13 + CR 616.1e persistence: the nonempty-prefix pause above,
 /// save/loaded THROUGH the ordering prompt (authoritative capture form) and
 /// resumed — the parked prefix survives the round trip, so the resumed batch
