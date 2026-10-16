@@ -12776,6 +12776,77 @@ fn quoted_ability_sacrifice_cost_separator() {
         "effect should not be Unimplemented, got {:?}",
         def.effect
     );
+    // CR 606.2: the loyalty-timing attach is cost-keyed — a non-loyalty quote
+    // gains no AsSorcery. Guards the fix shape against a blanket push.
+    assert!(
+        !def.activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery),
+        "non-loyalty quote must not carry AsSorcery, got {:?}",
+        def.activation_restrictions
+    );
+}
+
+#[test]
+fn quoted_ability_riderless_tap_cost_gains_no_sorcery_timing() {
+    // CR 606.2 hostile: riderless Tap-cost quote on a second cost shape. A
+    // blanket-push mutation (attach without the loyalty predicate) would put
+    // AsSorcery here; the correct cost-keyed fix leaves it empty.
+    let def = parse_quoted_ability("{T}: Draw a card.");
+    assert_eq!(def.kind, AbilityKind::Activated);
+    assert!(
+        matches!(def.cost, Some(AbilityCost::Tap)),
+        "should retain the tap cost, got {:?}",
+        def.cost
+    );
+    assert!(
+        matches!(
+            *def.effect,
+            Effect::Draw {
+                target: TargetFilter::Controller,
+                ..
+            }
+        ),
+        "effect should parse to Draw, got {:?}",
+        def.effect
+    );
+    assert_eq!(
+        def.activation_restrictions,
+        Vec::<ActivationRestriction>::new(),
+        "riderless tap quote must carry no restrictions, got {:?}",
+        def.activation_restrictions
+    );
+}
+
+#[test]
+fn quoted_loyalty_ability_with_sorcery_rider_dedups_to_one() {
+    // CR 606.3: a quoted loyalty ability with an explicit textual sorcery
+    // rider already carries AsSorcery via `strip_activated_constraints`; the
+    // loyalty attach must dedup to exactly one. Dropping the guard
+    // (unconditional push) yields two → red.
+    let def = parse_quoted_ability("[+1]: Draw a card. Activate only as a sorcery.");
+    assert_eq!(def.kind, AbilityKind::Activated);
+    assert!(
+        matches!(def.cost, Some(AbilityCost::Loyalty { amount: 1 })),
+        "cost should be Loyalty +1, got {:?}",
+        def.cost
+    );
+    assert!(
+        matches!(
+            *def.effect,
+            Effect::Draw {
+                target: TargetFilter::Controller,
+                ..
+            }
+        ),
+        "effect should parse to Draw, got {:?}",
+        def.effect
+    );
+    assert_eq!(
+        def.activation_restrictions,
+        vec![ActivationRestriction::AsSorcery],
+        "dedup guard must leave exactly one AsSorcery, got {:?}",
+        def.activation_restrictions
+    );
 }
 
 #[test]
@@ -32896,6 +32967,21 @@ fn ichormoon_gauntlet_grants_loyalty_abilities_to_planeswalkers() {
         "second grant effect should be ExtraTurn, got {:?}",
         grants[1].effect
     );
+    // CR 606.3: quoted granted loyalty abilities carry sorcery-speed timing,
+    // the same attach the printed-loyalty path performs.
+    for (i, grant) in grants.iter().enumerate() {
+        assert_eq!(
+            grant.activation_restrictions,
+            vec![ActivationRestriction::AsSorcery],
+            "grant {i} must carry exactly [AsSorcery], got {:?}",
+            grant.activation_restrictions
+        );
+        assert!(
+            !matches!(*grant.effect, Effect::Unimplemented { .. }),
+            "grant {i} effect must not be Unimplemented, got {:?}",
+            grant.effect
+        );
+    }
 }
 
 #[test]

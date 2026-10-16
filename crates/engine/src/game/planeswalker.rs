@@ -924,6 +924,111 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Issue #9936 (P1-C4): a quoted-text granted loyalty ability carries
+    /// sorcery-speed timing (CR 606.3 timing half), so it refuses off-turn /
+    /// non-main / non-empty-stack and allows on own main phase with an empty
+    /// stack — exactly like a printed loyalty ability. The def is extracted
+    /// from the production quoted-grant path (the exact Phase-3-consumed
+    /// shape), installed via `create_planeswalker` — NOT `make_loyalty_ability`
+    /// (that helper adds `OnlyOnceEachTurn`, which would conflate the fixture).
+    ///
+    /// Leg discipline is load-bearing: refusals run BEFORE the allow on the
+    /// shared walker, so the activation count stays 0 through the refusals and
+    /// each refusal is attributable to `AsSorcery`, not the per-permanent cap
+    /// (`planeswalker.rs:129` precedes the restriction consult at `:155-172`,
+    /// behind the undiscriminating `ActionNotAllowed`). Revert the attach and
+    /// the FIRST refusal leg returns Ok → red.
+    #[test]
+    fn quoted_granted_loyalty_ability_requires_sorcery_speed() {
+        use crate::parser::oracle_static::parse_quoted_ability_modifications;
+        use crate::types::ContinuousModification;
+
+        let parsed = parse_quoted_ability_modifications("\"[0]: Proliferate\"");
+        let quoted_def = match parsed.as_slice() {
+            [ContinuousModification::GrantAbility { definition }] => (**definition).clone(),
+            other => panic!("expected single GrantAbility, got {other:?}"),
+        };
+        assert_eq!(quoted_def.kind, AbilityKind::Activated);
+        assert!(
+            matches!(quoted_def.cost, Some(AbilityCost::Loyalty { amount: 0 })),
+            "fixture def must be [0] loyalty, got {:?}",
+            quoted_def.cost
+        );
+        assert!(
+            matches!(*quoted_def.effect, Effect::Proliferate),
+            "fixture def effect must be Proliferate, got {:?}",
+            quoted_def.effect
+        );
+
+        let mut state = setup();
+        let pw = create_planeswalker(&mut state, PlayerId(0), "Jace", 3, vec![quoted_def.clone()]);
+
+        // REFUSALS FIRST. Count must stay 0 through all three legs so each
+        // refusal is attributable to AsSorcery, not the cap.
+        // Leg 1: not main phase.
+        state.phase = Phase::DeclareAttackers;
+        let mut events = Vec::new();
+        let result = handle_activate_loyalty(&mut state, PlayerId(0), pw, 0, &mut events);
+        assert!(result.is_err(), "non-main-phase activation must refuse");
+        assert_eq!(state.objects[&pw].loyalty_activations_this_turn, 0);
+
+        // Leg 2: not active player (opponent's turn).
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(1);
+        let result = handle_activate_loyalty(&mut state, PlayerId(0), pw, 0, &mut events);
+        assert!(result.is_err(), "off-turn activation must refuse");
+        assert_eq!(state.objects[&pw].loyalty_activations_this_turn, 0);
+
+        // Leg 3: stack not empty.
+        state.active_player = PlayerId(0);
+        state.stack.push_back(crate::types::game_state::StackEntry {
+            id: ObjectId(99),
+            source_id: ObjectId(99),
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(99),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        let result = handle_activate_loyalty(&mut state, PlayerId(0), pw, 0, &mut events);
+        assert!(result.is_err(), "stack-nonempty activation must refuse");
+        assert_eq!(state.objects[&pw].loyalty_activations_this_turn, 0);
+
+        // ALLOW LAST (reach-guard): own main phase, empty stack → Ok, with the
+        // activation count recorded and the ability on the stack.
+        state.stack.clear();
+        let result = handle_activate_loyalty(&mut state, PlayerId(0), pw, 0, &mut events);
+        assert!(result.is_ok(), "own-main-empty activation must allow");
+        assert!(state.objects[&pw].loyalty_activations_this_turn > 0);
+        assert!(!state.stack.is_empty());
+
+        // Non-walker holder pin (P1-R2 preservation): the same quoted def
+        // direct-installed on a non-walker object refuses via the planeswalker
+        // type check (`:88`) — which precedes the restriction consult
+        // (`:155-172`) — both before and after the attach. Pins
+        // gate-structural stability, not the fix; excluded from the revert-red
+        // claim.
+        let holder = create_object(
+            &mut state,
+            CardId(777),
+            PlayerId(0),
+            "Non-walker holder".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&holder).unwrap().abilities = Arc::new(vec![quoted_def]);
+        state.stack.clear();
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let result = handle_activate_loyalty(&mut state, PlayerId(0), holder, 0, &mut events);
+        assert!(
+            result.is_err(),
+            "non-walker holder must refuse pre- and post-fix"
+        );
+    }
+
     /// CR 606.2: a targeted `[-X]` loyalty ability's printed cost is
     /// `RemoveCounter { X loyalty counters }`, which `is_loyalty_ability_cost`
     /// recognizes. The X-cost path clears `pending.activation_cost` before the
