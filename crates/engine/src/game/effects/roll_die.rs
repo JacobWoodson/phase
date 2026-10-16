@@ -256,6 +256,7 @@ pub fn resolve(
         declared_target_pins: parked.declared_pins,
         declared_ahead: parked.declared_ahead,
         local_target_pins: parked.local_pins,
+        keyed_target_incarnations: parked.keyed_target_incarnations,
     };
 
     // CR 706.1 + CR 614.1a: route the instruction through the replacement
@@ -368,6 +369,7 @@ fn execute_roll(
         declared_target_pins,
         declared_ahead,
         local_target_pins,
+        keyed_target_incarnations,
     } = instruction;
 
     let pending = PendingDieRoll {
@@ -396,6 +398,7 @@ fn execute_roll(
         declared_target_pins,
         declared_ahead,
         local_target_pins,
+        keyed_target_incarnations,
     };
 
     // CR 706.6: when the ignored set is fully determined the roller has no
@@ -583,6 +586,7 @@ pub fn resume_after_ignore(
         declared_target_pins,
         declared_ahead,
         local_target_pins,
+        keyed_target_incarnations,
     } = pending;
 
     // Clear any resolving keep choice so a re-suspension below is unambiguous
@@ -634,6 +638,7 @@ pub fn resume_after_ignore(
                 declared: &declared_targets,
                 declared_pins: &declared_target_pins,
                 ahead: declared_ahead,
+                keyed_target_incarnations: &keyed_target_incarnations,
             },
         );
 
@@ -716,6 +721,7 @@ pub fn resume_after_ignore(
                     declared_target_pins: declared_target_pins.clone(),
                     declared_ahead,
                     local_target_pins: local_target_pins.clone(),
+                    keyed_target_incarnations: keyed_target_incarnations.clone(),
                 };
                 // CR 706.3a: park the owner in the structurally valid slot.
                 // A results-table branch that suspended on its own prompt is
@@ -1607,6 +1613,7 @@ mod tests {
             declared_target_pins: vec![],
             declared_ahead: 0,
             local_target_pins: vec![],
+            keyed_target_incarnations: vec![],
         };
         let mut events = Vec::new();
         let waiting = resume_after_ignore(&mut state, pending, vec![0], &mut events, None).unwrap();

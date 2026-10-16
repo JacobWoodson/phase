@@ -36362,6 +36362,22 @@ impl PartialEq for ResolvedAbility {
 /// projected `ObjectId` sequence, which is itself an equivalence relation.
 impl Eq for ResolvedAbility {}
 
+/// CR 400.7 + CR 603.7c: the keyed delayed-referent eligibility predicate
+/// shared by live indexed selection
+/// ([`ResolvedAbility::target_pin_is_current`]) and resumed parked reads —
+/// one policy, evaluated at read time on both paths. An id with no keyed
+/// entry passes (fail-open: not a pinned delayed-trigger referent); a
+/// recorded pin must be current.
+pub fn keyed_target_pin_is_current(
+    pins: &[crate::types::identifiers::ObjectIncarnationRef],
+    id: crate::types::identifiers::ObjectId,
+    state: &crate::types::game_state::GameState,
+) -> bool {
+    pins.iter()
+        .find(|pin| pin.object_id == id)
+        .is_none_or(|pin| pin.is_current(state))
+}
+
 impl ResolvedAbility {
     /// CR 610.3: The "until" event bounding this node's own zone change, for
     /// every bounded zone-move shape (single-object `ChangeZone` and mass
@@ -37132,10 +37148,7 @@ impl ResolvedAbility {
         id: ObjectId,
         state: &crate::types::game_state::GameState,
     ) -> bool {
-        self.target_incarnations
-            .iter()
-            .find(|pin| pin.object_id == id)
-            .is_none_or(|pin| pin.is_current(state))
+        keyed_target_pin_is_current(&self.target_incarnations, id, state)
     }
 
     /// CR 603.7c + CR 400.7: The subset of `targets` this ability may still
