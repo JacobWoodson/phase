@@ -4338,6 +4338,7 @@ pub fn matches_target_filter_including_phased_out(
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::LiveOnly,
+        ctx.ability_targets,
     )
 }
 
@@ -4677,6 +4678,7 @@ pub fn matches_target_filter_in_owner_zone(
             ctx.declared_slot_view,
             ctx.granting_object,
             ControllerLookup::OwnerZone,
+            ctx.ability_targets,
         );
     }
 
@@ -4697,6 +4699,7 @@ pub fn matches_target_filter_in_owner_zone(
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::OwnerZone,
+        ctx.ability_targets,
     )
 }
 
@@ -5021,6 +5024,7 @@ pub(crate) fn matches_target_filter_on_object(
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::LiveOrLki,
+        ctx.ability_targets,
     )
 }
 
@@ -5058,6 +5062,7 @@ fn entry_filter_matches_staged(
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::LiveOrLki,
+        ctx.ability_targets,
     )
 }
 
@@ -5104,6 +5109,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                     ctx.declared_slot_view,
                     ctx.granting_object,
                     ControllerLookup::LiveOrLki,
+                    ctx.ability_targets,
                 );
             }
             if let Some(copy) = enter_as_copy {
@@ -5173,6 +5179,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                     ctx.declared_slot_view,
                     ctx.granting_object,
                     ControllerLookup::LiveOrLki,
+                    ctx.ability_targets,
                 )
             })
         }
@@ -5198,6 +5205,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                 ctx.declared_slot_view,
                 ctx.granting_object,
                 ControllerLookup::LiveOrLki,
+                ctx.ability_targets,
             )
         }
         _ => false,
@@ -5274,6 +5282,7 @@ pub fn matches_target_filter_on_counter_added_record(
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::LiveOrLki,
+        ctx.ability_targets,
     )
 }
 
@@ -5322,6 +5331,7 @@ pub fn matches_target_filter_on_attack_declaration_record(
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::LiveOrLki,
+        ctx.ability_targets,
     )
 }
 
@@ -5374,6 +5384,7 @@ pub fn matches_target_filter_on_damage_record_source(
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::LiveOrLki,
+        ctx.ability_targets,
     )
 }
 
@@ -5619,6 +5630,7 @@ pub(crate) fn matches_target_filter_on_event_snapshot(
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::LiveOnly,
+        ctx.ability_targets,
     )
 }
 
@@ -5792,6 +5804,7 @@ fn filter_inner_with_lookup(
         ctx.declared_slot_view,
         ctx.granting_object,
         controller_lookup,
+        ctx.ability_targets,
     )
 }
 
@@ -5811,6 +5824,7 @@ fn filter_inner_for_object(
     declared_slot_view: Option<&[Option<crate::game::targeting::DeclaredSlotBinding>]>,
     granting_object: Option<ObjectIncarnationRef>,
     controller_lookup: ControllerLookup,
+    ability_targets: Option<ParkedTargets<'_>>,
 ) -> bool {
     match filter {
         TargetFilter::None => false,
@@ -6115,6 +6129,7 @@ fn filter_inner_for_object(
             declared_slot_view,
             granting_object,
             controller_lookup,
+            ability_targets,
         ),
         TargetFilter::Or { filters } => filters.iter().any(|f| {
             filter_inner_for_object(
@@ -6132,6 +6147,7 @@ fn filter_inner_for_object(
                 declared_slot_view,
                 granting_object,
                 controller_lookup,
+                ability_targets,
             )
         }),
         TargetFilter::And { filters } => filters.iter().all(|f| {
@@ -6150,6 +6166,7 @@ fn filter_inner_for_object(
                 declared_slot_view,
                 granting_object,
                 controller_lookup,
+                ability_targets,
             )
         }),
         // CR 405.1 + CR 115.9b: stack-target predicates can be composed inside
@@ -6375,6 +6392,7 @@ fn filter_inner_for_object(
                     declared_slot_view,
                     granting_object,
                     controller_lookup,
+                    ability_targets,
                 )
         }
         // CR 603.10a + CR 607.2a: "cards exiled with [this object]" on a
@@ -6455,27 +6473,60 @@ fn filter_inner_for_object(
         // CR 400.7 + CR 603.7c: a parent object can be the member predicate of
         // a tracked-set continuation. In that one scan-based path, match the
         // creation-time target only while its recorded incarnation is current.
-        TargetFilter::ParentTarget => ability.is_some_and(|ability| {
-            !ability.target_incarnations.is_empty()
-                && ability.targets.iter().any(|target| {
-                    matches!(target, TargetRef::Object(id)
-                        if *id == object_id && ability.target_pin_is_current(*id, state))
-                })
-        }),
-        TargetFilter::ParentTargetSlot { index } => ability.is_some_and(|ability| {
-            !ability.target_incarnations.is_empty()
-                && matches!(
-                    // CR 608.2c: the slot is resolved from the chain root, not the
-                    // current node's locally-propagated targets — the selected
-                    // object is then checked by the same authority, so a referent
-                    // that was an illegal target at resolution (CR 608.2b) or that
-                    // departed and returned (CR 400.7) no longer matches.
-                    crate::game::targeting::resolve_live_parent_slot_from_root(
-                        state, ability, *index,
-                    ),
-                    Some(TargetRef::Object(id)) if id == object_id
-                )
-        }),
+        // R1: suspension-resume reads carry no ability, but the parked frame
+        // kept the node's targets plus the keyed guard — judge the member by
+        // those, exactly like the live arm.
+        TargetFilter::ParentTarget => match ability {
+            Some(ability) => {
+                !ability.target_incarnations.is_empty()
+                    && ability.targets.iter().any(|target| {
+                        matches!(target, TargetRef::Object(id)
+                            if *id == object_id && ability.target_pin_is_current(*id, state))
+                    })
+            }
+            None => ability_targets.is_some_and(|parked| {
+                !parked.keyed_target_incarnations.is_empty()
+                    && parked.local.iter().any(|target| {
+                        matches!(target, TargetRef::Object(id)
+                            if *id == object_id
+                                && crate::types::ability::keyed_target_pin_is_current(
+                                    parked.keyed_target_incarnations,
+                                    *id,
+                                    state,
+                                ))
+                    })
+            }),
+        },
+        TargetFilter::ParentTargetSlot { index } => match ability {
+            Some(ability) => {
+                !ability.target_incarnations.is_empty()
+                    && matches!(
+                        // CR 608.2c: the slot is resolved from the chain root, not the
+                        // current node's locally-propagated targets — the selected
+                        // object is then checked by the same authority, so a referent
+                        // that was an illegal target at resolution (CR 608.2b) or that
+                        // departed and returned (CR 400.7) no longer matches.
+                        crate::game::targeting::resolve_live_parent_slot_from_root(
+                            state, ability, *index,
+                        ),
+                        Some(TargetRef::Object(id)) if id == object_id
+                    )
+            }
+            // R1: the parked twin of the live slot authority — the same
+            // stamp/keyed selection the resumed indexed reads use.
+            None => ability_targets.is_some_and(|parked| {
+                !parked.keyed_target_incarnations.is_empty()
+                    && referenced_parked_targets_for_filter(
+                        state,
+                        &TargetFilter::ParentTargetSlot { index: *index },
+                        parked,
+                    )
+                    .iter()
+                    .any(|referent| {
+                        matches!(referent.target, TargetRef::Object(id) if *id == object_id)
+                    })
+            }),
+        },
         // ParentTargetController/ParentTargetOwner/PostReplacementSourceController
         // resolve at resolution time, not via object matching. ParentTargetOwner
         // mirrors ParentTargetController for the player-axis side of CR 108.3 vs CR 109.4.
