@@ -107,13 +107,25 @@ fn can_activate_loyalty_ability_impl(
         .get(&player)
         .copied()
         .unwrap_or(0);
-    let static_cap = super::restrictions::loyalty_activation_cap_from_statics(
-        state,
-        player,
-        planeswalker_id,
-        restriction_gates,
-    );
-    let cap = static_cap.saturating_add(extra_grants);
+    // CR 606.3: static `ModifyActivationLimit` terms only RAISE the cap above
+    // the `1 + extra_grants` base (max semantics, floor 1), so when the count
+    // is already below the base cap the static scan cannot change the outcome
+    // and is skipped. Besides saving the walk, this keeps priority loyalty
+    // candidate production at a single exact static scan (the ActivateAsInstant
+    // permission consult): the pre-flush `all_present` presence default would
+    // otherwise fall through to a redundant exact scan here.
+    let base_cap = 1u32.saturating_add(extra_grants);
+    let cap = if obj.loyalty_activations_this_turn < base_cap {
+        base_cap
+    } else {
+        super::restrictions::loyalty_activation_cap_from_statics(
+            state,
+            player,
+            planeswalker_id,
+            restriction_gates,
+        )
+        .saturating_add(extra_grants)
+    };
     if obj.loyalty_activations_this_turn >= cap {
         return false;
     }
