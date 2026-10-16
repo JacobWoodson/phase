@@ -210,6 +210,9 @@ pub fn resolve(
     // independently with the same sides/modifier/results table.
     let count = resolve_quantity_with_targets(state, count_expr, ability).max(0) as u32;
 
+    // Slot context must be captured while `ability` is still in scope — past
+    // the proposal below, a CR 616.1 suspension drops it.
+    let parked = crate::game::targeting::capture_parked_slot_context(state, ability);
     let instruction = PendingDieRollInstruction {
         source_id: ability.source_id,
         controller: ability.controller,
@@ -244,6 +247,15 @@ pub fn resolve(
                 TargetRef::Player(_) => None,
             })
             .collect(),
+        // CR 608.2c + CR 608.2b + CR 400.7: capture the slot-base declared
+        // entries, the base offset, and the node's own pins through the
+        // single capture authority — first-match pin lookup would collapse
+        // repeated IDs, and raw root indexing ignores modal/downstream
+        // offsets. Resume prefers these over the legacy chain-root list.
+        declared_targets: parked.declared_targets,
+        declared_target_pins: parked.declared_pins,
+        declared_ahead: parked.declared_ahead,
+        local_target_pins: parked.local_pins,
     };
 
     // CR 706.1 + CR 614.1a: route the instruction through the replacement
@@ -352,6 +364,10 @@ fn execute_roll(
         chain_root_targets,
         illegal_target_slots,
         chain_root_target_pins,
+        declared_targets,
+        declared_target_pins,
+        declared_ahead,
+        local_target_pins,
     } = instruction;
 
     let pending = PendingDieRoll {
@@ -376,6 +392,10 @@ fn execute_roll(
         chain_root_targets,
         illegal_target_slots,
         chain_root_target_pins,
+        declared_targets,
+        declared_target_pins,
+        declared_ahead,
+        local_target_pins,
     };
 
     // CR 706.6: when the ignored set is fully determined the roller has no
@@ -559,6 +579,10 @@ pub fn resume_after_ignore(
         chain_root_targets,
         illegal_target_slots,
         chain_root_target_pins,
+        declared_targets,
+        declared_target_pins,
+        declared_ahead,
+        local_target_pins,
     } = pending;
 
     // Clear any resolving keep choice so a re-suspension below is unambiguous
@@ -603,9 +627,13 @@ pub fn resume_after_ignore(
             ability,
             crate::game::filter::ParkedTargets {
                 local: &targets,
+                local_pins: &local_target_pins,
                 root: &chain_root_targets,
                 illegal_slots: &illegal_target_slots,
                 root_pins: &chain_root_target_pins,
+                declared: &declared_targets,
+                declared_pins: &declared_target_pins,
+                ahead: declared_ahead,
             },
         );
 
@@ -684,6 +712,10 @@ pub fn resume_after_ignore(
                     chain_root_targets: chain_root_targets.clone(),
                     illegal_target_slots: illegal_target_slots.clone(),
                     chain_root_target_pins: chain_root_target_pins.clone(),
+                    declared_targets: declared_targets.clone(),
+                    declared_target_pins: declared_target_pins.clone(),
+                    declared_ahead,
+                    local_target_pins: local_target_pins.clone(),
                 };
                 // CR 706.3a: park the owner in the structurally valid slot.
                 // A results-table branch that suspended on its own prompt is
@@ -1571,6 +1603,10 @@ mod tests {
             chain_root_targets: vec![],
             illegal_target_slots: vec![],
             chain_root_target_pins: vec![],
+            declared_targets: vec![],
+            declared_target_pins: vec![],
+            declared_ahead: 0,
+            local_target_pins: vec![],
         };
         let mut events = Vec::new();
         let waiting = resume_after_ignore(&mut state, pending, vec![0], &mut events, None).unwrap();
