@@ -1297,10 +1297,12 @@ fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
             // modes above; without it the swallow auditor false-positives an
             // Optional_YouMay clause and demotes the card from "supported."
             | StaticMode::CastFromHandFree { .. }
-            // CR 606.3 + CR 602.5b: "You may activate ... twice ... rather than
-            // (only) once" (Oath of Teferi class) — the "you may" is the
-            // permission itself.
-            | StaticMode::ModifyActivationLimit { .. }
+    ) || matches!(
+        // CR 606.3 + CR 602.5b: "You may activate ... twice ... rather than
+        // (only) once" (Oath of Teferi class) — the "you may" is the
+        // loyalty permission itself, not an exemption for unrelated keywords.
+        mode,
+        StaticMode::ModifyActivationLimit { keyword, .. } if keyword == "loyalty"
     )
 }
 

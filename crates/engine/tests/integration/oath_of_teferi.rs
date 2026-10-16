@@ -415,7 +415,7 @@ fn oath_etb_blink_preserved_and_static_coexists() {
     );
 }
 
-/// CR 606.3 + CR 109.5: Urza, Planeswalker's `SelfRef` scope grants the extra
+/// CR 606.3 + CR 201.5 + CR 201.5c: Urza, Planeswalker's `SelfRef` scope grants the extra
 /// activation ONLY to its source. Walker A (carrying the constructed SelfRef
 /// static) activates twice; Walker B's 2nd activation is refused — the scan
 /// discriminates per-source rather than blanket-allowing.

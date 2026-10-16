@@ -8,6 +8,7 @@ use super::prelude::*;
 use super::support::*;
 use crate::types::ability::TypedFilter;
 use nom::bytes::complete::take_till;
+use nom::combinator::map_opt;
 
 pub(crate) fn parse_self_loyalty_activation_permission(input: &str) -> OracleResult<'_, ()> {
     value(
@@ -141,10 +142,12 @@ pub(crate) fn parse_loyalty_activation_limit_static(
             map(
                 (
                     take_till(|c: char| c.is_ascii_digit()),
-                    nom_primitives::parse_number,
+                    map_opt(nom_primitives::parse_number, |n| {
+                        u8::try_from(n).ok().filter(|&limit| limit != 0)
+                    }),
                     tag(" times each turn rather than "),
                 ),
-                |(subject, n, _): (&str, u32, &str)| (subject.to_string(), n as u8),
+                |(subject, new_limit, _)| (subject.to_string(), new_limit),
             ),
         ))
         .parse(i)?;
@@ -156,7 +159,7 @@ pub(crate) fn parse_loyalty_activation_limit_static(
     })
     .map(|((subject, new_limit), _)| (subject, new_limit))?;
 
-    // CR 109.5: a self-reference subject scopes the static to its source
+    // CR 201.5 + CR 201.5c: a self-reference subject scopes the static to its source
     // (the `dispatch.rs` "~" pattern); anything else folds through the typed
     // subject phrase. Reject an empty or unrecognized subject outright.
     let trimmed = subject.trim();

@@ -12036,7 +12036,7 @@ fn static_oath_of_teferi_loyalty_activation_limit() {
     );
 }
 
-/// CR 606.3 + CR 109.5: Urza, Planeswalker's self-scoped sibling — the
+/// CR 606.3 + CR 201.5 + CR 201.5c: Urza, Planeswalker's self-scoped sibling — the
 /// production pipeline normalizes "Urza" to `~` before the static line parses,
 /// so the unit shape uses `~` directly and expects `SelfRef`. Runtime scope is
 /// pinned by the `oath_of_teferi` integration seam test, not here.
@@ -12083,6 +12083,66 @@ fn static_loyalty_activation_limit_count_axis_composes() {
             new_limit: 4,
         }
     );
+}
+
+/// Synthetic numeric grammar controls: representable nonzero limits retain
+/// their exact value; zero and overflowing limits keep honest unsupported output.
+#[test]
+fn static_loyalty_activation_limit_numeric_bounds_are_honest() {
+    for limit in [1u8, 4, 255] {
+        let text = format!(
+            "You may activate the loyalty abilities of planeswalkers you control {limit} times each turn rather than only once."
+        );
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            &text,
+            "Numeric Limit",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        assert!(
+            parsed.statics.iter().any(|definition| matches!(
+                &definition.mode,
+                StaticMode::ModifyActivationLimit { keyword, new_limit }
+                    if keyword == "loyalty" && *new_limit == limit
+            )),
+            "limit {limit} must retain its exact value: {parsed:?}"
+        );
+        assert!(
+            !parsed
+                .abilities
+                .iter()
+                .any(|ability| matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })),
+            "representable limit {limit} must parse completely: {parsed:?}"
+        );
+    }
+
+    for limit in [0, 256, 257] {
+        let text = format!(
+            "You may activate the loyalty abilities of planeswalkers you control {limit} times each turn rather than only once."
+        );
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            &text,
+            "Numeric Limit",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .any(|ability| matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })),
+            "unfaithful limit {limit} must remain unsupported: {parsed:?}"
+        );
+        assert!(
+            !parsed.statics.iter().any(|definition| matches!(
+                &definition.mode,
+                StaticMode::ModifyActivationLimit { keyword, .. } if keyword == "loyalty"
+            )),
+            "unfaithful limit {limit} must not produce a loyalty cap: {parsed:?}"
+        );
+    }
 }
 
 /// CR 606.3: routing claims exactly its class. Kaito, Dancing Shadow's line is
