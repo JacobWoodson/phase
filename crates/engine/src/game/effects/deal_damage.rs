@@ -2830,6 +2830,13 @@ pub(crate) fn tally_map_from_record_entries(
 /// unpublished remainder re-parks below any rider frames, so the rider
 /// subtree drains first on resume). Returns `None` when every frame unwound.
 /// Callers propagate the fresh choice instead of any cached Priority.
+///
+/// KNOWN RESIDUAL (pre-existing, out of C1–C3 scope): the drain hooks defer
+/// while ANY continuation is queued, so a nested resumed batch that completes
+/// while an outer tail is still queued leaves its frame parked — and the
+/// outer tail then hydrates from that stale top frame instead of its own.
+/// Fixing deferred-flush attribution (e.g. depth-keyed unwinding) is a
+/// separate change; none of the C1–C3 witnesses nest.
 pub(crate) fn flush_pending_each_source_batches(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
