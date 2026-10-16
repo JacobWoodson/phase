@@ -1876,7 +1876,12 @@ fn drain_combat_lifelink(
     // prompt is open, and after nothing else can stamp `last_effect_count`.
     // Fire-all: combat keeps its standing shape (see the `stop_on_fresh_choice`
     // contract on `fire_batch_prevention_riders`).
-    let _ = fire_batch_prevention_riders(state, &record.prevention_tally, &mut record.batch_events, false);
+    let _ = fire_batch_prevention_riders(
+        state,
+        &record.prevention_tally,
+        &mut record.batch_events,
+        false,
+    );
     // CR 510.2 + CR 732.2a: the simultaneous batch is the EVENT the loop-ring life
     // prohibition keys on, and this is the last statement that can move life in it.
     // The batch moves life in three places and only a call here sees all three:
@@ -2081,10 +2086,9 @@ pub(crate) fn fire_batch_prevention_riders(
                 drain.event_source = Some(source);
             }
         }
-        let dispatch_wait =
-            crate::game::engine_replacement::apply_pending_post_replacement_effect(
-                state, None, None, None, events,
-            );
+        let dispatch_wait = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+            state, None, None, None, events,
+        );
         // Matt C2: in stop mode a fresh rider-created choice ends the frame
         // here — later groups must not execute ahead of the pending prompt.
         if stop_on_fresh_choice {

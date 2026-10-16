@@ -2007,7 +2007,9 @@ fn rakdos_charm_rider_draw_choice_propagates_through_drain_hooks() {
     // NWF's rider draw must surface Abundance's live child choice — NOT the
     // cached Priority.
     let result = runner
-        .act(GameAction::ChooseReplacement { index: squire_index })
+        .act(GameAction::ChooseReplacement {
+            index: squire_index,
+        })
         .expect("the ordering choice must be answerable");
     log.extend(result.events);
     let WaitingFor::ReplacementChoice { candidates, .. } = runner.state().waiting_for.clone()
@@ -2143,7 +2145,9 @@ fn rakdos_charm_rider_draw_choice_survives_save_load() {
         .position(|c| c.source_name.contains("Selfless Squire"))
         .expect("one candidate must be the Squire's ETB shield");
     let result = runner
-        .act(GameAction::ChooseReplacement { index: squire_index })
+        .act(GameAction::ChooseReplacement {
+            index: squire_index,
+        })
         .expect("the ordering choice must be answerable");
     log.extend(result.events);
 

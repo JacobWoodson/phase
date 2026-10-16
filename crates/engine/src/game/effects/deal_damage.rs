@@ -2851,9 +2851,8 @@ pub(crate) fn flush_pending_each_source_batches(
         let suspended = std::mem::take(&mut state.pending_each_source_batches);
         let map = tally_map_from_record_entries(&frame.tally);
         let entries = crate::game::combat_damage::sorted_prevention_entries(map);
-        let outcome = crate::game::combat_damage::fire_batch_prevention_riders(
-            state, &entries, events, true,
-        );
+        let outcome =
+            crate::game::combat_damage::fire_batch_prevention_riders(state, &entries, events, true);
         let rider_frames = std::mem::take(&mut state.pending_each_source_batches);
         match outcome {
             BatchRiderDrainOutcome::Completed => {
@@ -2879,10 +2878,12 @@ pub(crate) fn flush_pending_each_source_batches(
                 remainder.drain(..published_entries.min(remainder.len()));
                 state.pending_each_source_batches = suspended;
                 if !remainder.is_empty() || frame.restore_tally.is_some() {
-                    state.pending_each_source_batches.push(EachSourceBatchFrame {
-                        tally: remainder,
-                        restore_tally: frame.restore_tally,
-                    });
+                    state
+                        .pending_each_source_batches
+                        .push(EachSourceBatchFrame {
+                            tally: remainder,
+                            restore_tally: frame.restore_tally,
+                        });
                 }
                 state.pending_each_source_batches.extend(rider_frames);
                 state.combat_prevention_tally = None;

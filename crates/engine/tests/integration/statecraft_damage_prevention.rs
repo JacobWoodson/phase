@@ -1390,7 +1390,10 @@ fn gateway_express_pause_consumes_exactly_one_shield_counter() {
     assert!(
         candidates.iter().any(|c| c.source_name.contains("Defang")),
         "one candidate must be Defang, got {:?}",
-        candidates.iter().map(|c| &c.source_name).collect::<Vec<_>>()
+        candidates
+            .iter()
+            .map(|c| &c.source_name)
+            .collect::<Vec<_>>()
     );
     let shield_index = candidates
         .iter()
@@ -1412,7 +1415,9 @@ fn gateway_express_pause_consumes_exactly_one_shield_counter() {
     );
 
     let result = runner
-        .act(GameAction::ChooseReplacement { index: shield_index })
+        .act(GameAction::ChooseReplacement {
+            index: shield_index,
+        })
         .expect("the ordering choice must be answerable");
     log.extend(result.events);
     runner.advance_until_stack_empty();
@@ -1539,7 +1544,9 @@ fn gateway_express_pause_survives_save_load() {
     );
 
     let result = runner
-        .act(GameAction::ChooseReplacement { index: shield_index })
+        .act(GameAction::ChooseReplacement {
+            index: shield_index,
+        })
         .expect("the ordering choice must be answerable after restore");
     log.extend(result.events);
     runner.advance_until_stack_empty();
