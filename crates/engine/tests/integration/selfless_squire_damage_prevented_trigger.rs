@@ -13,12 +13,13 @@
 //! that damage."
 //!
 //! The "once" in `DamagePreventedOnce` is a property of the EVENT STREAM, not of
-//! the matcher: the combat path emits ONE aggregate `DamagePrevented` per shield
-//! per simultaneous batch, and the non-combat path emits one per event. The
-//! matcher is therefore a pure per-event predicate and adds no dedup or
-//! once-per-turn latch — `two_separate_preventions_each_read_their_own_amount`
-//! pins that two separate applications produce two triggers, each reading its own
-//! amount.
+//! the matcher: the combat path and simultaneous non-combat batches each emit
+//! ONE aggregate `DamagePrevented` per shield per simultaneous batch (a paused
+//! batch republishes prefix + resumed entry + tail as one application via its
+//! pause-owned record). The matcher is therefore a pure per-event predicate
+//! and adds no dedup or once-per-turn latch —
+//! `two_separate_preventions_each_read_their_own_amount` pins that two
+//! separate applications produce two triggers, each reading its own amount.
 //!
 //! THE COMBAT HALF, and how CR 615.13 and CR 120.3 are BOTH honored. The combat
 //! path aggregates a whole CR 510.2 simultaneous batch before emitting, and it
@@ -28,7 +29,7 @@
 //! matcher correctly refused it under CR 120.3. The recipient is now THREADED
 //! from the replacement applier that prevented the damage
 //! (`game/replacement.rs`'s tally writes → `PreventedDamageEntry` →
-//! `game/combat_damage.rs::fire_combat_prevention_riders`), never re-derived,
+//! `game/combat_damage.rs::fire_batch_prevention_riders`), never re-derived,
 //! because a shield's `damage_target_filter` is a PREDICATE over recipients and
 //! not the recipient of any one event. So:
 //!
@@ -78,7 +79,7 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{PersistedGameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
@@ -122,6 +123,10 @@ const RIOT_CONTROL_TEXT: &str = "You gain 1 life for each creature your opponent
 /// so there is no scope for a filter-derived recipient to come from — the old
 /// path fabricated `Object(ObjectId(0))`, an object that does not exist.
 const FOG_TEXT: &str = "Prevent all combat damage that would be dealt this turn.";
+
+/// Verbatim New Way Forward. The chosen-source shield: aimed at the Bear, it
+/// makes the Bear event (and only it) a two-shield CR 616.1 ordering pause.
+const NEW_WAY_FORWARD_TEXT: &str = "The next time a source of your choice would deal damage to you this turn, prevent that damage. When damage is prevented this way, New Way Forward deals that much damage to that source's controller and you draw that many cards.";
 
 /// Verbatim Comeuppance. Per-source-reflecting, so it bypasses the batch tally
 /// entirely and keeps the pre-existing per-damage-event emission.
@@ -1513,10 +1518,11 @@ fn rakdos_charm_simultaneous_batch_fires_one_squire_trigger() {
 /// itself) with TWO co-applicable shields (its ETB shield plus Safe Passage),
 /// so Phase B pauses for a CR 616.1 ordering choice. The tally is
 /// `#[serde(skip)]` transient state and cannot span the player-visible pause:
-/// the (empty) prefix flushes at pause time, the tally restores, and the
-/// paused entry resumes per-event through the preserved continuation
-/// machinery. Driven manually so the test PROVES the pause prompt appeared
-/// (two candidates) rather than merely tolerating it.
+/// the (empty) prefix parks in the pause-owned batch record, the resumed
+/// entry re-accumulates onto it through the preserved continuation machinery,
+/// and the completion cascade publishes the single aggregate. Driven manually
+/// so the test PROVES the pause prompt appeared (two candidates) rather than
+/// merely tolerating it.
 ///
 /// NOTE (pre-existing, out of scope): a multi-entry batch that pauses loses
 /// its stashed tail on the base commit too (verified by stashing this
@@ -1524,7 +1530,7 @@ fn rakdos_charm_simultaneous_batch_fires_one_squire_trigger() {
 /// flagged for follow-up. This control uses one source to pin the
 /// pause/resume mechanics without depending on tail re-entry.
 #[test]
-fn rakdos_charm_batch_with_ordering_pause_completes_per_event_after_flush() {
+fn rakdos_charm_batch_with_ordering_pause_completes_single_aggregate_after_flush() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     stock_libraries(&mut scenario);
@@ -1584,5 +1590,287 @@ fn rakdos_charm_batch_with_ordering_pause_completes_per_event_after_flush() {
         counters_on(&runner, squire),
         1,
         "one resumed entry fires the trigger once"
+    );
+}
+
+/// CR 615.13 + CR 616.1e: a replacement-ordering pause at the FINAL entry of a
+/// two-source batch, with a NONEMPTY parked prefix, still yields ONE
+/// prevention application — the prefix is republished with the resumed entry,
+/// not flushed separately at pause time. Squire first (one shield: its ETB,
+/// no pause, parks 1), Bear last (two shields: Squire's ETB plus New Way
+/// Forward aimed at the Bear, pauses for ordering); answering with the Squire
+/// shield prevents both under one application: one aggregate event naming 2,
+/// one trigger placing 2, +1 from Hardened Scales = 3. The old prefix-flush
+/// published the prefix separately (two events, two triggers, 4 counters).
+///
+/// Revert-catches: restoring the pause-time prefix flush yields two
+/// `DamagePrevented` events and 4 counters.
+#[test]
+fn rakdos_charm_nonempty_prefix_pause_keeps_one_prevention_application() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    stock_libraries(&mut scenario);
+
+    let squire = scenario
+        .add_creature_to_hand_from_oracle(P0, "Selfless Squire", 1, 1, SELFLESS_SQUIRE_TEXT)
+        .with_mana_cost(free_cost())
+        .id();
+    // The Bear must ENTER after the Squire: the batch iterates the
+    // battlefield in entry order, and the pause must land on the final entry
+    // with the Squire's event parked as a nonempty prefix.
+    let bear = scenario
+        .add_creature_to_hand(P0, "Bear", 2, 2)
+        .with_mana_cost(free_cost())
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES_TEXT);
+    let way = add_instant_from_oracle(&mut scenario, P0, "New Way Forward", NEW_WAY_FORWARD_TEXT);
+    let charm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Rakdos Charm", true, RAKDOS_CHARM_TEXT)
+        .with_mana_cost(free_cost())
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(squire).resolve();
+    runner.cast(bear).resolve();
+    runner.cast(way).resolve();
+    // New Way Forward aims at the Bear: only the Bear event gets a second
+    // shield, so only it can pause for ordering.
+    let WaitingFor::DamageSourceChoice { .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "New Way Forward must ask for its damage source, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    runner
+        .act(GameAction::ChooseDamageSource { source: bear })
+        .expect("naming the Bear must be answerable");
+    assert!(
+        runner.state().objects[&squire].zone == Zone::Battlefield
+            && runner.state().objects[&bear].zone == Zone::Battlefield,
+        "reach guard: both creatures must be on the battlefield"
+    );
+    let battlefield_creatures: Vec<ObjectId> = runner
+        .state()
+        .battlefield
+        .iter()
+        .filter(|id| runner.state().objects[id].power.is_some())
+        .copied()
+        .collect();
+    assert_eq!(
+        battlefield_creatures,
+        vec![squire, bear],
+        "reach guard: the batch must iterate Squire first, Bear last"
+    );
+
+    let life_before = runner.state().players[P0.0 as usize].life;
+    let hand_before = runner
+        .state()
+        .objects
+        .values()
+        .filter(|o| o.controller == P0 && o.zone == Zone::Hand)
+        .count();
+    let mut log: Vec<GameEvent> = Vec::new();
+    let outcome = runner.cast(charm).modes(&[2]).resolve();
+    log.extend(outcome.events().iter().cloned());
+    let WaitingFor::ReplacementChoice { candidates, .. } = outcome.final_waiting_for() else {
+        panic!(
+            "the Bear event must pause for a CR 616.1 ordering choice, got {:?}",
+            outcome.final_waiting_for()
+        );
+    };
+    assert_eq!(
+        candidates.len(),
+        2,
+        "the Bear event must offer both shields as ordering candidates"
+    );
+    let squire_index = candidates
+        .iter()
+        .position(|c| c.source_name.contains("Selfless Squire"))
+        .expect("one candidate must be the Squire's ETB shield");
+    assert!(
+        candidates.iter().any(|c| c.source_name.is_empty()),
+        "the other candidate must be New Way Forward's floating shield, got {:?}",
+        candidates
+            .iter()
+            .map(|c| &c.source_name)
+            .collect::<Vec<_>>()
+    );
+    // The pause parked a NONEMPTY prefix: exactly one source's prevention (the
+    // Squire's event, first in battlefield order) with the Bear's event
+    // paused — pause at the final entry, not index 0.
+    assert_eq!(
+        runner.state().pending_each_source_batches.len(),
+        1,
+        "the pause must park exactly one batch record"
+    );
+    assert_eq!(
+        runner.state().pending_each_source_batches[0]
+            .tally
+            .iter()
+            .map(|entry| entry.amount)
+            .sum::<i32>(),
+        1,
+        "the parked prefix must hold the Squire's 1 prevented"
+    );
+
+    // Answer with the Squire shield: both preventions land under ONE shield,
+    // hence ONE application. (Choosing New Way Forward instead would prevent
+    // under two shields — two applications, four counters — for the right
+    // reason, and is NOT this test.)
+    let result = runner
+        .act(GameAction::ChooseReplacement {
+            index: squire_index,
+        })
+        .expect("the ordering choice must be answerable");
+    log.extend(result.events);
+    runner.advance_until_stack_empty();
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "resolution must complete to a clean priority window, got {:?}",
+        runner.state().waiting_for
+    );
+
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        life_before,
+        "both damage must be prevented (none dealt through)"
+    );
+    assert_eq!(
+        prevented_pairs(&log),
+        vec![(TargetRef::Player(P0), 2)],
+        "prefix + resumed entry must publish as ONE aggregate application"
+    );
+    assert_eq!(
+        counters_on(&runner, squire),
+        3,
+        "one trigger placing 2 at once, +1 from Hardened Scales (two triggers would make 4)"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .objects
+            .values()
+            .filter(|o| o.controller == P0 && o.zone == Zone::Hand)
+            .count(),
+        hand_before - 1,
+        "New Way Forward's rider must stay silent (its shield prevented nothing): \
+         only the Charm left the hand, nothing drawn"
+    );
+    assert!(
+        runner.state().pending_each_source_batches.is_empty(),
+        "the pause record must be consumed by the completion cascade"
+    );
+}
+
+/// CR 615.13 + CR 616.1e persistence: the nonempty-prefix pause above,
+/// save/loaded THROUGH the ordering prompt (authoritative capture form) and
+/// resumed — the parked prefix survives the round trip, so the resumed batch
+/// still publishes ONE aggregate application (one event naming 2, 3
+/// counters), not a prefix-less resumed fragment plus a lost prefix.
+#[test]
+fn rakdos_charm_paused_prefix_survives_save_load() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    stock_libraries(&mut scenario);
+
+    let squire = scenario
+        .add_creature_to_hand_from_oracle(P0, "Selfless Squire", 1, 1, SELFLESS_SQUIRE_TEXT)
+        .with_mana_cost(free_cost())
+        .id();
+    let bear = scenario
+        .add_creature_to_hand(P0, "Bear", 2, 2)
+        .with_mana_cost(free_cost())
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES_TEXT);
+    let way = add_instant_from_oracle(&mut scenario, P0, "New Way Forward", NEW_WAY_FORWARD_TEXT);
+    let charm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Rakdos Charm", true, RAKDOS_CHARM_TEXT)
+        .with_mana_cost(free_cost())
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(squire).resolve();
+    runner.cast(bear).resolve();
+    runner.cast(way).resolve();
+    runner
+        .act(GameAction::ChooseDamageSource { source: bear })
+        .expect("naming the Bear must be answerable");
+
+    let life_before = runner.state().players[P0.0 as usize].life;
+    let mut log: Vec<GameEvent> = Vec::new();
+    let outcome = runner.cast(charm).modes(&[2]).resolve();
+    log.extend(outcome.events().iter().cloned());
+    let WaitingFor::ReplacementChoice { candidates, .. } = outcome.final_waiting_for() else {
+        panic!(
+            "the Bear event must pause for a CR 616.1 ordering choice, got {:?}",
+            outcome.final_waiting_for()
+        );
+    };
+    let squire_index = candidates
+        .iter()
+        .position(|c| c.source_name.contains("Selfless Squire"))
+        .expect("one candidate must be the Squire's ETB shield");
+
+    // Save/load THROUGH the pause: the parked prefix (1 prevented under the
+    // Squire shield) must survive the authoritative round trip.
+    assert_eq!(
+        runner.state().pending_each_source_batches.len(),
+        1,
+        "reach guard: the pause must park exactly one batch record"
+    );
+    let saved = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+        .expect("the authoritative paused state serializes");
+    let restored: PersistedGameState =
+        serde_json::from_str(&saved).expect("the authoritative paused state deserializes");
+    let mut runner = GameRunner::from_state(
+        restored
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract"),
+    );
+    assert_eq!(
+        runner.state().pending_each_source_batches.len(),
+        1,
+        "the parked batch record must survive authoritative restore"
+    );
+    assert_eq!(
+        runner.state().pending_each_source_batches[0]
+            .tally
+            .iter()
+            .map(|entry| entry.amount)
+            .sum::<i32>(),
+        1,
+        "the parked prefix (Squire's 1 prevented) must survive restore"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "the ordering prompt must survive restore, got {:?}",
+        runner.state().waiting_for
+    );
+
+    let result = runner
+        .act(GameAction::ChooseReplacement {
+            index: squire_index,
+        })
+        .expect("the ordering choice must be answerable after restore");
+    log.extend(result.events);
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        life_before,
+        "both damage must be prevented (none dealt through)"
+    );
+    assert_eq!(
+        prevented_pairs(&log),
+        vec![(TargetRef::Player(P0), 2)],
+        "restored prefix + resumed entry must publish as ONE aggregate application"
+    );
+    assert_eq!(
+        counters_on(&runner, squire),
+        3,
+        "one trigger placing 2 at once, +1 from Hardened Scales"
     );
 }

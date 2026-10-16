@@ -1365,6 +1365,20 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                 let _ = resolve_ability_chain(state, &scope.after_scope, events, 1);
             }
         }
+        // CR 615.13 + CR 616.1e: a resumed prevention batch publishes its
+        // aggregate application(s) exactly here — its chain fully drained with
+        // no further choice pending and no continuation still queued. Earlier
+        // (mid-chain) would fragment the batch; the gate makes later
+        // impossible (frames pop now). Innermost-first cascade; the stack
+        // check alone skips the common path. Runs before the marker below so
+        // aggregate events precede `EffectResolved`, matching the unpaused
+        // order.
+        if !state.pending_each_source_batches.is_empty()
+            && !waits_for_resolution_choice(&state.waiting_for)
+            && state.active_ability_continuation().is_none()
+        {
+            deal_damage::flush_pending_each_source_batches(state, events);
+        }
         if let Some(kind) = parent_kind {
             events.push(GameEvent::EffectResolved {
                 kind,

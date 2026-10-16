@@ -18,7 +18,9 @@ use crate::types::ability::{
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{DamageRecord, GameState};
+use crate::types::game_state::{
+    CombatPreventionTally, DamageRecord, EachSourceBatchFrame, GameState, PreventedDamageEntry,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::KeywordKind;
 use crate::types::player::{PlayerCounterKind, PlayerId};
@@ -2780,7 +2782,80 @@ fn flush_noncombat_prevention_tally(state: &mut GameState, events: &mut Vec<Game
     }
 }
 
+/// CR 615.13: canonical entry encoding of a live prevention tally for pause
+/// records — saves cannot key JSON maps on pairs, and entries are exactly
+/// what the aggregate drain consumes. Sorted, so records compare canonically.
+pub(crate) fn tally_entries_for_record(tally: &CombatPreventionTally) -> Vec<PreventedDamageEntry> {
+    crate::game::combat_damage::sorted_prevention_entries(tally.clone())
+}
+
+/// CR 615.13: fold parked entries back into a live tally, summing duplicate
+/// pairs. A resumed batch re-accumulates onto its parked prefix through this.
+pub(crate) fn tally_map_from_record_entries(
+    entries: &[PreventedDamageEntry],
+) -> CombatPreventionTally {
+    let mut map = HashMap::new();
+    for entry in entries {
+        *map.entry((entry.key, entry.recipient.clone())).or_insert(0) += entry.amount;
+    }
+    map
+}
+
+/// CR 615.13 + CR 616.1e: publish every suspended prevention batch, innermost
+/// first, once the resumed drain completes. Called from
+/// `drain_pending_continuation` when a chain drains with batch frames present,
+/// no further choice pending, and no continuation still queued: each frame's
+/// tally is one CR 615.13 application (its shield/recipient groups), and each
+/// pop restores the surrounding transient that frame suspended, so nesting
+/// unwinds exactly. Empty frames (a scope whose tally already published
+/// inline) restore without publishing.
+pub(crate) fn flush_pending_each_source_batches(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) {
+    while let Some(frame) = state.pending_each_source_batches.pop() {
+        if !frame.tally.is_empty() {
+            let map = tally_map_from_record_entries(&frame.tally);
+            let entries = crate::game::combat_damage::sorted_prevention_entries(map);
+            crate::game::combat_damage::fire_batch_prevention_riders(state, &entries, events);
+        }
+        state.combat_prevention_tally = frame
+            .restore_tally
+            .map(|entries| tally_map_from_record_entries(&entries));
+    }
+}
+
 pub fn resolve_each_source_deals_damage(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    // CR 615.13: a batch nested inside a suspended batch pushes a scope frame
+    // so its accumulations attribute to itself (never to the outer frame via
+    // write-through). Top-level batches push nothing — the common path stays
+    // allocation-free.
+    let entry_len = state.pending_each_source_batches.len();
+    let pushed_scope = !state.pending_each_source_batches.is_empty();
+    if pushed_scope {
+        state
+            .pending_each_source_batches
+            .push(EachSourceBatchFrame {
+                tally: Vec::new(),
+                restore_tally: None,
+            });
+    }
+    let result = resolve_each_source_deals_damage_inner(state, ability, events);
+    // A pause in this invocation (or deeper) pushed above our scope: the
+    // frames stay for the completion cascade. Otherwise this batch completed
+    // synchronously — pop and discard our scope (its tally already published
+    // by the inline flush, or is empty).
+    if pushed_scope && state.pending_each_source_batches.len() == entry_len + 1 {
+        state.pending_each_source_batches.pop();
+    }
+    result
+}
+
+fn resolve_each_source_deals_damage_inner(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
@@ -2943,6 +3018,12 @@ pub fn resolve_each_source_deals_damage(
     // combat batch. Save/restore the surrounding value: a nested batch (e.g. a
     // rider that deals damage) aggregates separately.
     let restore_tally = state.combat_prevention_tally.take();
+    // CR 615.13: a nested batch suspends the outer scope — the surrounding
+    // transient rides in our scope frame (top of stack at this point, pushed
+    // by the wrapper) so the completion cascade restores it.
+    if let Some(top) = state.pending_each_source_batches.last_mut() {
+        top.restore_tally = restore_tally.as_ref().map(tally_entries_for_record);
+    }
     state.combat_prevention_tally = Some(HashMap::new());
     for (i, (_src, ctx, target, dmg)) in entries.iter().enumerate() {
         let Some(proposed) = pre_replacement_damage_gate(state, ctx, target, *dmg, false, events)
@@ -2978,16 +3059,28 @@ pub fn resolve_each_source_deals_damage(
     }
 
     if let (Some(pause_at), Some(player)) = (phase_b_paused_at, phase_b_waiting_for_player) {
-        // CR 615.13: a replacement choice pauses Phase B mid-batch. Flush the
-        // completed prefix as one aggregate application now — the tally is
-        // `#[serde(skip)]` transient state that cannot span the player-visible
-        // pause — then restore the surrounding tally so the paused entry and
-        // the stashed tail resolve per-event through the preserved continuation
-        // machinery. Documented deviation: a batch that pauses mid-Phase-B
-        // yields one prefix application plus per-event tail applications
-        // instead of a single whole-batch application.
-        flush_noncombat_prevention_tally(state, events);
-        state.combat_prevention_tally = restore_tally;
+        // CR 615.13 + CR 616.1e: a replacement choice pauses Phase B mid-batch.
+        // Park the completed prefix in a pause-owned record — the transient
+        // tally cannot span the player-visible pause — INSTEAD of publishing
+        // it: the resumed drain republishes the WHOLE batch (prefix, resumed
+        // entry, and stashed tail) as one CR 615.13 application. The
+        // surrounding tally rides in the record too (restored when the batch
+        // completes). Clear our scope copy (if nested) so the completion
+        // cascade publishes the prefix once, from this record.
+        let prefix_tally = state
+            .combat_prevention_tally
+            .take()
+            .map(|tally| tally_entries_for_record(&tally))
+            .unwrap_or_default();
+        if let Some(top) = state.pending_each_source_batches.last_mut() {
+            top.tally.clear();
+        }
+        state
+            .pending_each_source_batches
+            .push(EachSourceBatchFrame {
+                tally: prefix_tally,
+                restore_tally: restore_tally.as_ref().map(tally_entries_for_record),
+            });
         state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
         // Source `pause_at` is mid-Phase-B (replacement choice in flight via
         // `waiting_for`); `handle_replacement_choice` will call
@@ -3009,8 +3102,13 @@ pub fn resolve_each_source_deals_damage(
     // aggregate riders fire and `last_effect_count` carries the batch total
     // while no further replacement can overwrite it. (Phase C pauses stash
     // post-replacement survivors that bypass the pipeline, so flushing here
-    // is unaffected by them.)
+    // is unaffected by them.) The inline flush consumed the batch tally —
+    // clear our scope copy (if nested) so the completion cascade never
+    // republishes it; our normal exit then pops and discards the spent scope.
     flush_noncombat_prevention_tally(state, events);
+    if let Some(top) = state.pending_each_source_batches.last_mut() {
+        top.tally.clear();
+    }
     state.combat_prevention_tally = restore_tally;
 
     // Phase C — apply all already-replaced damage events. If any source's

@@ -17429,6 +17429,26 @@ pub struct PreventedDamageEntry {
     pub amount: i32,
 }
 
+/// CR 615.13 + CR 616.1e: one suspended simultaneous-prevention batch's owned
+/// tally. Pushed onto `pending_each_source_batches` when an
+/// `EachSourceDealsDamage` batch pauses mid-Phase-B for a replacement choice
+/// (or when a batch nests inside a suspended one); the resumed drain pops and
+/// publishes every frame, innermost first, once the batch completes. The tally
+/// rides as entries rather than the `HashMap` (JSON maps cannot key on pairs);
+/// entries stay in `sorted_prevention_entries` order so equality and saves are
+/// canonical.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EachSourceBatchFrame {
+    /// Accumulated (shield, recipient) prevention, kept current by applier
+    /// write-through so save/load at any boundary resumes exactly.
+    #[serde(default)]
+    pub tally: Vec<PreventedDamageEntry>,
+    /// The surrounding transient suspended when this frame opened, restored
+    /// when it pops so nesting composes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_tally: Option<Vec<PreventedDamageEntry>>,
+}
+
 /// CR 510.2 + CR 616.1 + CR 702.15b: the unfinished tail of ONE simultaneous combat-damage batch,
 /// parked because a lifelink life-gain event met two or more co-applicable replacement effects
 /// and the gaining player must choose which applies first. CR 510.2 forbids *casting spells and
@@ -23758,6 +23778,18 @@ declare_game_state! {
     /// clippy's `type_complexity` lint demands one — `replace_combat_damage_batch`'s
     /// return type.
     pub combat_prevention_tally: Option<HashMap<(AppliedReplacementKey, TargetRef), i32>>,
+    /// CR 615.13 + CR 616.1e: pause-owned prevention-batch frames (see
+    /// [`EachSourceBatchFrame`]). The transient tally above cannot span a
+    /// player-visible pause (`#[serde(skip)]`, always `None` at every
+    /// `apply()` boundary); a batch that pauses parks its accumulation here,
+    /// and the resumed drain publishes it once the batch completes. Empty
+    /// (hence skipped) whenever no batch is suspended — the common unpaused
+    /// path never touches it. Compared: accumulated prevention is real
+    /// resolution progress, like its combat sibling. NOT a live-event
+    /// carrier: entries name plain object/player ids, with no occurrence
+    /// fields to erase or rebind.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_each_source_batches: Vec<EachSourceBatchFrame>,
 }
 
 /// The map-backed history entries `copy` does not share with `original`, a nested causes map
@@ -29628,6 +29660,7 @@ impl GameState {
             archenemy,
             initiative: None,
             combat_prevention_tally: None,
+            pending_each_source_batches: Vec::new(),
             cancelled_casts: Vec::new(),
             pending_activations: Vec::new(),
             commander_declined_zone_return: HashSet::new(),
@@ -31403,6 +31436,7 @@ impl GameState {
             && self.pending_player_scope_sacrifice_choice.is_none()
             && self.pending_discard_batch.is_none()
             && self.pending_combat_lifelink.is_none()
+            && self.pending_each_source_batches.is_empty()
             && self.deferred_entry_events.is_empty()
             && self.pending_attack_trigger_events.is_empty()
             && self
@@ -32657,6 +32691,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         archenemy: _,
         initiative: _,
         combat_prevention_tally: _,
+        pending_each_source_batches: _,
         // Post-rebase upstream additions (v0.21.x: #5515 discover + liminal mechanic).
         // Strict-compared by eq_except_growable's GameState PartialEq reuse (fail-safe:
         // a differing value is correctly not a fixed-point repeat); object-growth loops
@@ -32935,6 +32970,7 @@ impl PartialEq for GameState {
             && self.pending_discard_batch == other.pending_discard_batch
             && self.pending_exile_from_top_until == other.pending_exile_from_top_until
             && self.pending_combat_lifelink == other.pending_combat_lifelink
+            && self.pending_each_source_batches == other.pending_each_source_batches
             && self.pending_mass_library_order_choice
                 == other.pending_mass_library_order_choice
             && self.pending_scoped_library_search == other.pending_scoped_library_search
@@ -36799,6 +36835,71 @@ mod tests {
             .into_game_state()
             .expect("persisted test snapshot satisfies the checked restore contract");
         assert!(restored.pending_combat_lifelink.is_none());
+        assert!(
+            matches!(
+                restored.waiting_for,
+                WaitingFor::ReplacementChoice {
+                    player,
+                    candidate_count,
+                    ..
+                } if player == PlayerId(0) && candidate_count == 2
+            ),
+            "a batch-less mid-pause save must round-trip its prompt VERBATIM"
+        );
+    }
+
+    /// Registration surface 1's save-compat property for the parked
+    /// each-source batch: a save written before this field existed must load
+    /// as empty rather than failing deserialization, and the prompt it was
+    /// paused on must survive VERBATIM. Modelled on
+    /// `absent_pending_combat_lifelink_deserializes_as_none`.
+    #[test]
+    fn absent_pending_each_source_batches_deserializes_as_empty() {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 19;
+        state
+            .pending_each_source_batches
+            .push(EachSourceBatchFrame {
+                tally: vec![PreventedDamageEntry {
+                    key: AppliedReplacementKey::Object {
+                        source: ObjectId(9_402),
+                        index: 0,
+                    },
+                    recipient: TargetRef::Player(PlayerId(1)),
+                    amount: 1,
+                }],
+                restore_tally: None,
+            });
+        // CR 616.1: the ordering prompt a parked batch is waiting on. Without it
+        // the save is not mid-pause and this test measures nothing.
+        state.waiting_for = WaitingFor::ReplacementChoice {
+            player: PlayerId(0),
+            candidate_count: 2,
+            candidates: Vec::new(),
+            kind: Default::default(),
+            last_applied_decides: false,
+            remember_identity: None,
+        };
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "reach guard: the INPUT must not already satisfy the property under test"
+        );
+
+        let mut wire = serde_json::to_value(PersistedGameState::Raw(Box::new(state)))
+            .expect("fixture serializes");
+        assert!(
+            wire.as_object_mut()
+                .expect("a raw persisted state is an object")
+                .remove("pending_each_source_batches")
+                .is_some(),
+            "reach guard: the field must actually have been serialized to remove"
+        );
+
+        let restored = serde_json::from_value::<PersistedGameState>(wire)
+            .expect("an absent parked batch defaults to empty")
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
+        assert!(restored.pending_each_source_batches.is_empty());
         assert!(
             matches!(
                 restored.waiting_for,

@@ -186,6 +186,18 @@ pub(super) fn handle_replacement_choice(
 ) -> Result<WaitingFor, EngineError> {
     let action_event_start = events.len();
     let waiting_for = handle_replacement_choice_inner(state, index, events)?;
+    // CR 615.13 + CR 616.1e: a resumed prevention batch whose continuation is
+    // empty (single source, no downstream) completes with no drain at all, so
+    // the drain hook never evaluates — publish here on the fresh outcome. A
+    // still-queued chain defers to the drain hook (active check); a nested
+    // pause defers to its own resume (fresh choice check). Pop-once makes the
+    // overlap with the drain hook idempotent.
+    if !state.pending_each_source_batches.is_empty()
+        && matches!(waiting_for, WaitingFor::Priority { .. })
+        && state.active_ability_continuation().is_none()
+    {
+        super::effects::deal_damage::flush_pending_each_source_batches(state, events);
+    }
     // CR 616.1f: a second ordering choice, or any nested prompt, leaves the record
     // parked for the next answer; only a settled round trip may close the batch.
     // Nothing is left behind on this path — the anchor is a local that dies here.

@@ -2337,8 +2337,38 @@ fn accumulate_batch_prevention(
     if prevented_amount == 0 {
         return false;
     }
-    if let Some(tally) = state.combat_prevention_tally.as_mut() {
+    // CR 615.13 + CR 616.1e: a resumed batch rehydrates its parked tally on
+    // first accumulation — save/load may have dropped the transient, and the
+    // record is authoritative (kept current by the write-through below). Gated
+    // on a suspended batch, so the common path is one emptiness check.
+    if state.combat_prevention_tally.is_none() && !state.pending_each_source_batches.is_empty() {
+        let parked = state
+            .pending_each_source_batches
+            .last()
+            .map(|frame| frame.tally.clone())
+            .unwrap_or_default();
+        state.combat_prevention_tally =
+            Some(crate::game::effects::deal_damage::tally_map_from_record_entries(&parked));
+    }
+    let accumulated = if let Some(tally) = state.combat_prevention_tally.as_mut() {
         *tally.entry((applied_key, recipient.clone())).or_insert(0) += prevented_amount as i32;
+        true
+    } else {
+        false
+    };
+    if accumulated {
+        // CR 615.13: write the accumulation back so the parked record stays
+        // current across any nested boundary (pause, save/load). The top
+        // frame always owns this accumulation: nested batches suspend outer
+        // frames under their own scope.
+        let snapshot = state
+            .combat_prevention_tally
+            .as_ref()
+            .map(crate::game::effects::deal_damage::tally_entries_for_record)
+            .unwrap_or_default();
+        if let Some(top) = state.pending_each_source_batches.last_mut() {
+            top.tally = snapshot;
+        }
         return true;
     }
     false
