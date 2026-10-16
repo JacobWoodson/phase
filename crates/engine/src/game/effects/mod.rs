@@ -4849,7 +4849,11 @@ pub(crate) fn optional_decline_branch(
         || (sub.sub_link == SubAbilityLink::SequentialSibling
             && !sub_ability_is_reflexive(sub)
             && !(matches!(&ability.effect, Effect::CastFromZone { .. })
-                && (cast_from_zone::graveyard_destination_rider(&sub.effect).is_some()
+                && (cast_from_zone::graveyard_destination_rider(
+                    &sub.effect,
+                    sub.condition.as_ref(),
+                )
+                .is_some()
                     || cast_from_zone::is_enters_with_counter_rider_subability(sub))));
     if !selected {
         // CR 608.2c: a declined "you may" fails the "if you do" gate `sub`,
@@ -18062,7 +18066,8 @@ fn resolve_chain_body(
         // last slot itself when no rider is printed.
         let cast_slots = cast_from_zone::cast_slot_group(ability);
         let is_rider = |link: &ResolvedAbility| {
-            cast_from_zone::graveyard_destination_rider(&link.effect).is_some()
+            cast_from_zone::graveyard_destination_rider(&link.effect, link.condition.as_ref())
+                .is_some()
         };
         let tail_parent: Option<&ResolvedAbility> = match cast_slots.last() {
             Some(last) => Some(
@@ -18323,7 +18328,10 @@ fn resolve_chain_body(
         // its condition reads none and grants nothing, while the spell stays
         // on the stack (measured: `delay_leaves_an_uncounterable_spell_alone`).
         if matches!(&ability.effect, Effect::Counter { .. })
-            && cast_from_zone::is_graveyard_exile_rider_subability(&sub.effect)
+            && cast_from_zone::is_graveyard_exile_rider_subability(
+                &sub.effect,
+                sub.condition.as_ref(),
+            )
         {
             // Not pinned by a test: no printed card reaches this state
             // (measured above), and returning here preserves `main`'s
@@ -38141,16 +38149,19 @@ mod tests {
                         exiled_id: exiled_a,
                         owner: PlayerId(0),
                         mana_value: 2,
+                        incarnation: state.objects[&exiled_a].incarnation,
                     },
                     LinkedExileSnapshot {
                         exiled_id: exiled_b,
                         owner: PlayerId(0),
                         mana_value: 3,
+                        incarnation: state.objects[&exiled_b].incarnation,
                     },
                     LinkedExileSnapshot {
                         exiled_id: exiled_c,
                         owner: PlayerId(1),
                         mana_value: 4,
+                        incarnation: state.objects[&exiled_c].incarnation,
                     },
                 ],
                 ..crate::types::game_state::ZoneChangeRecord::test_minimal(
