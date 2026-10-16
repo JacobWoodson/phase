@@ -174,6 +174,7 @@ mod client_wire_viewer_projection;
 mod cloud_key_chosen_type_cost;
 mod coalition_relic_integration;
 mod cobra_king_guarded_reflexive_modal;
+mod code_of_constraint_addendum;
 mod codie_prepared_spell_trigger;
 mod codie_turn14_effect_zone_wedge;
 mod coin_of_fate;
