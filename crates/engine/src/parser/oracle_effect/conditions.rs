@@ -5991,7 +5991,6 @@ fn player_attack_endpoint_to_scope(scope: &ControllerRef) -> Option<PlayerScope>
         ControllerRef::TargetPlayer
         | ControllerRef::TargetOpponent
         | ControllerRef::ChosenPlayer { .. } => Some(PlayerScope::Target),
-        ControllerRef::SpecificPlayer { id } => Some(PlayerScope::SpecificPlayer { id: *id }),
         ControllerRef::SourceChosenPlayer => Some(PlayerScope::SourceChosenPlayer),
         ControllerRef::DefendingPlayer => Some(PlayerScope::DefendingPlayer),
         ControllerRef::ScopedPlayer => Some(PlayerScope::ScopedPlayer),
@@ -6001,6 +6000,13 @@ fn player_attack_endpoint_to_scope(scope: &ControllerRef) -> Option<PlayerScope>
         // have no `PlayerScope` counterpart. Each fails the condition to
         // `None` (listed explicitly so a new `ControllerRef` breaks the
         // build here instead of silently rebinding).
+        //
+        // CR 508.6 + CR 608.2c (Matt M2): `SpecificPlayer` is refused here
+        // too, even though the names line up. `PlayerScope::SpecificPlayer`
+        // is duration-timing-only — never produced by the parser, carrying
+        // no value reading — and the condition authority rejects it before
+        // evaluation, so mapping it would bridge a matching ledger entry to
+        // a condition that still yields false (or true under `Not`).
         ControllerRef::Opponent
         | ControllerRef::ParentTargetController
         | ControllerRef::EventTargetController
@@ -6008,6 +6014,7 @@ fn player_attack_endpoint_to_scope(scope: &ControllerRef) -> Option<PlayerScope>
         | ControllerRef::TriggeringPlayer
         | ControllerRef::EnchantedPlayer
         | ControllerRef::ActivePlayer
+        | ControllerRef::SpecificPlayer { .. }
         | ControllerRef::DeclaredPlayer { .. } => None,
     }
 }
@@ -6045,10 +6052,13 @@ pub(crate) fn static_condition_to_ability_condition(
         // preserved exactly: `You` reads the resolution controller;
         // declared-target and chosen endpoints read the first
         // `TargetRef::Player` (the V1 creation-time stamp carries the
-        // chosen player); `SpecificPlayer`, `SourceChosenPlayer`,
-        // `DefendingPlayer`, and `ScopedPlayer` are scalar-identical on
-        // both axes. Aggregates (`Opponent`), event- and parent-relative
-        // anchors, and `ActivePlayer`/`TriggeringPlayer`/`EnchantedPlayer`
+        // chosen player); `SourceChosenPlayer`, `DefendingPlayer`, and
+        // `ScopedPlayer` are scalar-identical on both axes. Aggregates
+        // (`Opponent`), event- and parent-relative anchors,
+        // `ActivePlayer`/`TriggeringPlayer`/`EnchantedPlayer`, and
+        // `SpecificPlayer` (Matt M2: its `PlayerScope` namesake is
+        // duration-timing-only and the condition authority rejects it,
+        // so mapping it would yield false despite a matching ledger)
         // have no scalar counterpart -- lowering them would silently
         // rebind (cf. `IsMonarch` below), so the whole condition stays
         // unrepresented and coverage stays honest.
@@ -14006,5 +14016,41 @@ mod tests {
             })
             .collect();
         assert_eq!(colors, ManaColor::ALL.to_vec());
+    }
+
+    /// CR 508.6 + CR 608.2c (Matt M2): the `SpecificPlayer` attack endpoint
+    /// is refused by the initial-verb bridge on either side.
+    /// `PlayerScope::SpecificPlayer` is duration-timing-only and the
+    /// condition authority rejects it, so mapping the endpoint would bridge
+    /// a matching ledger entry to a condition that still yields false (or
+    /// true under `Not`). The declared-target positive still bridges to
+    /// `Target`/`Controller`; evaluation cells live in
+    /// `player_attacked_player_predicate_matrix`.
+    #[test]
+    fn initial_verb_bridge_refuses_specific_player_attack_endpoint() {
+        use crate::types::player::PlayerId;
+
+        let p1 = PlayerId(1);
+        for (attacker, defender) in [
+            (ControllerRef::SpecificPlayer { id: p1 }, ControllerRef::You),
+            (ControllerRef::You, ControllerRef::SpecificPlayer { id: p1 }),
+        ] {
+            let sc = StaticCondition::PlayerAttackedPlayer { attacker, defender };
+            assert_eq!(
+                static_condition_to_ability_condition(&sc, &mut ParseContext::default()),
+                None
+            );
+        }
+        let sc = StaticCondition::PlayerAttackedPlayer {
+            attacker: ControllerRef::ChosenPlayer { index: 0 },
+            defender: ControllerRef::You,
+        };
+        assert_eq!(
+            static_condition_to_ability_condition(&sc, &mut ParseContext::default()),
+            Some(AbilityCondition::PlayerAttackedPlayer {
+                attacker: PlayerScope::Target,
+                defender: PlayerScope::Controller,
+            })
+        );
     }
 }
