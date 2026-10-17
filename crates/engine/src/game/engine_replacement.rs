@@ -373,6 +373,22 @@ fn handle_replacement_choice_inner(
         .pending_replacement
         .as_ref()
         .and_then(|pending| pending.each_source_batch_owner);
+    // CR 616.1f + CR 615.13 + CR 616.1e (R2-F2): same-event identity for the
+    // stamp restore in the NeedsChoice epilogue below. A mandatory modifier
+    // changes the amount, so the (source, recipient, combat) triple
+    // discriminates the repeated event from a nested child event's choice.
+    let parked_damage_identity: Option<(ObjectId, TargetRef, bool)> = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| match &pending.proposed {
+            ProposedEvent::Damage {
+                source_id,
+                target,
+                is_combat,
+                ..
+            } => Some((*source_id, target.clone(), *is_combat)),
+            _ => None,
+        });
     let result = super::replacement::continue_replacement(state, index, events);
     // CR 614.12a: an optional `MayCost` accept whose payment surfaced an
     // interactive sub-choice (e.g. Mox Diamond's "discard a land card" with
@@ -1544,6 +1560,36 @@ fn handle_replacement_choice_inner(
                 // choice or applied replacement has changed the proposal since.
                 if let Some(paused) = parked_zone_change_delivery.as_ref() {
                     pending.inherit_delivery_boundary(&paused.expected_event);
+                }
+                // CR 616.1f + CR 615.13 + CR 616.1e (R2-F2): a SECOND ordering
+                // choice on the same damage event re-parked a fresh record
+                // with `each_source_batch_owner: None` (pipeline_loop
+                // constructs it unstamped). Reapply the stamp captured before
+                // `continue_replacement` consumed the prior record so the
+                // eventual answer still publishes the empty-tail batch at its
+                // own boundary. Same-event gated: a nested child event's
+                // choice (a rider-created reflect names a different source)
+                // must not inherit the stamp.
+                if pending.each_source_batch_owner.is_none() {
+                    let fresh_damage_identity: Option<(ObjectId, TargetRef, bool)> =
+                        match &pending.proposed {
+                            ProposedEvent::Damage {
+                                source_id,
+                                target,
+                                is_combat,
+                                ..
+                            } => Some((*source_id, target.clone(), *is_combat)),
+                            _ => None,
+                        };
+                    if let (Some(owner), Some(parked), Some(fresh)) = (
+                        parked_batch_owner,
+                        parked_damage_identity.clone(),
+                        fresh_damage_identity,
+                    ) {
+                        if parked == fresh {
+                            pending.each_source_batch_owner = Some(owner);
+                        }
+                    }
                 }
             }
             Ok(super::replacement::replacement_choice_waiting_for(

@@ -3000,3 +3000,343 @@ fn typed_batch_downstream_instruction_publishes_separate_application() {
         "every parked record must be consumed by the completion cascade"
     );
 }
+/// CR 616.1f + CR 615.13 + CR 616.1e (Matt R2-F2): an empty-tail batch owner
+/// stamp must survive an ordinary second ordering choice for the same event.
+/// The nested fixture plus a Bat2-only mandatory Double: the nested Bat2
+/// prompt offers [Double, Squire, NWF-Bat2]; answering Double re-parks a
+/// second same-event prompt. Pre-fix the re-park drops the child stamp, so
+/// the Squire answer skips child-boundary publication and outer work resumes
+/// with the child frame still parked. Post-fix the second prompt retains the
+/// stamp (pinned across save/load) and the child publishes (P0,5) -- Bat1 1
+/// plus the doubled Bat2 4 -- before the outer tail resumes; the outer
+/// applications are unchanged from the nested control.
+#[test]
+fn typed_nested_batch_second_ordering_retains_child_stamp() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    stock_libraries(&mut scenario);
+    let squire = scenario
+        .add_creature_to_hand_from_oracle(P0, "Selfless Squire", 1, 1, SELFLESS_SQUIRE_TEXT)
+        .with_mana_cost(free_cost())
+        .id();
+    let bear1 = scenario
+        .add_creature(P0, "Bear1", 1, 1)
+        .with_subtypes(vec!["Bear"])
+        .id();
+    let bear2 = scenario
+        .add_creature(P0, "Bear2", 2, 2)
+        .with_subtypes(vec!["Bear"])
+        .id();
+    let bear3 = scenario
+        .add_creature(P0, "Bear3", 3, 3)
+        .with_subtypes(vec!["Bear"])
+        .id();
+    let bat1 = scenario
+        .add_creature(P0, "Bat1", 1, 1)
+        .with_subtypes(vec!["Bat"])
+        .id();
+    let bat2 = scenario
+        .add_creature(P0, "Bat2", 2, 2)
+        .with_subtypes(vec!["Bat"])
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES_TEXT);
+    let way_bear =
+        add_instant_from_oracle(&mut scenario, P0, "New Way Forward", NEW_WAY_FORWARD_TEXT);
+    let way_bat =
+        add_instant_from_oracle(&mut scenario, P0, "New Way Forward", NEW_WAY_FORWARD_TEXT);
+    let double_bat = add_instant_from_oracle(
+        &mut scenario,
+        P0,
+        "Chosen Doubling",
+        "The next time a source of your choice would deal damage to you this turn, it deals double that damage instead.",
+    );
+    let mut runner = scenario.build();
+    runner.cast(squire).resolve();
+    runner.cast(way_bear).resolve();
+    runner
+        .act(GameAction::ChooseDamageSource { source: bear2 })
+        .expect("naming Bear2 must be answerable");
+    runner.cast(way_bat).resolve();
+    runner
+        .act(GameAction::ChooseDamageSource { source: bat2 })
+        .expect("naming Bat2 must be answerable");
+    runner.cast(double_bat).resolve();
+    runner
+        .act(GameAction::ChooseDamageSource { source: bat2 })
+        .expect("naming Bat2 for the doubler must be answerable");
+    assert_eq!(
+        runner.state().pending_damage_replacements.len(),
+        4,
+        "reach guard: Squire plus two NWF shields plus the Bat2-only Double"
+    );
+    let double_pos = runner
+        .state()
+        .pending_damage_replacements
+        .iter()
+        .position(|r| {
+            matches!(
+                r.damage_modification,
+                Some(engine::types::ability::DamageModification::Double)
+            ) && r
+                .damage_source_filter
+                .as_ref()
+                .is_some_and(|f| matches!(f, TargetFilter::SpecificObject { id } if *id == bat2))
+        })
+        .expect("the Bat2-only Double must install with a Bat2 source filter");
+    let bear2_filter = runner
+        .state()
+        .pending_damage_replacements
+        .iter()
+        .find(|r| {
+            r.damage_source_filter
+                .as_ref()
+                .is_some_and(|f| matches!(f, TargetFilter::SpecificObject { id } if *id == bear2))
+        })
+        .expect("NWF-Bear2 installed shield must exist")
+        .damage_source_filter
+        .clone()
+        .expect("a chosen-source shield binds its source");
+    let mut rider_def = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::EachSourceDealsDamage {
+            sources: TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Subtype("Bat".to_string()))
+                    .controller(ControllerRef::You),
+            ),
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::BatchSource,
+                },
+            },
+            recipient: EachDamageRecipient::EachController,
+        },
+    );
+    rider_def.condition = Some(AbilityCondition::PostReplacementDamageSourceMatchesFilter {
+        filter: bear2_filter,
+    });
+    let rider = build_resolved_from_def(&rider_def, way_bear, P0);
+    runner
+        .state_mut()
+        .pending_damage_replacements
+        .iter_mut()
+        .find(|r| {
+            r.damage_source_filter
+                .as_ref()
+                .is_some_and(|f| matches!(f, TargetFilter::SpecificObject { id } if *id == bear2))
+        })
+        .expect("NWF-Bear2 installed shield must exist")
+        .runtime_execute = Some(Box::new(rider));
+    let outer_def = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::EachSourceDealsDamage {
+            sources: TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Subtype("Bear".to_string()))
+                    .controller(ControllerRef::You),
+            ),
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::BatchSource,
+                },
+            },
+            recipient: EachDamageRecipient::EachController,
+        },
+    );
+    let card_id = CardId(runner.state().next_object_id);
+    let source = create_object(
+        runner.state_mut(),
+        card_id,
+        P0,
+        "Typed Outer Batch".to_string(),
+        Zone::Stack,
+    );
+    let outer = build_resolved_from_def(&outer_def, source, P0);
+    let life_before = runner.state().players[P0.0 as usize].life;
+    let hand_before = runner
+        .state()
+        .objects
+        .values()
+        .filter(|o| o.controller == P0 && o.zone == Zone::Hand)
+        .count();
+    let mut log: Vec<GameEvent> = Vec::new();
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &outer, &mut events, 0)
+        .expect("the typed outer batch resolves to its pause");
+    log.extend(events);
+    let WaitingFor::ReplacementChoice { candidates, .. } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "the Bear2 event must pause for a CR 616.1 ordering choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        candidates.len(),
+        2,
+        "the Bear2 event must offer only its two shields (the Double is Bat2-only)"
+    );
+    let way_index = candidates
+        .iter()
+        .position(|c| c.source_name.is_empty())
+        .expect("the other Bear2 candidate must be the floating NWF-Bear2 shield");
+    let result = runner
+        .act(GameAction::ChooseReplacement { index: way_index })
+        .expect("the ordering choice must be answerable");
+    log.extend(result.events);
+    let WaitingFor::ReplacementChoice { candidates, .. } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "the nested Bat2 event must pause for its own ordering choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        candidates.len(),
+        3,
+        "the Bat2 event must offer the Double plus both shields"
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|c| c.source_name.contains("Selfless Squire")),
+        "one Bat2 candidate must be the Squire ETB shield"
+    );
+    let pending = runner
+        .state()
+        .pending_replacement
+        .as_ref()
+        .expect("the nested pause must park a pending replacement");
+    let double_index = pending
+        .candidates
+        .iter()
+        .position(|rid| rid.index == double_pos)
+        .expect("the Double must be offered on the Bat2 event");
+    let child_owner = pending
+        .each_source_batch_owner
+        .expect("the first nested prompt must carry the child stamp (empty tail)");
+    assert_eq!(
+        runner
+            .state()
+            .pending_each_source_batches
+            .iter()
+            .map(|frame| frame.tally.iter().map(|entry| entry.amount).sum::<i32>())
+            .collect::<Vec<_>>(),
+        vec![3, 0, 1],
+        "outer prefix holds Squire 1 plus NWF-Bear2 2, child scope is empty, \
+         child prefix holds Squire 1 (Bat1); the Double prevents nothing yet"
+    );
+    let result = runner
+        .act(GameAction::ChooseReplacement {
+            index: double_index,
+        })
+        .expect("the Double choice must be answerable");
+    log.extend(result.events);
+    let WaitingFor::ReplacementChoice { candidates, .. } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "the doubled Bat2 event must re-park a second ordering choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        candidates.len(),
+        2,
+        "the second prompt must offer only the two shields (Double applied)"
+    );
+    let pending = runner
+        .state()
+        .pending_replacement
+        .as_ref()
+        .expect("the second pause must park a pending replacement");
+    assert!(
+        matches!(
+            &pending.proposed,
+            engine::types::proposed_event::ProposedEvent::Damage { amount: 4, .. }
+        ),
+        "the re-parked event must be the doubled Bat2 event, got {:?}",
+        pending.proposed
+    );
+    assert_eq!(
+        pending.each_source_batch_owner,
+        Some(child_owner),
+        "the second same-event prompt must retain the child stamp (R2-F2)"
+    );
+    let saved = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+        .expect("the authoritative paused state serializes");
+    let restored: PersistedGameState =
+        serde_json::from_str(&saved).expect("the authoritative paused state deserializes");
+    let mut runner = GameRunner::from_state(
+        restored
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract"),
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "the second ordering prompt must survive restore, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .and_then(|pending| pending.each_source_batch_owner),
+        Some(child_owner),
+        "the re-parked stamp must survive authoritative restore verbatim"
+    );
+    let squire_index = match runner.state().waiting_for.clone() {
+        WaitingFor::ReplacementChoice { candidates, .. } => candidates
+            .iter()
+            .position(|c| c.source_name.contains("Selfless Squire"))
+            .expect("one candidate must be the Squire ETB shield"),
+        other => panic!("expected the second ordering prompt, got {other:?}"),
+    };
+    let result = runner
+        .act(GameAction::ChooseReplacement {
+            index: squire_index,
+        })
+        .expect("the second ordering choice must be answerable after restore");
+    log.extend(result.events);
+    runner.advance_until_stack_empty();
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "resolution must complete to a clean priority window, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        life_before,
+        "all damage must be prevented (none dealt through)"
+    );
+    assert_eq!(
+        prevented_pairs(&log),
+        vec![
+            (TargetRef::Player(P0), 5),
+            (TargetRef::Player(P0), 4),
+            (TargetRef::Player(P0), 2),
+        ],
+        "child (P0,5) publishes at the child boundary before the outer tail \
+         resumes; outer publishes (P0,4) plus (P0,2) unchanged"
+    );
+    assert_eq!(
+        counters_on(&runner, squire),
+        14,
+        "three triggers of 5/4/2, each plus 1 from Hardened Scales"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .objects
+            .values()
+            .filter(|o| o.controller == P0 && o.zone == Zone::Hand)
+            .count(),
+        hand_before,
+        "NWF-Bat2 rider must stay silent (its shield prevented nothing)"
+    );
+    assert!(
+        runner.state().pending_each_source_batches.is_empty(),
+        "every parked record must be consumed by the completion cascade"
+    );
+}
