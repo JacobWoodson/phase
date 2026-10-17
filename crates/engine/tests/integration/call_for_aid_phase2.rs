@@ -16,6 +16,7 @@
 use engine::game::combat::{build_declare_attackers_waiting_for, declare_attackers, AttackTarget};
 use engine::game::functioning_abilities::active_static_definitions;
 use engine::game::scenario::{GameRunner, GameScenario};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::static_abilities::object_has_static_other;
 use engine::game::turns::execute_cleanup;
 use engine::game::zones::{create_object, move_to_zone};
@@ -35,6 +36,8 @@ use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
 use super::rules::run_combat;
+
+use crate::support::shared_card_db as load_db;
 
 const P0: PlayerId = PlayerId(0);
 const P1: PlayerId = PlayerId(1);
@@ -855,6 +858,92 @@ fn call_for_aid_bar_does_not_follow_control_change() {
     // Subsequent control change: end the THEFT of p1_a (drop its
     // `ChangeController` grant) and pass it to P2. The sacrifice bar is a
     // separate installer-bound grant and stays installed.
+    pass_control_to(&mut runner, p1_a, P2);
+    assert_eq!(
+        runner.state().objects[&p1_a].controller,
+        P2,
+        "the control change must stick for the sacrifice below to mean anything"
+    );
+    // P2 — never bound by another player's "you" — sacrifices freely.
+    runner.state_mut().priority_player = P2;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P2 };
+    let hand_before = hand_count(&runner, P2);
+    cast_sacrifice_cost_spell(&mut runner, rites, p1_a);
+    assert_eq!(
+        runner.state().objects[&p1_a].zone,
+        Zone::Graveyard,
+        "the later controller sacrifices the creature normally"
+    );
+    assert_eq!(
+        hand_count(&runner, P2),
+        hand_before + 1,
+        "spell left hand (-1), draw two (+2)"
+    );
+    // The sibling still stolen by the installer stays barred and controlled.
+    assert_eq!(runner.state().objects[&p1_b].controller, P0);
+    assert!(
+        cant_be_sacrificed(runner.state(), p1_b),
+        "the installer's bar still binds its own stolen creature"
+    );
+}
+
+/// CR 109.5 + CR 701.21a (Matt M4): the later-controller control driven
+/// through REAL-CARD loading. The committed fixture's Call for Aid row must
+/// carry the parser-emitted `bound_actor: You` so the bar binds the
+/// installer, not the object. Fails on the stale row: an absent binding
+/// defaults to `None`, an object-wide prohibition, and P2 cannot sacrifice.
+#[test]
+fn call_for_aid_real_card_bar_does_not_follow_control_change() {
+    let Some(db) = load_db() else {
+        return;
+    };
+
+    // Fixture-shape pin: the nested "you can't sacrifice those creatures"
+    // def carries the actor binding the parser emits.
+    let face = db
+        .get_face_by_name("Call for Aid")
+        .expect("fixture carries Call for Aid");
+    let v = serde_json::to_value(face).expect("face serializes");
+    let mut node = &v["abilities"][0];
+    for _ in 0..4 {
+        node = &node["sub_ability"];
+    }
+    assert_eq!(
+        node["effect"]["static_abilities"][0]["bound_actor"],
+        serde_json::json!("You"),
+        "fixture row must carry the parser-emitted bound_actor"
+    );
+
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let p1_a = scenario.add_creature(P1, "P1 Goblin A", 1, 1).id();
+    let p1_b = scenario.add_creature(P1, "P1 Goblin B", 1, 1).id();
+    for _ in 0..5 {
+        scenario.add_card_to_library_top(P2, "Plains");
+    }
+    let aid = scenario.add_real_card(P0, "Call for Aid", Zone::Hand, db);
+    let rites = scenario
+        .add_spell_to_hand_from_oracle(P2, "Village Rites", true, VILLAGE_RITES)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 0,
+        })
+        .id();
+    let mut runner = scenario.build();
+    add_mana(&mut runner, P0, ManaType::Red, 1);
+    add_mana(&mut runner, P0, ManaType::Colorless, 4);
+    add_mana(&mut runner, P2, ManaType::Black, 1);
+    runner.cast(aid).target_player(P1).resolve();
+    {
+        let state = runner.state();
+        assert_eq!(state.objects[&p1_a].controller, P0);
+        assert_eq!(state.objects[&p1_b].controller, P0);
+        assert!(
+            cant_be_sacrificed(state, p1_a) && cant_be_sacrificed(state, p1_b),
+            "both stolen creatures must carry the prohibition"
+        );
+    }
+    // Subsequent control change: end the THEFT of p1_a and pass it to P2.
     pass_control_to(&mut runner, p1_a, P2);
     assert_eq!(
         runner.state().objects[&p1_a].controller,
