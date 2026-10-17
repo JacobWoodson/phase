@@ -1794,7 +1794,17 @@ fn handle_replacement_choice_inner(
             // the next resume's epilogue to drain; on a pause, surface the
             // parked prompt (its resume delivers the chosen event through the
             // ZoneChange arm above).
-            if state.active_ability_continuation().is_some() {
+            //
+            // CR 615.13 + CR 616.1e (R2-F1): a stamped batch tail is LIVE, not
+            // dead — its prevention applied inside `continue_replacement` and
+            // its parked frames plus downstream instructions still must drain
+            // through the Priority resume below. Clearing it here orphans the
+            // batch (a stub publishes, downstream never runs). Only dead
+            // (unstamped) continuations clear.
+            let active_is_live_batch_tail = state
+                .active_ability_continuation()
+                .is_some_and(|pending| pending.each_source_batch_owner.is_some());
+            if !active_is_live_batch_tail && state.active_ability_continuation().is_some() {
                 let _ = state
                     .clear_active_ability_continuation()
                     .expect("replacement cancellation cannot clear a buried continuation");

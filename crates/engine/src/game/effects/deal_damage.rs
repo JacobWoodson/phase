@@ -4,7 +4,7 @@ use crate::game::ability_utils::append_to_sub_chain;
 use crate::game::effects::player_counter;
 use crate::game::effects::{
     append_to_pending_continuation, mark_pending_continuation_parent,
-    push_each_source_tail_continuation,
+    push_each_source_tail_continuation, push_ownerless_tail_continuation,
 };
 use crate::game::filter;
 use crate::game::keywords;
@@ -1256,8 +1256,9 @@ fn cast_tail_with_parent_targets(
 /// completed Phase B (replacements applied) and are stashed as
 /// `ApplyPostReplacementDamage` nodes (skip re-replacement). `raw_remaining`
 /// sources have not yet entered Phase B and are stashed as `DealDamage` nodes
-/// (full pipeline). Both segments share a single `sub_ability` tail so
-/// downstream effects fire exactly once after the combined batch completes.
+/// (full pipeline). The parent's `sub_ability` parks as its OWN ownerless
+/// frame below the stamped remainder (R2-F1 split tails) so downstream
+/// effects fire exactly once, after the batch's own boundary publishes.
 /// Returns whether a tail was parked. A `false` return (fully-prevented
 /// prefix nodes need no stash, no raw tail, no downstream) tells the pause
 /// site to stamp the pending prompt itself: no continuation will ever drain
@@ -1303,7 +1304,16 @@ fn stash_each_source_combined_continuation(
                     owner,
                 );
             }
-            Some(h) => append_to_sub_chain(h, cast_tail_with_parent_targets(sub, ability)),
+            Some(_) => {
+                // CR 615.13 + CR 616.1e (R2-F1): split tails — the downstream
+                // parks as its OWN ownerless frame BELOW the stamped
+                // remainder, so the remainder's boundary publishes before
+                // downstream drains instead of merging into one application.
+                push_ownerless_tail_continuation(
+                    state,
+                    Some(Box::new(cast_tail_with_parent_targets(sub, ability))),
+                );
+            }
         }
     }
 

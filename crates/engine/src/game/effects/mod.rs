@@ -2873,6 +2873,29 @@ pub(crate) fn push_each_source_tail_continuation(
     true
 }
 
+/// CR 615.13 + CR 616.1e (R2-F1): park an `EachSourceDealsDamage` pause's
+/// downstream `sub_ability` as its OWN ownerless continuation frame, below
+/// the stamped batch-remainder frame. Downstream instructions are genuine
+/// later instructions, not simultaneous batch members: spliced into the
+/// remainder's chain they would hydrate the batch tally and merge into its
+/// application. As a separate frame they drain after the remainder's
+/// boundary publishes (LIFO + the drain cascade), with an ownerless ambient
+/// so their prevention publishes its own application. The `None` stamp is
+/// explicit (never ambient-inherited): inheriting an outer drain's owner
+/// would flush that still-incomplete outer batch from this frame's hook.
+pub(crate) fn push_ownerless_tail_continuation(
+    state: &mut GameState,
+    tail: Option<Box<ResolvedAbility>>,
+) -> bool {
+    let Some(tail) = tail else {
+        return false;
+    };
+    let mut pending = PendingContinuation::new(tail, state);
+    pending.each_source_batch_owner = None;
+    state.park_ability_continuation(pending);
+    true
+}
+
 /// CR 608.2c: Stamp an operation result onto only the active, same-source
 /// completion head whose producer-action requirement matches. This is a typed
 /// adjacency check; it never searches past another resolution frame.
@@ -18995,6 +19018,18 @@ fn resolve_chain_body(
         // remaining-cost continuation itself so later sub-costs stay before
         // the original rider after the choice resolves.
         if continuation_installed_by_this_effect && matches!(ability.effect, Effect::PayCost { .. })
+        {
+            return Ok(());
+        }
+        // CR 615.13 + CR 616.1e (R2-F1): a paused `EachSourceDealsDamage`
+        // resolver already parked the parent's `sub_ability` — the Phase-B
+        // combined stash parks it as its own ownerless frame below the
+        // stamped remainder, and the Phase-C post-replacement stash appends
+        // it last — so downstream fires exactly once after the batch
+        // completes. The generic prepend below would run it a second time,
+        // ahead of the batch remainder — skip it the same way PayCost does.
+        if continuation_installed_by_this_effect
+            && matches!(ability.effect, Effect::EachSourceDealsDamage { .. })
         {
             return Ok(());
         }
