@@ -2338,11 +2338,23 @@ pub(crate) fn shield_rider_reflects_per_event(state: &GameState, rid: Replacemen
 /// on a suspended batch, so the common path is one emptiness check.
 fn hydrate_parked_batch_prevention_tally(state: &mut GameState) {
     if state.combat_prevention_tally.is_none() && !state.pending_each_source_batches.is_empty() {
-        let parked = state
-            .pending_each_source_batches
-            .last()
-            .map(|frame| frame.tally.clone())
-            .unwrap_or_default();
+        // CR 615.13 + CR 616.1e (Matt M1): a draining tail hydrates its OWN
+        // batch's frame — never the stack top, which may be a completed
+        // child's still-parked record. No owned frame (the batch published
+        // inline) hydrates nothing. Outside a batch-tail drain the legacy
+        // top applies: the answered event's own batch parked last.
+        let parked = match state.resolving_each_source_batch_owner {
+            Some(owner) => {
+                crate::game::effects::deal_damage::top_owned_each_source_frame(state, owner)
+                    .map(|frame| frame.tally.clone())
+                    .unwrap_or_default()
+            }
+            None => state
+                .pending_each_source_batches
+                .last()
+                .map(|frame| frame.tally.clone())
+                .unwrap_or_default(),
+        };
         state.combat_prevention_tally =
             Some(crate::game::effects::deal_damage::tally_map_from_record_entries(&parked));
     }
@@ -2368,16 +2380,31 @@ fn accumulate_batch_prevention(
     };
     if accumulated {
         // CR 615.13: write the accumulation back so the parked record stays
-        // current across any nested boundary (pause, save/load). The top
-        // frame always owns this accumulation: nested batches suspend outer
-        // frames under their own scope.
+        // current across any nested boundary (pause, save/load).
+        //
+        // CR 615.13 + CR 616.1e (Matt M1): a draining tail writes through to
+        // its OWN batch's frame — never the stack top, which may be a
+        // completed child's still-parked record. No owned frame (the batch
+        // published inline) writes nowhere. Outside a batch-tail drain the
+        // legacy top applies: the answered event's own batch parked last.
         let snapshot = state
             .combat_prevention_tally
             .as_ref()
             .map(crate::game::effects::deal_damage::tally_entries_for_record)
             .unwrap_or_default();
-        if let Some(top) = state.pending_each_source_batches.last_mut() {
-            top.tally = snapshot;
+        match state.resolving_each_source_batch_owner {
+            Some(owner) => {
+                if let Some(frame) =
+                    crate::game::effects::deal_damage::top_owned_each_source_frame_mut(state, owner)
+                {
+                    frame.tally = snapshot;
+                }
+            }
+            None => {
+                if let Some(top) = state.pending_each_source_batches.last_mut() {
+                    top.tally = snapshot;
+                }
+            }
         }
         return true;
     }
@@ -11402,6 +11429,7 @@ fn park_entry_controller_choice(
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
+        each_source_batch_owner: None,
     });
     state.waiting_for = WaitingFor::EntryControllerChoice { player, candidates };
     ReplacementResult::NeedsChoice(player)
@@ -11575,6 +11603,7 @@ fn park_as_enters_named_choice(
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
+        each_source_batch_owner: None,
     });
     raise_as_enters_named_choice(state, object_id, choice, events)
 }
@@ -12141,6 +12170,7 @@ fn pipeline_loop(
                     may_cost_paid: false,
                     may_cost_remaining: None,
                     delivery_boundary: None,
+                    each_source_batch_owner: None,
                 });
                 return replay_pending_replacement(state, affected, events);
             }
@@ -12204,6 +12234,7 @@ fn pipeline_loop(
                 may_cost_paid: false,
                 may_cost_remaining: None,
                 delivery_boundary: None,
+                each_source_batch_owner: None,
             });
             return replay_pending_replacement(state, affected, events);
         } else {
@@ -12479,6 +12510,11 @@ fn continue_replacement_impl(
         let reparked_sacrifice_provenance = pending.sacrifice_provenance;
         let reparked_choice_player = pending.choice_player;
         let reparked_delivery_boundary = pending.delivery_boundary.clone();
+        // CR 615.13 + CR 616.1e (Matt M1): a reconstructing re-park carries
+        // the batch stamp with the record — a stamp dropped here would
+        // strand an empty-tail batch's boundary (practically `None` on this
+        // zone-change path, but the lifecycle must not depend on that).
+        let reparked_batch_owner = pending.each_source_batch_owner;
         let mut proposed = pending.proposed.clone();
         if chosen_index == 0 {
             if let Some((player, entry_candidates)) = entry_controller_choice(state, &proposed, rid)
@@ -12611,6 +12647,7 @@ fn continue_replacement_impl(
                     may_cost_paid: true,
                     may_cost_remaining: remaining_cost,
                     delivery_boundary: reparked_delivery_boundary,
+                    each_source_batch_owner: reparked_batch_owner,
                 };
                 if let Some(crate::types::game_state::PendingCostMoveResume::ReplacementMayCost {
                     outer_replacement: parked_outer,
@@ -15940,6 +15977,7 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            each_source_batch_owner: None,
         });
 
         let WaitingFor::ReplacementChoice {
@@ -16004,6 +16042,7 @@ mod tests {
                 may_cost_paid: false,
                 may_cost_remaining: None,
                 delivery_boundary: None,
+                each_source_batch_owner: None,
             });
 
             let WaitingFor::ReplacementChoice { candidates, .. } =
@@ -16089,6 +16128,7 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            each_source_batch_owner: None,
         });
 
         let WaitingFor::ReplacementChoice { candidates, .. } =
@@ -20919,6 +20959,7 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            each_source_batch_owner: None,
         });
 
         let waiting_for = replacement_choice_waiting_for(PlayerId(0), &state);

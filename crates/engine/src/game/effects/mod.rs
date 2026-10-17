@@ -1300,6 +1300,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             attachment_remainder: _,
             player_scope_linked_exile,
             player_scope_queue_end,
+            each_source_batch_owner,
         } = cont;
         debug_assert!(
             pending_return_result_producer.is_none(),
@@ -1319,6 +1320,13 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         let prior_occurrence = std::mem::replace(
             &mut state.active_return_result_occurrence,
             return_result_occurrence,
+        );
+        // CR 615.13 + CR 616.1e (Matt M1): restore the draining tail's batch
+        // owner for the synchronous window (save/restore, like the occurrence
+        // above — the cascade below re-enters this drain for outer tails).
+        let prior_batch_owner = std::mem::replace(
+            &mut state.resolving_each_source_batch_owner,
+            each_source_batch_owner,
         );
         // CR 608.2: replay the resolving ability's snapshotted trigger
         // context so TargetFilter::TriggeringPlayer (and its siblings)
@@ -1369,20 +1377,32 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         }
         // CR 615.13 + CR 616.1e: a resumed prevention batch publishes its
         // aggregate application(s) exactly here — its chain fully drained with
-        // no further choice pending and no continuation still queued. Earlier
-        // (mid-chain) would fragment the batch; the gate makes later
-        // impossible (frames pop now). Innermost-first cascade; the stack
-        // check alone skips the common path. Runs before the marker below so
-        // aggregate events precede `EffectResolved`, matching the unpaused
-        // order.
+        // no further choice pending. Earlier (mid-chain) would fragment the
+        // batch. Innermost-first cascade; the stack check alone skips the
+        // common path. Runs before the marker below so aggregate events
+        // precede `EffectResolved`, matching the unpaused order.
+        //
+        // Matt M1: the just-drained chain's OWNING batch publishes at its own
+        // boundary even while an outer continuation remains queued — deferring
+        // it would leave a completed child parked for the outer tail to
+        // hydrate. Frames of any other owner stay parked for their own
+        // boundary. An ownerless chain keeps the legacy quiescent flush.
         if !state.pending_each_source_batches.is_empty()
             && !waits_for_resolution_choice(&state.waiting_for)
-            && state.active_ability_continuation().is_none()
         {
             // Matt C2: a fresh rider-created choice stays parked in
             // `state.waiting_for` (synced by the flush); the gates below
             // read it from state, so no local propagation is needed here.
-            let _fresh_choice = deal_damage::flush_pending_each_source_batches(state, events);
+            if let Some(owner) = each_source_batch_owner {
+                let _fresh_choice =
+                    deal_damage::flush_owned_each_source_batches(state, events, owner);
+            }
+            if state.active_ability_continuation().is_none()
+                && !waits_for_resolution_choice(&state.waiting_for)
+                && !state.pending_each_source_batches.is_empty()
+            {
+                let _fresh_choice = deal_damage::flush_pending_each_source_batches(state, events);
+            }
         }
         if let Some(kind) = parent_kind {
             events.push(GameEvent::EffectResolved {
@@ -1392,6 +1412,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             });
         }
         state.active_return_result_occurrence = prior_occurrence;
+        state.resolving_each_source_batch_owner = prior_batch_owner;
         retire_unreferenced_return_result_frames(state);
         if !waits_for_resolution_choice(&state.waiting_for) {
             // CR 615.5: a resumed continuation completes its own paused
@@ -2823,6 +2844,35 @@ pub(crate) fn append_to_pending_continuation(
     }
 }
 
+/// CR 615.13 + CR 616.1e (Matt M1): park an `EachSourceDealsDamage` Phase-B
+/// tail as its OWN continuation frame, stamped with the pausing batch's id —
+/// never spliced into an active outer chain.
+///
+/// Splicing (what `append_to_pending_continuation` does when a continuation is
+/// already active) merges two owners' tails into one chain with one boundary:
+/// the nested child's frames then sit last while the outer tail's damage
+/// hydrates them, mixing separate applications and publishing at the wrong
+/// boundary. A dedicated frame drains first (LIFO), publishes the child's
+/// boundary before outer instructions resume, and restores the child's owner
+/// as the ambient drain owner while its tail runs. A `None` tail parks nothing
+/// (single source, no downstream), exactly like the shared helper.
+pub(crate) fn push_each_source_tail_continuation(
+    state: &mut GameState,
+    tail: Option<Box<ResolvedAbility>>,
+    owner: u64,
+) -> bool {
+    let Some(tail) = tail else {
+        return false;
+    };
+    let mut pending = PendingContinuation::new(tail, state);
+    // The pausing batch names its tail explicitly: ambient inheritance alone
+    // would stamp a nested batch with an outer drain's owner instead of its
+    // own.
+    pending.each_source_batch_owner = Some(owner);
+    state.park_ability_continuation(pending);
+    true
+}
+
 /// CR 608.2c: Stamp an operation result onto only the active, same-source
 /// completion head whose producer-action requirement matches. This is a typed
 /// adjacency check; it never searches past another resolution frame.
@@ -2917,6 +2967,7 @@ fn prepend_to_pending_continuation_with_producer(
             attachment_remainder,
             player_scope_linked_exile,
             player_scope_queue_end,
+            each_source_batch_owner,
         } = existing;
         assert!(
             pending_return_result_producer.is_none() || existing_return_result_producer.is_none(),
@@ -2940,6 +2991,10 @@ fn prepend_to_pending_continuation_with_producer(
                 attachment_remainder,
                 player_scope_linked_exile,
                 player_scope_queue_end,
+                // CR 615.13 + CR 616.1e (Matt M1): the prepended head joins the
+                // existing chain, so the merged frame keeps the existing
+                // batch owner — it is still the same logical tail.
+                each_source_batch_owner,
             },
             choose_zone_trigger_context: frame.choose_zone_trigger_context,
         });

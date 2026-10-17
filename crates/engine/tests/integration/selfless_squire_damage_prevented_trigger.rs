@@ -71,16 +71,21 @@
 //!
 //! Oracle text is verbatim from Scryfall.
 
+use engine::game::ability_utils::build_resolved_from_def;
 use engine::game::combat::AttackTarget;
+use engine::game::effects::resolve_ability_chain;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::zones::create_object;
 use engine::types::ability::{
-    DamageTargetFilter, DamageTargetPlayerScope, PreventionAmount, ShieldKind, TargetRef,
+    AbilityCondition, AbilityDefinition, AbilityKind, ControllerRef, DamageTargetFilter,
+    DamageTargetPlayerScope, EachDamageRecipient, Effect, ObjectScope, PreventionAmount,
+    QuantityExpr, QuantityRef, ShieldKind, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{PersistedGameState, WaitingFor};
-use engine::types::identifiers::ObjectId;
+use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -2349,5 +2354,415 @@ fn rakdos_charm_paused_prefix_survives_save_load() {
         counters_on(&runner, squire),
         3,
         "one trigger placing 2 at once, +1 from Hardened Scales"
+    );
+}
+
+/// CR 615.13 + CR 615.5 + CR 616.1e (Matt M1): parked prevention batches bind
+/// to their owning continuation, and the nested child's application publishes
+/// at the child's batch boundary — BEFORE the outer tail resumes.
+///
+/// Typed (not printed-card) nested composition: no printed card opens an
+/// `EachSourceDealsDamage` batch from an inline prevention rider, so the outer
+/// batch and the rider are built as typed AST and resolved through the
+/// production pipeline:
+///   * outer batch O: each Bear you control deals damage equal to its power to
+///     its controller (Bear1 1/1, Bear2 2/2, Bear3 3/3; P0 takes it all);
+///   * Bear2's shield is a production New Way Forward install whose rider slot
+///     carries a typed inline `EachSourceDealsDamage` rider (each Bat you
+///     control deals damage equal to its power to its controller), gated on
+///     the prevented event's source being Bear2 (the Comeuppance inline shape);
+///   * Bat2's shield is a second production NWF install (plain — its rider
+///     never fires because Squire is ordered first and it prevents 0).
+///
+/// O pauses at Bear2 (Squire + NWF-Bear2). Answering NWF-Bear2 first applies
+/// Bear2's prevention in the answer path, whose inline rider opens the nested
+/// batch C while O's continuation is still queued; C pauses at Bat2 (Squire +
+/// NWF-Bat2). Answering Squire first completes C, then O's downstream tail
+/// (Bear3) resumes.
+///
+/// Pre-fix the outer tail hydrated the nested child's still-parked frame
+/// (stack top), mixing O's downstream 3 into C's application: (P0,6) +
+/// (P0,1) + (P0,2). Post-fix each application publishes under its own owner:
+/// C's (P0,3) at C's boundary, then O's (P0,4) + (P0,2). The mid-nesting
+/// save/load pins the parked stack + queued continuations (owners included)
+/// across the authoritative round trip.
+#[test]
+fn typed_nested_batch_publishes_child_before_outer_tail() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    stock_libraries(&mut scenario);
+
+    let squire = scenario
+        .add_creature_to_hand_from_oracle(P0, "Selfless Squire", 1, 1, SELFLESS_SQUIRE_TEXT)
+        .with_mana_cost(free_cost())
+        .id();
+    let bear1 = scenario
+        .add_creature(P0, "Bear1", 1, 1)
+        .with_subtypes(vec!["Bear"])
+        .id();
+    let bear2 = scenario
+        .add_creature(P0, "Bear2", 2, 2)
+        .with_subtypes(vec!["Bear"])
+        .id();
+    let bear3 = scenario
+        .add_creature(P0, "Bear3", 3, 3)
+        .with_subtypes(vec!["Bear"])
+        .id();
+    let bat1 = scenario
+        .add_creature(P0, "Bat1", 1, 1)
+        .with_subtypes(vec!["Bat"])
+        .id();
+    let bat2 = scenario
+        .add_creature(P0, "Bat2", 2, 2)
+        .with_subtypes(vec!["Bat"])
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES_TEXT);
+    let way_bear =
+        add_instant_from_oracle(&mut scenario, P0, "New Way Forward", NEW_WAY_FORWARD_TEXT);
+    let way_bat =
+        add_instant_from_oracle(&mut scenario, P0, "New Way Forward", NEW_WAY_FORWARD_TEXT);
+    let mut runner = scenario.build();
+
+    runner.cast(squire).resolve();
+    runner.cast(way_bear).resolve();
+    runner
+        .act(GameAction::ChooseDamageSource { source: bear2 })
+        .expect("naming Bear2 must be answerable");
+    runner.cast(way_bat).resolve();
+    runner
+        .act(GameAction::ChooseDamageSource { source: bat2 })
+        .expect("naming Bat2 must be answerable");
+    assert_eq!(
+        runner.state().pending_damage_replacements.len(),
+        3,
+        "reach guard: the Squire ETB shield plus the two floating NWF shields"
+    );
+    assert!(
+        runner.state().pending_damage_replacements[0]
+            .damage_source_filter
+            .is_none(),
+        "reach guard: shield 0 is the sourceless Squire ETB shield"
+    );
+    let battlefield_creatures: Vec<ObjectId> = runner
+        .state()
+        .battlefield
+        .iter()
+        .filter(|id| runner.state().objects[id].power.is_some())
+        .copied()
+        .collect();
+    assert_eq!(
+        battlefield_creatures,
+        vec![bear1, bear2, bear3, bat1, bat2, squire],
+        "reach guard: batch iteration order is battlefield order"
+    );
+
+    // Swap NWF-Bear2's aggregate rider for the typed INLINE EachSource rider.
+    // The shield (chosen-source Bear2, prevent-all, end-of-turn) stays
+    // production-installed; only the rider slot carries typed AST, gated on
+    // the prevented event's source (Comeuppance's inline marker).
+    let bear2_filter = runner
+        .state()
+        .pending_damage_replacements
+        .iter()
+        .find(|r| {
+            r.damage_source_filter
+                .as_ref()
+                .is_some_and(|f| matches!(f, TargetFilter::SpecificObject { id } if *id == bear2))
+        })
+        .expect("NWF-Bear2's installed shield must exist")
+        .damage_source_filter
+        .clone()
+        .expect("a chosen-source shield binds its source");
+    let mut rider_def = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::EachSourceDealsDamage {
+            sources: TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Subtype("Bat".to_string()))
+                    .controller(ControllerRef::You),
+            ),
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::BatchSource,
+                },
+            },
+            recipient: EachDamageRecipient::EachController,
+        },
+    );
+    rider_def.condition = Some(AbilityCondition::PostReplacementDamageSourceMatchesFilter {
+        filter: bear2_filter,
+    });
+    let rider = build_resolved_from_def(&rider_def, way_bear, P0);
+    runner
+        .state_mut()
+        .pending_damage_replacements
+        .iter_mut()
+        .find(|r| {
+            r.damage_source_filter
+                .as_ref()
+                .is_some_and(|f| matches!(f, TargetFilter::SpecificObject { id } if *id == bear2))
+        })
+        .expect("NWF-Bear2's installed shield must exist")
+        .runtime_execute = Some(Box::new(rider));
+
+    // The typed outer batch: each Bear you control deals damage equal to its
+    // power to its controller. Resolved directly (no printed card has this
+    // shape); pauses still answer through the production action engine.
+    let outer_def = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::EachSourceDealsDamage {
+            sources: TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Subtype("Bear".to_string()))
+                    .controller(ControllerRef::You),
+            ),
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::BatchSource,
+                },
+            },
+            recipient: EachDamageRecipient::EachController,
+        },
+    );
+    let card_id = CardId(runner.state().next_object_id);
+    let source = create_object(
+        runner.state_mut(),
+        card_id,
+        P0,
+        "Typed Outer Batch".to_string(),
+        Zone::Stack,
+    );
+    let outer = build_resolved_from_def(&outer_def, source, P0);
+
+    let life_before = runner.state().players[P0.0 as usize].life;
+    let hand_before = runner
+        .state()
+        .objects
+        .values()
+        .filter(|o| o.controller == P0 && o.zone == Zone::Hand)
+        .count();
+    let mut log: Vec<GameEvent> = Vec::new();
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &outer, &mut events, 0)
+        .expect("the typed outer batch resolves to its pause");
+    log.extend(events);
+    let WaitingFor::ReplacementChoice { candidates, .. } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "the Bear2 event must pause for a CR 616.1 ordering choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        candidates.len(),
+        2,
+        "the Bear2 event must offer both shields as ordering candidates"
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|c| c.source_name.contains("Selfless Squire")),
+        "one candidate must be the Squire's ETB shield"
+    );
+    let way_index = candidates
+        .iter()
+        .position(|c| c.source_name.is_empty())
+        .expect("the other candidate must be NWF-Bear2's floating shield");
+    assert_eq!(
+        runner.state().pending_each_source_batches.len(),
+        1,
+        "the pause must park exactly one batch record"
+    );
+    assert_eq!(
+        runner.state().pending_each_source_batches[0]
+            .tally
+            .iter()
+            .map(|entry| entry.amount)
+            .sum::<i32>(),
+        1,
+        "the parked prefix must hold the Squire's 1 prevented (Bear1)"
+    );
+
+    // Answer NWF-Bear2 first: Bear2's prevention applies in the answer path
+    // and the inline rider opens the nested batch C, which pauses at Bat2.
+    let result = runner
+        .act(GameAction::ChooseReplacement { index: way_index })
+        .expect("the ordering choice must be answerable");
+    log.extend(result.events);
+    let WaitingFor::ReplacementChoice { candidates, .. } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "the nested Bat2 event must pause for its own ordering choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        candidates.len(),
+        2,
+        "the Bat2 event must offer both shields as ordering candidates"
+    );
+    let squire_index_before = candidates
+        .iter()
+        .position(|c| c.source_name.contains("Selfless Squire"))
+        .expect("one candidate must be the Squire's ETB shield");
+    assert!(
+        candidates.iter().any(|c| c.source_name.is_empty()),
+        "the other candidate must be NWF-Bat2's floating shield"
+    );
+    assert_eq!(
+        runner.state().pending_each_source_batches.len(),
+        3,
+        "the nesting must park outer prefix + child scope + child prefix"
+    );
+    let parked_sums: Vec<i32> = runner
+        .state()
+        .pending_each_source_batches
+        .iter()
+        .map(|frame| frame.tally.iter().map(|entry| entry.amount).sum())
+        .collect();
+    assert_eq!(
+        parked_sums,
+        vec![3, 0, 1],
+        "outer prefix holds Squire 1 + NWF-Bear2 2, child scope is empty, \
+         child prefix holds Squire 1 (Bat1)"
+    );
+    let parked_owners: Vec<u64> = runner
+        .state()
+        .pending_each_source_batches
+        .iter()
+        .map(|frame| frame.owner)
+        .collect();
+    assert_ne!(
+        parked_owners[0], 0,
+        "the outer prefix must carry a minted owner, not the legacy sentinel"
+    );
+    assert_eq!(
+        parked_owners[1], parked_owners[2],
+        "the child scope and child prefix must share the child's owner"
+    );
+    assert_ne!(
+        parked_owners[0], parked_owners[1],
+        "the nested child must not share attribution with its outer"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .and_then(|pending| pending.each_source_batch_owner),
+        Some(parked_owners[2]),
+        "the nested prompt must carry the child's boundary stamp (its tail is empty)"
+    );
+
+    // Save/load THROUGH the nested pause: the parked stack and the queued
+    // continuations (owners included) must survive the authoritative round
+    // trip and resume identically.
+    let saved = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+        .expect("the authoritative paused state serializes");
+    let restored: PersistedGameState =
+        serde_json::from_str(&saved).expect("the authoritative paused state deserializes");
+    let mut runner = GameRunner::from_state(
+        restored
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract"),
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "the nested ordering prompt must survive restore, got {:?}",
+        runner.state().waiting_for
+    );
+    let restored_sums: Vec<i32> = runner
+        .state()
+        .pending_each_source_batches
+        .iter()
+        .map(|frame| frame.tally.iter().map(|entry| entry.amount).sum())
+        .collect();
+    assert_eq!(
+        restored_sums,
+        vec![3, 0, 1],
+        "the parked nesting must survive authoritative restore"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .pending_each_source_batches
+            .iter()
+            .map(|frame| frame.owner)
+            .collect::<Vec<_>>(),
+        parked_owners,
+        "the frame owners must survive authoritative restore verbatim"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .and_then(|pending| pending.each_source_batch_owner),
+        Some(parked_owners[2]),
+        "the boundary stamp must survive authoritative restore verbatim"
+    );
+
+    // Answer Squire first: NWF-Bat2 prevents 0 (its rider stays silent),
+    // C completes and publishes at C's boundary, then O's downstream tail
+    // (Bear3) resumes and O publishes.
+    let squire_index = match runner.state().waiting_for.clone() {
+        WaitingFor::ReplacementChoice { candidates, .. } => candidates
+            .iter()
+            .position(|c| c.source_name.contains("Selfless Squire"))
+            .expect("one candidate must be the Squire's ETB shield"),
+        other => panic!("expected the nested ordering prompt, got {other:?}"),
+    };
+    assert_eq!(
+        squire_index, squire_index_before,
+        "candidate order must survive restore"
+    );
+    let result = runner
+        .act(GameAction::ChooseReplacement {
+            index: squire_index,
+        })
+        .expect("the nested ordering choice must be answerable after restore");
+    log.extend(result.events);
+    runner.advance_until_stack_empty();
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "resolution must complete to a clean priority window, got {:?}",
+        runner.state().waiting_for
+    );
+
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        life_before,
+        "all damage must be prevented (none dealt through)"
+    );
+    assert_eq!(
+        prevented_pairs(&log),
+        vec![
+            (TargetRef::Player(P0), 3),
+            (TargetRef::Player(P0), 4),
+            (TargetRef::Player(P0), 2),
+        ],
+        "child (P0,3) publishes at the child's boundary before the outer tail \
+         resumes; outer publishes (P0,4) + (P0,2)"
+    );
+    assert_eq!(
+        counters_on(&runner, squire),
+        12,
+        "three triggers of 3/4/2, each +1 from Hardened Scales"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .objects
+            .values()
+            .filter(|o| o.controller == P0 && o.zone == Zone::Hand)
+            .count(),
+        hand_before,
+        "NWF-Bat2's rider must stay silent (its shield prevented nothing): \
+         nothing drawn"
+    );
+    assert!(
+        runner.state().pending_each_source_batches.is_empty(),
+        "every parked record must be consumed by the completion cascade"
     );
 }

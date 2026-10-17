@@ -219,6 +219,10 @@ fn initial_logical_zone_change_group_id() -> u64 {
     1
 }
 
+fn initial_each_source_batch_id() -> u64 {
+    1
+}
+
 /// A durable product-knowledge disclosure. This is intentionally separate from
 /// rules-visible reveal state: it records who learned an exact card occurrence,
 /// not a continuing reveal effect or a targeting/trigger authority.
@@ -2913,6 +2917,16 @@ pub struct PendingContinuation {
     /// placeholder `chain` is never resolved when this is set.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) player_scope_queue_end: bool,
+    /// CR 615.13 + CR 616.1e (Matt M1): the prevention batch whose tail this
+    /// chain drains, minted from `GameState::next_each_source_batch_id`. Stamped
+    /// explicitly by an `EachSourceDealsDamage` pause, otherwise inherited from
+    /// the ambient drain owner (a splinter re-paused mid-tail is still the same
+    /// batch's chain). The drain restores it as the ambient owner so the applier
+    /// hydrates this batch's frame, and publishes this batch's boundary when the
+    /// chain completes — even while an outer continuation remains queued. `None`
+    /// is an ordinary (non-batch) chain: the legacy quiescent flush applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub each_source_batch_owner: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2958,6 +2972,10 @@ impl PendingContinuation {
             attachment_remainder: None,
             player_scope_linked_exile: state.resolving_player_scope_linked_exile.clone(),
             player_scope_queue_end: false,
+            // CR 615.13 + CR 616.1e (Matt M1): inherit the ambient drain
+            // owner — a chain re-parked mid-tail is still its batch's chain.
+            // `None` outside a batch-tail drain, as for every other ambient.
+            each_source_batch_owner: state.resolving_each_source_batch_owner,
         }
     }
 
@@ -2982,6 +3000,9 @@ impl PendingContinuation {
             attachment_remainder: None,
             player_scope_linked_exile: state.resolving_player_scope_linked_exile.clone(),
             player_scope_queue_end: false,
+            // CR 615.13 + CR 616.1e (Matt M1): same ambient inheritance as
+            // `new` — the twin constructor must not drop the drain owner.
+            each_source_batch_owner: state.resolving_each_source_batch_owner,
         }
     }
 }
@@ -17505,6 +17526,15 @@ pub struct EachSourceBatchFrame {
     /// when it pops so nesting composes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restore_tally: Option<Vec<PreventedDamageEntry>>,
+    /// CR 615.13 + CR 616.1e (Matt M1): the owning batch's id, minted from
+    /// `GameState::next_each_source_batch_id` when the batch opened. A nested
+    /// batch's frames carry its own id — never the outer's — so the applier
+    /// hydrates the running tail's frame (not the stack top) and the drain
+    /// hook publishes a completed child's boundary before outer instructions
+    /// resume. `0` is legacy-unowned (pre-M1 saves); those continuations are
+    /// unstamped too, so they drain down the legacy top-of-stack path.
+    #[serde(default)]
+    pub owner: u64,
 }
 
 /// CR 510.2 + CR 616.1 + CR 702.15b: the unfinished tail of ONE simultaneous combat-damage batch,
@@ -23876,6 +23906,24 @@ declare_game_state! {
     /// fields to erase or rebind.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_each_source_batches: Vec<EachSourceBatchFrame>,
+    /// CR 615.13 + CR 616.1e (Matt M1): monotonic allocator minting the
+    /// owning-batch id each `EachSourceDealsDamage` resolution stamps on its
+    /// parked frames and its stashed continuation. Serialized plainly (mirrors
+    /// `next_object_id`) so a reloaded game never re-mints an id a parked
+    /// frame or a queued continuation still carries. Starts at 1; `0` is the
+    /// legacy-unowned sentinel (pre-M1 saves).
+    #[serde(default = "initial_each_source_batch_id")]
+    pub next_each_source_batch_id: u64,
+    /// CR 615.13 + CR 616.1e (Matt M1): the owning-batch id of the
+    /// continuation whose tail is draining, restored from the taken
+    /// continuation's stamp for the synchronous drain window (mirrors
+    /// `active_return_result_occurrence`, including save/restore across the
+    /// re-entrant cascade). The prevention applier hydrates the frame owned
+    /// by this batch — never the stack top — and continuations parked inside
+    /// the window inherit it. `None` outside a batch-tail drain; never
+    /// serialized and never part of state equality.
+    #[serde(skip)]
+    pub resolving_each_source_batch_owner: Option<u64>,
 }
 
 /// The map-backed history entries `copy` does not share with `original`, a nested causes map
@@ -25625,6 +25673,17 @@ pub struct PendingReplacement {
     /// boundary methods below.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_boundary: Option<Box<ProposedEvent>>,
+    /// CR 615.13 + CR 616.1e (Matt M1): the prevention batch this prompt is
+    /// the boundary of — set ONLY by an `EachSourceDealsDamage` Phase-B pause
+    /// whose tail is empty (fully-prevented prefix nodes need no stash, no
+    /// raw tail, no downstream), so the answer parked no continuation and no
+    /// drain will ever run for this batch. The replacement-answer hook
+    /// publishes exactly this batch's frames on the fresh outcome, even while
+    /// an outer continuation remains queued. `None` for every other parked
+    /// event (a queued tail owns its own boundary via its stamped
+    /// continuation). Single-use: consumed with the prompt it rides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub each_source_batch_owner: Option<u64>,
 }
 
 impl PendingReplacement {
@@ -29748,6 +29807,8 @@ impl GameState {
             initiative: None,
             combat_prevention_tally: None,
             pending_each_source_batches: Vec::new(),
+            next_each_source_batch_id: initial_each_source_batch_id(),
+            resolving_each_source_batch_owner: None,
             cancelled_casts: Vec::new(),
             pending_activations: Vec::new(),
             commander_declined_zone_return: HashSet::new(),
@@ -32781,6 +32842,13 @@ fn _gamestate_partition_is_total(s: &GameState) {
         initiative: _,
         combat_prevention_tally: _,
         pending_each_source_batches: _,
+        // CR 615.13 + CR 616.1e (Matt M1): the batch-id allocator is COMPARED
+        // (mirrors `next_object_id` — a differing mint cursor is correctly not
+        // a fixed-point repeat); the synchronous drain owner is EXCLUDED (it is
+        // `None` at every Priority sample beat, like the other `resolving_*`
+        // transients).
+        next_each_source_batch_id: _,
+        resolving_each_source_batch_owner: _,
         // Post-rebase upstream additions (v0.21.x: #5515 discover + liminal mechanic).
         // Strict-compared by eq_except_growable's GameState PartialEq reuse (fail-safe:
         // a differing value is correctly not a fixed-point repeat); object-growth loops
@@ -33060,6 +33128,10 @@ impl PartialEq for GameState {
             && self.pending_exile_from_top_until == other.pending_exile_from_top_until
             && self.pending_combat_lifelink == other.pending_combat_lifelink
             && self.pending_each_source_batches == other.pending_each_source_batches
+            // CR 615.13 + CR 616.1e (Matt M1): the allocator cursor compares
+            // (mirrors `next_object_id`); the synchronous drain owner is
+            // excluded (always `None` at a sample beat).
+            && self.next_each_source_batch_id == other.next_each_source_batch_id
             && self.pending_mass_library_order_choice
                 == other.pending_mass_library_order_choice
             && self.pending_scoped_library_search == other.pending_scoped_library_search
@@ -36993,6 +37065,7 @@ mod tests {
                     amount: 1,
                 }],
                 restore_tally: None,
+                owner: 1,
             });
         // CR 616.1: the ordering prompt a parked batch is waiting on. Without it
         // the save is not mid-pause and this test measures nothing.
@@ -37034,6 +37107,44 @@ mod tests {
                 } if player == PlayerId(0) && candidate_count == 2
             ),
             "a batch-less mid-pause save must round-trip its prompt VERBATIM"
+        );
+    }
+
+    /// CR 615.13 + CR 616.1e save-compat (Matt M1): a save written before
+    /// frames carried owners must load with the legacy-unowned sentinel
+    /// rather than failing deserialization, and the pre-M1 allocator default
+    /// must be 1 so `0` is never minted and the sentinel never collides with
+    /// a live batch. (The stashed continuation's stamp is the same serde
+    /// `Option` default as its ten sibling fields; the stamped round trip is
+    /// pinned by the integration nesting control's mid-pause save/load.)
+    #[test]
+    fn absent_batch_owner_fields_deserialize_as_legacy() {
+        let frame = serde_json::from_value::<EachSourceBatchFrame>(serde_json::json!({
+            "tally": [],
+        }))
+        .expect("a legacy frame without owner deserializes");
+        assert_eq!(
+            frame.owner, 0,
+            "an absent frame owner defaults to legacy-unowned"
+        );
+
+        let state = GameState::new_two_player(42);
+        let mut wire = serde_json::to_value(PersistedGameState::Raw(Box::new(state)))
+            .expect("fixture serializes");
+        assert!(
+            wire.as_object_mut()
+                .expect("a raw persisted state is an object")
+                .remove("next_each_source_batch_id")
+                .is_some(),
+            "reach guard: the allocator must actually have been serialized to remove"
+        );
+        let restored = serde_json::from_value::<PersistedGameState>(wire)
+            .expect("an absent batch allocator defaults")
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
+        assert_eq!(
+            restored.next_each_source_batch_id, 1,
+            "an absent batch allocator defaults to 1, never the 0 sentinel"
         );
     }
 
