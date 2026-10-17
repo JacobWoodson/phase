@@ -20170,7 +20170,10 @@ mod tests {
     /// P3-C1's exact-shape assert (revert the source arm to bare Typed →
     /// P3-C1 red, this test stays green — the per-recipient self-skip covers);
     /// reverting the skip alone stays green (the filter covers); reverting
-    /// BOTH grows the lone count (red).
+    /// BOTH still stays green — self-donated defs are structurally identical
+    /// to the printed base, so the GrantAbility dedup suppresses them. This
+    /// test guards the no-self-duplication outcome, not the exclusion
+    /// mechanism (filter: P3-C1; skip: P2-C2).
     #[test]
     fn bolas_grant_excludes_self_only() {
         let mut state = setup();
