@@ -19815,6 +19815,613 @@ mod tests {
         );
     }
 
+    /// Parse the verbatim Bolas grant clause into host statics (the Phase 3
+    /// delta). Every Phase 3 layers test builds its Bolas host statics through
+    /// this helper; providers stay hand-built with distinct effects, since
+    /// provider parsing is the orthogonal Priority-11 printed-loyalty path.
+    /// The setup assertions make an emission revert fail here (red), not
+    /// downstream.
+    fn bolas_grant_statics_from_verbatim_line() -> Vec<StaticDefinition> {
+        let parsed = parse_oracle_text(
+            "Nicol Bolas has all loyalty abilities of all other planeswalkers on the battlefield.",
+            "Nicol Bolas, Dragon-God",
+            &[],
+            &["Legendary".to_string(), "Planeswalker".to_string()],
+            &["Bolas".to_string()],
+        );
+        assert_eq!(
+            parsed.statics.len(),
+            1,
+            "verbatim Bolas grant clause must parse to exactly one static; got {:?}",
+            parsed.statics
+        );
+        assert!(
+            matches!(
+                parsed.statics[0].modifications.as_slice(),
+                [ContinuousModification::GrantAllLoyaltyAbilitiesOf { .. }]
+            ),
+            "verbatim Bolas grant clause must lower to the loyalty grant; got {:?}",
+            parsed.statics[0].modifications
+        );
+        parsed.statics
+    }
+
+    /// CR 613.1f + CR 606.2: a Bolas host whose statics come from the verbatim
+    /// grant clause (the Phase 3 delta) gains exactly the donor walkers'
+    /// loyalty defs: the `[+1]`/`[-3]` fixed-loyalty defs and the `[-X]`
+    /// `RemoveCounter{X}`-shaped def (per `is_loyalty_ability_cost`), each with
+    /// its `AsSorcery` timing intact — while the donor's `{T}` non-loyalty def
+    /// is excluded by the ability-level loyalty-cost filter. An
+    /// OPPONENT-controlled donor donates too (the source carries no controller
+    /// axis).
+    ///
+    /// Two phases plus a hostile leg: lone Bolas gains nothing; once the donor
+    /// enters Bolas holds exactly the three donated defs; once an
+    /// opponent-controlled donor enters Bolas holds all five. Reverting the
+    /// emission arm donates nothing (red at the phase-2 assertion).
+    #[test]
+    fn bolas_gains_exactly_donor_loyalty_defs() {
+        use crate::types::ability::CounterCostSelection;
+        use crate::types::ability::REMOVE_COUNTER_COST_X;
+
+        let mut state = setup();
+        fn make_walker(
+            state: &mut GameState,
+            card: u64,
+            controller: PlayerId,
+            name: &str,
+        ) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(card),
+                controller,
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+            obj.base_card_types = obj.card_types.clone();
+            id
+        }
+
+        let bolas = make_walker(&mut state, 900, PlayerId(0), "Nicol Bolas, Dragon-God");
+        state.objects.get_mut(&bolas).unwrap().static_definitions =
+            bolas_grant_statics_from_verbatim_line().into();
+
+        // Phase 1 (negative): lone Bolas gains nothing (self-exclusion).
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            state.objects.get(&bolas).unwrap().abilities.is_empty(),
+            "lone Bolas must gain nothing; got {:?}",
+            state.objects.get(&bolas).unwrap().abilities
+        );
+
+        // Donor walker: [+1]/[-3] loyalty defs with printed-loyalty timing, a
+        // [-X] RemoveCounter{X}-shaped loyalty def, and a {T} non-loyalty
+        // activated def. Distinct effects identify each donor def.
+        let plus_one = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Loyalty { amount: 1 })
+        .sorcery_speed();
+        let minus_three = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Loyalty { amount: -3 })
+        .sorcery_speed();
+        let minus_x = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 7 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::RemoveCounter {
+            count: REMOVE_COUNTER_COST_X,
+            counter_type: CounterMatch::OfType(CounterType::Loyalty),
+            target: None,
+            selection: CounterCostSelection::SingleObject,
+        })
+        .sorcery_speed();
+        let tap_def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        let donor = make_walker(&mut state, 901, PlayerId(0), "Donor Walker");
+        {
+            let obj = state.objects.get_mut(&donor).unwrap();
+            // Printed abilities: on the base too, so a layer reset to
+            // `base_abilities` cannot make a negative assertion vacuous.
+            for def in [&plus_one, &minus_three, &minus_x, &tap_def] {
+                Arc::make_mut(&mut obj.base_abilities).push(def.clone());
+            }
+            obj.abilities = Arc::clone(&obj.base_abilities);
+        }
+
+        // Phase 2 (positive reach-guard): exactly the three donated loyalty
+        // defs with their timing intact; the {T} def excluded (reaches the
+        // `is_loyalty_ability_cost` false arm) and the [-X]-shaped cost
+        // included (reaches the `RemoveCounter` true arm).
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        let held = &state.objects.get(&bolas).unwrap().abilities;
+        assert_eq!(
+            held.len(),
+            3,
+            "Bolas must hold exactly the three donated loyalty defs; got {held:?}"
+        );
+        for donated in held.iter() {
+            assert!(
+                donated == &plus_one || donated == &minus_three || donated == &minus_x,
+                "unexpected donated def {donated:?}"
+            );
+            assert_eq!(
+                donated.activation_restrictions,
+                vec![ActivationRestriction::AsSorcery],
+                "donated loyalty def must keep its sorcery-speed timing; got {:?}",
+                donated.activation_restrictions
+            );
+        }
+        assert!(
+            held.iter().all(|a| a.cost != Some(AbilityCost::Tap)),
+            "{{T}} non-loyalty def must be excluded by the loyalty-cost filter"
+        );
+
+        // Hostile: an opponent-controlled donor still donates — the source has
+        // no controller axis (reaches `matches_target_filter` with no
+        // controller conjunct).
+        let opp_plus = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 11 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Loyalty { amount: 1 })
+        .sorcery_speed();
+        let opp_minus = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Loyalty { amount: -2 })
+        .sorcery_speed();
+        let opp_donor = make_walker(&mut state, 902, PlayerId(1), "Opponent Donor");
+        {
+            let obj = state.objects.get_mut(&opp_donor).unwrap();
+            for def in [&opp_plus, &opp_minus] {
+                Arc::make_mut(&mut obj.base_abilities).push(def.clone());
+            }
+            obj.abilities = Arc::clone(&obj.base_abilities);
+        }
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        let held = &state.objects.get(&bolas).unwrap().abilities;
+        assert_eq!(
+            held.len(),
+            5,
+            "Bolas must hold both donors' loyalty defs; got {held:?}"
+        );
+        for def in [&plus_one, &minus_three, &minus_x, &opp_plus, &opp_minus] {
+            assert!(
+                held.iter().any(|a| a == def),
+                "Bolas must hold donated def {def:?}; got {held:?}"
+            );
+        }
+    }
+
+    /// CR 611.3a: the verbatim-clause Bolas grant tracks the battlefield live —
+    /// a provider leaving retires its donations on the next pass, and a newly
+    /// entered provider donates immediately. Bolas + donor → present; second
+    /// donor enters → both present; first donor leaves while the second remains
+    /// → only the remaining donor's defs stay (provider-scan
+    /// `matches_target_filter` false-after-leave); last donor leaves → absent.
+    /// Reverting the emission arm strands the phase-1 presence assertion (red).
+    #[test]
+    fn bolas_grant_tracks_the_battlefield_live() {
+        let mut state = setup();
+
+        fn make_walker(
+            state: &mut GameState,
+            card: u64,
+            controller: PlayerId,
+            name: &str,
+        ) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(card),
+                controller,
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+            obj.base_card_types = obj.card_types.clone();
+            id
+        }
+        fn give_printed_loyalty(state: &mut GameState, walker: ObjectId, def: &AbilityDefinition) {
+            let obj = state.objects.get_mut(&walker).unwrap();
+            Arc::make_mut(&mut obj.base_abilities).push(def.clone());
+            obj.abilities = Arc::clone(&obj.base_abilities);
+        }
+        fn send_to_graveyard(state: &mut GameState, object_id: ObjectId) {
+            let mut events = Vec::new();
+            move_object(
+                state,
+                ZoneMoveRequest {
+                    object_id,
+                    to: Zone::Graveyard,
+                    cause: ZoneChangeCause::Effect { source: object_id },
+                    mods: EntryMods::default(),
+                    placement: None,
+                    exile_links: ExileLinkSpec::default(),
+                    replacement_applied: Default::default(),
+                    face_down_in_exile: crate::types::ability::ExileConcealment::Public,
+                },
+                &mut events,
+            );
+            flush_layers(state);
+        }
+
+        let bolas = make_walker(&mut state, 910, PlayerId(0), "Nicol Bolas, Dragon-God");
+        state.objects.get_mut(&bolas).unwrap().static_definitions =
+            bolas_grant_statics_from_verbatim_line().into();
+
+        // Distinct effects identify which provider donated.
+        let first_def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Loyalty { amount: 1 })
+        .sorcery_speed();
+        let second_def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Loyalty { amount: -2 })
+        .sorcery_speed();
+
+        // Bolas + first donor → present (reach-guard).
+        let first = make_walker(&mut state, 911, PlayerId(0), "First Donor");
+        give_printed_loyalty(&mut state, first, &first_def);
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            state
+                .objects
+                .get(&bolas)
+                .unwrap()
+                .abilities
+                .iter()
+                .any(|a| a == &first_def),
+            "Bolas must hold the first donor's loyalty def; got {:?}",
+            state.objects.get(&bolas).unwrap().abilities
+        );
+
+        // Second donor enters → both donate.
+        let second = make_walker(&mut state, 912, PlayerId(0), "Second Donor");
+        give_printed_loyalty(&mut state, second, &second_def);
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects.get(&bolas).unwrap().abilities.len(),
+            2,
+            "Bolas must hold both donors' defs; got {:?}",
+            state.objects.get(&bolas).unwrap().abilities
+        );
+
+        // First donor leaves while the second remains → only the remaining
+        // donor's defs stay.
+        send_to_graveyard(&mut state, first);
+        {
+            let held = &state.objects.get(&bolas).unwrap().abilities;
+            assert_eq!(
+                held.len(),
+                1,
+                "only the remaining donor's def must stay; got {held:?}"
+            );
+            assert!(
+                held.iter().any(|a| a == &second_def),
+                "remaining def must be the second donor's; got {held:?}"
+            );
+        }
+
+        // Last donor leaves → absent.
+        send_to_graveyard(&mut state, second);
+        assert!(
+            state.objects.get(&bolas).unwrap().abilities.is_empty(),
+            "Bolas must hold nothing once all donors leave; got {:?}",
+            state.objects.get(&bolas).unwrap().abilities
+        );
+    }
+
+    /// CR 613.1f: self-exclusion is self-ONLY. A lone Bolas (three printed
+    /// loyalty defs, verbatim-clause statics) holds exactly its three printed
+    /// defs — no self-duplication. Two Bolases plus a donor each hold their own
+    /// three printed + the other Bolas's three printed + the donor's two, each
+    /// exactly once (re-donation dedup: B's donated-from-donor defs re-donated
+    /// to A collapse via the `GrantAbility` structural-equality `any` branch),
+    /// with identical composition across two consecutive passes (per-pass reset
+    /// idempotence). Reverting the emission arm strands the pair assertions
+    /// (red: each holds only its own three).
+    ///
+    /// Attribution (defense in depth): the FILTER conjunct is discriminated by
+    /// P3-C1's exact-shape assert (revert the source arm to bare Typed →
+    /// P3-C1 red, this test stays green — the per-recipient self-skip covers);
+    /// reverting the skip alone stays green (the filter covers); reverting
+    /// BOTH grows the lone count (red).
+    #[test]
+    fn bolas_grant_excludes_self_only() {
+        let mut state = setup();
+        fn make_walker(
+            state: &mut GameState,
+            card: u64,
+            controller: PlayerId,
+            name: &str,
+        ) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(card),
+                controller,
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+            obj.base_card_types = obj.card_types.clone();
+            id
+        }
+        fn give_printed(state: &mut GameState, walker: ObjectId, defs: &[AbilityDefinition]) {
+            let obj = state.objects.get_mut(&walker).unwrap();
+            for def in defs {
+                Arc::make_mut(&mut obj.base_abilities).push(def.clone());
+            }
+            obj.abilities = Arc::clone(&obj.base_abilities);
+        }
+        // Distinct loyalty defs per permanent so provenance is identifiable.
+        fn loyalty_plus(gain: i32) -> AbilityDefinition {
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: gain },
+                    player: TargetFilter::Controller,
+                },
+            )
+            .cost(AbilityCost::Loyalty { amount: 1 })
+            .sorcery_speed()
+        }
+        fn loyalty_minus(draw: i32) -> AbilityDefinition {
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: draw },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .cost(AbilityCost::Loyalty { amount: -3 })
+            .sorcery_speed()
+        }
+        fn loyalty_seven(gain: i32) -> AbilityDefinition {
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: gain },
+                    player: TargetFilter::Controller,
+                },
+            )
+            .cost(AbilityCost::Loyalty { amount: -7 })
+            .sorcery_speed()
+        }
+
+        let a_printed = [loyalty_plus(1), loyalty_minus(3), loyalty_seven(7)];
+        let b_printed = [loyalty_plus(11), loyalty_minus(13), loyalty_seven(17)];
+        let donor_defs = [loyalty_plus(101), loyalty_minus(102)];
+
+        // Lone Bolas: exactly its three printed defs, no self-duplication.
+        let bolas_a = make_walker(&mut state, 920, PlayerId(0), "Nicol Bolas, Dragon-God");
+        give_printed(&mut state, bolas_a, &a_printed);
+        state.objects.get_mut(&bolas_a).unwrap().static_definitions =
+            bolas_grant_statics_from_verbatim_line().into();
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        {
+            let held = &state.objects.get(&bolas_a).unwrap().abilities;
+            assert_eq!(
+                held.len(),
+                3,
+                "lone Bolas must hold exactly its three printed defs; got {held:?}"
+            );
+            for def in &a_printed {
+                assert!(
+                    held.iter().any(|a| a == def),
+                    "lone Bolas must hold printed def {def:?}; got {held:?}"
+                );
+            }
+        }
+
+        // A second Bolas plus a donor: each Bolas gains the donor's defs AND
+        // the other Bolas's PRINTED defs — exclusion is self-only, not all.
+        let bolas_b = make_walker(&mut state, 921, PlayerId(0), "Nicol Bolas, Second Copy");
+        give_printed(&mut state, bolas_b, &b_printed);
+        state.objects.get_mut(&bolas_b).unwrap().static_definitions =
+            bolas_grant_statics_from_verbatim_line().into();
+        let donor = make_walker(&mut state, 922, PlayerId(0), "Donor Walker");
+        give_printed(&mut state, donor, &donor_defs);
+
+        // Two consecutive passes: identical composition each time.
+        for pass in 1..=2 {
+            state.layers_dirty.mark_full();
+            evaluate_layers(&mut state);
+            for (id, own, other) in [
+                (bolas_a, &a_printed, &b_printed),
+                (bolas_b, &b_printed, &a_printed),
+            ] {
+                let held = &state.objects.get(&id).unwrap().abilities;
+                assert_eq!(
+                    held.len(),
+                    8,
+                    "pass {pass}: Bolas must hold own 3 + other's 3 + donor's 2; got {held:?}"
+                );
+                for def in own.iter().chain(other.iter()).chain(donor_defs.iter()) {
+                    assert_eq!(
+                        held.iter().filter(|a| a == &def).count(),
+                        1,
+                        "pass {pass}: single copy of {def:?} expected (re-donation dedup); got {held:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// CR 613.1f + CR 606.3 (transitive timing, Seam S1): a donor walker
+    /// holding a quoted-granted loyalty def — built via the PRODUCTION
+    /// quoted-grant path (`parse_quoted_ability_modifications`, the P1-C4
+    /// extractor pattern), NOT hand-built — donates a correctly-timed def to
+    /// the verbatim-clause Bolas: present with `AsSorcery` intact. A quoted
+    /// NON-loyalty grant alongside is excluded (reaches the loyalty-cost false
+    /// arm on a quoted def).
+    ///
+    /// Fixture decision: hand-placed donor def via the P1 production path, not
+    /// a live Gauntlet two-hop (which would depend on intra-pass Layer-6
+    /// ordering between Gauntlet's grant and Bolas's expansion); the
+    /// Gauntlet→donor hop is P1-covered. Timing enforcement composes from P1-C4
+    /// (quoted defs with `AsSorcery` refuse off-turn) + P3-C4 (donated defs'
+    /// carried restrictions are consulted). Reverting the emission arm strands
+    /// the donation assertion (red).
+    #[test]
+    fn bolas_donates_quoted_granted_loyalty_def_with_timing() {
+        use crate::parser::oracle_static::parse_quoted_ability_modifications;
+
+        // The P1 production path: a quoted "[0]: Proliferate" loyalty def
+        // carries sorcery-speed timing.
+        let parsed = parse_quoted_ability_modifications("\"[0]: Proliferate\"");
+        let quoted_loyalty = match parsed.as_slice() {
+            [ContinuousModification::GrantAbility { definition }] => (**definition).clone(),
+            other => panic!("expected single GrantAbility, got {other:?}"),
+        };
+        assert_eq!(quoted_loyalty.kind, AbilityKind::Activated);
+        assert!(
+            matches!(
+                quoted_loyalty.cost,
+                Some(AbilityCost::Loyalty { amount: 0 })
+            ),
+            "fixture def must be [0] loyalty, got {:?}",
+            quoted_loyalty.cost
+        );
+        assert!(
+            matches!(*quoted_loyalty.effect, Effect::Proliferate),
+            "fixture def effect must be Proliferate, got {:?}",
+            quoted_loyalty.effect
+        );
+        assert!(
+            quoted_loyalty
+                .activation_restrictions
+                .contains(&ActivationRestriction::AsSorcery),
+            "quoted loyalty def must carry AsSorcery via the P1 attach; got {:?}",
+            quoted_loyalty.activation_restrictions
+        );
+
+        // Quoted non-loyalty grant alongside (exclusion hostile).
+        let parsed_tap = parse_quoted_ability_modifications("\"{T}: Draw a card\"");
+        let quoted_tap = match parsed_tap.as_slice() {
+            [ContinuousModification::GrantAbility { definition }] => (**definition).clone(),
+            other => panic!("expected single GrantAbility, got {other:?}"),
+        };
+        assert!(
+            matches!(quoted_tap.cost, Some(AbilityCost::Tap)),
+            "hostile fixture def must be {{T}}, got {:?}",
+            quoted_tap.cost
+        );
+
+        let mut state = setup();
+        fn make_walker(
+            state: &mut GameState,
+            card: u64,
+            controller: PlayerId,
+            name: &str,
+        ) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(card),
+                controller,
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+            obj.base_card_types = obj.card_types.clone();
+            id
+        }
+
+        let bolas = make_walker(&mut state, 930, PlayerId(0), "Nicol Bolas, Dragon-God");
+        state.objects.get_mut(&bolas).unwrap().static_definitions =
+            bolas_grant_statics_from_verbatim_line().into();
+        let donor = make_walker(&mut state, 931, PlayerId(0), "Donor Walker");
+        {
+            let obj = state.objects.get_mut(&donor).unwrap();
+            // Printed abilities: on the base too, so a layer reset to
+            // `base_abilities` cannot make a negative assertion vacuous.
+            for def in [&quoted_loyalty, &quoted_tap] {
+                Arc::make_mut(&mut obj.base_abilities).push(def.clone());
+            }
+            obj.abilities = Arc::clone(&obj.base_abilities);
+        }
+
+        // Reach-guard: the quoted defs are present on the DONOR pre-pass.
+        for def in [&quoted_loyalty, &quoted_tap] {
+            let obj = state.objects.get(&donor).unwrap();
+            assert!(
+                obj.base_abilities.iter().any(|a| a == def),
+                "quoted def {def:?} must be installed on the donor base pre-pass"
+            );
+            assert!(
+                obj.abilities.iter().any(|a| a == def),
+                "quoted def {def:?} must be installed on the donor live pre-pass"
+            );
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let held = &state.objects.get(&bolas).unwrap().abilities;
+        let donated = held
+            .iter()
+            .find(|a| a == &&quoted_loyalty)
+            .unwrap_or_else(|| panic!("Bolas must gain the quoted loyalty def; got {held:?}"));
+        assert!(
+            donated
+                .activation_restrictions
+                .contains(&ActivationRestriction::AsSorcery),
+            "donated quoted def must keep its sorcery-speed timing; got {:?}",
+            donated.activation_restrictions
+        );
+        assert!(
+            !held.iter().any(|a| a == &quoted_tap),
+            "quoted non-loyalty grant must be excluded from donation; got {held:?}"
+        );
+    }
+
     /// CR 702.167c + CR 613.1f: Locus of Enlightenment — "Locus of Enlightenment
     /// has each activated ability of the exiled cards used to craft it." Built
     /// end-to-end through the real parser (`parse_oracle_text` →

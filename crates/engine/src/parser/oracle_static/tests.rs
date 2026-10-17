@@ -10846,6 +10846,152 @@ fn parse_grant_all_activated_abilities_all_lands() {
     }
 }
 
+/// CR 613.1f: the provider set "all other planeswalkers on the battlefield"
+/// (Nicol Bolas, Dragon-God) — battlefield-pinned planeswalkers (the Manascape
+/// zone shape) AND NOT the host itself (the Kraj self-exclusion conjunct, for
+/// the English "other"). Shared by the Bolas clause test and the
+/// activated-category hostile so the emission shape cannot drift.
+fn all_other_planeswalkers_source() -> TargetFilter {
+    use crate::types::ability::{FilterProp, TypedFilter};
+    use crate::types::zones::Zone;
+    use crate::types::TypeFilter;
+    TargetFilter::And {
+        filters: vec![
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker).properties(vec![
+                FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                },
+            ])),
+            TargetFilter::Not {
+                filter: Box::new(TargetFilter::SelfRef),
+            },
+        ],
+    }
+}
+
+/// CR 613.1f + CR 606.2: "all loyalty abilities of all other planeswalkers on
+/// the battlefield" (Nicol Bolas, Dragon-God) — the loyalty category leaf over
+/// the battlefield-wide planeswalker source set. Self-exclusion is the
+/// `Not{SelfRef}` conjunct (the Kraj precedent), NOT `FilterProp::Another`,
+/// which excludes the trigger source in trigger context. Reverting the
+/// category leaf, the source arm, or the emission arm strands this exact-shape
+/// assertion (red).
+#[test]
+fn parse_grant_all_loyalty_abilities_all_other_planeswalkers() {
+    let expected = ContinuousModification::GrantAllLoyaltyAbilitiesOf {
+        source: all_other_planeswalkers_source(),
+    };
+    for predicate in [
+        "all loyalty abilities of all other planeswalkers on the battlefield",
+        "has all loyalty abilities of all other planeswalkers on the battlefield",
+    ] {
+        assert_eq!(
+            parse_continuous_modifications(predicate),
+            vec![expected.clone()],
+            "predicate: {predicate}"
+        );
+    }
+}
+
+/// CR 613.1f: axis-independence (a) — the NEW source arm composes with the OLD
+/// activated category, proving the source arm is an independent per-axis
+/// addition rather than part of a Bolas-specific branch. Reaches exactly one
+/// new `alt` arm: reverting the source arm turns this red while the category
+/// hostile stays green, and vice versa.
+#[test]
+fn parse_grant_new_source_arm_composes_with_activated() {
+    assert_eq!(
+        parse_continuous_modifications(
+            "has all activated abilities of all other planeswalkers on the battlefield"
+        ),
+        vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+            source: all_other_planeswalkers_source(),
+            cap: None,
+        }],
+    );
+}
+
+/// CR 613.1f: axis-independence (b) — the NEW loyalty category composes with
+/// the OLD Manascape land source (typed over a runtime-empty set — lands hold
+/// no loyalty abilities — so this is a parse-shape assertion only). Reaches
+/// exactly one new `alt` arm: reverting the category arm turns this red while
+/// the source hostile stays green, and vice versa.
+#[test]
+fn parse_grant_new_category_arm_composes_with_land_source() {
+    use crate::types::ability::{FilterProp, TargetFilter, TypedFilter};
+    use crate::types::zones::Zone;
+    assert_eq!(
+        parse_continuous_modifications("has all loyalty abilities of all lands on the battlefield"),
+        vec![ContinuousModification::GrantAllLoyaltyAbilitiesOf {
+            source: TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::InZone {
+                zone: Zone::Battlefield,
+            }]),),
+        }],
+    );
+}
+
+/// CR 613.1f + CR 606.2: the verbatim Bolas grant clause parses typed end to
+/// end — one `GrantAllLoyaltyAbilitiesOf` static affecting SelfRef, zero
+/// `Effect::Unimplemented` anywhere in the parse (the production
+/// `static_structure` honest gap, closed). Reverting any of the three
+/// production arms (category leaf, source arm, emission arm) strands the
+/// static-count assertion (red).
+#[test]
+fn bolas_grant_clause_parses_typed_with_no_unimplemented() {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::{AbilityDefinition, Effect, TargetFilter};
+
+    let parsed = parse_oracle_text(
+        "Nicol Bolas has all loyalty abilities of all other planeswalkers on the battlefield.",
+        "Nicol Bolas, Dragon-God",
+        &[],
+        &["Legendary".to_string(), "Planeswalker".to_string()],
+        &["Bolas".to_string()],
+    );
+
+    // Walk the whole ability tree (each ability plus its sub_ability chain) so
+    // a nested Unimplemented cannot hide.
+    fn walk<'a>(ability: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
+        out.push(&ability.effect);
+        if let Some(sub) = &ability.sub_ability {
+            walk(sub, out);
+        }
+    }
+    let mut effects = Vec::new();
+    for ability in &parsed.abilities {
+        walk(ability, &mut effects);
+    }
+    for effect in &effects {
+        assert!(
+            !matches!(effect, Effect::Unimplemented { .. }),
+            "verbatim Bolas grant clause must not emit Effect::Unimplemented, got {effect:?}"
+        );
+    }
+
+    // Positive reach-guard: exactly one static, so the negative above cannot
+    // pass vacuously on a parse that emitted nothing.
+    assert_eq!(
+        parsed.statics.len(),
+        1,
+        "verbatim Bolas grant clause must parse to exactly one static; got {:?}",
+        parsed.statics
+    );
+    assert_eq!(
+        parsed.statics[0].affected,
+        Some(TargetFilter::SelfRef),
+        "the Bolas grant static must affect its host; got {:?}",
+        parsed.statics[0].affected
+    );
+    assert_eq!(
+        parsed.statics[0].modifications,
+        vec![ContinuousModification::GrantAllLoyaltyAbilitiesOf {
+            source: all_other_planeswalkers_source(),
+        }],
+        "the Bolas grant static must carry the typed loyalty grant; got {:?}",
+        parsed.statics[0].modifications
+    );
+}
+
 /// CR 613.1f: "all legendary creatures you control" (Robaran Mercenaries)
 #[test]
 fn parse_grant_all_activated_abilities_legendary_creatures_you_control() {
