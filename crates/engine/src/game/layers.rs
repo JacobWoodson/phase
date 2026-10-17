@@ -5215,7 +5215,8 @@ fn live_characteristic_reads(
         // an entering object into a provider for an existing recipient.
         match &e.modification {
             ContinuousModification::GrantAllActivatedAbilitiesOf { source, .. }
-            | ContinuousModification::GrantAllTriggeredAbilitiesOf { source } => {
+            | ContinuousModification::GrantAllTriggeredAbilitiesOf { source }
+            | ContinuousModification::GrantAllLoyaltyAbilitiesOf { source } => {
                 global = global.union(target_filter_characteristic_reads(source));
             }
             _ => {}
@@ -5616,6 +5617,7 @@ fn modification_characteristic_writes_at(
         | ContinuousModification::GrantAbility { .. }
         | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+        | ContinuousModification::GrantAllLoyaltyAbilitiesOf { .. }
         | ContinuousModification::GrantTrigger { .. }
         | ContinuousModification::GrantReplacement { .. }
         // CR 707.9a: retaining a printed ability through a copy still only
@@ -5695,7 +5697,8 @@ fn active_effects_force_incremental_escalation(
         // recipient on entry, even when that recipient's affected set cannot.
         // Test each live controller because "you" is bound at the recipient.
         if let ContinuousModification::GrantAllActivatedAbilitiesOf { source, .. }
-        | ContinuousModification::GrantAllTriggeredAbilitiesOf { source } = &e.modification
+        | ContinuousModification::GrantAllTriggeredAbilitiesOf { source }
+        | ContinuousModification::GrantAllLoyaltyAbilitiesOf { source } = &e.modification
         {
             let controllers: HashSet<_> =
                 state.objects.values().map(|obj| obj.controller).collect();
@@ -8254,6 +8257,123 @@ fn expand_granted_triggered_abilities(
     out
 }
 
+/// CR 613.1f + CR 606.2: Loyalty-ability mirror of
+/// [`expand_granted_activated_abilities`]. Expands a
+/// `GrantAllLoyaltyAbilitiesOf { source }` host modification into one
+/// `GrantAbility` effect per loyalty ability of each object matching `source`
+/// (Nicol Bolas, Dragon-God — "all loyalty abilities of all other
+/// planeswalkers on the battlefield"). Providers are scanned across all zones
+/// in deterministic `ObjectId` order with the `source` filter resolved against
+/// the host id with each recipient's controller, memoized per controller —
+/// mirroring the activated expander exactly; the recipient-equality self-skip
+/// (CR 613.1f) stays per-recipient at emission. Each provider's LIVE
+/// `abilities` is read, filtered to loyalty abilities: `kind == Activated`
+/// with a loyalty cost per `is_loyalty_ability_cost` (CR 606.2 — loyalty
+/// abilities ARE activated abilities; `AbilityKind` has no loyalty kind), so
+/// donated defs land in `obj.abilities` via the shared `GrantAbility` apply +
+/// structural-equality dedup. Whole-def wholesale clone, like the siblings. No
+/// `cap`: loyalty frequency is governed by the CR 606.3 per-permanent gate,
+/// which replaces CR 602.5b rider caps.
+fn expand_granted_loyalty_abilities(
+    state: &GameState,
+    host_source_id: ObjectId,
+    host_timestamp: u64,
+    affected_ids: &[ObjectId],
+    source: &TargetFilter,
+) -> ExpandedReferencedGrants {
+    let mut out = ExpandedReferencedGrants {
+        output: ReferencedGrantOutput::default(),
+        effects: Vec::new(),
+    };
+    let mut provider_ids: Vec<ObjectId> = state.objects.keys().copied().collect();
+    provider_ids.sort_unstable_by_key(|id| id.0);
+    // CR 109.5: per-controller memoization of the matching-provider set, mirroring
+    // the activated expander exactly — the recipient-equality self-skip stays
+    // per-recipient at emission (CR 613.1f).
+    let mut providers_by_controller: std::collections::HashMap<PlayerId, Vec<ObjectId>> =
+        std::collections::HashMap::new();
+    for &recipient_id in affected_ids {
+        out.output.recipients.push(recipient_id);
+        let recipient_controller = match state.objects.get(&recipient_id) {
+            Some(obj) => obj.controller,
+            None => continue,
+        };
+        // CR 109.5 + CR 113.7: object-self references resolve against the host
+        // id with the recipient's controller — verbatim mirror of the activated
+        // expander's context split.
+        let matching = providers_by_controller
+            .entry(recipient_controller)
+            .or_insert_with(|| {
+                let provider_ctx = crate::game::filter::FilterContext::from_source_with_controller(
+                    host_source_id,
+                    recipient_controller,
+                );
+                provider_ids
+                    .iter()
+                    .copied()
+                    .filter(|&provider_id| {
+                        crate::game::perf_counters::record_granted_ability_provider_scan();
+                        crate::game::filter::matches_target_filter(
+                            state,
+                            provider_id,
+                            source,
+                            &provider_ctx,
+                        )
+                    })
+                    .collect()
+            });
+        let mut next_mod_index = 0usize;
+        for &provider_id in matching.iter() {
+            if provider_id == recipient_id {
+                continue;
+            }
+            out.output.providers.push((recipient_id, provider_id));
+            let Some(provider) = state.objects.get(&provider_id) else {
+                continue;
+            };
+            for ability in provider.abilities.iter() {
+                // CR 606.2: an activated ability with a loyalty symbol in its
+                // cost is a loyalty ability — the ONLY behavioral delta from
+                // the activated mirror. Non-loyalty activated abilities (and
+                // non-activated kinds) are excluded.
+                if ability.kind != crate::types::ability::AbilityKind::Activated
+                    || !ability
+                        .cost
+                        .as_ref()
+                        .is_some_and(crate::types::ability::is_loyalty_ability_cost)
+                {
+                    continue;
+                }
+                let modification = ContinuousModification::GrantAbility {
+                    definition: Box::new(ability.clone()),
+                };
+                out.output
+                    .grants
+                    .push((recipient_id, provider_id, modification.clone(), None));
+                out.effects.push(ActiveContinuousEffect {
+                    source_id: recipient_id,
+                    controller: recipient_controller,
+                    def_index: None,
+                    transient_id: None,
+                    trigger_producer_origin: None,
+                    expanded_trigger_provider: None,
+                    mod_index: next_mod_index,
+                    layer: Layer::Ability,
+                    timestamp: host_timestamp,
+                    modification,
+                    affected_filter: TargetFilter::SelfRef,
+                    condition: None,
+                    mode: StaticMode::Continuous,
+                    characteristic_defining: false,
+                    granter: None,
+                });
+                next_mod_index += 1;
+            }
+        }
+    }
+    out
+}
+
 /// Collect active transient effects, filtering out expired host-bound effects.
 /// CR 611.2 + CR 613.1: whether a stored transient continuous effect is still
 /// APPLYING, as opposed to merely still being stored.
@@ -9236,7 +9356,8 @@ impl ReferencedGrantSelectionCache {
             let reader = &pending[reader_index];
             let source = match &reader.modification {
                 ContinuousModification::GrantAllActivatedAbilitiesOf { source, .. }
-                | ContinuousModification::GrantAllTriggeredAbilitiesOf { source } => source,
+                | ContinuousModification::GrantAllTriggeredAbilitiesOf { source }
+                | ContinuousModification::GrantAllLoyaltyAbilitiesOf { source } => source,
                 _ => unreachable!("selection metadata is only requested for referenced grants"),
             };
             let parent = referenced_granted_static_parent(state, reader);
@@ -9335,7 +9456,8 @@ impl ReferencedGrantSelectionCache {
             let original_static_granter = data.original_static_granter;
             let source = match &reader.modification {
                 ContinuousModification::GrantAllActivatedAbilitiesOf { source, .. }
-                | ContinuousModification::GrantAllTriggeredAbilitiesOf { source } => source,
+                | ContinuousModification::GrantAllTriggeredAbilitiesOf { source }
+                | ContinuousModification::GrantAllLoyaltyAbilitiesOf { source } => source,
                 _ => unreachable!("reach is only requested for referenced grants"),
             };
             let candidate_ids = self.writer_candidates[writer_index].get_or_insert_with(|| {
@@ -9727,6 +9849,7 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
             | ContinuousModification::GrantAbility { .. }
             | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
             | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+            | ContinuousModification::GrantAllLoyaltyAbilitiesOf { .. }
             | ContinuousModification::GrantTrigger { .. }
             | ContinuousModification::RemoveAllAbilities
             | ContinuousModification::AddStaticMode { .. }
@@ -10291,6 +10414,7 @@ fn is_referenced_grant_modification(modification: &ContinuousModification) -> bo
         modification,
         ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
             | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+            | ContinuousModification::GrantAllLoyaltyAbilitiesOf { .. }
     )
 }
 
@@ -10655,6 +10779,15 @@ fn apply_continuous_effect_filtered(
                 affected_ids,
                 source,
                 trigger_origin(effect),
+            ))
+        }
+        ContinuousModification::GrantAllLoyaltyAbilitiesOf { source } => {
+            Some(expand_granted_loyalty_abilities(
+                state,
+                effect.source_id,
+                effect.timestamp,
+                affected_ids,
+                source,
             ))
         }
         _ => None,
@@ -11500,6 +11633,8 @@ fn apply_continuous_effect_filtered(
             ContinuousModification::GrantAllActivatedAbilitiesOf { .. } => {}
             // CR 613.1f: Triggered-ability mirror of the activated expansion.
             ContinuousModification::GrantAllTriggeredAbilitiesOf { .. } => {}
+            // CR 613.1f: Loyalty-ability mirror of the activated expansion.
+            ContinuousModification::GrantAllLoyaltyAbilitiesOf { .. } => {}
             // CR 604.1: Push granted trigger to trigger_definitions so
             // the trigger's event matching and condition metadata is preserved.
             ContinuousModification::GrantTrigger { trigger } => {
@@ -11865,6 +12000,7 @@ pub(crate) fn apply_type_or_color_modification(
         | ContinuousModification::GrantAbility { .. }
         | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+        | ContinuousModification::GrantAllLoyaltyAbilitiesOf { .. }
         | ContinuousModification::GrantTrigger { .. }
         | ContinuousModification::GrantReplacement { .. }
         | ContinuousModification::RemoveAllAbilities
@@ -19349,6 +19485,333 @@ mod tests {
             host_obj.abilities.iter().any(|a| a == &granted),
             "Myr Welder must gain the exiled card's activated ability; got {:?}",
             host_obj.abilities
+        );
+    }
+
+    /// CR 613.1f + CR 606.2: `GrantAllLoyaltyAbilitiesOf` — loyalty-category
+    /// mirror of the Myr Welder reference grant. A loyalty-empty planeswalker
+    /// host carrying a hand-built `GrantAllLoyaltyAbilitiesOf { planeswalkers
+    /// on the battlefield }` static (host-inclusive source — the
+    /// `Not{SelfRef}` conjunct is Phase 3 emission) gains exactly the provider
+    /// walker's loyalty abilities after layer evaluation: the `[+1]`/`[-3]`
+    /// fixed-loyalty defs and the `[-X]` `RemoveCounter{X}`-shaped def (per
+    /// `is_loyalty_ability_cost`), each with its `AsSorcery` restriction
+    /// intact — while the provider's `{T}` non-loyalty activated ability is
+    /// excluded by the ability-level loyalty-cost filter.
+    ///
+    /// Two phases: the lone host gains nothing while only itself matches its
+    /// own source (per-recipient self-skip); once the provider enters, the
+    /// host holds exactly the three donated loyalty defs. A second pass
+    /// re-derives the same three (per-pass reset idempotence), and a second
+    /// recipient under a different controller sharing the provider gains the
+    /// same three (per-controller memoization + per-recipient self-skip).
+    ///
+    /// Reverting the expander filter to kind-only lets the `{T}` def through
+    /// (RED); reverting the L9 dispatch arm donates nothing (RED).
+    #[test]
+    fn grants_all_loyalty_abilities_of_planeswalkers_on_the_battlefield() {
+        use crate::types::ability::CounterCostSelection;
+        use crate::types::ability::REMOVE_COUNTER_COST_X;
+
+        let mut state = setup();
+
+        // Battlefield-wide planeswalker source, host-inclusive by design.
+        let grant_source = || {
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker).properties(vec![
+                FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                },
+            ]))
+        };
+        let grant_static = || {
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::GrantAllLoyaltyAbilitiesOf {
+                    source: grant_source(),
+                }])
+        };
+        // Battlefield planeswalker with no abilities of its own (baseline zero).
+        fn make_walker(
+            state: &mut GameState,
+            card: u64,
+            controller: PlayerId,
+            name: &str,
+        ) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(card),
+                controller,
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+            obj.base_card_types = obj.card_types.clone();
+            id
+        }
+
+        let host = make_walker(&mut state, 800, PlayerId(0), "Loyalty-less Stand-in");
+        state.objects.get_mut(&host).unwrap().static_definitions = vec![grant_static()].into();
+
+        // Phase 1 (negative): the lone host matches its own source but the
+        // per-recipient self-skip donates nothing.
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            state.objects.get(&host).unwrap().abilities.is_empty(),
+            "lone host must gain nothing from itself; got {:?}",
+            state.objects.get(&host).unwrap().abilities
+        );
+
+        // Provider walker: [+1]/[-3] loyalty defs with printed-loyalty timing,
+        // a [-X] RemoveCounter{X}-shaped loyalty def, and a {T} non-loyalty
+        // activated def. Distinct effects identify each donor def.
+        let plus_one = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Loyalty { amount: 1 })
+        .sorcery_speed();
+        let minus_three = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Loyalty { amount: -3 })
+        .sorcery_speed();
+        let minus_x = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 7 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::RemoveCounter {
+            count: REMOVE_COUNTER_COST_X,
+            counter_type: CounterMatch::OfType(CounterType::Loyalty),
+            target: None,
+            selection: CounterCostSelection::SingleObject,
+        })
+        .sorcery_speed();
+        let tap_def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        let provider = make_walker(&mut state, 801, PlayerId(0), "Donor Walker");
+        {
+            let obj = state.objects.get_mut(&provider).unwrap();
+            // Printed abilities: on the base too, so a layer reset to
+            // `base_abilities` cannot make a negative assertion vacuous.
+            for def in [&plus_one, &minus_three, &minus_x, &tap_def] {
+                Arc::make_mut(&mut obj.base_abilities).push(def.clone());
+            }
+            obj.abilities = Arc::clone(&obj.base_abilities);
+        }
+
+        // Phase 2 (positive reach-guard): the host holds exactly the three
+        // donated loyalty defs with their timing intact.
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        let host_abilities = &state.objects.get(&host).unwrap().abilities;
+        assert_eq!(
+            host_abilities.len(),
+            3,
+            "host must hold exactly the three donated loyalty defs; got {:?}",
+            host_abilities
+        );
+        for donated in host_abilities.iter() {
+            assert!(
+                donated == &plus_one || donated == &minus_three || donated == &minus_x,
+                "unexpected donated def {donated:?}"
+            );
+            assert_eq!(
+                donated.activation_restrictions,
+                vec![ActivationRestriction::AsSorcery],
+                "donated loyalty def must keep its sorcery-speed timing; got {:?}",
+                donated.activation_restrictions
+            );
+        }
+        assert!(
+            host_abilities
+                .iter()
+                .all(|a| a.cost != Some(AbilityCost::Tap)),
+            "{{T}} non-loyalty def must be excluded by the loyalty-cost filter"
+        );
+
+        // A second pass re-derives the same three (per-pass reset idempotence).
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects.get(&host).unwrap().abilities.len(),
+            3,
+            "second pass must re-derive the same three defs; got {:?}",
+            state.objects.get(&host).unwrap().abilities
+        );
+
+        // A second recipient under a DIFFERENT controller sharing the provider
+        // gains the same three (per-controller memoization entry per
+        // controller + per-recipient self-skip).
+        let host_p1 = make_walker(&mut state, 802, PlayerId(1), "Second Stand-in");
+        state.objects.get_mut(&host_p1).unwrap().static_definitions = vec![grant_static()].into();
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        for id in [host, host_p1] {
+            assert_eq!(
+                state.objects.get(&id).unwrap().abilities.len(),
+                3,
+                "each recipient must hold exactly the three donated defs; got {:?}",
+                state.objects.get(&id).unwrap().abilities
+            );
+        }
+    }
+
+    /// CR 611.3a: the loyalty reference grant tracks the battlefield live —
+    /// a provider leaving retires its donations on the next pass, and a newly
+    /// entered provider donates immediately. Host + provider → present;
+    /// provider to graveyard → absent; a second provider entering donates its
+    /// own defs; when one of two providers leaves, only the remaining
+    /// provider's defs stay (provider-scan `matches_target_filter`
+    /// false-after-leave).
+    #[test]
+    fn loyalty_reference_grant_tracks_the_battlefield() {
+        let mut state = setup();
+
+        let grant_source =
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker).properties(vec![
+                FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                },
+            ]));
+        let grant_static = StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::GrantAllLoyaltyAbilitiesOf {
+                source: grant_source,
+            }]);
+        fn make_walker(
+            state: &mut GameState,
+            card: u64,
+            controller: PlayerId,
+            name: &str,
+        ) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(card),
+                controller,
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+            obj.base_card_types = obj.card_types.clone();
+            id
+        }
+        fn give_printed_loyalty(state: &mut GameState, walker: ObjectId, def: &AbilityDefinition) {
+            let obj = state.objects.get_mut(&walker).unwrap();
+            Arc::make_mut(&mut obj.base_abilities).push(def.clone());
+            obj.abilities = Arc::clone(&obj.base_abilities);
+        }
+        fn send_to_graveyard(state: &mut GameState, object_id: ObjectId) {
+            let mut events = Vec::new();
+            move_object(
+                state,
+                ZoneMoveRequest {
+                    object_id,
+                    to: Zone::Graveyard,
+                    cause: ZoneChangeCause::Effect { source: object_id },
+                    mods: EntryMods::default(),
+                    placement: None,
+                    exile_links: ExileLinkSpec::default(),
+                    replacement_applied: Default::default(),
+                    face_down_in_exile: crate::types::ability::ExileConcealment::Public,
+                },
+                &mut events,
+            );
+            flush_layers(state);
+        }
+
+        let host = make_walker(&mut state, 810, PlayerId(0), "Loyalty-less Stand-in");
+        state.objects.get_mut(&host).unwrap().static_definitions = vec![grant_static].into();
+
+        // Distinct effects identify which provider donated.
+        let first_def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Loyalty { amount: 1 })
+        .sorcery_speed();
+        let second_def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Loyalty { amount: -2 })
+        .sorcery_speed();
+
+        // Host + first provider → present (reach-guard).
+        let first = make_walker(&mut state, 811, PlayerId(0), "First Donor");
+        give_printed_loyalty(&mut state, first, &first_def);
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            state
+                .objects
+                .get(&host)
+                .unwrap()
+                .abilities
+                .iter()
+                .any(|a| a == &first_def),
+            "host must hold the first provider's loyalty def; got {:?}",
+            state.objects.get(&host).unwrap().abilities
+        );
+
+        // Second provider enters → both donate.
+        let second = make_walker(&mut state, 812, PlayerId(0), "Second Donor");
+        give_printed_loyalty(&mut state, second, &second_def);
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects.get(&host).unwrap().abilities.len(),
+            2,
+            "host must hold both providers' defs; got {:?}",
+            state.objects.get(&host).unwrap().abilities
+        );
+
+        // First provider leaves while the second remains → only the remaining
+        // provider's defs stay.
+        send_to_graveyard(&mut state, first);
+        {
+            let held = &state.objects.get(&host).unwrap().abilities;
+            assert_eq!(
+                held.len(),
+                1,
+                "only the remaining provider's def must stay; got {held:?}"
+            );
+            assert!(
+                held.iter().any(|a| a == &second_def),
+                "remaining def must be the second provider's; got {held:?}"
+            );
+        }
+
+        // Last provider leaves → absent.
+        send_to_graveyard(&mut state, second);
+        assert!(
+            state.objects.get(&host).unwrap().abilities.is_empty(),
+            "host must hold nothing once all providers leave; got {:?}",
+            state.objects.get(&host).unwrap().abilities
         );
     }
 
@@ -30130,6 +30593,9 @@ mod tests {
             ContinuousModification::GrantAllTriggeredAbilitiesOf {
                 source: TargetFilter::SelfRef,
             },
+            ContinuousModification::GrantAllLoyaltyAbilitiesOf {
+                source: TargetFilter::SelfRef,
+            },
             ContinuousModification::GrantTrigger {
                 trigger: Box::new(TriggerDefinition::new(TriggerMode::ChangesZone)),
             },
@@ -30181,6 +30647,19 @@ mod tests {
     /// sits in layer 4 but also strips abilities, and CR 613.1f's
     /// `RemoveAllAbilities` sits in layer 6 but is classified `ALL` because it
     /// turns off characteristic-defining abilities (CR 604.3).
+    ///
+    /// CR 613.1f: the loyalty reference grant is an ability-adding effect
+    /// (Layer 6), beside its activated/triggered siblings.
+    #[test]
+    fn grant_all_loyalty_abilities_of_maps_to_layer_6() {
+        assert_eq!(
+            ContinuousModification::GrantAllLoyaltyAbilitiesOf {
+                source: TargetFilter::SelfRef,
+            }
+            .layer(),
+            Layer::Ability
+        );
+    }
     #[test]
     fn modification_write_kinds_agree_with_their_layer() {
         for m in every_layered_modification() {
