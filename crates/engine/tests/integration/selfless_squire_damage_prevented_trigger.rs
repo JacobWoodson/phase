@@ -3083,6 +3083,18 @@ fn typed_nested_batch_second_ordering_retains_child_stamp() {
                 .is_some_and(|f| matches!(f, TargetFilter::SpecificObject { id } if *id == bat2))
         })
         .expect("the Bat2-only Double must install with a Bat2 source filter");
+    let battlefield_creatures: Vec<ObjectId> = runner
+        .state()
+        .battlefield
+        .iter()
+        .filter(|id| runner.state().objects[id].power.is_some())
+        .copied()
+        .collect();
+    assert_eq!(
+        battlefield_creatures,
+        vec![bear1, bear2, bear3, bat1, bat2, squire],
+        "reach guard: batch iteration order is battlefield order"
+    );
     let bear2_filter = runner
         .state()
         .pending_damage_replacements
