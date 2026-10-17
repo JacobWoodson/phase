@@ -32699,6 +32699,20 @@ impl TriggerDefinition {
         self
     }
 
+    /// CR 615.13 (Matt M5): whether this `DamagePreventedOnce` def carries
+    /// qualifiers the engine cannot honor. `GameEvent::DamagePrevented`
+    /// carries no combat flag and its `source_id` names the aggregate
+    /// shield host (or the floating-shield sentinel), never the actual
+    /// damage source — so a kind qualifier or a source filter has no true
+    /// reading. Shared single authority: the runtime matcher refuses to
+    /// fire such defs and all three coverage authorities refuse to admit
+    /// them as supported. Every other mode answers false (their matchers
+    /// honor these fields on events that carry the provenance).
+    pub fn unsupported_damage_prevention_qualifiers(&self) -> bool {
+        self.mode == TriggerMode::DamagePreventedOnce
+            && (!matches!(self.damage_kind, DamageKindFilter::Any) || self.valid_source.is_some())
+    }
+
     /// CR 601.2a + CR 603.2: set the cast-origin constraint for SpellCast
     /// triggers ("from your graveyard", "from anywhere other than their hand").
     pub fn spell_cast_origin(mut self, constraint: OriginConstraint) -> Self {

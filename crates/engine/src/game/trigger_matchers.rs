@@ -4357,10 +4357,12 @@ pub(super) fn damage_received_filters_match(
 /// player-scoped trigger ("dealt to you") must not fire when the source object
 /// is the recipient, and vice versa.
 ///
-/// `trigger.damage_kind` is deliberately NOT consulted: `GameEvent::DamagePrevented`
-/// carries no `is_combat` flag, so a combat/noncombat qualifier cannot be honored
-/// on this event. The parser refuses that phrasing rather than accepting the text
-/// and dropping the qualifier.
+/// `trigger.damage_kind` and `trigger.valid_source` are consulted only as a
+/// refusal: `GameEvent::DamagePrevented` carries no `is_combat` flag and its
+/// `source_id` names the shield host, so a kind qualifier or source filter
+/// cannot be honored on this event and the def stays silent. The parser
+/// refuses those phrasings rather than accepting the text and dropping the
+/// qualifier; this matcher extends the same honesty to typed defs.
 pub(super) fn match_damage_prevented(
     event: &GameEvent,
     trigger: &TriggerDefinition,
@@ -4378,6 +4380,14 @@ pub(super) fn match_damage_prevented(
     // CR 615.13: "... and prevents some or all of that damage" — a zero-prevention
     // application is not a trigger event.
     if *amount == 0 {
+        return false;
+    }
+    // CR 615.13 (Matt M5): qualifier-bearing defs never fire — the event
+    // carries no combat flag and names the shield host, not the damage
+    // source, so neither qualifier has a true reading. Shared authority
+    // with the three coverage gates (see `TriggerDefinition::
+    // unsupported_damage_prevention_qualifiers`).
+    if trigger.unsupported_damage_prevention_qualifiers() {
         return false;
     }
     let source_id = source_event_subject_id(source_context);
@@ -6080,6 +6090,62 @@ mod tests {
                 &state,
             ),
             "self-scoped prevention trigger must not fire on another object"
+        );
+    }
+
+    /// CR 615.13 (Matt M5): qualifier-bearing `DamagePreventedOnce` defs never
+    /// fire — the event names the shield host (or sentinel), not the damage
+    /// source, and carries no combat flag, so neither a kind qualifier nor a
+    /// source filter can be honored. The source filter below deliberately
+    /// MATCHES the aggregate id: pre-fix this fires on shield-host identity.
+    #[test]
+    fn damage_prevented_qualified_forms_do_not_fire() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Selfless Squire".to_string(),
+            Zone::Battlefield,
+        );
+        let event = GameEvent::DamagePrevented {
+            source_id: source,
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 3,
+        };
+        let ctx = test_trigger_source_context(&state, source);
+
+        // Paired positive reach-guard: the unqualified Squire shape fires.
+        let plain = TriggerDefinition::new(TriggerMode::DamagePreventedOnce)
+            .valid_target(TargetFilter::Controller);
+        assert!(
+            match_damage_prevented(&event, &plain, &ctx, &state),
+            "unqualified prevention trigger must fire"
+        );
+
+        // Combat/noncombat kind qualifiers cannot be honored: no flag on the
+        // event. Both stay silent on the same prevention.
+        for kind in [
+            DamageKindFilter::CombatOnly,
+            DamageKindFilter::NoncombatOnly,
+        ] {
+            let qualified = TriggerDefinition::new(TriggerMode::DamagePreventedOnce)
+                .valid_target(TargetFilter::Controller)
+                .damage_kind(kind);
+            assert!(
+                !match_damage_prevented(&event, &qualified, &ctx, &state),
+                "kind-qualified prevention trigger must not fire: {kind:?}"
+            );
+        }
+
+        // Source-qualified form: the filter matches the aggregate shield-host
+        // id, so pre-fix this fires — on host identity, not the damage source.
+        let source_qualified = TriggerDefinition::new(TriggerMode::DamagePreventedOnce)
+            .valid_target(TargetFilter::Controller)
+            .valid_source(TargetFilter::SpecificObject { id: source });
+        assert!(
+            !match_damage_prevented(&event, &source_qualified, &ctx, &state),
+            "source-qualified prevention trigger must not fire on aggregate identity"
         );
     }
 

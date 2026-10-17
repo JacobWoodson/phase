@@ -5700,7 +5700,11 @@ fn build_trigger_item(
 ) -> ParsedItem {
     // CR 603.8: StateCondition triggers use the priority pipeline, not the
     // event-based trigger registry — they are supported.
-    let mode_supported = trigger_mode_is_supported(&trig.mode, trigger_registry);
+    // CR 615.13 (Matt M5): qualifier-bearing prevention defs are refused —
+    // the runtime matcher cannot honor the qualifiers (shared authority on
+    // `TriggerDefinition`).
+    let mode_supported = trigger_mode_is_supported(&trig.mode, trigger_registry)
+        && !trig.unsupported_damage_prevention_qualifiers();
     let mut children = Vec::new();
     if let Some(execute) = &trig.execute {
         children.push(build_ability_item(
@@ -7772,7 +7776,12 @@ fn check_trigger(
     }
     // CR 603.8: StateCondition triggers are handled by the priority pipeline
     // (check_state_triggers), not the event-based trigger registry. They are supported.
-    if !trigger_mode_is_supported(&trigger.mode, trigger_registry) {
+    // CR 615.13 (Matt M5): qualifier-bearing prevention defs surface the same
+    // gap — the def AS SPECIFIED cannot fire (shared refusal authority on
+    // `TriggerDefinition`).
+    if !trigger_mode_is_supported(&trigger.mode, trigger_registry)
+        || trigger.unsupported_damage_prevention_qualifiers()
+    {
         let label = format!("Trigger:{}", trigger.mode);
         if !missing.contains(&label) {
             missing.push(label);
@@ -9238,6 +9247,12 @@ fn is_trigger_supported(
     token_static_traversal: TokenStaticTraversal,
 ) -> bool {
     if !trigger_mode_is_supported(&trigger.mode, trigger_registry) {
+        return false;
+    }
+    // CR 615.13 (Matt M5): qualifier-bearing prevention defs are refused —
+    // the runtime matcher cannot honor the qualifiers (shared authority on
+    // `TriggerDefinition`).
+    if trigger.unsupported_damage_prevention_qualifiers() {
         return false;
     }
     trigger.execute.as_deref().is_none_or(|execute| {
@@ -14328,6 +14343,84 @@ mod tests {
             .supported,
             "an ordinary battlefield state trigger stays supported"
         );
+    }
+
+    /// CR 615.13 (Matt M5): qualifier-bearing `DamagePreventedOnce` defs are
+    /// refused at ALL THREE coverage authorities — parse-details items,
+    /// missing parts, and carrier support — because the runtime matcher
+    /// cannot honor the qualifiers. The unqualified Squire shape stays
+    /// supported everywhere. Pre-fix the qualified forms are admitted.
+    #[test]
+    fn qualified_damage_prevention_trigger_is_unsupported() {
+        use crate::types::ability::DamageKindFilter;
+
+        let trigger_registry = super::build_trigger_registry();
+        let static_registry = super::build_static_registry();
+        let traversal = super::TokenStaticTraversal::Include;
+        let plain = TriggerDefinition::new(TriggerMode::DamagePreventedOnce)
+            .valid_target(TargetFilter::Controller);
+        assert!(
+            super::is_trigger_supported(&plain, &trigger_registry, &static_registry, traversal),
+            "unqualified prevention trigger stays supported"
+        );
+        assert!(
+            super::build_trigger_item(&plain, &trigger_registry, &static_registry, traversal)
+                .supported,
+            "unqualified prevention trigger item stays supported"
+        );
+        let mut missing = Vec::new();
+        super::check_trigger(
+            &plain,
+            &trigger_registry,
+            &static_registry,
+            traversal,
+            &mut missing,
+        );
+        assert!(
+            missing.is_empty(),
+            "unqualified prevention trigger surfaces no gap: {missing:?}"
+        );
+
+        let source = crate::types::identifiers::ObjectId(7);
+        let qualified = [
+            TriggerDefinition::new(TriggerMode::DamagePreventedOnce)
+                .valid_target(TargetFilter::Controller)
+                .damage_kind(DamageKindFilter::CombatOnly),
+            TriggerDefinition::new(TriggerMode::DamagePreventedOnce)
+                .valid_target(TargetFilter::Controller)
+                .damage_kind(DamageKindFilter::NoncombatOnly),
+            TriggerDefinition::new(TriggerMode::DamagePreventedOnce)
+                .valid_target(TargetFilter::Controller)
+                .valid_source(TargetFilter::SpecificObject { id: source }),
+        ];
+        for trigger in &qualified {
+            assert!(
+                !super::is_trigger_supported(
+                    trigger,
+                    &trigger_registry,
+                    &static_registry,
+                    traversal
+                ),
+                "qualified prevention trigger must be unsupported: {trigger:?}"
+            );
+            assert!(
+                !super::build_trigger_item(trigger, &trigger_registry, &static_registry, traversal)
+                    .supported,
+                "qualified prevention trigger item must be unsupported: {trigger:?}"
+            );
+            let mut missing = Vec::new();
+            super::check_trigger(
+                trigger,
+                &trigger_registry,
+                &static_registry,
+                traversal,
+                &mut missing,
+            );
+            assert!(
+                missing.iter().any(|gap| gap.starts_with("Trigger:")),
+                "qualified prevention trigger must surface a gap: {missing:?}"
+            );
+        }
     }
 
     /// An explicit Exile origin can retrieve the intended set when it is still
