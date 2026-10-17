@@ -6843,20 +6843,19 @@ fn kitt_kanto_fires_every_turn() {
     );
 }
 
-/// CR 507.2 + CR 603.2 (guard, UNCHANGED in commit 2): Overencumbered fires
-/// every turn — its "enchanted opponent's turn" trigger is correctly
-/// unconstrained (the opponent constraint would be wrong here).
+/// CR 507.2 + CR 603.2 (Matt R2-F3): Overencumbered fires on the enchanted
+/// opponent's turn — its Oracle licenses only that turn, and the trigger
+/// event must match. The controller-turn leg is deliberately NOT pinned
+/// here: whether it fires there today is an inherited timing gap outside
+/// this finding's scope, and a positive pin would reject a future timing
+/// correction.
 #[test]
-fn overencumbered_fires_every_turn() {
+fn overencumbered_fires_on_enchanted_opponents_turn() {
     let setup = |state: &mut GameState| {
         put_overencumbered(state);
     };
     assert!(
-        fired_at_begin_combat(PlayerId(0), setup),
-        "Overencumbered fires on its controller's turn"
-    );
-    assert!(
         fired_at_begin_combat(PlayerId(1), setup),
-        "Overencumbered fires on the opponent's turn"
+        "Overencumbered fires on the enchanted opponent's turn"
     );
 }
