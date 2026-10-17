@@ -106,11 +106,22 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
- *  127 — game_setup and state_update carry GameState whose ability aggregates
+ *  130 — game_setup and state_update carry GameState whose ability aggregates
  *       may name CardTypeSetSource TargetedObjects (CR 608.2c + CR 115.1: the
  *       resolving ability's chosen targets) and whose TrackedSet populations
- *       may carry a member filter a v126 peer would silently drop. Bumped in
- *       lockstep with full-game protocol 145.
+ *       may carry a member filter a v129 peer would silently drop. Bumped in
+ *       lockstep with full-game protocol 148.
+ *  129 — game_setup and state_update carry GameState whose waiting_for may be
+ *       WaitingFor::PhysicalContest (Eye to Eye / Mouth to Mouth) and whose
+ *       abilities may hold Effect::PhysicalContest; a v128 peer cannot parse
+ *       either tag. Bumped in lockstep with full-game protocol 147.
+ *  128 — game_setup and state_update carry GameState whose loop offers may carry
+ *       ConfirmedPeriod counted_by and performance (CR 732.2a). Bumped in
+ *       lockstep with full-game protocol 146.
+ *  127 — ParentTargetMissingReason gains SearchLibrary (CR 701.23b), serialized
+ *       on ResolvedAbility.parent_target_missing_reason in game_setup and
+ *       state_update; a wire 126 peer cannot parse the tag. Bumped in lockstep
+ *       with full-game protocol 145; lobby messages unchanged.
  *  126 — game_setup and state_update carry GameState, whose one-time boons
  *       (#7495) add Effect.CreateBoon / Effect.NoteNumber, the HasBoon
  *       conditions, and WaitingFor.ChooseTokenHost, and whose perpetual P/T
@@ -690,7 +701,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 127 as const;
+export const WIRE_PROTOCOL_VERSION = 130 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {
@@ -711,6 +722,12 @@ export type P2PMessage = P2PAuthorityWire & (
       playerNames?: Record<number, string>;
     } & LegalActionsWire)
   | { type: "action"; senderPlayerId: number; action: GameAction }
+  /** One click in the running Eye to Eye / Mouth to Mouth contest. No `senderPlayerId`
+   *  and no timestamp: the host reads the seat from the authenticated connection and
+   *  stamps the instant on its own clock, so a guest can claim neither. `contest` is
+   *  the engine-authored identity of the contest the click was made in, so a frame
+   *  delayed from an earlier contest is never counted in a later one. */
+  | { type: "contest_click"; contest: number; seq: number }
   | { type: "interaction"; senderPlayerId: number; submission: InteractionSubmission }
   | { type: "preview_mana_payment"; requestId: number; action: GameAction }
   /** Carries the request VERBATIM. No `senderPlayerId`: the host reads the
@@ -809,6 +826,7 @@ const VALID_TYPES = new Set([
   "guest_deck",
   "game_setup",
   "action",
+  "contest_click",
   "interaction",
   "preview_mana_payment",
   "preview_interaction",
