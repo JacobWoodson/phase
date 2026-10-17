@@ -13182,7 +13182,7 @@ impl StaticCondition {
     /// Engine limitation, not CR-mandated: the ACCEPTANCE PREDICATE — can this
     /// condition ever be satisfied at `mode`'s enforcement point?
     ///
-    /// The union of the two rejection classes, and the single authority both
+    /// The union of the three rejection classes, and the single authority both
     /// consumers read:
     ///
     /// - `oracle_static::static_helpers::gate_static_condition` — the PARSER
@@ -13205,6 +13205,12 @@ impl StaticCondition {
         self.requires_unavailable_continuation(mode)
             || self
                 .has_unanswerable_designation_anchor(|_, scope| mode.binds_designation_scope(scope))
+            // CR 109.4 (Matt R2-F4): a resolution-scoped `ChosenPlayer`
+            // endpoint has no answer inside the layer pipeline (no resolving
+            // ability), so the runtime entry gate refuses the whole tree —
+            // the admission predicate must refuse it too, or the card ships
+            // reported as supported while its gate is inert.
+            || self.has_unanswerable_chosen_player()
     }
 
     /// True when this condition (or a Boolean sub-condition of it, at ANY
@@ -44759,6 +44765,47 @@ mod static_condition_traversal_tests {
         assert!(
             !bindable.has_unanswerable_chosen_player(),
             "non-ChosenPlayer endpoints bind fine at any depth and must NOT be rejected"
+        );
+    }
+
+    /// CR 109.4 (Matt R2-F4): the canonical admission predicate refuses a
+    /// `PlayerAttackedPlayer` naming a resolution-scoped `ChosenPlayer` —
+    /// bare or nested under `Not` — because the layer pipeline has no
+    /// resolving ability to answer it (the runtime entry gate refuses the
+    /// whole tree). The same gate with bindable endpoints stays admissible.
+    /// Pre-fix the chosen-player shape is admitted.
+    #[test]
+    fn static_condition_chosen_player_attack_gate_is_unenforceable() {
+        use crate::types::ability::ControllerRef;
+        use crate::types::statics::StaticMode;
+        let mode = StaticMode::Continuous;
+        for gate in [
+            StaticCondition::PlayerAttackedPlayer {
+                attacker: ControllerRef::ChosenPlayer { index: 0 },
+                defender: ControllerRef::You,
+            },
+            StaticCondition::Not {
+                condition: Box::new(StaticCondition::PlayerAttackedPlayer {
+                    attacker: ControllerRef::ChosenPlayer { index: 0 },
+                    defender: ControllerRef::You,
+                }),
+            },
+        ] {
+            assert!(
+                gate.is_unenforceable_on(&mode),
+                "a ChosenPlayer attack gate (bare or nested under Not) must be \
+                 unenforceable, got admissible: {gate:?}"
+            );
+        }
+        let bindable = StaticCondition::Not {
+            condition: Box::new(StaticCondition::PlayerAttackedPlayer {
+                attacker: ControllerRef::TargetPlayer,
+                defender: ControllerRef::You,
+            }),
+        };
+        assert!(
+            !bindable.is_unenforceable_on(&mode),
+            "bindable attack endpoints must stay admissible: {bindable:?}"
         );
     }
 

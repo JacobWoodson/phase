@@ -9189,6 +9189,14 @@ fn is_static_definition_supported(
             .condition
             .as_ref()
             .is_some_and(StaticCondition::contains_unrecognized)
+        // CR 109.4 (Matt R2-F4): a resolution-scoped `ChosenPlayer` endpoint
+        // has no answer inside the layer pipeline, so the runtime entry gate
+        // refuses the whole tree — coverage must refuse it too (shared
+        // authority on `StaticCondition`).
+        && !stat
+            .condition
+            .as_ref()
+            .is_some_and(StaticCondition::has_unanswerable_chosen_player)
         && stat.modifications.iter().all(|modification| {
             modification_is_supported(
                 modification,
@@ -22927,6 +22935,55 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 TokenStaticTraversal::Include,
             ),
             "Not(HasEnduringStory) must remain supported"
+        );
+    }
+
+    /// CR 109.4 (Matt R2-F4): a typed Continuous static gated on a
+    /// `PlayerAttackedPlayer` with a resolution-scoped `ChosenPlayer`
+    /// endpoint is UNSUPPORTED — the layer pipeline has no resolving
+    /// ability to answer it, so the runtime entry gate refuses the whole
+    /// tree. The `Not` wrapper must not bypass the refusal (the leaf view
+    /// recurses), while the same gate with bindable endpoints stays
+    /// supported. Pre-fix the chosen-player shape is admitted.
+    #[test]
+    fn chosen_player_nested_not_attack_gate_is_unsupported_static() {
+        let trigger_registry = build_trigger_registry();
+        let static_registry = build_static_registry();
+
+        let refused = StaticDefinition::continuous().condition(StaticCondition::Not {
+            condition: Box::new(StaticCondition::PlayerAttackedPlayer {
+                attacker: ControllerRef::ChosenPlayer { index: 0 },
+                defender: ControllerRef::You,
+            }),
+        });
+        assert!(
+            !is_static_supported(
+                &refused,
+                &trigger_registry,
+                &static_registry,
+                TokenStaticTraversal::Include,
+            ),
+            "a Continuous static gated on Not(ChosenPlayer attacked you) must be \
+             reported unsupported, not silently accepted as fully parsed"
+        );
+
+        // Sanity: the same gate with bindable endpoints stays supported —
+        // proving the gap signal comes from the ChosenPlayer leaf, not from
+        // the attack gate or the Not wrapper themselves.
+        let supported = StaticDefinition::continuous().condition(StaticCondition::Not {
+            condition: Box::new(StaticCondition::PlayerAttackedPlayer {
+                attacker: ControllerRef::TargetPlayer,
+                defender: ControllerRef::You,
+            }),
+        });
+        assert!(
+            is_static_supported(
+                &supported,
+                &trigger_registry,
+                &static_registry,
+                TokenStaticTraversal::Include,
+            ),
+            "Not(TargetPlayer attacked you) must remain supported"
         );
     }
 
