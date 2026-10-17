@@ -4935,7 +4935,26 @@ fn any_active_static_reads_monarch(state: &GameState) -> bool {
             found = true;
         }
     });
-    found
+    if found {
+        return true;
+    }
+    // CR 611.3a + CR 725.5 (Matt M3): live TRANSIENT modifications and their
+    // gates are readers too — a transient `ChangeControllerToDesignation` or
+    // monarch-gated buff can be the sole reader, and after its initial
+    // evaluation a crowning would otherwise leave layers Clean with the
+    // previous derived control/characteristics cached. Walked straight off
+    // the store, including currently-OFF gates (a crowning may be exactly
+    // what flips one — same rationale as the characteristic-reads transient
+    // walk, which also refuses to project through `active_effects`).
+    state.transient_continuous_effects.iter().any(|tce| {
+        transient_gate_conditions(tce).any(static_condition_reads_monarch)
+            || tce.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::ChangeControllerToDesignation { .. }
+                )
+            })
+    })
 }
 
 /// CR 400.7 + CR 611.3a: Query zone-sensitive static dependencies on both sides
@@ -25901,6 +25920,122 @@ mod tests {
         );
         let turn_gate = StaticDefinition::continuous().condition(C::DuringYourTurn);
         assert!(!static_definition_reads_monarch(&turn_gate));
+    }
+
+    /// CR 611.3a + CR 725.5 (Matt M3): a live TRANSIENT
+    /// designation-anchored effect is a monarch reader — the guard must
+    /// escalate even though no static definition reads the monarch.
+    /// Pre-fix this stays Clean: the predicate scans statics only.
+    #[test]
+    fn transient_designation_effect_escalates_on_crowning() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, P0);
+        let _eid =
+            add_designation_controller_effect(&mut state, bear, bear, P0, Designation::Monarch);
+        assert_full_escalation_on_monarch_guard(&mut state);
+    }
+
+    /// CR 611.3a + CR 725.5 (Matt M3): a transient whose monarch gate is
+    /// currently OFF still counts — a crowning may be exactly what flips it
+    /// (mirrors the characteristic-reads transient walk, which includes OFF
+    /// gates for the same reason).
+    #[test]
+    fn transient_ismonarch_gate_escalates_on_crowning() {
+        let mut state = setup();
+        state.monarch = None;
+        let bear = make_creature(&mut state, "Bear", 2, 2, P0);
+        let _eid = state.add_transient_continuous_effect(
+            bear,
+            P0,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: bear },
+            vec![ContinuousModification::AddPower { value: 2 }],
+            Some(StaticCondition::IsMonarch {
+                player: PlayerScope::Controller,
+            }),
+        );
+        assert_full_escalation_on_monarch_guard(&mut state);
+    }
+
+    /// Production crowning through the real `BecomeMonarch` resolve path (no
+    /// manual dirty marking, no hand-set designation).
+    fn crown_through_production_resolve(state: &mut GameState, source: ObjectId, player: PlayerId) {
+        use crate::types::events::GameEvent;
+
+        let ability = ResolvedAbility::new(
+            Effect::BecomeMonarch {
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            player,
+        );
+        let mut events = Vec::new();
+        crate::game::effects::become_monarch::resolve(
+            state,
+            &ability,
+            &TargetFilter::Controller,
+            &mut events,
+        )
+        .expect("production crowning must resolve");
+        assert!(
+            matches!(
+                events.last(),
+                Some(GameEvent::MonarchChanged { player_id }) if *player_id == player
+            ),
+            "crowning must publish MonarchChanged for the new monarch"
+        );
+    }
+
+    /// CR 725.5 (Matt M3): production crowning invalidates transient monarch
+    /// readers with NO manual dirty marking. Vacancy/later-crowning control:
+    /// vacant → crown P1 (designation control + gated buff flip) → crown P0
+    /// back (both revert). Pre-fix the first crowning leaves layers Clean and
+    /// the derived control/characteristics go stale.
+    #[test]
+    fn production_crowning_invalidates_transient_monarch_readers() {
+        let mut state = setup();
+        state.monarch = None;
+        let bear = make_creature(&mut state, "Bear", 2, 2, P0);
+        // Sole readers: ungated designation control (P0-installed) + an OFF
+        // IsMonarch-gated +2/+0 buff held by P1.
+        let _d =
+            add_designation_controller_effect(&mut state, bear, bear, P0, Designation::Monarch);
+        let _g = state.add_transient_continuous_effect(
+            bear,
+            P1,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: bear },
+            vec![ContinuousModification::AddPower { value: 2 }],
+            Some(StaticCondition::IsMonarch {
+                player: PlayerScope::Controller,
+            }),
+        );
+        evaluate_layers(&mut state);
+        assert_eq!(state.objects[&bear].controller, P0);
+        assert_eq!(state.objects[&bear].power, Some(2));
+        state.layers_dirty = LayersDirty::Clean;
+
+        // Crown P1: control follows the designation, P1's gate flips ON.
+        crown_through_production_resolve(&mut state, bear, P1);
+        assert!(
+            state.layers_dirty.is_dirty(),
+            "crowning P1 must invalidate with transient monarch readers live"
+        );
+        evaluate_layers(&mut state);
+        assert_eq!(state.objects[&bear].controller, P1);
+        assert_eq!(state.objects[&bear].power, Some(4));
+        state.layers_dirty = LayersDirty::Clean;
+
+        // Crown passes back to P0: control follows, P1's gate flips OFF.
+        crown_through_production_resolve(&mut state, bear, P0);
+        assert!(
+            state.layers_dirty.is_dirty(),
+            "crowning P0 must invalidate with transient monarch readers live"
+        );
+        evaluate_layers(&mut state);
+        assert_eq!(state.objects[&bear].controller, P0);
+        assert_eq!(state.objects[&bear].power, Some(2));
     }
 
     /// CR 613.1b row 3: layer-2 join with timestamp ordering — the LATER
