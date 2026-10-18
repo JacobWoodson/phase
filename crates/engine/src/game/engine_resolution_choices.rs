@@ -9550,6 +9550,9 @@ pub(crate) fn run_batch_completion(
             current_card,
             events,
         ),
+        BatchCompletion::TopCardContestRoundComplete { ability, round } => {
+            effects::exile_top_card_contest::complete_round(state, ability, round, events)
+        }
         BatchCompletion::CascadeBottomComplete {
             controller,
             source_id,
