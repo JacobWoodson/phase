@@ -265,6 +265,9 @@ pub(crate) fn resolve_step(
         declared_targets: parked.declared_targets,
         declared_target_pins: parked.declared_pins,
         declared_ahead: parked.declared_ahead,
+        // This capture ran through the single capture authority above, so
+        // even an empty list is authoritative on resume.
+        declared_targets_recorded: true,
         local_target_pins: parked.local_pins,
         keyed_target_incarnations: parked.keyed_target_incarnations,
     };
@@ -377,6 +380,7 @@ fn execute_roll(
         declared_targets,
         declared_target_pins,
         declared_ahead,
+        declared_targets_recorded,
         local_target_pins,
         keyed_target_incarnations,
     } = instruction;
@@ -406,6 +410,7 @@ fn execute_roll(
         declared_targets,
         declared_target_pins,
         declared_ahead,
+        declared_targets_recorded,
         local_target_pins,
         keyed_target_incarnations,
     };
@@ -616,6 +621,7 @@ pub fn resume_after_ignore(
         declared_targets,
         declared_target_pins,
         declared_ahead,
+        declared_targets_recorded,
         local_target_pins,
         keyed_target_incarnations,
     } = pending;
@@ -669,6 +675,7 @@ pub fn resume_after_ignore(
                 declared: &declared_targets,
                 declared_pins: &declared_target_pins,
                 ahead: declared_ahead,
+                declared_recorded: declared_targets_recorded,
                 keyed_target_incarnations: &keyed_target_incarnations,
             },
         );
@@ -755,6 +762,7 @@ pub fn resume_after_ignore(
                     declared_targets: declared_targets.clone(),
                     declared_target_pins: declared_target_pins.clone(),
                     declared_ahead,
+                    declared_targets_recorded,
                     local_target_pins: local_target_pins.clone(),
                     keyed_target_incarnations: keyed_target_incarnations.clone(),
                 };
@@ -1650,6 +1658,9 @@ mod tests {
             declared_targets: vec![],
             declared_target_pins: vec![],
             declared_ahead: 0,
+            // Hand-built without a capture: no declared context, so the
+            // legacy path applies (no indexed reads run here either way).
+            declared_targets_recorded: false,
             local_target_pins: vec![],
             keyed_target_incarnations: vec![],
         };
