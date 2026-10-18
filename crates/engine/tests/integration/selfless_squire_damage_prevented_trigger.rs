@@ -1458,6 +1458,10 @@ const RAKDOS_CHARM_TEXT: &str = "Choose one \u{2014}\n\u{2022} Exile target play
 /// placements (6 total).
 const HARDENED_SCALES_TEXT: &str = "If one or more +1/+1 counters would be put on a creature you control, put that many plus one +1/+1 counters on it instead.";
 
+/// Verbatim The One Ring (Scryfall): ETB burden counters, tap-for-draw, and
+/// the protection-from-everything turn window this file expires and narrows.
+const ONE_RING_TEXT: &str = "Indestructible\nWhen The One Ring enters, if you cast it, you gain protection from everything until your next turn.\nAt the beginning of your upkeep, you lose 1 life for each burden counter on The One Ring.\n{T}: Put a burden counter on The One Ring, then draw a card for each burden counter on it.";
+
 /// CR 615.13 + CR 120.3: three simultaneous 1-damage events (two bears plus
 /// the Squire itself) to one shielded player are ONE prevention application —
 /// one `DamagePrevented` event, one Squire trigger placing 3 at once, +1 from
@@ -4122,7 +4126,6 @@ fn aggregate_rider_choice_parks_later_groups_behind_it() {
 /// triggers three times for 6 counters.
 #[test]
 fn protection_prevention_aggregates_at_batch_boundary() {
-    const ONE_RING_TEXT: &str = "Indestructible\nWhen The One Ring enters, if you cast it, you gain protection from everything until your next turn.\nAt the beginning of your upkeep, you lose 1 life for each burden counter on The One Ring.\n{T}: Put a burden counter on The One Ring, then draw a card for each burden counter on The One Ring.";
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     stock_libraries(&mut scenario);
@@ -4188,5 +4191,209 @@ fn protection_prevention_aggregates_at_batch_boundary() {
     assert!(
         runner.state().pending_each_source_batches.is_empty(),
         "no batch records must leak from the unpaused path"
+    );
+}
+
+/// CR 702.16e + CR 510.2 + CR 615.13 (Matt R7-F1): combat protection
+/// prevention joins the simultaneous damage step's aggregate instead of
+/// emitting one event per source. P1 attacks P0 with two 1/1s; P0 controls a
+/// seeded Squire (no ETB shield — the seed never triggers), Scales, and a cast
+/// Ring. Both 1s exit through protection and publish ONE (P0,2) application,
+/// so Squire triggers once for 2 plus 1 from Scales = 3 counters. Pre-fix
+/// Phase A emits per-source and Squire triggers twice for 4 counters.
+#[test]
+fn combat_protection_aggregates_simultaneous_damage() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    stock_libraries(&mut scenario);
+
+    let squire = add_squire(&mut scenario, P0);
+    let bear1 = scenario.add_creature(P1, "Bear1", 1, 1).id();
+    let bear2 = scenario.add_creature(P1, "Bear2", 1, 1).id();
+    scenario.add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES_TEXT);
+    let ring = scenario
+        .add_artifact_to_hand_from_oracle(P0, "The One Ring", ONE_RING_TEXT)
+        .with_mana_cost(free_cost())
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(ring).resolve();
+    runner.advance_until_stack_empty();
+    assert!(
+        engine::game::static_abilities::player_protection_from(runner.state(), P0, Some(bear1)),
+        "reach guard: the cast Ring must grant P0 protection from everything"
+    );
+
+    let crossed = pass_turn_to(&mut runner, P1);
+    assert!(
+        crossed,
+        "stall guard: the turn must actually have passed to P1"
+    );
+    assert!(
+        engine::game::static_abilities::player_protection_from(runner.state(), P0, Some(bear1)),
+        "the Ring's until-your-next-turn window must survive onto P1's turn"
+    );
+
+    let life_before = runner.state().players[P0.0 as usize].life;
+    let (ran, log) = run_combat_collecting(&mut runner, P1, &[bear1, bear2], P0, &[], None);
+    assert!(ran, "stall guard: combat must actually have run");
+
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        life_before,
+        "both 1s must be prevented (none dealt through)"
+    );
+    assert_eq!(
+        prevented_pairs(&log),
+        vec![(TargetRef::Player(P0), 2)],
+        "protection prevention publishes ONE (P0,2) application for the \
+         simultaneous combat damage step — pre-fix Phase A emits per-source"
+    );
+    assert_eq!(
+        counters_on(&runner, squire),
+        3,
+        "one trigger for 2 damage, plus 1 from Hardened Scales"
+    );
+}
+
+/// CR 702.7 + CR 510.4 (Matt R7-F1 pin): the aggregate fix must not merge the
+/// two combat damage steps. A first-striker and a regular 1/1 attack into the
+/// same protection; each step is its own simultaneity, so prevention publishes
+/// TWO (P0,1) applications and Squire triggers twice for 2+2 = 4 counters,
+/// before AND after the fix.
+#[test]
+fn combat_protection_keeps_first_strike_steps_separate() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    stock_libraries(&mut scenario);
+
+    let squire = add_squire(&mut scenario, P0);
+    let striker = {
+        let mut b = scenario.add_creature(P1, "Striker", 1, 1);
+        b.first_strike();
+        b.id()
+    };
+    let bear = scenario.add_creature(P1, "Bear", 1, 1).id();
+    scenario.add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES_TEXT);
+    let ring = scenario
+        .add_artifact_to_hand_from_oracle(P0, "The One Ring", ONE_RING_TEXT)
+        .with_mana_cost(free_cost())
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(ring).resolve();
+    runner.advance_until_stack_empty();
+
+    let crossed = pass_turn_to(&mut runner, P1);
+    assert!(
+        crossed,
+        "stall guard: the turn must actually have passed to P1"
+    );
+    assert!(
+        engine::game::static_abilities::player_protection_from(runner.state(), P0, Some(bear)),
+        "the Ring's until-your-next-turn window must survive onto P1's turn"
+    );
+
+    let life_before = runner.state().players[P0.0 as usize].life;
+    let (ran, log) = run_combat_collecting(&mut runner, P1, &[striker, bear], P0, &[], None);
+    assert!(ran, "stall guard: combat must actually have run");
+
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        life_before,
+        "both 1s must be prevented (none dealt through)"
+    );
+    assert_eq!(
+        prevented_pairs(&log),
+        vec![(TargetRef::Player(P0), 1), (TargetRef::Player(P0), 1)],
+        "first-strike and regular are separate damage steps: two (P0,1) \
+         applications, never one merged (P0,2)"
+    );
+    assert_eq!(
+        counters_on(&runner, squire),
+        4,
+        "two triggers for 1 damage each, plus 1 per trigger from Hardened Scales"
+    );
+}
+
+/// CR 120.3e (Matt R7-F1 pin): sequential events stay sequential under
+/// protection. Two separate 1-damage pings to P0, each fully resolved before
+/// the next, publish TWO (P0,1) applications and Squire triggers twice for
+/// 2+2 = 4 counters, before AND after the fix. A tally that leaked across
+/// sequential resolutions would merge these into one (P0,2).
+#[test]
+fn sequential_noncombat_pings_stay_separate_under_protection() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    stock_libraries(&mut scenario);
+
+    let squire = add_squire(&mut scenario, P0);
+    scenario.add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES_TEXT);
+    let ring = scenario
+        .add_artifact_to_hand_from_oracle(P0, "The One Ring", ONE_RING_TEXT)
+        .with_mana_cost(free_cost())
+        .id();
+    // Two separately castable pings: each cast is its own damage event, fully
+    // resolved (triggers included) before the next is cast. The pings MUST be
+    // untargeted ("each player"): protection from everything also stops P0's
+    // OWN targeted pings (CR 702.16b has no controller exception), which
+    // would fizzle with no damage event at all.
+    let ping_one = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Ping One",
+            true,
+            "Ping One deals 1 damage to each player.",
+        )
+        .with_mana_cost(free_cost())
+        .id();
+    let ping_two = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Ping Two",
+            true,
+            "Ping Two deals 1 damage to each player.",
+        )
+        .with_mana_cost(free_cost())
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(ring).resolve();
+    runner.advance_until_stack_empty();
+    assert!(
+        engine::game::static_abilities::player_protection_from(runner.state(), P0, None),
+        "reach guard: the cast Ring must grant P0 protection from everything"
+    );
+
+    let p0_before = runner.state().players[P0.0 as usize].life;
+    let p1_before = runner.state().players[P1.0 as usize].life;
+    let mut log: Vec<GameEvent> = Vec::new();
+    for ping in [ping_one, ping_two] {
+        let outcome = runner.cast(ping).resolve();
+        log.extend(outcome.events().iter().cloned());
+        runner.advance_until_stack_empty();
+    }
+
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        p0_before,
+        "both pings must be prevented on P0 (none dealt through)"
+    );
+    assert_eq!(
+        runner.state().players[P1.0 as usize].life,
+        p1_before - 2,
+        "reach guard: P1 has no protection, so both pings must have dealt — \
+         proving the casts resolved rather than fizzling"
+    );
+    assert_eq!(
+        prevented_pairs(&log),
+        vec![(TargetRef::Player(P0), 1), (TargetRef::Player(P0), 1)],
+        "sequential pings are separate events: two (P0,1) applications, \
+         never one merged (P0,2)"
+    );
+    assert_eq!(
+        counters_on(&runner, squire),
+        4,
+        "two triggers for 1 damage each, plus 1 per trigger from Hardened Scales"
     );
 }

@@ -20,6 +20,7 @@ use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{AppliedReplacementKey, ProposedEvent};
+use std::collections::HashMap;
 
 /// CR 510.1a + CR 613.11: Returns the amount of combat damage a creature assigns.
 /// Normally equal to power, but if `assigns_damage_from_toughness` is set (e.g. Doran),
@@ -1579,8 +1580,15 @@ pub(crate) fn apply_combat_damage(
     let mut lifelink_by_source: Vec<(ObjectId, PlayerId, u32)> = Vec::new();
 
     // --- Phase A: Collect proposed damage events (CR 510.2) ---
+    // CR 702.16e + CR 510.2 (Matt R7-F1): the batch tally window opens BEFORE
+    // Phase A so protection prevention accumulates into this step's aggregate
+    // instead of emitting per-source. Saved/restored, never merged outward:
+    // combat is its own simultaneity even if an outer batch is live.
+    let outer_tally = state.combat_prevention_tally.take();
+    state.combat_prevention_tally = Some(HashMap::new());
     // Gated assignments (0-damage, protection, prohibition) contribute nothing
-    // and are dropped here; the gate already emitted any required DamagePrevented.
+    // and are dropped here; the gate accumulates any required DamagePrevented
+    // into the tally above for the boundary publisher.
     let mut entries: Vec<BatchEntry> = Vec::with_capacity(assignments.len());
     let mut proposed_events: Vec<ProposedEvent> = Vec::with_capacity(assignments.len());
     for (source_id, assignment) in assignments {
@@ -1618,9 +1626,9 @@ pub(crate) fn apply_combat_damage(
             DamageTarget::Player(id) => TargetRef::Player(*id),
         };
 
-        // CR 702.16e + CR 615.13 (Matt F4): protection prevention emits
-        // or aggregates through the shared helper (sequential here — no live
-        // batch tally during combat Phase A — so immediate emission).
+        // CR 702.16e + CR 615.13 (Matt F4, aggregated by R7-F1): protection
+        // prevention aggregates through the shared helper into the tally
+        // window opened above, publishing once per recipient at the boundary.
         match pre_replacement_damage_gate(state, &ctx, &target_ref, assignment.amount, true) {
             DamageGateOutcome::Proposed(proposed) => {
                 entries.push(BatchEntry {
@@ -1645,8 +1653,21 @@ pub(crate) fn apply_combat_damage(
     }
 
     // --- Phase B: Batch replacement (CR 510.2 + CR 615.7) ---
-    let (survivors, prevention_tally) =
+    let (survivors, phase_b_tally) =
         replacement::replace_combat_damage_batch(state, &mut events, proposed_events);
+
+    // CR 510.2 + CR 615.13 (Matt R7-F1): Phase B ran under its own fresh tally
+    // (restoring the Phase-A window on exit), so merge its aggregate into the
+    // live Phase-A protection tally — the boundary publishes ONE aggregate per
+    // (shield, recipient) for the whole step. Then close this step's window
+    // and restore any outer tally untouched.
+    if let Some(live) = state.combat_prevention_tally.as_mut() {
+        for (key, amount) in phase_b_tally {
+            *live.entry(key).or_insert(0) += amount;
+        }
+    }
+    let prevention_tally = state.combat_prevention_tally.take().unwrap_or_default();
+    state.combat_prevention_tally = outer_tally;
 
     // --- Phase C: Apply survivors + combat bookkeeping (CR 120.3 + CR 510.2) ---
     debug_assert_eq!(
