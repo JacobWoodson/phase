@@ -3100,7 +3100,17 @@ pub fn resolve_each_source_deals_damage(
                 owner: batch_id,
             });
     }
+    // CR 615.13 + CR 616.1e (Matt F3): bind accumulation to the executing
+    // batch for the synchronous window (save/restore, like the tail drain).
+    // A child that opens inside an already-owned outer tail would otherwise
+    // write its snapshot through the ambient outer owner into the outer
+    // persisted record — which later republishes the child's amount while
+    // the outer application is lost. Top-level and answer-hook nesting are
+    // unaffected (no owned frame exists yet, or the child scope is topmost).
+    let prior_batch_owner =
+        std::mem::replace(&mut state.resolving_each_source_batch_owner, Some(batch_id));
     let result = resolve_each_source_deals_damage_inner(state, ability, events, batch_id);
+    state.resolving_each_source_batch_owner = prior_batch_owner;
     // A pause in this invocation (or deeper) pushed above our scope: the
     // frames stay for the completion cascade. Otherwise this batch completed
     // synchronously — pop and discard our scope (its tally already published
