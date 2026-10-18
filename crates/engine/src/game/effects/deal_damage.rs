@@ -2798,16 +2798,53 @@ pub fn resolve_each_deals_equal_to_power(
 /// (shield, recipient) and firing each `All` rider once — the same authority
 /// the combat batch uses (`fire_batch_prevention_riders`). No-op when the
 /// tally is absent or empty. Takes (deactivates) the tally; callers restore
-/// the surrounding value.
-fn flush_noncombat_prevention_tally(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    if let Some(tally) = state.combat_prevention_tally.take() {
-        if !tally.is_empty() {
-            let entries = crate::game::combat_damage::sorted_prevention_entries(tally);
-            // Fire-all: the unpaused path keeps its standing shape (a pausing
-            // rider's prompt propagates via `state.waiting_for`, as before).
-            let _ = crate::game::combat_damage::fire_batch_prevention_riders(
-                state, &entries, events, false,
-            );
+/// the surrounding value on the completed path.
+///
+/// CR 615.5 + CR 616.1e (Matt F2): a rider that parks a fresh choice stops
+/// the drainage (stop mode, like the framed flush below) instead of letting
+/// later groups overwrite it. Published groups stay published; the
+/// unpublished remainder re-parks as this batch's frame for the answer-time
+/// cascade, and the fresh choice returns so the caller can park its own
+/// Phase-C/downstream tail and stop. The transient stays deactivated — a
+/// live one would absorb rider-created prevention into the popped batch.
+fn flush_noncombat_prevention_tally(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    owner: u64,
+    restore_tally: &Option<CombatPreventionTally>,
+) -> Option<WaitingFor> {
+    use crate::game::combat_damage::BatchRiderDrainOutcome;
+    let tally = state.combat_prevention_tally.take()?;
+    if tally.is_empty() {
+        return None;
+    }
+    let entries = crate::game::combat_damage::sorted_prevention_entries(tally);
+    match crate::game::combat_damage::fire_batch_prevention_riders(state, &entries, events, true) {
+        BatchRiderDrainOutcome::Completed => None,
+        BatchRiderDrainOutcome::Paused {
+            waiting_for,
+            published_entries,
+        } => {
+            let mut remainder = entries;
+            remainder.drain(..published_entries.min(remainder.len()));
+            // A nonempty remainder re-parks as this batch's frame (same
+            // owner/restore shape as a Phase-B pause record). An empty one
+            // parks nothing: top-level there is no scope to restore, and
+            // nested the still-parked scope frame below already carries the
+            // surrounding restore for the cascade.
+            if !remainder.is_empty() {
+                state
+                    .pending_each_source_batches
+                    .push(EachSourceBatchFrame {
+                        tally: remainder,
+                        restore_tally: restore_tally.as_ref().map(tally_entries_for_record),
+                        owner,
+                    });
+            }
+            state.combat_prevention_tally = None;
+            let waiting_for = *waiting_for;
+            state.waiting_for = waiting_for.clone();
+            Some(waiting_for)
         }
     }
 }
@@ -3300,9 +3337,24 @@ fn resolve_each_source_deals_damage_inner(
     // is unaffected by them.) The inline flush consumed the batch tally —
     // clear our scope copy (if nested) so the completion cascade never
     // republishes it; our normal exit then pops and discards the spent scope.
-    flush_noncombat_prevention_tally(state, events);
+    // The scope clears BEFORE the flush: on a rider pause the remainder parks
+    // above it and must survive.
     if let Some(top) = state.pending_each_source_batches.last_mut() {
         top.tally.clear();
+    }
+    if let Some(fresh) = flush_noncombat_prevention_tally(state, events, batch_id, &restore_tally) {
+        // CR 615.5 + CR 616.1e (Matt F2): a rider parked a fresh choice
+        // mid-drainage. Published groups stay published; the unpublished
+        // remainder already re-parked as this batch's frame inside the flush.
+        // Park Phase-C survivors plus downstream as the tail (they bypass the
+        // pipeline on resume — replacements already applied in Phase B), then
+        // stop: the answer-time cascade resumes after the first choice.
+        let remaining_refs: Vec<(&DamageContext, ProposedEvent)> =
+            replaced.iter().map(|(ctx, ev)| (ctx, ev.clone())).collect();
+        stash_remaining_post_replacement_damage(state, ability, &remaining_refs);
+        mark_pending_continuation_parent(state, EffectKind::EachSourceDealsDamage);
+        state.waiting_for = fresh;
+        return Ok(());
     }
     state.combat_prevention_tally = restore_tally;
 

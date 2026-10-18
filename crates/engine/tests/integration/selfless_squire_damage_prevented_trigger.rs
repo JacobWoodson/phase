@@ -3596,3 +3596,175 @@ fn typed_single_batch_downstream_instruction_publishes_separate_application() {
         "every parked record must be consumed by the completion cascade"
     );
 }
+
+/// CR 615.5 + CR 616.1e (Matt F2): a fresh rider-created choice on the
+/// UNPAUSED aggregate path must stop the drainage — later groups park
+/// behind it instead of overwriting it. P0/P1 each control a Bear and
+/// Abundance; each resolves NWF naming their own Bear (P0's shield first);
+/// Rakdos Charm mode 3 deals 1 to each controller. Each event has one
+/// shield, so Phase B needs no ordering choice. P0's NWF rider draw parks
+/// P0's Abundance choice; pre-fix the drain continues into P1's rider and
+/// P1's pending draw overwrites P0's parked choice. Post-fix P0's choice
+/// surfaces first with the P1 group parked as remainder, then P1's choice
+/// surfaces after P0 declines — both remain answerable.
+#[test]
+fn aggregate_rider_choice_parks_later_groups_behind_it() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    stock_libraries(&mut scenario);
+
+    let bear_p0 = scenario.add_creature(P0, "Bear P0", 2, 2).id();
+    let bear_p1 = scenario.add_creature(P1, "Bear P1", 2, 2).id();
+    scenario.add_enchantment_from_oracle(P0, "Abundance", ABUNDANCE_TEXT);
+    scenario.add_enchantment_from_oracle(P1, "Abundance", ABUNDANCE_TEXT);
+    let way_p0 =
+        add_instant_from_oracle(&mut scenario, P0, "New Way Forward", NEW_WAY_FORWARD_TEXT);
+    let way_p1 =
+        add_instant_from_oracle(&mut scenario, P1, "New Way Forward", NEW_WAY_FORWARD_TEXT);
+    let charm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Rakdos Charm", true, RAKDOS_CHARM_TEXT)
+        .with_mana_cost(free_cost())
+        .id();
+    let mut runner = scenario.build();
+
+    // P0's shield installs FIRST so its group drains (and pauses) first.
+    runner.cast(way_p0).resolve();
+    runner
+        .act(GameAction::ChooseDamageSource { source: bear_p0 })
+        .expect("naming Bear P0 must be answerable");
+    pass_priority_to(&mut runner, P1);
+    runner.cast(way_p1).resolve();
+    runner
+        .act(GameAction::ChooseDamageSource { source: bear_p1 })
+        .expect("naming Bear P1 must be answerable");
+    pass_priority_to(&mut runner, P0);
+    assert_eq!(
+        runner.state().pending_damage_replacements.len(),
+        2,
+        "reach guard: both NWF shields installed, P0's first"
+    );
+
+    let p0_life_before = runner.state().players[P0.0 as usize].life;
+    let p1_life_before = runner.state().players[P1.0 as usize].life;
+    let p0_hand_before = runner.state().players[P0.0 as usize].hand.len();
+    let p1_hand_before = runner.state().players[P1.0 as usize].hand.len();
+    let p0_library_before = runner.state().players[P0.0 as usize].library.len();
+    let p1_library_before = runner.state().players[P1.0 as usize].library.len();
+    let mut log: Vec<GameEvent> = Vec::new();
+    let outcome = runner.cast(charm).modes(&[2]).resolve();
+    log.extend(outcome.events().iter().cloned());
+
+    // First prompt: P0's Abundance Accept/Decline, with the P1 group still
+    // unpublished behind it.
+    let WaitingFor::ReplacementChoice {
+        player, candidates, ..
+    } = outcome.final_waiting_for().clone()
+    else {
+        panic!(
+            "P0's Abundance choice must surface first (no ordering pause), got {:?}",
+            outcome.final_waiting_for()
+        );
+    };
+    assert_eq!(
+        player, P0,
+        "the first rider choice must be P0's Abundance (P0's shield installed first)"
+    );
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|c| c.description.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Accept", "Decline"],
+        "the live child must be Abundance's optional replacement"
+    );
+    assert_eq!(
+        runner.state().pending_each_source_batches.len(),
+        1,
+        "the unpublished P1 group must stay parked as a remainder"
+    );
+    assert_eq!(
+        runner.state().pending_each_source_batches[0]
+            .tally
+            .iter()
+            .map(|entry| entry.amount)
+            .sum::<i32>(),
+        1,
+        "the remainder must hold the P1 group's 1 prevented"
+    );
+
+    // Decline P0's: the natural draw resolves, then P1's Abundance choice
+    // must surface — pre-fix it overwrote (or was overwritten by) P0's.
+    let result = runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("declining P0's Abundance must be answerable");
+    log.extend(result.events);
+    runner.advance_until_stack_empty();
+    let WaitingFor::ReplacementChoice {
+        player, candidates, ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "P1's Abundance choice must surface after P0 declines, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P1, "the second rider choice must be P1's Abundance");
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|c| c.description.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Accept", "Decline"],
+        "the second live child must be Abundance's optional replacement"
+    );
+    let result = runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("declining P1's Abundance must be answerable");
+    log.extend(result.events);
+    runner.advance_until_stack_empty();
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "resolution must complete to a clean priority window, got {:?}",
+        runner.state().waiting_for
+    );
+
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        p0_life_before - 1,
+        "P0's NWF reflected 1 with no shield to stop it"
+    );
+    assert_eq!(
+        runner.state().players[P1.0 as usize].life,
+        p1_life_before - 1,
+        "P1's NWF reflected 1 with no shield to stop it"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize].hand.len(),
+        p0_hand_before,
+        "the Charm left the hand and P0's rider drew exactly 1"
+    );
+    assert_eq!(
+        runner.state().players[P1.0 as usize].hand.len(),
+        p1_hand_before + 1,
+        "P1's rider draw must resolve (declined Abundance draws naturally)"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize].library.len(),
+        p0_library_before - 1,
+        "exactly one card drawn from P0's library"
+    );
+    assert_eq!(
+        runner.state().players[P1.0 as usize].library.len(),
+        p1_library_before - 1,
+        "exactly one card drawn from P1's library"
+    );
+    assert_eq!(
+        prevented_pairs(&log),
+        vec![(TargetRef::Player(P0), 1), (TargetRef::Player(P1), 1)],
+        "P0's application first, P1's remainder after P0's child answers"
+    );
+    assert!(
+        runner.state().pending_each_source_batches.is_empty(),
+        "the remainder must be consumed by the completion cascade"
+    );
+}
