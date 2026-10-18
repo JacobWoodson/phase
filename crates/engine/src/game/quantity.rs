@@ -1252,8 +1252,17 @@ pub fn casting_permission_is_cast_stable_for_pre_cast(permission: &CastingPermis
                 .as_ref()
                 .is_none_or(cast_permission_constraint_is_cast_stable_for_pre_cast)
                 && enters_with_modifications
+                    .modifications
                     .iter()
                     .all(continuous_modification_is_cast_stable_for_pre_cast)
+                // The printed spell-quality gate ("If you cast a creature spell
+                // this way") must be a context-free type population for the
+                // permission to be pre-cast stable; any filter the positive
+                // proof does not cover keeps the cast.
+                && enters_with_modifications
+                    .cast_filter
+                    .as_ref()
+                    .is_none_or(target_filter_is_property_free_population)
         }
         CastingPermission::PlayFromExile {
             card_filter,
@@ -2612,6 +2621,7 @@ pub(crate) fn static_condition_uses_unspent_mana(condition: &StaticCondition) ->
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::PlayerAttackedPlayer { .. }
+        | StaticCondition::FirstCombatPhaseOfTurn
         | StaticCondition::None => false,
     }
 }
