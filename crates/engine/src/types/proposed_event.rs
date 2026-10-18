@@ -100,6 +100,14 @@ pub enum AppliedReplacementKey {
         index: usize,
         controller: PlayerId,
     },
+    /// CR 702.16e + CR 615.13 (Matt F4): prevention by player/object
+    /// protection inside a simultaneous batch. Protection has no registry
+    /// shield (and no rider), so it aggregates under its own key — one
+    /// application per recipient per batch — instead of fragmenting one
+    /// event per damage event. The gate cannot attribute simultaneous
+    /// protection to a single granter (notably the sourceless `Everything`
+    /// authority), so the key carries no granter identity.
+    Protection,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -120,6 +128,7 @@ enum TaggedAppliedReplacementKey {
         index: usize,
         controller: PlayerId,
     },
+    Protection,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -159,6 +168,9 @@ impl AppliedReplacementKeyCompat {
                 index,
                 controller,
             },
+            AppliedReplacementKeyCompat::Tagged(TaggedAppliedReplacementKey::Protection) => {
+                AppliedReplacementKey::Protection
+            }
             AppliedReplacementKeyCompat::Legacy(ReplacementId {
                 source: ObjectId(0),
                 index,
@@ -200,9 +212,9 @@ impl AppliedReplacementKey {
         match self {
             AppliedReplacementKey::Object { source, .. }
             | AppliedReplacementKey::EntryControllerChoice { source, .. } => source,
-            AppliedReplacementKey::Floating { .. } | AppliedReplacementKey::StepEndMana { .. } => {
-                ObjectId(0)
-            }
+            AppliedReplacementKey::Floating { .. }
+            | AppliedReplacementKey::StepEndMana { .. }
+            | AppliedReplacementKey::Protection => ObjectId(0),
         }
     }
 
@@ -212,6 +224,10 @@ impl AppliedReplacementKey {
             | AppliedReplacementKey::Floating { index }
             | AppliedReplacementKey::StepEndMana { index }
             | AppliedReplacementKey::EntryControllerChoice { index, .. } => index,
+            // Protection never reaches `as_replacement_id`: the aggregate
+            // drain matches it before the registry lookup. The 0 is a
+            // type-system placeholder, never a registry address.
+            AppliedReplacementKey::Protection => 0,
         }
     }
 
@@ -1362,6 +1378,20 @@ mod tests {
         set.insert(id1);
         assert!(set.contains(&id2));
         assert!(!set.contains(&id3));
+    }
+
+    /// CR 702.16e + CR 615.13 (Matt F4): the protection tally key
+    /// round-trips through the tagged mirror, so paused-batch frames
+    /// carrying protection prevention survive save/load.
+    #[test]
+    fn protection_key_serde_round_trip() {
+        let key = AppliedReplacementKey::Protection;
+        let json = serde_json::to_string(&key).expect("the key serializes");
+        assert_eq!(json, r#"{"type":"Protection"}"#);
+        let back: AppliedReplacementKey =
+            serde_json::from_str(&json).expect("the key deserializes");
+        assert_eq!(back, key);
+        assert_eq!(back.source(), ObjectId(0));
     }
 
     #[test]

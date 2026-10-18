@@ -1,6 +1,7 @@
 use crate::game::combat::{AttackTarget, CombatState, DamageAssignment, DamageTarget, TrampleKind};
 use crate::game::effects::deal_damage::{
-    apply_damage_after_replacement, pre_replacement_damage_gate, DamageContext, DamageResult,
+    apply_damage_after_replacement, emit_or_accumulate_protection_prevention,
+    pre_replacement_damage_gate, DamageContext, DamageGateOutcome, DamageResult,
 };
 use crate::game::effects::life::ReplacementDeferred;
 use crate::game::game_object::GameObject;
@@ -574,9 +575,8 @@ fn damage_is_not_fixed(
         return false;
     }
 
-    let mut discarded_events = Vec::new();
-    let Some(proposed) =
-        pre_replacement_damage_gate(state, context, target, amount, true, &mut discarded_events)
+    let DamageGateOutcome::Proposed(proposed) =
+        pre_replacement_damage_gate(state, context, target, amount, true)
     else {
         return true;
     };
@@ -1631,21 +1631,29 @@ pub(crate) fn apply_combat_damage(
             DamageTarget::Player(id) => TargetRef::Player(*id),
         };
 
-        if let Some(proposed) = pre_replacement_damage_gate(
-            state,
-            &ctx,
-            &target_ref,
-            assignment.amount,
-            true,
-            &mut events,
-        ) {
-            entries.push(BatchEntry {
-                ctx,
-                source_is_commander,
-                assignment,
-                lifelink_controller,
-            });
-            proposed_events.push(proposed);
+        // CR 702.16e + CR 615.13 (Matt F4): protection prevention emits
+        // or aggregates through the shared helper (sequential here — no live
+        // batch tally during combat Phase A — so immediate emission).
+        match pre_replacement_damage_gate(state, &ctx, &target_ref, assignment.amount, true) {
+            DamageGateOutcome::Proposed(proposed) => {
+                entries.push(BatchEntry {
+                    ctx,
+                    source_is_commander,
+                    assignment,
+                    lifelink_controller,
+                });
+                proposed_events.push(proposed);
+            }
+            DamageGateOutcome::Protected(prevented) => {
+                emit_or_accumulate_protection_prevention(
+                    state,
+                    ctx.source_id,
+                    &target_ref,
+                    prevented,
+                    &mut events,
+                );
+            }
+            DamageGateOutcome::Gated => {}
         }
     }
 
@@ -1930,6 +1938,9 @@ pub(crate) fn sorted_prevention_entries(
                 index,
                 controller,
             } => (3, source.0, index, controller.0),
+            // Protection aggregates last; it has no rider and no registry
+            // address, so its rank only needs determinism, not order meaning.
+            AppliedReplacementKey::Protection => (4, 0, 0, 0),
         };
         (rank, entry.recipient.clone())
     });
@@ -1997,11 +2008,20 @@ pub(crate) fn fire_batch_prevention_riders(
         // Every group counts exactly once — resolved means events pushed (or
         // standing-behavior skipped), whether or not a rider dispatched.
         published_entries += group.len();
-        let rid = group[0].key.as_replacement_id();
         let total_prevented: i32 = group.iter().map(|entry| entry.amount).sum();
         if total_prevented <= 0 {
             continue;
         }
+
+        // CR 702.16e + CR 615.13 (Matt F4): protection prevention aggregates
+        // under its own key — no registry shield, no rider, never a
+        // `ReplacementId`. Publish the aggregate application and resolve the
+        // group without dispatch. Sourceless like any floating prevention.
+        if matches!(group[0].key, AppliedReplacementKey::Protection) {
+            push_prevented_events(group, ObjectId(0), events);
+            continue;
+        }
+        let rid = group[0].key.as_replacement_id();
 
         if replacement::is_shield_counter_damage_replacement(rid) {
             replacement::consume_shield_counter(state, rid.source, events);

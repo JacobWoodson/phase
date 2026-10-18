@@ -3768,3 +3768,82 @@ fn aggregate_rider_choice_parks_later_groups_behind_it() {
         "the remainder must be consumed by the completion cascade"
     );
 }
+
+/// CR 702.16e + CR 615.13 (Matt F4): player-protection prevention joins
+/// the simultaneous batch's aggregate instead of emitting one event per
+/// damage event. P0 controls Squire, two 1/1 Bears, and Scales; casts The
+/// One Ring (protection from everything until next turn); then Rakdos Charm
+/// mode 3. All three 1s exit through protection and publish ONE (P0,3)
+/// application, so Squire triggers once for 3 plus 1 from Scales = 4
+/// counters. Pre-fix the gate fragments into three (P0,1) events and Squire
+/// triggers three times for 6 counters.
+#[test]
+fn protection_prevention_aggregates_at_batch_boundary() {
+    const ONE_RING_TEXT: &str = "Indestructible\nWhen The One Ring enters, if you cast it, you gain protection from everything until your next turn.\nAt the beginning of your upkeep, you lose 1 life for each burden counter on The One Ring.\n{T}: Put a burden counter on The One Ring, then draw a card for each burden counter on The One Ring.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    stock_libraries(&mut scenario);
+
+    let squire = scenario
+        .add_creature_to_hand_from_oracle(P0, "Selfless Squire", 1, 1, SELFLESS_SQUIRE_TEXT)
+        .with_mana_cost(free_cost())
+        .id();
+    let bear1 = scenario
+        .add_creature(P0, "Bear1", 1, 1)
+        .with_subtypes(vec!["Bear"])
+        .id();
+    let _bear2 = scenario
+        .add_creature(P0, "Bear2", 1, 1)
+        .with_subtypes(vec!["Bear"])
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES_TEXT);
+    let ring = scenario
+        .add_artifact_to_hand_from_oracle(P0, "The One Ring", ONE_RING_TEXT)
+        .with_mana_cost(free_cost())
+        .id();
+    let charm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Rakdos Charm", true, RAKDOS_CHARM_TEXT)
+        .with_mana_cost(free_cost())
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(squire).resolve();
+    runner.cast(ring).resolve();
+    runner.advance_until_stack_empty();
+    assert!(
+        engine::game::static_abilities::player_protection_from(runner.state(), P0, Some(bear1)),
+        "reach guard: the cast Ring must grant P0 protection from everything"
+    );
+
+    let life_before = runner.state().players[P0.0 as usize].life;
+    let mut log: Vec<GameEvent> = Vec::new();
+    let outcome = runner.cast(charm).modes(&[2]).resolve();
+    log.extend(outcome.events().iter().cloned());
+    runner.advance_until_stack_empty();
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "resolution must complete to a clean priority window, got {:?}",
+        runner.state().waiting_for
+    );
+
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        life_before,
+        "all three 1s must be prevented (none dealt through)"
+    );
+    assert_eq!(
+        prevented_pairs(&log),
+        vec![(TargetRef::Player(P0), 3)],
+        "protection prevention publishes ONE (P0,3) application at the \
+         batch boundary — pre-fix it fragments into three (P0,1) events"
+    );
+    assert_eq!(
+        counters_on(&runner, squire),
+        4,
+        "one trigger for 3 damage, plus 1 from Hardened Scales"
+    );
+    assert!(
+        runner.state().pending_each_source_batches.is_empty(),
+        "no batch records must leak from the unpaused path"
+    );
+}

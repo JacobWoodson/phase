@@ -2360,7 +2360,7 @@ fn hydrate_parked_batch_prevention_tally(state: &mut GameState) {
     }
 }
 
-fn accumulate_batch_prevention(
+pub(crate) fn accumulate_batch_prevention(
     state: &mut GameState,
     applied_key: AppliedReplacementKey,
     recipient: &TargetRef,
