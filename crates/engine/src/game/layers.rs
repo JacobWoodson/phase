@@ -1774,6 +1774,7 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::SourceIsFaceUp
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
+        | StaticCondition::FirstCombatPhaseOfTurn
         | StaticCondition::None => false,
     }
 }
@@ -1924,6 +1925,7 @@ fn static_condition_characteristic_reads_at(
         | StaticCondition::SourceIsFaceUp
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
+        | StaticCondition::FirstCombatPhaseOfTurn
         | StaticCondition::None => CharacteristicKinds::EMPTY,
     }
 }
@@ -2064,6 +2066,7 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::SourceIsFaceUp
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
+        | StaticCondition::FirstCombatPhaseOfTurn
         | StaticCondition::None => false,
     }
 }
@@ -2281,6 +2284,12 @@ fn evaluate_condition_inner(
                     .unwrap_or(controller)
             });
             super::players::is_opponent(state, source_controller, state.active_player)
+        }
+        // CR 500.8 + CR 506.1 + CR 608.2c: the first combat phase of the turn
+        // must be the phase in progress (shared predicate; the composed
+        // possessive form carries its `DuringYourTurn` scope separately).
+        StaticCondition::FirstCombatPhaseOfTurn => {
+            super::conditions::first_combat_phase_in_progress(state)
         }
         // CR 103.1: True when the scoped player took the first turn of the
         // game (fixed at game start). The parser emits `ControllerRef::You`.
@@ -4716,6 +4725,7 @@ fn static_condition_reads_life(condition: &StaticCondition) -> bool {
         | StaticCondition::EnchantedIsFaceDown
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
+        | StaticCondition::FirstCombatPhaseOfTurn
         | StaticCondition::None => false,
     }
 }
@@ -12201,6 +12211,45 @@ pub(crate) fn compute_current_copiable_values(
 
 #[cfg(test)]
 mod tests {
+
+    /// CR 500.8 + CR 506.1 + CR 506.2 + CR 611.3a (structural review round 4):
+    /// the static "As long as it's the first combat phase of your turn" gate
+    /// admits its effect only while that phase is in progress — the phase-start
+    /// tally alone (one `BeginCombat` this turn) leaves the buff on through the
+    /// postcombat main and the ending phase, and an added combat phase makes the
+    /// gate false while the second one runs. `Phase::group` recovers the
+    /// CR 506.1 phase from the engine's flattened combat-step variants, so every
+    /// step of the first combat phase qualifies.
+    #[test]
+    fn first_combat_phase_static_requires_the_phase_in_progress() {
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(1);
+        for (phase, begin_combat_starts, expected) in [
+            (Phase::PreCombatMain, 0, false),
+            (Phase::DeclareAttackers, 1, true),
+            (Phase::EndCombat, 1, true),
+            (Phase::PostCombatMain, 1, false),
+            (Phase::End, 1, false),
+            (Phase::DeclareAttackers, 2, false),
+        ] {
+            state.steps_started_this_turn.clear();
+            for _ in 0..begin_combat_starts {
+                state.steps_started_this_turn.record(Phase::BeginCombat);
+            }
+            state.phase = phase;
+            assert_eq!(
+                evaluate_condition_inner(
+                    &state,
+                    &StaticCondition::FirstCombatPhaseOfTurn,
+                    PlayerId(0),
+                    source,
+                    ConditionContext::NONE,
+                ),
+                expected,
+                "phase {phase:?} with {begin_combat_starts} BeginCombat start(s)"
+            );
+        }
+    }
 
     /// CR 201.5a: the predicate is true exactly for grant bodies that name their granter.
     #[test]
@@ -23123,7 +23172,7 @@ mod tests {
             source_id,
             graveyard_replacement: None,
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
         }

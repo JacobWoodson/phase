@@ -4288,9 +4288,9 @@ pub(super) fn selected_exile_alt_cost_permission_enters_with_modifications(
     object_id: ObjectId,
     player: PlayerId,
     casting_permission_index: Option<CastingPermissionIndex>,
-) -> Vec<crate::types::ability::ContinuousModification> {
+) -> crate::types::ability::PendingEntersModifications {
     let Some(obj) = state.objects.get(&object_id) else {
-        return Vec::new();
+        return Default::default();
     };
     selected_exile_alt_cost_permission(state, obj, player, casting_permission_index)
         .map(|permission| match permission {
@@ -4298,7 +4298,7 @@ pub(super) fn selected_exile_alt_cost_permission_enters_with_modifications(
                 enters_with_modifications,
                 ..
             } => enters_with_modifications.clone(),
-            _ => Vec::new(),
+            _ => Default::default(),
         })
         .unwrap_or_default()
 }
@@ -5926,6 +5926,7 @@ fn holder_bound_condition_is_modeled(condition: &StaticCondition) -> bool {
     match condition {
         StaticCondition::DuringYourTurn
         | StaticCondition::DuringOpponentsTurn
+        | StaticCondition::FirstCombatPhaseOfTurn
         | StaticCondition::IsPresent { .. } => true,
         StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
             conditions.iter().all(holder_bound_condition_is_modeled)
@@ -16685,6 +16686,13 @@ pub(super) struct ResolutionCastRequest {
     pub(super) cleanup: crate::types::ability::ResolutionCastCleanup,
     pub(super) graveyard_replacement:
         Option<crate::types::ability::SpellStackToGraveyardReplacement>,
+    /// CR 608.2c + CR 611.2a + CR 611.2c: the cast-permission
+    /// gains-modifications rider ("If you cast a [quality] spell this way, it
+    /// gains …", Strago and Relm) rides the elected resolution permission into
+    /// the cast finalization, which applies it as a `Duration::Permanent`
+    /// continuous effect scoped to the cast object. Empty for every other
+    /// during-resolution route.
+    pub(super) enters_with_modifications: crate::types::ability::PendingEntersModifications,
     /// CR 608.2g + CR 609.4b + CR 118.9: whether the during-resolution cast
     /// is free (Cascade/Discover/Suspend, `Auto`), pays the card's real
     /// printed cost (Quistis Trepe / Tinybones the Pickpocket, `Manual` with
@@ -16807,7 +16815,11 @@ fn install_resolution_cast_permission(
             source_id: None,
             graveyard_replacement: request.graveyard_replacement.clone(),
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            // CR 608.2c: the request is the transaction authority for the
+            // rider; `selected_exile_alt_cost_permission_enters_with_modifications`
+            // is the single reader, so a non-elected sibling permission cannot
+            // leak its own modifications onto this cast.
+            enters_with_modifications: request.enters_with_modifications.clone(),
             mana_spend_permission,
             cast_cost_modifier: None,
         });
@@ -32232,7 +32244,7 @@ mod castable_zone_authority_tests {
             duration: None,
             graveyard_replacement: None,
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
         };
@@ -32269,7 +32281,7 @@ mod castable_zone_authority_tests {
             duration: None,
             graveyard_replacement: None,
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
         }];
@@ -32456,7 +32468,7 @@ mod castable_zone_authority_tests {
             duration: None,
             graveyard_replacement: None,
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
         };
@@ -32683,7 +32695,7 @@ mod castable_zone_authority_tests {
             duration: None,
             graveyard_replacement: None,
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
         };
@@ -32818,7 +32830,7 @@ mod castable_zone_authority_tests {
                         duration: None,
                         graveyard_replacement: None,
                         enters_with_counter: None,
-                        enters_with_modifications: Vec::new(),
+                        enters_with_modifications: Default::default(),
                         mana_spend_permission: None,
                         cast_cost_modifier: None,
                     }];
@@ -33192,6 +33204,7 @@ mod sacrifice_cost_context_identity_tests {
                 None,
                 false,
                 None,
+                false,
                 &mut vec![],
             )
             .unwrap();

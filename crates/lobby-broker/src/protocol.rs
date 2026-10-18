@@ -60,16 +60,19 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
-/// 150 — `CardTypeSetSource` gains `TargetedObjects`
-///      (`{"type":"TargetedObjects"}`, CR 608.2c + CR 115.1: the resolving
-///      ability's chosen targets, read by identity for "those cards"
-///      aggregates — Song of Inspiration, Command the Dreadhorde),
-///      serialized inside `GameState` wherever a resolving or pending ability
-///      carries a property aggregate; a v149 peer cannot parse the tag. The
-///      same version gives `TrackedSet` a semantics-bearing `filter` (member
-///      restriction, `#[serde(default)]`): a v149 peer parses the shape but
-///      silently drops the restriction and counts unfiltered members.
-///      Full-game peers and P2P move in lockstep (wire 132); no lobby carrier
+/// 151 — Combined wire: main's 150 and the 150 this branch coined
+///      independently carried incompatible shapes under one number, so the
+///      combined candidate moves to a fresh numeral both dialects refuse.
+///      From main's 150: the cast-this-way gains rider's serialized payload
+///      is reshaped (`CastingPermission::ExileWithAltCost.enters_with_modifications`
+///      becomes a `PendingEntersModifications` object and
+///      `Effect::AddPendingEntersModifications` carries its `rider` object in
+///      place of the required `modifications` array). From this branch's 150:
+///      `CardTypeSetSource` gains `TargetedObjects` (`{"type":"TargetedObjects"}`,
+///      CR 608.2c + CR 115.1: the resolving ability's chosen targets, read by
+///      identity for "those cards" aggregates) and `TrackedSet` gains a
+///      semantics-bearing `filter` member restriction (`#[serde(default)]`).
+///      Full-game peers and P2P move in lockstep (wire 133); no lobby carrier
 ///      names it.
 ///
 /// 149 — The CR 608.2n final part of a spell's resolution is owed on the
@@ -1143,7 +1146,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 150;
+pub const PROTOCOL_VERSION: u32 = 151;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2400,12 +2403,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 150);
+        assert_eq!(PROTOCOL_VERSION, 151);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 149);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 150);
     }
 
     #[test]

@@ -3473,11 +3473,12 @@ mod tests {
         }
     }
 
-    /// v150: `CardTypeSetSource` gains `TargetedObjects` (CR 608.2c + CR 115.1:
-    /// the resolving ability's chosen targets), carried in a property aggregate
-    /// inside `GameState`, and `TrackedSet` gains a semantics-bearing `filter`
-    /// member restriction. A v149 peer cannot parse the tag and silently drops
-    /// the restriction, so it must be refused before it receives v150 state.
+    /// v151: combined wire — main's v150 (reshaped cast-this-way gains rider
+    /// payload) and this branch's v150 (`CardTypeSetSource::TargetedObjects`
+    /// plus the `TrackedSet.filter` member restriction) coined one number for
+    /// incompatible shapes, so the combined candidate moves to a fresh numeral.
+    /// A v150 peer of either dialect must be refused before it receives v151
+    /// state.
     /// v149: `GameState::deferred_spell_delivery` is gone and
     /// `GameState::resolving_spell_final_part` marks the CR 608.2n final part a
     /// paused instant or sorcery still owes; a v148 peer drops the key and would
@@ -3718,8 +3719,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_150_for_targeted_objects_and_tracked_set_filter() {
-        assert_eq!(PROTOCOL_VERSION, 150);
+    fn protocol_version_is_151_for_combined_targeted_objects_and_gains_rider() {
+        assert_eq!(PROTOCOL_VERSION, 151);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3730,7 +3731,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_150_for_targeted_objects_and_tracked_set_filter`
+    /// `protocol_version_is_151_for_combined_targeted_objects_and_gains_rider`
     /// stays green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

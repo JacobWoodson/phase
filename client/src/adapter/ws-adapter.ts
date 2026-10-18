@@ -215,14 +215,13 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 150 — CardTypeSetSource gains TargetedObjects (CR 608.2c + CR 115.1: the
- *      resolving ability's chosen targets, read by identity for "those cards"
- *      aggregates), carried in a property aggregate inside GameState — see
- *      PROTOCOL_VERSION's own `/// 150` entry in
- *      crates/lobby-broker/src/protocol.rs. A v149 peer cannot parse the tag,
- *      and silently drops the new TrackedSet member filter it does parse; the
- *      exact-match version check at connect refuses the pairing. Wire 132
- *      moves with it.
+ * 151 — Combined wire: main's 150 (reshaped cast-this-way gains rider
+ *      payload) and this branch's 150 (CardTypeSetSource TargetedObjects plus
+ *      the TrackedSet member filter) carried incompatible shapes under one
+ *      number, so the combined candidate moves to a fresh numeral — see
+ *      PROTOCOL_VERSION's own `/// 151` entry in
+ *      crates/lobby-broker/src/protocol.rs. Full-game peers and P2P move in
+ *      lockstep (wire 133).
  * 149 — The CR 608.2n final part of a spell's resolution is owed on the
  *      resolution carrier: `GameState::deferred_spell_delivery` (v110) is removed
  *      and `GameState::resolving_spell_final_part` (`{ spell }`) marks an instant
@@ -916,7 +915,8 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 150;
+export const PROTOCOL_VERSION = 151;
+
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

@@ -106,11 +106,14 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
- *  132 — game_setup and state_update carry GameState whose ability aggregates
- *       may name CardTypeSetSource TargetedObjects (CR 608.2c + CR 115.1: the
- *       resolving ability's chosen targets) and whose TrackedSet populations
- *       may carry a member filter a v131 peer would silently drop. Bumped in
- *       lockstep with full-game protocol 150.
+ *  133 — Combined wire: game_setup and state_update carry GameState whose
+ *       ability aggregates may name CardTypeSetSource TargetedObjects (the
+ *       resolving ability's chosen targets) with a TrackedSet member filter,
+ *       and whose casting permissions may carry the reshaped cast-this-way
+ *       gains rider (enters_with_modifications object and
+ *       Effect.AddPendingEntersModifications.rider). Main's 132 and this
+ *       branch's 132 carried one shape each under the same number; both now
+ *       refuse. Bumped in lockstep with full-game protocol 151.
  *  131 — GameState.deferred_spell_delivery is removed and GameState.resolving_spell_final_part
  *       ({ spell }) marks the CR 608.2n final part a paused instant or sorcery still owes,
  *       in game_setup and state_update; a v130 peer drops the key and would move the spell
@@ -709,7 +712,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 132 as const;
+export const WIRE_PROTOCOL_VERSION = 133 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {
