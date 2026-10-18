@@ -4915,6 +4915,7 @@ fn static_condition_reads_monarch(condition: &StaticCondition) -> bool {
         | StaticCondition::EnchantedIsFaceDown
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
+        | StaticCondition::FirstCombatPhaseOfTurn
         | StaticCondition::None => false,
     }
 }

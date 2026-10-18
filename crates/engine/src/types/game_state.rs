@@ -31049,6 +31049,7 @@ impl GameState {
         clone.state_revision = 0;
         clone.next_timestamp = 0;
         clone.next_object_id = 0;
+        clone.next_each_source_batch_id = 0;
         clone.next_spell_announcement = 0;
         clone.next_delayed_trigger_token = 0;
         clone.next_delayed_trigger_instance = 0;
@@ -43460,8 +43461,10 @@ mod tests {
         later.state_revision = 99;
         later.next_timestamp = 42;
         later.next_object_id = base.next_object_id + 5;
+        later.next_each_source_batch_id = base.next_each_source_batch_id + 5;
         later.next_return_result_occurrence_id = base.next_return_result_occurrence_id + 5;
 
+        assert!(base.is_loop_comparable() && later.is_loop_comparable());
         assert!(
             loop_states_equal(&base.normalize_for_loop(), &later.normalize_for_loop()),
             "states differing only in volatile counters must confirm as a repeat"
