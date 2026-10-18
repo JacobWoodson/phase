@@ -1851,10 +1851,19 @@ fn handle_replacement_choice_inner(
             // its parked frames plus downstream instructions still must drain
             // through the Priority resume below. Clearing it here orphans the
             // batch (a stub publishes, downstream never runs). Only dead
-            // (unstamped) continuations clear.
-            let active_is_live_batch_tail = state
-                .active_ability_continuation()
-                .is_some_and(|pending| pending.each_source_batch_owner.is_some());
+            // continuations clear.
+            //
+            // CR 615.13 + CR 608.2c (Matt F1): the empty-remainder pause's
+            // ownerless downstream tail is equally live — the pause site
+            // marks it with the batch parent, and the stamped prompt's flush
+            // publishes the batch before it drains. A dead prevented-spell
+            // continuation carries neither a batch stamp nor a batch parent.
+            let active_is_live_batch_tail =
+                state.active_ability_continuation().is_some_and(|pending| {
+                    pending.each_source_batch_owner.is_some()
+                        || pending.parent_kind
+                            == Some(crate::types::ability::EffectKind::EachSourceDealsDamage)
+                });
             if !active_is_live_batch_tail && state.active_ability_continuation().is_some() {
                 let _ = state
                     .clear_active_ability_continuation()

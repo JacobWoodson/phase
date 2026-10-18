@@ -3352,3 +3352,247 @@ fn typed_nested_batch_second_ordering_retains_child_stamp() {
         "every parked record must be consumed by the completion cascade"
     );
 }
+
+/// CR 615.13 + CR 608.2c (Matt F1): the empty-remainder branch of the
+/// batch/downstream boundary. One Bear (1 to P0) with the same genuine
+/// downstream 3: the pause parks NO damage remainder, so the downstream
+/// must park ownerlessly while the prompt carries the batch stamp. The
+/// answered member publishes (P0,1) at its own boundary, then downstream
+/// prevents (P0,3). Hardened Scales discriminates: 2+4=6 counters fixed,
+/// 5 (one 4-application) pre-fix.
+#[test]
+fn typed_single_batch_downstream_instruction_publishes_separate_application() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    stock_libraries(&mut scenario);
+
+    let squire = scenario
+        .add_creature_to_hand_from_oracle(P0, "Selfless Squire", 1, 1, SELFLESS_SQUIRE_TEXT)
+        .with_mana_cost(free_cost())
+        .id();
+    let bear1 = scenario
+        .add_creature(P0, "Bear1", 1, 1)
+        .with_subtypes(vec!["Bear"])
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES_TEXT);
+    let way = add_instant_from_oracle(&mut scenario, P0, "New Way Forward", NEW_WAY_FORWARD_TEXT);
+    let mut runner = scenario.build();
+
+    runner.cast(squire).resolve();
+    runner.cast(way).resolve();
+    runner
+        .act(GameAction::ChooseDamageSource { source: bear1 })
+        .expect("naming Bear1 must be answerable");
+    assert_eq!(
+        runner.state().pending_damage_replacements.len(),
+        2,
+        "reach guard: the Squire ETB shield plus the NWF-Bear1 shield"
+    );
+
+    // Typed root batch: the single Bear deals power to its controller.
+    let batch_def = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::EachSourceDealsDamage {
+            sources: TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Subtype("Bear".to_string()))
+                    .controller(ControllerRef::You),
+            ),
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::BatchSource,
+                },
+            },
+            recipient: EachDamageRecipient::EachController,
+        },
+    );
+    let card_id = CardId(runner.state().next_object_id);
+    let source = create_object(
+        runner.state_mut(),
+        card_id,
+        P0,
+        "Typed Single Batch With Downstream".to_string(),
+        Zone::Stack,
+    );
+    // Genuine downstream instruction, production-parsed: 3 to target player.
+    let downstream_def = parse_oracle_text(
+        "Downstream Burn deals 3 damage to target player.",
+        "Downstream Burn",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    )
+    .abilities
+    .into_iter()
+    .next()
+    .expect("the burn line must parse to one ability");
+    let mut downstream = build_resolved_from_def(&downstream_def, source, P0);
+    downstream.targets = vec![TargetRef::Player(P0)];
+    let mut root = build_resolved_from_def(&batch_def, source, P0);
+    root.sub_ability = Some(Box::new(downstream));
+
+    let life_before = runner.state().players[P0.0 as usize].life;
+    let hand_before = runner
+        .state()
+        .objects
+        .values()
+        .filter(|o| o.controller == P0 && o.zone == Zone::Hand)
+        .count();
+    let mut log: Vec<GameEvent> = Vec::new();
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &root, &mut events, 0)
+        .expect("the typed batch resolves to its pause");
+    log.extend(events);
+    let WaitingFor::ReplacementChoice { candidates, .. } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "the Bear1 event must pause for a CR 616.1 ordering choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        candidates.len(),
+        2,
+        "the Bear1 event must offer both shields as ordering candidates"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .pending_each_source_batches
+            .iter()
+            .map(|frame| frame.tally.iter().map(|entry| entry.amount).sum::<i32>())
+            .collect::<Vec<_>>(),
+        vec![0],
+        "the single-source pause parks one prefix with nothing yet prevented"
+    );
+    let batch_owner = runner.state().pending_each_source_batches[0].owner;
+    assert_ne!(
+        batch_owner, 0,
+        "the parked prefix must carry a minted owner, not the legacy sentinel"
+    );
+    // F1 empty-remainder pin: no damage remainder exists, so the prompt
+    // carries the batch stamp (the answered member is the batch boundary)
+    // while the ONLY parked frame is the ownerless downstream chain.
+    assert_eq!(
+        runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .and_then(|pending| pending.each_source_batch_owner),
+        Some(batch_owner),
+        "the prompt must carry the batch stamp (empty damage remainder)"
+    );
+    let top = runner
+        .state()
+        .active_ability_continuation()
+        .expect("the pause must park the downstream chain as the active frame");
+    assert_eq!(
+        top.each_source_batch_owner, None,
+        "the downstream frame must be ownerless (never stamped with the batch)"
+    );
+    assert!(
+        matches!(&top.chain.effect, Effect::DealDamage { .. }),
+        "the downstream frame must head with the burn node, got {:?}",
+        top.chain.effect
+    );
+    assert!(
+        top.chain.sub_ability.is_none(),
+        "the downstream frame must hold only the downstream chain"
+    );
+
+    // Save/load THROUGH the pause: the stamped prompt, the parked prefix,
+    // and the ownerless downstream frame must survive the round trip.
+    let saved = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+        .expect("the authoritative paused state serializes");
+    let restored: PersistedGameState =
+        serde_json::from_str(&saved).expect("the authoritative paused state deserializes");
+    let mut runner = GameRunner::from_state(
+        restored
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract"),
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "the ordering prompt must survive restore, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .and_then(|pending| pending.each_source_batch_owner),
+        Some(batch_owner),
+        "the prompt stamp must survive authoritative restore verbatim"
+    );
+    assert_eq!(
+        runner.state().pending_each_source_batches[0].owner,
+        batch_owner,
+        "the frame owner must survive authoritative restore verbatim"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .active_ability_continuation()
+            .expect("the downstream frame must survive restore")
+            .each_source_batch_owner,
+        None,
+        "the downstream frame must stay ownerless across restore"
+    );
+
+    // Answer Squire: Bear1's 1 publishes (P0,1) at the answered member's
+    // boundary, then downstream prevents (P0,3) separately.
+    let squire_index = match runner.state().waiting_for.clone() {
+        WaitingFor::ReplacementChoice { candidates, .. } => candidates
+            .iter()
+            .position(|c| c.source_name.contains("Selfless Squire"))
+            .expect("one candidate must be the Squire's ETB shield"),
+        other => panic!("expected the ordering prompt, got {other:?}"),
+    };
+    let result = runner
+        .act(GameAction::ChooseReplacement {
+            index: squire_index,
+        })
+        .expect("the ordering choice must be answerable after restore");
+    log.extend(result.events);
+    runner.advance_until_stack_empty();
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "resolution must complete to a clean priority window, got {:?}",
+        runner.state().waiting_for
+    );
+
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        life_before,
+        "all damage must be prevented (none dealt through)"
+    );
+    assert_eq!(
+        prevented_pairs(&log),
+        vec![(TargetRef::Player(P0), 1), (TargetRef::Player(P0), 3)],
+        "the batch publishes (P0,1) at its own boundary; the downstream \
+         instruction prevents separately as (P0,3) — pre-fix they merge to (P0,4)"
+    );
+    assert_eq!(
+        counters_on(&runner, squire),
+        6,
+        "two triggers of 1/3, each plus 1 from Hardened Scales"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .objects
+            .values()
+            .filter(|o| o.controller == P0 && o.zone == Zone::Hand)
+            .count(),
+        hand_before,
+        "NWF-Bear1's rider must stay silent (its shield prevented nothing): \
+         nothing drawn"
+    );
+    assert!(
+        runner.state().pending_each_source_batches.is_empty(),
+        "every parked record must be consumed by the completion cascade"
+    );
+}

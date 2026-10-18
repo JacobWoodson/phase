@@ -1259,10 +1259,10 @@ fn cast_tail_with_parent_targets(
 /// (full pipeline). The parent's `sub_ability` parks as its OWN ownerless
 /// frame below the stamped remainder (R2-F1 split tails) so downstream
 /// effects fire exactly once, after the batch's own boundary publishes.
-/// Returns whether a tail was parked. A `false` return (fully-prevented
-/// prefix nodes need no stash, no raw tail, no downstream) tells the pause
-/// site to stamp the pending prompt itself: no continuation will ever drain
-/// for this batch, so the replacement-answer hook is its boundary.
+/// Returns whether a DAMAGE tail was parked. A `false` return (no damage
+/// remainder — either nothing at all, or downstream-only per F1) tells the
+/// pause site to stamp the pending prompt itself: the answered member is
+/// this batch's boundary, so the replacement-answer hook publishes it.
 fn stash_each_source_combined_continuation(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -1297,12 +1297,18 @@ fn stash_each_source_combined_continuation(
     if let Some(sub) = ability.sub_ability.as_ref() {
         match head_opt.as_mut() {
             None => {
-                // Nothing to stash — forward sub_ability so downstream fires.
-                return push_each_source_tail_continuation(
+                // CR 615.13 + CR 608.2c (Matt F1): no damage remainder —
+                // park the genuine downstream chain ownerlessly (stamping it
+                // would merge it into this batch's application) and return
+                // false so the pause site stamps the prompt itself: the
+                // answered member is this batch's boundary, and the
+                // answer-time stamp flush publishes it before the ownerless
+                // downstream drains.
+                push_ownerless_tail_continuation(
                     state,
                     Some(Box::new(cast_tail_with_parent_targets(sub, ability))),
-                    owner,
                 );
+                return false;
             }
             Some(_) => {
                 // CR 615.13 + CR 616.1e (R2-F1): split tails — the downstream
