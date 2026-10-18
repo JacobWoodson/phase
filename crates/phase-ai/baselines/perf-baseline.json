@@ -1,7 +1,7 @@
 {
   "schema_version": 6,
-  "git_sha": "7591ea2f664e",
-  "card_data_hash": "0fbc2a6fc9c80531a2e2e02cbfafec9b28807b8b",
+  "git_sha": "4c23c5e10d37",
+  "card_data_hash": "acb701064cab1eb9510b0cc873b3157063a86d7b",
   "base_seed": 2654435769,
   "action_cap": 3000,
   "sample_count": 5,
@@ -57,5 +57,5 @@
     "strict_fast_path_mana_readiness_state_clones": 0,
     "strict_fast_path_state_clones": 868
   },
-  "wall_clock_ms": 70905
+  "wall_clock_ms": 22139
 }
