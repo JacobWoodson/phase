@@ -4457,6 +4457,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Clash
         | Effect::Vote { .. }
         | Effect::SeparateIntoPiles { .. }
+        | Effect::ExileTopCardContest { .. }
         | Effect::Incubate { .. }
         | Effect::TimeTravel
         | Effect::Conjure { .. }

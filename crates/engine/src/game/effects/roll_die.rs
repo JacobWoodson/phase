@@ -12,9 +12,11 @@ use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
-use crate::types::resolution::{DieRollContinuation, PendingDieRoll, PendingDieRollInstruction};
+use crate::types::resolution::{
+    DieRollContinuation, PendingDieRoll, PendingDieRollInstruction, ResolutionFrame,
+};
 
-use super::resolve_ability_chain;
+use super::{resolve_ability_chain_step, ResolutionProgress};
 use crate::game::ability_utils::build_resolved_from_def_with_targets_and_chain_root;
 
 /// CR 706.2: Draw one natural result from the game's seeded RNG — "the number
@@ -195,6 +197,14 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    resolve_step(state, ability, events).map(|_| ())
+}
+
+pub(crate) fn resolve_step(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<ResolutionProgress, EffectError> {
     let (count_expr, sides, results, modifier) = match &ability.effect {
         Effect::RollDie {
             count,
@@ -276,7 +286,7 @@ pub fn resolve(
         state.pending_die_roll_instruction = None;
     }
 
-    execute_roll(state, instruction, sides, proposal, events, Some(ability)).map(|_| ())
+    execute_roll(state, instruction, sides, proposal, events, Some(ability))
 }
 
 /// CR 706.1 + CR 706.6: Carry out a die-roll instruction once its replacement
@@ -286,9 +296,8 @@ pub fn resolve(
 /// resume path (`resume_roll_dice_after_replacement`), so an ordering choice
 /// cannot silently take a different route than an unreplaced roll takes.
 ///
-/// Returns `Ok(Some(wf))` when the instruction suspended — for the CR 706.6
-/// ignore choice, for a results branch's own choice, or because the proposal
-/// itself is still suspended — and `Ok(None)` when it completed.
+/// Returns typed progress for a suspended proposal, ignore choice or results
+/// branch, and `ResolutionProgress::Complete` after the instruction settles.
 fn execute_roll(
     state: &mut GameState,
     instruction: PendingDieRollInstruction,
@@ -296,7 +305,7 @@ fn execute_roll(
     proposal: RollProposal,
     events: &mut Vec<GameEvent>,
     ability: Option<&ResolvedAbility>,
-) -> Result<Option<WaitingFor>, EffectError> {
+) -> Result<ResolutionProgress, EffectError> {
     // CR 706.1: a die roll is defined by its kind ("roll a d20"); a zero-sided
     // die names no distribution, so there is nothing to roll. This is not a
     // rules case but a fail-safe: `sides` reaches here from the proposed event,
@@ -326,9 +335,9 @@ fn execute_roll(
                 source_id: instruction.source_id,
                 subject: None,
             });
-            return Ok(None);
+            return Ok(ResolutionProgress::Complete);
         }
-        RollProposal::Suspended => return Ok(Some(state.waiting_for.clone())),
+        RollProposal::Suspended => return Ok(ResolutionProgress::Waiting),
     };
 
     // CR 706.2: roll every die first, collecting NATURAL results. Nothing is
@@ -424,9 +433,9 @@ fn execute_roll(
         ignorable_indices: outcome.tied,
         ignore_count: picks,
     };
-    state.waiting_for = waiting.clone();
+    state.waiting_for = waiting;
     state.push_die_roll_frame(pending);
-    Ok(Some(waiting))
+    Ok(ResolutionProgress::Waiting)
 }
 
 /// CR 616.1 + CR 706.1: Finish a die-roll instruction whose competing
@@ -445,13 +454,13 @@ pub(crate) fn resume_roll_dice_after_replacement(
     state: &mut GameState,
     event: ProposedEvent,
     events: &mut Vec<GameEvent>,
-) -> Result<Option<WaitingFor>, EffectError> {
+) -> Result<ResolutionProgress, EffectError> {
     let Some(instruction) = state.pending_die_roll_instruction.take() else {
         // No parked instruction: nothing proposed this roll through a path that
         // owns a continuation. Both production origins (`Effect::RollDie` and
         // the CR 703.4g roll-to-visit) park before proposing, so this is only
         // reachable for a foreign/synthetic `RollDice` event.
-        return Ok(None);
+        return Ok(ResolutionProgress::Complete);
     };
     let sides = match &event {
         ProposedEvent::RollDice { sides, .. } => *sides,
@@ -479,7 +488,7 @@ pub(crate) fn resume_roll_dice_after_replacement(
             proposal,
             events,
         );
-        return Ok(None);
+        return Ok(ResolutionProgress::Complete);
     }
 
     // CR 706.4 + CR 608.2: the CR 616.1 ordering choice was an action boundary,
@@ -488,6 +497,18 @@ pub(crate) fn resume_roll_dice_after_replacement(
     state.die_result_this_resolution = instruction.die_result;
 
     execute_roll(state, *instruction, sides, proposal, events, None)
+}
+
+/// CR 706.4 + CR 608.2c: the immediate parent resumes with the completed
+/// aggregate, replacing the partial per-survivor value captured at suspension.
+pub(crate) fn publish_completed_result_to_parent(state: &mut GameState) {
+    let result = state.die_result_this_resolution;
+    if let Some(context) = state
+        .active_ability_continuation_frame_mut()
+        .and_then(|frame| frame.pending.trigger_context.as_mut())
+    {
+        context.die_result = result;
+    }
 }
 
 /// CR 706.3a + CR 608.2c: Continue a die-roll instruction whose results-table
@@ -519,8 +540,8 @@ pub(crate) fn drain_active_die_roll(state: &mut GameState, events: &mut Vec<Game
         return;
     };
 
-    // CR 706.4 + CR 608.2: restore the instruction's die context around the
-    // continuation, exactly as the `SelectDieRolls` handler does.
+    // CR 706.4 + CR 608.2c: restore the instruction context; a completed
+    // aggregate stays live until the parent's later instructions consume it.
     let prev_die_result = state.die_result_this_resolution;
     state.die_result_this_resolution = pending.die_result;
     let ignore_indices = pending.forced_ignored.clone();
@@ -528,10 +549,17 @@ pub(crate) fn drain_active_die_roll(state: &mut GameState, events: &mut Vec<Game
         // Re-suspended on yet another branch choice: the frame re-parked itself
         // with the cursor advanced, so leave the restored context in place for
         // that continuation to read.
-        Ok(Some(_)) => {}
-        Ok(None) | Err(_) => {
-            state.die_result_this_resolution = prev_die_result;
+        Ok(ResolutionProgress::Waiting) => {}
+        Ok(ResolutionProgress::Complete) => {
+            publish_completed_result_to_parent(state);
+            super::drain_pending_continuation(state, events);
+            super::resume_resolution_frames(state, events);
         }
+        Ok(ResolutionProgress::Queued) => {
+            super::drain_pending_continuation(state, events);
+            super::resume_resolution_frames(state, events);
+        }
+        Err(_) => state.die_result_this_resolution = prev_die_result,
     }
 }
 
@@ -548,16 +576,19 @@ pub(crate) fn drain_active_die_roll(state: &mut GameState, events: &mut Vec<Game
 /// only a display mirror, receive no modifier, run no results branch, and
 /// contribute nothing to the aggregate.
 ///
-/// Returns `Ok(Some(wf))` when a results branch re-suspended for another
-/// interactive choice, and `Ok(None)` when the whole instruction completed; the
+/// Returns the branch verdict when its full instruction remains pending,
+/// and Complete when all survivors and their branches have settled; the
 /// caller then drains the continuation back to Priority.
+///
+/// `pub` (not `pub(crate)`): the branch's integration tests drive this
+/// resume boundary directly with staged `PendingDieRoll` fixtures.
 pub fn resume_after_ignore(
     state: &mut GameState,
     pending: PendingDieRoll,
     ignore_indices: Vec<usize>,
     events: &mut Vec<GameEvent>,
     ability: Option<&ResolvedAbility>,
-) -> Result<Option<WaitingFor>, EffectError> {
+) -> Result<ResolutionProgress, EffectError> {
     let PendingDieRoll {
         source_id,
         controller,
@@ -679,7 +710,8 @@ pub fn resume_after_ignore(
                 targets.clone(),
                 chain_root_targets.clone(),
             );
-            resolve_ability_chain(state, &sub, events, 0)?;
+            let child_boundary = state.resolution_stack.capture_child_boundary();
+            let progress = resolve_ability_chain_step(state, &sub, events, 0)?;
 
             // CR 608.2c + CR 706.3a: a branch may itself have paused for a
             // player choice. The instruction is NOT finished — every die after
@@ -691,7 +723,10 @@ pub fn resume_after_ignore(
             // Without the re-park this would abandon the remaining dice: their
             // branches would never run and `die_result_this_resolution` would be
             // left at this single die's value rather than the survivors' total.
-            if super::waits_for_resolution_choice(&state.waiting_for) {
+            if matches!(
+                progress,
+                ResolutionProgress::Queued | ResolutionProgress::Waiting
+            ) {
                 let resumed = PendingDieRoll {
                     source_id,
                     controller,
@@ -723,19 +758,22 @@ pub fn resume_after_ignore(
                     local_target_pins: local_target_pins.clone(),
                     keyed_target_incarnations: keyed_target_incarnations.clone(),
                 };
-                // CR 706.3a: park the owner in the structurally valid slot.
-                // A results-table branch that suspended on its own prompt is
-                // above us, and this frame is an `AfterChild` owner past cursor
-                // 0 — so it must go BELOW that child, never on top of it. The
-                // helper discriminates re-park / push / insert-below; the old
-                // `.is_err()` fallback collapsed the last two and could bury an
-                // active `DirectChoice`.
-                state
-                    .park_die_roll_frame_for_resume(resumed)
-                    .map_err(|error| {
-                        EffectError::InvalidParam(format!("die-roll frame re-park: {error}"))
-                    })?;
-                return Ok(Some(state.waiting_for.clone()));
+                // CR 706.3a + CR 608.2c: the die owner waits outside the
+                // branch's entire child stack, not merely its top frame.
+                if state.resolution_stack.capture_child_boundary() > child_boundary {
+                    state
+                        .resolution_stack
+                        .insert_parent_at_child_boundary(
+                            ResolutionFrame::DieRoll(Box::new(resumed)),
+                            child_boundary,
+                        )
+                        .map_err(|error| {
+                            EffectError::InvalidParam(format!("die-roll frame re-park: {error}"))
+                        })?;
+                } else {
+                    state.push_die_roll_frame(resumed);
+                }
+                return Ok(progress);
             }
         }
     }
@@ -757,7 +795,7 @@ pub fn resume_after_ignore(
         subject: None,
     });
 
-    Ok(None)
+    Ok(ResolutionProgress::Complete)
 }
 
 #[cfg(test)]
@@ -1617,7 +1655,11 @@ mod tests {
         };
         let mut events = Vec::new();
         let waiting = resume_after_ignore(&mut state, pending, vec![0], &mut events, None).unwrap();
-        assert!(waiting.is_none(), "no branches means no suspension");
+        assert_eq!(
+            waiting,
+            ResolutionProgress::Complete,
+            "no branches means no suspension"
+        );
         assert!(
             events.iter().any(|e| matches!(
                 e,
