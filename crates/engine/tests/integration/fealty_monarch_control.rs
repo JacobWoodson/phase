@@ -29,6 +29,7 @@ use engine::game::effects::attach::attach_to;
 use engine::game::layers::{evaluate_layers, flush_layers};
 use engine::game::sba::check_state_based_actions;
 use engine::game::scenario::{GameRunner, GameScenario};
+use engine::types::ability::{ContinuousModification, Designation, Duration, TargetFilter};
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
@@ -99,6 +100,53 @@ fn controller_of(runner: &GameRunner, id: ObjectId) -> PlayerId {
         .get(&id)
         .expect("object present")
         .controller
+}
+
+/// Install a duration-bound monarch-anchored control transient on `target`,
+/// installed by `installer`. Direct installation (mirrors the layers unit
+/// helper): no printed card produces a duration-bound designation transient,
+/// and the R7-F3 finding is about elimination behavior downstream of
+/// installation, not about parsing one. The host doubles as the source so a
+/// survivor always owns it — source departure must never confound the
+/// installer/holder assertions below.
+fn install_designation_control(
+    runner: &mut GameRunner,
+    target: ObjectId,
+    installer: PlayerId,
+) -> u64 {
+    runner
+        .state_mut()
+        .add_transient_continuous_effect(
+            target,
+            installer,
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: target },
+            vec![ContinuousModification::ChangeControllerToDesignation {
+                designation: Designation::Monarch,
+            }],
+            None,
+        )
+        .expect("the designation transient installs")
+}
+
+fn designation_tce_present(runner: &GameRunner, id: u64) -> bool {
+    runner
+        .state()
+        .transient_continuous_effects
+        .iter()
+        .any(|e| e.id == id)
+}
+
+/// Eliminate `who` through state-based actions (0 life), mirroring the
+/// succession tests above.
+fn eliminate_via_sba(runner: &mut GameRunner, who: PlayerId) {
+    runner.state_mut().players[who.0 as usize].life = 0;
+    let mut events = Vec::new();
+    check_state_based_actions(runner.state_mut(), &mut events);
+    assert!(
+        runner.state().players[who.0 as usize].is_eliminated,
+        "reach guard: {who:?} at 0 life must be eliminated"
+    );
 }
 
 /// Row 4 (vacant) + row 2 (effect path): with no monarch the aura moves
@@ -314,5 +362,148 @@ fn fealty_monarch_eliminated_successor_takes_control() {
         controller_of(&runner, host),
         P0,
         "succession moves control with no other game action"
+    );
+}
+
+/// CR 800.4a + CR 611.2a + CR 725.5 (Matt R7-F3): a designation-anchored
+/// control transient gives control to the LIVE holder, not the installer, so
+/// the installer's departure must not end it while the holder survives.
+/// P0 installs the transient on P2's host; monarch P1 holds it. P0 leaves:
+/// the transient survives for its stated duration and P1 keeps the host.
+/// Pre-fix the transient is pruned with its installer and the host reverts
+/// to P2.
+#[test]
+fn designation_control_survives_installer_departure_when_holder_survives() {
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_vanilla(P2, 2, 2);
+    let mut runner = scenario.build();
+
+    let tce = install_designation_control(&mut runner, host, P0);
+    runner.state_mut().monarch = Some(P1);
+    evaluate_layers(runner.state_mut());
+    assert_eq!(
+        controller_of(&runner, host),
+        P1,
+        "reach guard: the monarch holds the host before anyone leaves"
+    );
+
+    eliminate_via_sba(&mut runner, P0);
+    flush_layers(runner.state_mut());
+
+    assert!(
+        designation_tce_present(&runner, tce),
+        "CR 611.2a: the transient lasts its stated duration — the installer's \
+         departure ends only effects giving the LEAVER control"
+    );
+    assert_eq!(
+        controller_of(&runner, host),
+        P1,
+        "the surviving monarch keeps the host with no reinstall"
+    );
+}
+
+/// CR 800.4a + CR 725.4/725.5 (Matt R7-F3, symmetric case): when the HOLDER
+/// leaves, the transient ends even though the installer survives — at
+/// departure it was giving the leaver control. P2 installs the transient on
+/// its own host; monarch P0 holds it. P0 leaves: succession crowns P1, but
+/// the transient is already over, so the host reverts to P2 instead of
+/// jumping to the successor. Pre-fix the transient survives (its installer
+/// lives) and the successor wrongly takes the host.
+#[test]
+fn designation_control_ends_when_holder_leaves_despite_surviving_installer() {
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_vanilla(P2, 2, 2);
+    let mut runner = scenario.build();
+
+    let tce = install_designation_control(&mut runner, host, P2);
+    runner.state_mut().monarch = Some(P0);
+    evaluate_layers(runner.state_mut());
+    assert_eq!(
+        controller_of(&runner, host),
+        P0,
+        "reach guard: the monarch holds the host before anyone leaves"
+    );
+
+    eliminate_via_sba(&mut runner, P0);
+    assert_eq!(
+        runner.state().monarch,
+        Some(P1),
+        "reach guard: CR 725.4 succession must have crowned P1, proving the \
+         test crossed the succession path the prune must see past"
+    );
+    flush_layers(runner.state_mut());
+
+    assert!(
+        !designation_tce_present(&runner, tce),
+        "CR 800.4a: the transient was giving the leaver control, so it ends \
+         with them — it must not jump to the successor"
+    );
+    assert_eq!(
+        controller_of(&runner, host),
+        P2,
+        "the host reverts to its owner once the holder's transient ends"
+    );
+}
+
+/// CR 800.4a (Matt R7-F3 pin): installer and holder are the same leaving
+/// player — the transient ends either way the authority reads it, before
+/// AND after the fix.
+#[test]
+fn designation_control_ends_when_installer_and_holder_leave_together() {
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_vanilla(P2, 2, 2);
+    let mut runner = scenario.build();
+
+    let tce = install_designation_control(&mut runner, host, P0);
+    runner.state_mut().monarch = Some(P0);
+    evaluate_layers(runner.state_mut());
+    assert_eq!(controller_of(&runner, host), P0);
+
+    eliminate_via_sba(&mut runner, P0);
+    flush_layers(runner.state_mut());
+
+    assert!(
+        !designation_tce_present(&runner, tce),
+        "holder and installer both leaving ends the transient under either reading"
+    );
+    assert_eq!(controller_of(&runner, host), P2);
+}
+
+/// CR 800.4a + CR 611.2a + CR 725.5 (Matt R7-F3, vacant case): with no
+/// monarch the transient gives NOBODY control, so no departure ends it — it
+/// persists for its stated duration and a later crowning applies with no
+/// reinstall. P0 installs on P2's host with the throne vacant, then leaves:
+/// the transient survives and control stays at base. Pre-fix the transient
+/// is pruned with its installer.
+#[test]
+fn designation_control_vacancy_survives_installer_departure() {
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_vanilla(P2, 2, 2);
+    let mut runner = scenario.build();
+
+    let tce = install_designation_control(&mut runner, host, P0);
+    runner.state_mut().monarch = None;
+    evaluate_layers(runner.state_mut());
+    assert_eq!(
+        controller_of(&runner, host),
+        P2,
+        "reach guard: CR 725.5 vacant designation leaves control at base"
+    );
+
+    eliminate_via_sba(&mut runner, P0);
+    flush_layers(runner.state_mut());
+
+    assert!(
+        designation_tce_present(&runner, tce),
+        "a vacant transient gives nobody control, so no departure ends it"
+    );
+    assert_eq!(
+        controller_of(&runner, host),
+        P2,
+        "control stays at base while the throne is vacant"
     );
 }

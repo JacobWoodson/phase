@@ -253,6 +253,14 @@ pub fn eliminate_players_simultaneously(
         })
         .flatten();
 
+    // CR 800.4a + CR 725.4 (Matt R7-F3): the designation holder AT DEPARTURE,
+    // captured before any `do_eliminate` runs succession. The control-effect
+    // prune below judges a designation-anchored transient by the recipient it
+    // was actually giving control to — reading the live designation after
+    // succession would see the successor and wrongly keep an effect that was
+    // giving the leaver control.
+    let pre_elimination_monarch = state.monarch;
+
     for &player in players_to_eliminate {
         // Skip if already eliminated (e.g. a teammate eliminated alongside an
         // earlier loser in this same batch).
@@ -283,7 +291,7 @@ pub fn eliminate_players_simultaneously(
     // control and exile anything still under a leaver's control. Runs ONCE over
     // the full `leaving_set` — the retain+sweep scope is what makes a co-leaver's
     // steal of a survivor's object revert instead of being over-exiled.
-    end_control_effects_for_leaving_players(state, &leaving_set, events);
+    end_control_effects_for_leaving_players(state, &leaving_set, pre_elimination_monarch, events);
 
     // CR 800.4a, third and fourth steps, in the rule's own order: "Then, if that
     // player controlled any objects on the stack not represented by cards, those
@@ -873,31 +881,42 @@ fn exile_owned_objects_on_player_left_game(
 fn end_control_effects_for_leaving_players(
     state: &mut GameState,
     leaving_set: &HashSet<PlayerId>,
+    pre_elimination_monarch: Option<PlayerId>,
     events: &mut Vec<GameEvent>,
 ) {
-    use crate::types::ability::ContinuousModification;
+    use crate::types::ability::{ContinuousModification, Designation};
     use crate::types::identifiers::ObjectId;
 
-    // CR 800.4a: any effect giving a LEAVING player control of an object ends.
-    // Prune every single-mod ChangeController TCE controlled by any leaver, over
-    // the FULL leaving_set (symmetric with the sweep below), so a co-leaver's
-    // steal of a survivor's object reverts rather than being over-exiled.
+    // CR 800.4a: any effect giving a LEAVING player control of an object ends,
+    // over the FULL leaving_set (symmetric with the sweep below), so a
+    // co-leaver's steal of a survivor's object reverts rather than being
+    // over-exiled.
     state.transient_continuous_effects.retain(|e| {
-        // CR 800.4a + CR 725.5: a LEAVER-controlled designation-anchored TCE
-        // ends with its controller too — even when the current holder is a
-        // survivor, the EFFECT's controller left the game. Survivor-controlled
-        // designation TCEs survive (re-derived live by the layer pass).
-        !(leaving_set.contains(&e.controller)
-            && (e
-                .modifications
+        // Plain steal: the recipient IS the installer, so a leaver-controlled
+        // ChangeController TCE ends with its controller.
+        let plain_steal_gives_leaver_control = leaving_set.contains(&e.controller)
+            && e.modifications
                 .iter()
-                .any(|m| matches!(m, ContinuousModification::ChangeController))
-                || e.modifications.iter().any(|m| {
-                    matches!(
-                        m,
-                        ContinuousModification::ChangeControllerToDesignation { .. }
-                    )
-                })))
+                .any(|m| matches!(m, ContinuousModification::ChangeController));
+        // CR 800.4a + CR 611.2a + CR 725.5 (Matt R7-F3): a
+        // designation-anchored TCE gives control to the LIVE holder (the layer
+        // arm reads the designation, never `e.controller`), so departure
+        // treatment keys on the holder AT DEPARTURE (captured before
+        // succession), not the installer. A surviving holder — or a vacant
+        // throne, which gives nobody control — keeps the transient for its
+        // stated duration; a leaving holder ends it. Whole-TCE prune, matching
+        // the plain-steal half: one effect, one lifetime. Exhaustive over
+        // `Designation`: a future leaf breaks the build here by design.
+        let designation_gives_leaver_control = e.modifications.iter().any(|m| match m {
+            ContinuousModification::ChangeControllerToDesignation { designation } => {
+                let holder = match designation {
+                    Designation::Monarch => pre_elimination_monarch,
+                };
+                holder.is_some_and(|h| leaving_set.contains(&h))
+            }
+            _ => false,
+        });
+        !(plain_steal_gives_leaver_control || designation_gives_leaver_control)
     });
 
     // CR 613.1b: recompute layers so control reverts to base_controller/owner for
