@@ -215,6 +215,9 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 151: Populated GameObject.bestow_form carries the removed creature subtypes
+ *      as an object instead of a boolean. Old native readers cannot decode it.
+ *      Wire 133 moves with it.
  * 150 — The cast-this-way gains rider's serialized payload is reshaped: the
  *      ExileWithAltCost permission's enters_with_modifications becomes a
  *      PendingEntersModifications object (was a ContinuousModification array) and
@@ -916,7 +919,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 150;
+export const PROTOCOL_VERSION = 151;
 
 
 /**
