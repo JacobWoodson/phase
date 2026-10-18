@@ -3107,8 +3107,7 @@ pub fn resolve_each_source_deals_damage(
     // persisted record — which later republishes the child's amount while
     // the outer application is lost. Top-level and answer-hook nesting are
     // unaffected (no owned frame exists yet, or the child scope is topmost).
-    let prior_batch_owner =
-        std::mem::replace(&mut state.resolving_each_source_batch_owner, Some(batch_id));
+    let prior_batch_owner = state.resolving_each_source_batch_owner.replace(batch_id);
     let result = resolve_each_source_deals_damage_inner(state, ability, events, batch_id);
     state.resolving_each_source_batch_owner = prior_batch_owner;
     // A pause in this invocation (or deeper) pushed above our scope: the
