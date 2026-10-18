@@ -2147,9 +2147,10 @@ fn source_condition_gate_passes(
 /// anchored entry point is guarded exactly like `evaluate_condition` and
 /// `evaluate_condition_with_recipient`. The And/Or/Not recursions deliberately
 /// bypass it by calling `evaluate_condition_inner` — preserving the pre-existing
-/// recursion shape, which never re-entered the gate. The chosen-player gate
-/// below rides the same single entry for the same reason: every public entry
-/// (`evaluate_condition`, `evaluate_condition_with_recipient`, and this one)
+/// recursion shape, which never re-entered the gate. The unanswerable
+/// attack-endpoint gate below rides the same single entry point for the same
+/// reason: every public entry (`evaluate_condition`,
+/// `evaluate_condition_with_recipient`, and this one)
 /// funnels through here, so one check covers the generic conditional-static
 /// path with no per-caller wiring.
 pub(crate) fn evaluate_condition_with_context(
@@ -2160,7 +2161,7 @@ pub(crate) fn evaluate_condition_with_context(
     context: ConditionContext,
 ) -> bool {
     if static_condition_has_unanswerable_designation_anchor(state, condition, context)
-        || condition.has_unanswerable_chosen_player()
+        || condition.has_unanswerable_attack_endpoint()
     {
         return false;
     }

@@ -1174,10 +1174,12 @@ mod tests {
     /// Continuous static gated on a `PlayerAttackedPlayer` with a
     /// resolution-scoped `ChosenPlayer` endpoint — bare or nested under
     /// `Not` — because the layer pipeline has no resolving ability to
-    /// answer it. The same gate with bindable endpoints ships clean.
-    /// Pre-fix the chosen-player shape passes the export.
+    /// answer it. CR 109.4 + CR 115.1 (Matt R7-F2): the same refusal
+    /// covers the target-relative endpoints (`TargetPlayer`/`TargetOpponent`).
+    /// The same gate with bindable endpoints ships clean.
+    /// Pre-fix the target-relative shapes pass the export.
     #[test]
-    fn export_integrity_refuses_chosen_player_attack_gate() {
+    fn export_integrity_refuses_unanswerable_attack_gate() {
         use crate::types::ability::{ControllerRef, StaticCondition, StaticDefinition};
 
         let gate = |attacker: ControllerRef| StaticCondition::Not {
@@ -1194,7 +1196,7 @@ mod tests {
             face
         };
 
-        // REJECT: bare and nested-Not ChosenPlayer gates fail the export no
+        // REJECT: bare and nested-Not unanswerable gates fail the export no
         // matter which parser route built them.
         for (key, name, condition) in [
             (
@@ -1210,6 +1212,16 @@ mod tests {
                 "Nested Chosen Probe",
                 gate(ControllerRef::ChosenPlayer { index: 0 }),
             ),
+            (
+                "target probe",
+                "Target Probe",
+                gate(ControllerRef::TargetPlayer),
+            ),
+            (
+                "target opponent probe",
+                "Target Opponent Probe",
+                gate(ControllerRef::TargetOpponent),
+            ),
         ] {
             let mut faces = HashMap::new();
             faces.insert(key.to_string(), face_with(name, condition));
@@ -1218,15 +1230,16 @@ mod tests {
             let errors = db.export_integrity_errors();
             assert!(
                 errors.iter().any(|e| e.contains(name)),
-                "a ChosenPlayer attack gate must fail the export, got {errors:?}"
+                "an unanswerable attack gate must fail the export, got {errors:?}"
             );
         }
 
         // ACCEPT: the same gate with bindable endpoints ships clean.
+        // `ActivePlayer` reads live game state with no ability context.
         let mut ok_faces = HashMap::new();
         ok_faces.insert(
             "bound probe".to_string(),
-            face_with("Bound Probe", gate(ControllerRef::TargetPlayer)),
+            face_with("Bound Probe", gate(ControllerRef::ActivePlayer)),
         );
         let ok_db = CardDatabase::from_json_str(&serde_json::to_string(&ok_faces).unwrap())
             .expect("parses");

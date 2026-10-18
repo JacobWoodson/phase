@@ -13479,20 +13479,36 @@ impl StaticCondition {
         })
     }
 
-    /// CR 109.4: true when any leaf is a `PlayerAttackedPlayer` whose attacker
-    /// or defender is a resolution-scoped `ChosenPlayer` placeholder. That
-    /// index reads `ResolvedAbility.chosen_players`, which has no answer
-    /// inside the layer pipeline (no resolving ability), so the entry gate
-    /// must refuse the whole condition before `Not` can invert the leaf's
-    /// false value — mirrors `has_unanswerable_designation_anchor` (whole
-    /// tree via `any_leaf`, so nesting under `And`/`Or`/`Not` cannot bypass).
-    pub(crate) fn has_unanswerable_chosen_player(&self) -> bool {
+    /// CR 109.4 + CR 115.1: true when any leaf is a `PlayerAttackedPlayer`
+    /// whose attacker or defender is unanswerable inside the layer pipeline
+    /// (no resolving ability): a resolution-scoped `ChosenPlayer`
+    /// placeholder (reads `ResolvedAbility.chosen_players`), or a
+    /// target-relative `TargetPlayer`/`TargetOpponent` (reads the first
+    /// declared player target — `Undeclared` with no ability). Either way
+    /// the leaf is false for the wrong reason, so the entry gate must refuse
+    /// the whole condition before `Not` can invert it — mirrors
+    /// `has_unanswerable_designation_anchor` (whole tree via `any_leaf`, so
+    /// nesting under `And`/`Or`/`Not` cannot bypass). The refusal covers
+    /// exactly the target-relative pair (see the LEGALITY-SCOPE PAIR note on
+    /// `ControllerRef`); group-tagged (`DeclaredPlayer`) and chain/event
+    /// endpoints fail closed in the layer arm but have no producer for this
+    /// leaf and stay out of the predicate.
+    pub(crate) fn has_unanswerable_attack_endpoint(&self) -> bool {
         self.any_leaf(|leaf| {
             matches!(
                 leaf,
                 StaticCondition::PlayerAttackedPlayer { attacker, defender }
-                    if matches!(attacker, ControllerRef::ChosenPlayer { .. })
-                        || matches!(defender, ControllerRef::ChosenPlayer { .. })
+                    if matches!(
+                        attacker,
+                        ControllerRef::ChosenPlayer { .. }
+                            | ControllerRef::TargetPlayer
+                            | ControllerRef::TargetOpponent
+                    ) || matches!(
+                        defender,
+                        ControllerRef::ChosenPlayer { .. }
+                            | ControllerRef::TargetPlayer
+                            | ControllerRef::TargetOpponent
+                    )
             )
         })
     }
@@ -13645,12 +13661,13 @@ impl StaticCondition {
         self.requires_unavailable_continuation(mode)
             || self
                 .has_unanswerable_designation_anchor(|_, scope| mode.binds_designation_scope(scope))
-            // CR 109.4 (Matt R2-F4): a resolution-scoped `ChosenPlayer`
-            // endpoint has no answer inside the layer pipeline (no resolving
-            // ability), so the runtime entry gate refuses the whole tree —
-            // the admission predicate must refuse it too, or the card ships
-            // reported as supported while its gate is inert.
-            || self.has_unanswerable_chosen_player()
+            // CR 109.4 (Matt R2-F4, widened by R7-F2): a resolution-scoped
+            // `ChosenPlayer` or target-relative endpoint has no answer inside
+            // the layer pipeline (no resolving ability), so the runtime entry
+            // gate refuses the whole tree — the admission predicate must
+            // refuse it too, or the card ships reported as supported while
+            // its gate is inert.
+            || self.has_unanswerable_attack_endpoint()
     }
 
     /// True when this condition (or a Boolean sub-condition of it, at ANY
@@ -45727,8 +45744,12 @@ mod static_condition_traversal_tests {
     /// CR 109.4: a `PlayerAttackedPlayer` leaf naming a resolution-scoped
     /// `ChosenPlayer` on either endpoint is unanswerable in the layer
     /// pipeline — at full nesting depth, like the designation view above.
+    /// CR 109.4 + CR 115.1 (Matt R7-F2): the target-relative endpoints
+    /// (`TargetPlayer`/`TargetOpponent`) are unanswerable too — layer
+    /// evaluation passes no resolving ability, so they read no declared
+    /// target. Pre-fix the target-relative rows are admitted.
     #[test]
-    fn static_condition_chosen_player_view_recurses_to_full_depth() {
+    fn static_condition_unanswerable_attack_endpoint_view_recurses_to_full_depth() {
         use crate::types::ability::ControllerRef;
         for leaf in [
             StaticCondition::PlayerAttackedPlayer {
@@ -45739,19 +45760,34 @@ mod static_condition_traversal_tests {
                 attacker: ControllerRef::You,
                 defender: ControllerRef::ChosenPlayer { index: 1 },
             },
+            StaticCondition::PlayerAttackedPlayer {
+                attacker: ControllerRef::TargetPlayer,
+                defender: ControllerRef::You,
+            },
+            StaticCondition::PlayerAttackedPlayer {
+                attacker: ControllerRef::You,
+                defender: ControllerRef::TargetOpponent,
+            },
+            StaticCondition::PlayerAttackedPlayer {
+                attacker: ControllerRef::TargetOpponent,
+                defender: ControllerRef::TargetPlayer,
+            },
         ] {
             assert!(
-                nested_at_depth(leaf).has_unanswerable_chosen_player(),
-                "a ChosenPlayer endpoint nested under And(Or(Not(..))) must be found"
+                nested_at_depth(leaf).has_unanswerable_attack_endpoint(),
+                "an unanswerable attack endpoint nested under And(Or(Not(..))) must be found"
             );
         }
+        // `ActivePlayer` reads live game state with no ability context, so it
+        // is genuinely layer-resolvable — unlike the target-relative
+        // placeholder this pin used before R7-F2.
         let bindable = nested_at_depth(StaticCondition::PlayerAttackedPlayer {
-            attacker: ControllerRef::TargetPlayer,
+            attacker: ControllerRef::ActivePlayer,
             defender: ControllerRef::You,
         });
         assert!(
-            !bindable.has_unanswerable_chosen_player(),
-            "non-ChosenPlayer endpoints bind fine at any depth and must NOT be rejected"
+            !bindable.has_unanswerable_attack_endpoint(),
+            "layer-resolvable endpoints bind fine at any depth and must NOT be rejected"
         );
     }
 
@@ -45759,34 +45795,42 @@ mod static_condition_traversal_tests {
     /// `PlayerAttackedPlayer` naming a resolution-scoped `ChosenPlayer` —
     /// bare or nested under `Not` — because the layer pipeline has no
     /// resolving ability to answer it (the runtime entry gate refuses the
-    /// whole tree). The same gate with bindable endpoints stays admissible.
-    /// Pre-fix the chosen-player shape is admitted.
+    /// whole tree). CR 109.4 + CR 115.1 (Matt R7-F2): the same refusal
+    /// covers the target-relative endpoints (`TargetPlayer`/`TargetOpponent`),
+    /// bare or nested. The same gate with bindable endpoints stays
+    /// admissible. Pre-fix the target-relative shapes are admitted.
     #[test]
-    fn static_condition_chosen_player_attack_gate_is_unenforceable() {
+    fn static_condition_unanswerable_attack_gate_is_unenforceable() {
         use crate::types::ability::ControllerRef;
         use crate::types::statics::StaticMode;
         let mode = StaticMode::Continuous;
-        for gate in [
-            StaticCondition::PlayerAttackedPlayer {
-                attacker: ControllerRef::ChosenPlayer { index: 0 },
-                defender: ControllerRef::You,
-            },
-            StaticCondition::Not {
-                condition: Box::new(StaticCondition::PlayerAttackedPlayer {
-                    attacker: ControllerRef::ChosenPlayer { index: 0 },
-                    defender: ControllerRef::You,
-                }),
-            },
+        for attacker in [
+            ControllerRef::ChosenPlayer { index: 0 },
+            ControllerRef::TargetPlayer,
+            ControllerRef::TargetOpponent,
         ] {
-            assert!(
-                gate.is_unenforceable_on(&mode),
-                "a ChosenPlayer attack gate (bare or nested under Not) must be \
-                 unenforceable, got admissible: {gate:?}"
-            );
+            for gate in [
+                StaticCondition::PlayerAttackedPlayer {
+                    attacker: attacker.clone(),
+                    defender: ControllerRef::You,
+                },
+                StaticCondition::Not {
+                    condition: Box::new(StaticCondition::PlayerAttackedPlayer {
+                        attacker: attacker.clone(),
+                        defender: ControllerRef::You,
+                    }),
+                },
+            ] {
+                assert!(
+                    gate.is_unenforceable_on(&mode),
+                    "an unanswerable attack gate (bare or nested under Not) must be \
+                     unenforceable, got admissible: {gate:?}"
+                );
+            }
         }
         let bindable = StaticCondition::Not {
             condition: Box::new(StaticCondition::PlayerAttackedPlayer {
-                attacker: ControllerRef::TargetPlayer,
+                attacker: ControllerRef::ActivePlayer,
                 defender: ControllerRef::You,
             }),
         };
