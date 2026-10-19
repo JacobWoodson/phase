@@ -1831,7 +1831,21 @@ pub fn preventing_player_protection_quality(
     player_id: PlayerId,
     source: Option<ObjectId>,
 ) -> Option<crate::types::keywords::MatchedProtectionQuality> {
-    matching_player_protection(
+    all_preventing_player_protection_qualities(state, player_id, source)
+        .into_iter()
+        .next()
+}
+
+/// CR 616.1 (Matt R10-F1): EVERY resolved quality sheltering `player_id`
+/// from `source`, in scan order, deduplicated. Same-quality grants collapse
+/// to one entry (unobservable distinction — both key the same tally entry).
+/// The single-match fns delegate to this enumeration's head.
+pub fn all_preventing_player_protection_qualities(
+    state: &GameState,
+    player_id: PlayerId,
+    source: Option<ObjectId>,
+) -> Vec<crate::types::keywords::MatchedProtectionQuality> {
+    all_matching_player_protections(
         state,
         player_id,
         source.and_then(|id| state.objects.get(&id)),
@@ -1847,17 +1861,33 @@ fn matching_player_protection(
     player_id: PlayerId,
     source: Option<&crate::game::game_object::GameObject>,
 ) -> Option<crate::types::keywords::MatchedProtectionQuality> {
+    all_matching_player_protections(state, player_id, source)
+        .into_iter()
+        .next()
+}
+
+/// Collecting authority behind the single-match fns: every resolved
+/// quality, `Everything` first, then granting statics in scan order,
+/// deduplicated.
+fn all_matching_player_protections(
+    state: &GameState,
+    player_id: PlayerId,
+    source: Option<&crate::game::game_object::GameObject>,
+) -> Vec<crate::types::keywords::MatchedProtectionQuality> {
     use crate::game::keywords::matching_card_type_quality;
     use crate::types::ability::ControllerRef;
     use crate::types::keywords::{
         MatchedProtectionQuality, ProtectionPlayerScope, ProtectionTarget,
     };
 
+    let mut out = Vec::new();
     // CR 702.16j: protection from everything covers every source.
     if player_has_protection_from_everything(state, player_id) {
-        return Some(MatchedProtectionQuality::Everything);
+        out.push(MatchedProtectionQuality::Everything);
     }
-    let source_obj = source?;
+    let Some(source_obj) = source else {
+        return out;
+    };
     let context = StaticCheckContext {
         player_id: Some(player_id),
         ..Default::default()
@@ -1925,11 +1955,13 @@ fn matching_player_protection(
                 | ProtectionTarget::Filter(_) => None,
             };
             if let Some(quality) = matched {
-                return Some(quality);
+                if !out.contains(&quality) {
+                    out.push(quality);
+                }
             }
         }
     }
-    None
+    out
 }
 
 /// Allocation-free equivalent of `check_static_ability` for

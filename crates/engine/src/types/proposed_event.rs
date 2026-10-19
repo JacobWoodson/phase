@@ -245,6 +245,20 @@ impl AppliedReplacementKey {
     }
 
     pub fn for_event(event: &ProposedEvent, id: ReplacementId) -> Self {
+        // CR 616.1 (Matt R10-F1): protection virtual candidates key by
+        // their quality (pure unpack — no state needed, so the applied-set
+        // path stays total). Foreign rids in the source range, or a minor
+        // that overflows u64 (32-bit targets only; never our own writes),
+        // fall through to the opaque object key, contained.
+        if let Some(discriminant) = id.source.protection_source_discriminant() {
+            if let Ok(minor) = u64::try_from(id.index) {
+                if let Some(quality) =
+                    MatchedProtectionQuality::from_replacement_parts(discriminant, minor)
+                {
+                    return Self::Protection { quality };
+                }
+            }
+        }
         if id.source != ObjectId(0) {
             return Self::object(id.source, id.index);
         }

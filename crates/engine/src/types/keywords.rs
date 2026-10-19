@@ -706,6 +706,83 @@ impl MatchedProtectionQuality {
             ),
         }
     }
+
+    /// CR 616.1 (Matt R10-F1): the virtual-candidate rid parts for this
+    /// quality — the variant discriminant (selects one of the nine
+    /// `PROTECTION_REPLACEMENT_SOURCE_*` sentinels) plus the minor word
+    /// (rides whole in the rid index). Shares the ordinal table with
+    /// [`sort_words`](Self::sort_words) so the two can never disagree.
+    pub fn replacement_rid_parts(self) -> (u8, u64) {
+        let (minor, discriminant) = self.sort_words();
+        (discriminant, minor)
+    }
+
+    /// CR 616.1 (Matt R10-F1): inverse of
+    /// [`replacement_rid_parts`](Self::replacement_rid_parts). Total over
+    /// packed values but partial over arbitrary input: unknown discriminants
+    /// or out-of-range minor ordinals (only reachable from corrupt or
+    /// foreign rids, never our own writes) return `None` so callers can fail
+    /// contained. Explicit matches, never `as` casts — rids persist in
+    /// pause records, so the codec must be build-stable.
+    pub fn from_replacement_parts(discriminant: u8, minor: u64) -> Option<Self> {
+        match discriminant {
+            0 => match minor {
+                0 => Some(MatchedProtectionQuality::Color(ManaColor::White)),
+                1 => Some(MatchedProtectionQuality::Color(ManaColor::Blue)),
+                2 => Some(MatchedProtectionQuality::Color(ManaColor::Black)),
+                3 => Some(MatchedProtectionQuality::Color(ManaColor::Red)),
+                4 => Some(MatchedProtectionQuality::Color(ManaColor::Green)),
+                _ => None,
+            },
+            1 => match minor {
+                0 => Some(MatchedProtectionQuality::CardType(CoreType::Artifact)),
+                1 => Some(MatchedProtectionQuality::CardType(CoreType::Creature)),
+                2 => Some(MatchedProtectionQuality::CardType(CoreType::Enchantment)),
+                3 => Some(MatchedProtectionQuality::CardType(CoreType::Instant)),
+                4 => Some(MatchedProtectionQuality::CardType(CoreType::Land)),
+                5 => Some(MatchedProtectionQuality::CardType(CoreType::Planeswalker)),
+                6 => Some(MatchedProtectionQuality::CardType(CoreType::Sorcery)),
+                7 => Some(MatchedProtectionQuality::CardType(CoreType::Tribal)),
+                8 => Some(MatchedProtectionQuality::CardType(CoreType::Battle)),
+                9 => Some(MatchedProtectionQuality::CardType(CoreType::Kindred)),
+                10 => Some(MatchedProtectionQuality::CardType(CoreType::Dungeon)),
+                11 => Some(MatchedProtectionQuality::CardType(CoreType::Plane)),
+                12 => Some(MatchedProtectionQuality::CardType(CoreType::Phenomenon)),
+                13 => Some(MatchedProtectionQuality::CardType(CoreType::Scheme)),
+                14 => Some(MatchedProtectionQuality::CardType(CoreType::Conspiracy)),
+                _ => None,
+            },
+            2 => Some(MatchedProtectionQuality::CardSubtype(minor)),
+            3 => match minor {
+                0 => Some(MatchedProtectionQuality::Colorlessness(
+                    ProtectionColorlessness::Colorless,
+                )),
+                1 => Some(MatchedProtectionQuality::Colorlessness(
+                    ProtectionColorlessness::Monocolored,
+                )),
+                2 => Some(MatchedProtectionQuality::Colorlessness(
+                    ProtectionColorlessness::Multicolored,
+                )),
+                _ => None,
+            },
+            4 if minor == 0 => Some(MatchedProtectionQuality::Multicolored),
+            5 => u8::try_from(minor)
+                .ok()
+                .map(|id| MatchedProtectionQuality::Player(PlayerId(id))),
+            6 if minor == 0 => Some(MatchedProtectionQuality::Everything),
+            7 => Some(MatchedProtectionQuality::Filter(minor)),
+            8 => match minor {
+                0 => Some(MatchedProtectionQuality::FromPlayer(
+                    ProtectionPlayerScope::Opponent,
+                )),
+                1 => Some(MatchedProtectionQuality::FromPlayer(
+                    ProtectionPlayerScope::You,
+                )),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
 }
 
 /// CR 702.21a: Ward cost — what the targeting player must pay.
@@ -4856,6 +4933,49 @@ mod tests {
             parse_protection_target("mana value 3 or less from sources"),
             ProtectionTarget::CardType("mana value 3 or less from sources".to_string())
         );
+    }
+
+    /// CR 616.1 (Matt R10-F1): the rid codec is lossless on every variant
+    /// (fingerprints ride whole) and fails contained on foreign input, so
+    /// virtual-candidate rids survive pause records without a state lookup.
+    #[test]
+    fn matched_protection_quality_rid_codec_round_trips() {
+        for quality in [
+            MatchedProtectionQuality::Color(ManaColor::Red),
+            MatchedProtectionQuality::Color(ManaColor::Green),
+            MatchedProtectionQuality::CardType(CoreType::Artifact),
+            MatchedProtectionQuality::CardType(CoreType::Conspiracy),
+            MatchedProtectionQuality::CardSubtype(0),
+            MatchedProtectionQuality::CardSubtype(u64::MAX),
+            MatchedProtectionQuality::Colorlessness(ProtectionColorlessness::Multicolored),
+            MatchedProtectionQuality::Multicolored,
+            MatchedProtectionQuality::Player(PlayerId(0)),
+            MatchedProtectionQuality::Player(PlayerId(7)),
+            MatchedProtectionQuality::Everything,
+            MatchedProtectionQuality::Filter(1),
+            MatchedProtectionQuality::Filter(u64::MAX),
+            MatchedProtectionQuality::FromPlayer(ProtectionPlayerScope::Opponent),
+            MatchedProtectionQuality::FromPlayer(ProtectionPlayerScope::You),
+        ] {
+            let (discriminant, minor) = quality.replacement_rid_parts();
+            assert_eq!(
+                MatchedProtectionQuality::from_replacement_parts(discriminant, minor),
+                Some(quality),
+                "rid codec must round-trip {quality:?}"
+            );
+        }
+        assert_eq!(MatchedProtectionQuality::from_replacement_parts(9, 0), None);
+        assert_eq!(MatchedProtectionQuality::from_replacement_parts(0, 5), None);
+        assert_eq!(
+            MatchedProtectionQuality::from_replacement_parts(1, 15),
+            None
+        );
+        assert_eq!(MatchedProtectionQuality::from_replacement_parts(4, 1), None);
+        assert_eq!(
+            MatchedProtectionQuality::from_replacement_parts(5, 256),
+            None
+        );
+        assert_eq!(MatchedProtectionQuality::from_replacement_parts(8, 2), None);
     }
 
     #[test]

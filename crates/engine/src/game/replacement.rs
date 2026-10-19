@@ -30,7 +30,10 @@ use crate::types::game_state::{
     ReplacementChoiceKind, ReplacementIndexEntry, ResidentDrainPolicy, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
-use crate::types::mana::{StepEndManaAction, UnitDisposition};
+use crate::types::keywords::{
+    MatchedProtectionQuality, ProtectionColorlessness, ProtectionPlayerScope,
+};
+use crate::types::mana::{ManaColor, StepEndManaAction, UnitDisposition};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
     AppliedReplacementKey, BoundSearchFoundCandidate, BoundSearchFoundDisposition,
@@ -1692,6 +1695,16 @@ fn replacement_choice_label_for_rid(state: &GameState, rid: ReplacementId) -> St
             None => "Dredge: mill and return this card from graveyard to hand instead of drawing"
                 .to_string(),
         };
+    }
+    // CR 616.1 (Matt R10-F1): a virtual protection candidate has no
+    // object-carried definition to describe it — the label is rebuilt from
+    // the quality on the rid alone, so co-firing qualities read distinctly
+    // in a CR 616.1 ordering prompt.
+    if let Some(quality) = protection_quality_from_rid(rid) {
+        return format!(
+            "Prevent damage with {}",
+            protection_quality_label_tail(quality)
+        );
     }
     match shield_counter_replacement_kind(rid) {
         Some(ShieldCounterReplacementKind::Destroy) => "Remove a shield counter".to_string(),
@@ -3554,6 +3567,55 @@ fn apply_shield_counter_replacement(
             }
         }
         (_, other) => Ok(other),
+    }
+}
+
+/// CR 702.16e + CR 615.1 (Matt R10-F1): apply one virtual protection
+/// candidate. Protection prevents ALL remaining damage from a matching
+/// source — the quality on the rid only records WHICH protection the
+/// affected player ordered first, never a partial amount. Publication
+/// mirrors the gate's direct-claim path exactly
+/// (`emit_or_accumulate_protection_prevention`: accumulate in a live batch,
+/// else emit `DamagePrevented`; no `last_effect_count` stamp — protection
+/// carries no riders), so post-choice application is indistinguishable from
+/// a single-quality direct claim. The candidate id is already recorded in
+/// `applied` by the pipeline's `mark_applied(rid)` before this applier runs
+/// (`for_event`-keyed, so the key is `Protection { quality }`).
+// clippy::result_large_err: see `apply_shield_counter_replacement` — the Err
+// arm carries an inherent `ProposedEvent` from the shared replacement pipeline.
+#[allow(clippy::result_large_err)]
+fn apply_protection_replacement(
+    state: &mut GameState,
+    event: ProposedEvent,
+    _rid: ReplacementId,
+    quality: MatchedProtectionQuality,
+    events: &mut Vec<GameEvent>,
+) -> Result<ProposedEvent, ApplyResult> {
+    match event {
+        ProposedEvent::Damage {
+            source_id,
+            target,
+            amount,
+            is_combat,
+            applied,
+        } => {
+            // CR 120.8: a 0-damage event is not damage at all — no
+            // `DamagePrevented`, no consumption, pass through unmodified.
+            if amount == 0 {
+                return Ok(ProposedEvent::Damage {
+                    source_id,
+                    target,
+                    amount,
+                    is_combat,
+                    applied,
+                });
+            }
+            crate::game::effects::deal_damage::emit_or_accumulate_protection_prevention(
+                state, source_id, &target, amount, quality, events,
+            );
+            Err(ApplyResult::Prevented)
+        }
+        other => Ok(other),
     }
 }
 
@@ -8542,6 +8604,83 @@ fn clear_replacement_index_pipeline(state: &mut GameState) {
     state.replacement_index.pipeline_active = false;
 }
 
+/// CR 616.1 (Matt R10-F1): the virtual-candidate rid for one applicable
+/// protection quality. The source selects the quality variant's sentinel;
+/// the index carries the minor word. Lossless on 64-bit; on 32-bit targets
+/// the low word survives (`as` truncation, deterministic — the engine
+/// builds 64-bit only, so this is documentation, not a live path).
+fn protection_replacement_id(quality: MatchedProtectionQuality) -> ReplacementId {
+    use crate::types::identifiers::PROTECTION_REPLACEMENT_SOURCE_BASE;
+    let (discriminant, minor) = quality.replacement_rid_parts();
+    ReplacementId {
+        source: ObjectId(PROTECTION_REPLACEMENT_SOURCE_BASE + u64::from(discriminant)),
+        index: minor as usize,
+    }
+}
+
+/// CR 616.1 (Matt R10-F1): the quality named by a protection
+/// virtual-candidate rid, or `None` when `rid` is not one (or names a
+/// foreign quality — never our own writes; callers fail contained).
+fn protection_quality_from_rid(rid: ReplacementId) -> Option<MatchedProtectionQuality> {
+    let discriminant = rid.source.protection_source_discriminant()?;
+    let minor = u64::try_from(rid.index).ok()?;
+    MatchedProtectionQuality::from_replacement_parts(discriminant, minor)
+}
+
+/// CR 616.1 (Matt R10-F1): English tail for a protection candidate label,
+/// rendered from the rid alone (no state, no event). Exact for the seven
+/// denotable variants; the two fingerprint variants name their class plus
+/// the low 32 hash bits so overlapping members still read distinctly.
+fn protection_quality_label_tail(quality: MatchedProtectionQuality) -> String {
+    match quality {
+        MatchedProtectionQuality::Color(color) => {
+            let name = match color {
+                ManaColor::White => "White",
+                ManaColor::Blue => "Blue",
+                ManaColor::Black => "Black",
+                ManaColor::Red => "Red",
+                ManaColor::Green => "Green",
+            };
+            format!("protection from {name}")
+        }
+        MatchedProtectionQuality::CardType(core) => {
+            // Matched card-type qualities are always one of the seven the
+            // matcher accepts; the fallback is unreachable from our own rids.
+            let name = core.protection_quality_str().unwrap_or("card");
+            format!("protection from {name}")
+        }
+        MatchedProtectionQuality::CardSubtype(fingerprint) => {
+            format!(
+                "protection from a creature subtype #{:08x}",
+                fingerprint as u32
+            )
+        }
+        MatchedProtectionQuality::Colorlessness(colorlessness) => {
+            let name = match colorlessness {
+                ProtectionColorlessness::Colorless => "colorless",
+                ProtectionColorlessness::Monocolored => "monocolored",
+                ProtectionColorlessness::Multicolored => "multicolored",
+            };
+            format!("protection from {name}")
+        }
+        MatchedProtectionQuality::Multicolored => "protection from multicolored".to_string(),
+        MatchedProtectionQuality::Player(player) => {
+            format!("protection from Player {}", player.0)
+        }
+        MatchedProtectionQuality::Everything => "protection from everything".to_string(),
+        MatchedProtectionQuality::Filter(fingerprint) => {
+            format!(
+                "protection from filtered sources #{:08x}",
+                fingerprint as u32
+            )
+        }
+        MatchedProtectionQuality::FromPlayer(scope) => match scope {
+            ProtectionPlayerScope::Opponent => "protection from opponents".to_string(),
+            ProtectionPlayerScope::You => "protection from your own objects".to_string(),
+        },
+    }
+}
+
 pub fn find_applicable_replacements(
     state: &GameState,
     event: &ProposedEvent,
@@ -8588,6 +8727,53 @@ pub fn find_applicable_replacements(
             }
         }
         _ => {}
+    }
+
+    // CR 616.1 (Matt R10-F1): overlapping protections are virtual
+    // candidates — one rid per applicable quality — so the affected player
+    // orders them against each other (and any shields) instead of the gate's
+    // scan order deciding silently. A separate `if let` (like umbra armor
+    // below), independent of the shield-counter match above, so a damage
+    // event with both exposes every candidate. Drawn iff two-plus apply
+    // (the same predicate the gate uses to propose): single-quality events
+    // never reach here through a gated path. Amount-gated, so a
+    // fully-prevented event draws nothing on re-derive.
+    if let ProposedEvent::Damage {
+        target,
+        amount,
+        source_id,
+        ..
+    } = event
+    {
+        if *amount > 0 {
+            let applicable = match target {
+                TargetRef::Object(object_id) => {
+                    match (state.objects.get(object_id), state.objects.get(source_id)) {
+                        (Some(target_obj), Some(source_obj)) => {
+                            crate::game::keywords::all_preventing_protection_qualities(
+                                target_obj, source_obj,
+                            )
+                        }
+                        _ => Vec::new(),
+                    }
+                }
+                TargetRef::Player(player_id) => {
+                    crate::game::static_abilities::all_preventing_player_protection_qualities(
+                        state,
+                        *player_id,
+                        Some(*source_id),
+                    )
+                }
+            };
+            if applicable.len() >= 2 {
+                for quality in applicable {
+                    let rid = protection_replacement_id(quality);
+                    if !event.already_applied(&rid) {
+                        candidates.push(rid);
+                    }
+                }
+            }
+        }
     }
 
     // CR 903.9b: This is an intrinsic rules-source replacement, not an
@@ -9905,6 +10091,12 @@ fn apply_single_replacement(
         return apply_shield_counter_replacement(state, proposed, rid, kind, events);
     }
 
+    // CR 616.1 (Matt R10-F1): a virtual protection candidate applies its
+    // recorded quality — total prevention of the remaining damage.
+    if let Some(quality) = protection_quality_from_rid(rid) {
+        return apply_protection_replacement(state, proposed, rid, quality, events);
+    }
+
     if is_commander_hand_or_library_return_replacement(rid) {
         return apply_commander_hand_or_library_return_replacement(
             state, proposed, rid, branch, events,
@@ -11023,6 +11215,17 @@ fn candidate_materiality(
             }
         }
         None => {}
+    }
+
+    // CR 616.1 (Matt R10-F1): a virtual protection candidate prevents all
+    // damage — a Damage-field write exactly like the shield-counter damage
+    // replacement, non-commuting with it and with sibling qualities, so any
+    // overlap forces the CR 616.1e player ordering choice.
+    if protection_quality_from_rid(rid).is_some() {
+        return CandidateMateriality::Writes {
+            field: EventField::Damage,
+            commute: CommuteClass::NonCommuting,
+        };
     }
 
     // CR 122.1h + CR 616.1: finality redirects the graveyard move to exile — an

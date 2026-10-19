@@ -4379,6 +4379,242 @@ fn disjoint_protections_publish_separate_applications() {
     );
 }
 
+/// Shared setup for the R10-F1 overlap controls: a seeded Squire + Scales,
+/// two non-creature Emissary-pattern grantors (artifact / creature choices),
+/// a 1/1 Artifact Creature ("Brute"), and a free Rakdos Charm in hand. The
+/// batch iterates Squire first, Brute last; only the Brute's event overlaps
+/// two protections, so only it can pause for the CR 616.1 choice.
+fn overlap_setup() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    stock_libraries(&mut scenario);
+
+    let squire = add_squire(&mut scenario, P0);
+    let brute = scenario.add_creature(P0, "Brute", 1, 1).id();
+    scenario.add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES_TEXT);
+    let charm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Rakdos Charm", true, RAKDOS_CHARM_TEXT)
+        .with_mana_cost(free_cost())
+        .id();
+    let mut runner = scenario.build();
+
+    // Non-creature grantors (excluded from the charm's creature iteration),
+    // following the established post-build pattern: stats, base copies, flush.
+    {
+        let grantor_a = {
+            let card_id = CardId(runner.state().next_object_id);
+            engine::game::zones::create_object(
+                runner.state_mut(),
+                card_id,
+                P0,
+                "Emissary Artifact".to_string(),
+                Zone::Battlefield,
+            )
+        };
+        let grantor_b = {
+            let card_id = CardId(runner.state().next_object_id);
+            engine::game::zones::create_object(
+                runner.state_mut(),
+                card_id,
+                P0,
+                "Emissary Creature".to_string(),
+                Zone::Battlefield,
+            )
+        };
+        let state = runner.state_mut();
+        for (grantor, choice) in [
+            (grantor_a, CoreType::Artifact),
+            (grantor_b, CoreType::Creature),
+        ] {
+            let def = StaticDefinition::new(StaticMode::PlayerProtection(
+                ProtectionTarget::ChosenCardType,
+            ))
+            .affected(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            ));
+            let obj = state.objects.get_mut(&grantor).unwrap();
+            obj.static_definitions.push(def.clone());
+            std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def);
+            obj.chosen_attributes
+                .push(ChosenAttribute::CardType(choice));
+        }
+        let obj = state.objects.get_mut(&brute).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.base_card_types = obj.card_types.clone();
+    }
+    engine::game::layers::flush_layers(runner.state_mut());
+
+    assert!(
+        engine::game::static_abilities::player_protection_from(runner.state(), P0, Some(brute)),
+        "reach guard: P0 must have protection from the artifact source"
+    );
+    assert!(
+        engine::game::static_abilities::player_protection_from(runner.state(), P0, Some(squire)),
+        "reach guard: P0 must have protection from the plain-creature source"
+    );
+    (runner, squire, brute, charm)
+}
+
+/// CR 616.1 + CR 615.13 (Matt R10-F1): overlapping protections prompt the
+/// affected player, and the chosen application survives the batch
+/// continuation. P0 has artifact + creature Emissary-pattern protection;
+/// Rakdos Charm mode 2 makes the Squire (creature only) and the Brute
+/// (artifact AND creature) each deal 1 to P0. The Brute's event must pause
+/// for a 616.1 choice offering both qualities; answering creature-protection
+/// merges both preventions into ONE (P0,2) application: one Squire trigger
+/// for 2, +1 from Scales = 3 counters. Pre-fix no prompt exists (first-match
+/// claims artifact) and the pause assertion fails.
+#[test]
+fn overlapping_protections_prompt_and_merge_on_creature_answer() {
+    let (mut runner, squire, brute, charm) = overlap_setup();
+    let battlefield_creatures: Vec<ObjectId> = runner
+        .state()
+        .battlefield
+        .iter()
+        .filter(|id| runner.state().objects[id].power.is_some())
+        .copied()
+        .collect();
+    assert_eq!(
+        battlefield_creatures,
+        vec![squire, brute],
+        "reach guard: the batch must iterate Squire first, Brute last"
+    );
+
+    let life_before = runner.state().players[P0.0 as usize].life;
+    let mut log: Vec<GameEvent> = Vec::new();
+    let outcome = runner.cast(charm).modes(&[2]).resolve();
+    log.extend(outcome.events().iter().cloned());
+    let WaitingFor::ReplacementChoice { candidates, .. } = outcome.final_waiting_for() else {
+        panic!(
+            "the Brute event must pause for a CR 616.1 protection choice, got {:?}",
+            outcome.final_waiting_for()
+        );
+    };
+    assert_eq!(
+        candidates.len(),
+        2,
+        "the Brute event must offer both protections, got {:?}",
+        candidates
+            .iter()
+            .map(|c| &c.description)
+            .collect::<Vec<_>>()
+    );
+    let creature_index = candidates
+        .iter()
+        .position(|c| c.description.contains("from creature"))
+        .expect("one candidate must be creature-protection");
+    assert!(
+        candidates
+            .iter()
+            .any(|c| c.description.contains("from artifact")),
+        "the other candidate must be artifact-protection, got {:?}",
+        candidates
+            .iter()
+            .map(|c| &c.description)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        runner.state().pending_each_source_batches.len(),
+        1,
+        "the pause must park exactly one batch record"
+    );
+    assert_eq!(
+        runner.state().pending_each_source_batches[0]
+            .tally
+            .iter()
+            .map(|entry| entry.amount)
+            .sum::<i32>(),
+        1,
+        "the parked prefix must hold the Squire's 1 prevented"
+    );
+
+    let result = runner
+        .act(GameAction::ChooseReplacement {
+            index: creature_index,
+        })
+        .expect("the protection choice must be answerable");
+    log.extend(result.events);
+    runner.advance_until_stack_empty();
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "resolution must complete to a clean priority window, got {:?}",
+        runner.state().waiting_for
+    );
+
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        life_before,
+        "both 1s must be prevented (none dealt through)"
+    );
+    assert_eq!(
+        prevented_pairs(&log),
+        vec![(TargetRef::Player(P0), 2)],
+        "the chosen creature-protection must publish ONE (P0,2) application"
+    );
+    assert_eq!(
+        counters_on(&runner, squire),
+        3,
+        "one trigger for 2 damage, plus 1 from Hardened Scales"
+    );
+    assert!(
+        runner.state().pending_each_source_batches.is_empty(),
+        "the pause record must be consumed by the completion cascade"
+    );
+}
+
+/// CR 616.1 + CR 615.13 (Matt R10-F1, second leg): same overlap, answering
+/// artifact-protection instead. The Brute's 1 lands under the artifact key
+/// while the Squire's 1 stays under creature: TWO (P0,1) applications, two
+/// Squire triggers, (1+1)*2 = 4 counters. Together with the merge leg this
+/// proves the answer is honored rather than the choice being decorative.
+#[test]
+fn overlapping_protections_split_on_artifact_answer() {
+    let (mut runner, squire, _brute, charm) = overlap_setup();
+
+    let life_before = runner.state().players[P0.0 as usize].life;
+    let mut log: Vec<GameEvent> = Vec::new();
+    let outcome = runner.cast(charm).modes(&[2]).resolve();
+    log.extend(outcome.events().iter().cloned());
+    let WaitingFor::ReplacementChoice { candidates, .. } = outcome.final_waiting_for() else {
+        panic!(
+            "the Brute event must pause for a CR 616.1 protection choice, got {:?}",
+            outcome.final_waiting_for()
+        );
+    };
+    let artifact_index = candidates
+        .iter()
+        .position(|c| c.description.contains("from artifact"))
+        .expect("one candidate must be artifact-protection");
+
+    let result = runner
+        .act(GameAction::ChooseReplacement {
+            index: artifact_index,
+        })
+        .expect("the protection choice must be answerable");
+    log.extend(result.events);
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        life_before,
+        "both 1s must be prevented (none dealt through)"
+    );
+    assert_eq!(
+        prevented_pairs(&log),
+        vec![(TargetRef::Player(P0), 1), (TargetRef::Player(P0), 1)],
+        "the chosen artifact-protection must split off its own (P0,1)"
+    );
+    assert_eq!(
+        counters_on(&runner, squire),
+        4,
+        "two triggers for 1 each, plus 1 per trigger from Hardened Scales"
+    );
+    assert!(
+        runner.state().pending_each_source_batches.is_empty(),
+        "the pause record must be consumed by the completion cascade"
+    );
+}
+
 /// CR 702.7 + CR 510.4 (Matt R7-F1 pin): the aggregate fix must not merge the
 /// two combat damage steps. A first-striker and a regular 1/1 attack into the
 /// same protection; each step is its own simultaneity, so prevention publishes

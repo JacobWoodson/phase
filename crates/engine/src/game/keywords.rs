@@ -603,14 +603,33 @@ pub fn preventing_protection_quality(
     target: &GameObject,
     source: &GameObject,
 ) -> Option<MatchedProtectionQuality> {
+    all_preventing_protection_qualities(target, source)
+        .into_iter()
+        .next()
+}
+
+/// CR 616.1 (Matt R10-F1): EVERY resolved quality whose protection ability
+/// on `target` prevents interaction from `source`, in keyword order,
+/// deduplicated. Same-quality abilities from different grantors collapse to
+/// one entry: the distinction is unobservable (both key the same tally
+/// entry), so prompting on it would violate materiality. The single-match
+/// fns delegate to this enumeration's head, so one match can never disagree
+/// with the count.
+pub fn all_preventing_protection_qualities(
+    target: &GameObject,
+    source: &GameObject,
+) -> Vec<MatchedProtectionQuality> {
+    let mut out = Vec::new();
     for kw in &target.keywords {
         if let Keyword::Protection(ref pt) = kw {
             if let Some(quality) = matching_protection_quality(pt, target, source) {
-                return Some(quality);
+                if !out.contains(&quality) {
+                    out.push(quality);
+                }
             }
         }
     }
-    None
+    out
 }
 
 pub fn source_matches_protection_target(

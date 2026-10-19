@@ -542,14 +542,26 @@ pub(crate) fn pre_replacement_damage_gate(
         }
     }
 
+    // CR 616.1 (Matt R10-F1): overlapping protections (two-plus applicable
+    // qualities) route through the replacement-candidate/choice authority —
+    // EXCEPT in combat. Combat damage cannot pause for a replacement
+    // ordering choice (`replace_combat_damage_batch` skips on `NeedsChoice`;
+    // `apply_damage_to_target` sets no prompt for combat), and batch-adjacent
+    // choice is out of scope engine-wide (the CR 615.7 Next(N) path is
+    // explicitly not modeled), so combat keeps first-match claiming for any
+    // overlap while every pausable path prompts the affected player. A single
+    // applicable quality claims directly everywhere: no choice exists.
     // CR 702.16b + CR 702.16e: Protection prevents damage from sources with the matching quality.
     if let TargetRef::Object(target_obj_id) = target {
         if let (Some(target_obj), Some(source_obj)) = (
             state.objects.get(target_obj_id),
             state.objects.get(&ctx.source_id),
         ) {
-            if let Some(quality) = keywords::preventing_protection_quality(target_obj, source_obj) {
-                return DamageGateOutcome::Protected(amount, quality);
+            let applicable = keywords::all_preventing_protection_qualities(target_obj, source_obj);
+            if let Some(first) = applicable.first().copied() {
+                if is_combat || applicable.len() == 1 {
+                    return DamageGateOutcome::Protected(amount, first);
+                }
             }
         }
     }
@@ -558,12 +570,15 @@ pub(crate) fn pre_replacement_damage_gate(
     // protection from the damage source] is prevented." Mirror the object-
     // protection gate above for player targets.
     if let TargetRef::Player(player_id) = target {
-        if let Some(quality) = crate::game::static_abilities::preventing_player_protection_quality(
+        let applicable = crate::game::static_abilities::all_preventing_player_protection_qualities(
             state,
             *player_id,
             Some(ctx.source_id),
-        ) {
-            return DamageGateOutcome::Protected(amount, quality);
+        );
+        if let Some(first) = applicable.first().copied() {
+            if is_combat || applicable.len() == 1 {
+                return DamageGateOutcome::Protected(amount, first);
+            }
         }
     }
 
