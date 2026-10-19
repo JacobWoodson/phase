@@ -9642,6 +9642,14 @@ fn affected_objects_from_events(
         Effect::PumpAll { target, .. } if is_sole_chain_producer(state, ability) => {
             pump::pump_all_affected_objects(state, ability, target)
         }
+        // CR 701.10a + CR 611.2c (Matt R7-F4): doubling establishes the same
+        // mass population a pump does — the resolver selects through the
+        // shared authority, so publish that same population for a following
+        // "They"/"those creatures" consumer. Without this arm the fallback
+        // below harvests only zone changes and the grant binds nothing.
+        Effect::DoublePTAll { target, .. } if is_sole_chain_producer(state, ability) => {
+            pump::pump_all_affected_objects(state, ability, target)
+        }
         // CR 701.15a: the creatures actually goaded.
         Effect::GoadAll { .. } if is_sole_chain_producer(state, ability) => {
             goad::goad_targets(state, ability)
