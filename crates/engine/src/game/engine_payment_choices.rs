@@ -2460,7 +2460,7 @@ pub(super) fn resume_ward_sacrifice_payment(
             for (index, id) in remaining.iter().enumerate() {
                 match crate::game::sacrifice::sacrifice_permanent(state, *id, player, events)? {
                     crate::game::sacrifice::SacrificeOutcome::Complete => {}
-                    // CR 109.5: a mid-payment bar fails the Ward cost instead
+                    // CR 601.2h: a mid-payment bar fails the Ward cost instead
                     // of recording an unsacrificed permanent as paid.
                     crate::game::sacrifice::SacrificeOutcome::Prohibited => {
                         return Err(EngineError::ActionNotAllowed(
@@ -2751,7 +2751,7 @@ pub(super) fn handle_ward_sacrifice_choice(
         for (index, id) in chosen.iter().enumerate() {
             match crate::game::sacrifice::sacrifice_permanent(state, *id, player, events)? {
                 crate::game::sacrifice::SacrificeOutcome::Complete => {}
-                // CR 109.5: a mid-payment bar fails the Ward cost instead
+                // CR 601.2h: a mid-payment bar fails the Ward cost instead
                 // of recording an unsacrificed permanent as paid.
                 crate::game::sacrifice::SacrificeOutcome::Prohibited => {
                     return Err(EngineError::ActionNotAllowed(
@@ -2794,7 +2794,7 @@ pub(super) fn handle_ward_sacrifice_choice(
         // Ward sacrifices into one action (like `handle_sacrifice_for_cost`) — out of scope.
         match crate::game::sacrifice::sacrifice_permanent(state, chosen[0], player, events)? {
             crate::game::sacrifice::SacrificeOutcome::Complete => {}
-            // CR 109.5: a mid-payment bar fails the Ward cost instead
+            // CR 601.2h: a mid-payment bar fails the Ward cost instead
             // of recording an unsacrificed permanent as paid.
             crate::game::sacrifice::SacrificeOutcome::Prohibited => {
                 return Err(EngineError::ActionNotAllowed(
