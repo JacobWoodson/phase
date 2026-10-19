@@ -13603,10 +13603,12 @@ impl StaticCondition {
     /// the whole condition before `Not` can invert it — mirrors
     /// `has_unanswerable_designation_anchor` (whole tree via `any_leaf`, so
     /// nesting under `And`/`Or`/`Not` cannot bypass). The refusal covers
-    /// exactly the target-relative pair (see the LEGALITY-SCOPE PAIR note on
-    /// `ControllerRef`); group-tagged (`DeclaredPlayer`) and chain/event
-    /// endpoints fail closed in the layer arm but have no producer for this
-    /// leaf and stay out of the predicate.
+    /// the resolution-scoped endpoint, the target-relative pair (see the
+    /// LEGALITY-SCOPE PAIR note on `ControllerRef`), and the group-tagged
+    /// endpoint (Matt R9-LOW: `DeclaredPlayer` reads live targeting state,
+    /// so a hand-built leaf naming it would be admitted with no producer to
+    /// answer it); chain/event endpoints fail closed in the layer arm but
+    /// have no producer for this leaf and stay out of the predicate.
     pub(crate) fn has_unanswerable_attack_endpoint(&self) -> bool {
         self.any_leaf(|leaf| {
             matches!(
@@ -13617,11 +13619,13 @@ impl StaticCondition {
                         ControllerRef::ChosenPlayer { .. }
                             | ControllerRef::TargetPlayer
                             | ControllerRef::TargetOpponent
+                            | ControllerRef::DeclaredPlayer { .. }
                     ) || matches!(
                         defender,
                         ControllerRef::ChosenPlayer { .. }
                             | ControllerRef::TargetPlayer
                             | ControllerRef::TargetOpponent
+                            | ControllerRef::DeclaredPlayer { .. }
                     )
             )
         })
@@ -46231,9 +46235,12 @@ mod static_condition_traversal_tests {
     /// (`TargetPlayer`/`TargetOpponent`) are unanswerable too — layer
     /// evaluation passes no resolving ability, so they read no declared
     /// target. Pre-fix the target-relative rows are admitted.
+    /// (Matt R9-LOW): the group-tagged `DeclaredPlayer` endpoint reads live
+    /// targeting state, so it is refused on both endpoints as well — no
+    /// parser emits it today, but a hand-built leaf would be admitted.
     #[test]
     fn static_condition_unanswerable_attack_endpoint_view_recurses_to_full_depth() {
-        use crate::types::ability::ControllerRef;
+        use crate::types::ability::{ChosenGroupId, ControllerRef};
         for leaf in [
             StaticCondition::PlayerAttackedPlayer {
                 attacker: ControllerRef::ChosenPlayer { index: 0 },
@@ -46254,6 +46261,18 @@ mod static_condition_traversal_tests {
             StaticCondition::PlayerAttackedPlayer {
                 attacker: ControllerRef::TargetOpponent,
                 defender: ControllerRef::TargetPlayer,
+            },
+            StaticCondition::PlayerAttackedPlayer {
+                attacker: ControllerRef::DeclaredPlayer {
+                    group: ChosenGroupId::declared_player(0),
+                },
+                defender: ControllerRef::You,
+            },
+            StaticCondition::PlayerAttackedPlayer {
+                attacker: ControllerRef::You,
+                defender: ControllerRef::DeclaredPlayer {
+                    group: ChosenGroupId::declared_player(1),
+                },
             },
         ] {
             assert!(
@@ -46280,17 +46299,22 @@ mod static_condition_traversal_tests {
     /// resolving ability to answer it (the runtime entry gate refuses the
     /// whole tree). CR 109.4 + CR 115.1 (Matt R7-F2): the same refusal
     /// covers the target-relative endpoints (`TargetPlayer`/`TargetOpponent`),
-    /// bare or nested. The same gate with bindable endpoints stays
+    /// bare or nested. (Matt R9-LOW): the group-tagged `DeclaredPlayer`
+    /// endpoint is refused too — it reads live targeting state with no
+    /// producer for this leaf. The same gate with bindable endpoints stays
     /// admissible. Pre-fix the target-relative shapes are admitted.
     #[test]
     fn static_condition_unanswerable_attack_gate_is_unenforceable() {
-        use crate::types::ability::ControllerRef;
+        use crate::types::ability::{ChosenGroupId, ControllerRef};
         use crate::types::statics::StaticMode;
         let mode = StaticMode::Continuous;
         for attacker in [
             ControllerRef::ChosenPlayer { index: 0 },
             ControllerRef::TargetPlayer,
             ControllerRef::TargetOpponent,
+            ControllerRef::DeclaredPlayer {
+                group: ChosenGroupId::declared_player(0),
+            },
         ] {
             for gate in [
                 StaticCondition::PlayerAttackedPlayer {
