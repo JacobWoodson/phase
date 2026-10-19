@@ -13,7 +13,8 @@ use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{
     BestowCost, BlitzCost, EmbalmCost, EmergeCost, EternalizeCost, EvokeCost, FlashbackCost,
-    GiftKind, Keyword, KeywordKind, ProtectionTarget,
+    GiftKind, Keyword, KeywordKind, MatchedProtectionQuality, ProtectionColorlessness,
+    ProtectionPlayerScope, ProtectionTarget,
 };
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
@@ -590,14 +591,26 @@ pub fn has_indestructible(obj: &GameObject) -> bool {
 
 /// CR 702.16b: Returns true if target's protection prevents interaction from source.
 pub fn protection_prevents_from(target: &GameObject, source: &GameObject) -> bool {
+    preventing_protection_quality(target, source).is_some()
+}
+
+/// CR 702.16b + CR 615.13 (Matt R8-F1): the resolved quality of the FIRST
+/// protection ability on `target` that prevents interaction from `source`.
+/// First-match-wins: the damage gate claims each event for this ability, and
+/// the batch tally keys protection prevention by this quality plus the
+/// recipient, so disjoint abilities publish separate applications.
+pub fn preventing_protection_quality(
+    target: &GameObject,
+    source: &GameObject,
+) -> Option<MatchedProtectionQuality> {
     for kw in &target.keywords {
         if let Keyword::Protection(ref pt) = kw {
-            if source_matches_protection_target(pt, target, source) {
-                return true;
+            if let Some(quality) = matching_protection_quality(pt, target, source) {
+                return Some(quality);
             }
         }
     }
-    false
+    None
 }
 
 pub fn source_matches_protection_target(
@@ -605,18 +618,37 @@ pub fn source_matches_protection_target(
     protected: &GameObject,
     source: &GameObject,
 ) -> bool {
+    matching_protection_quality(protection, protected, source).is_some()
+}
+
+/// CR 702.16g + CR 615.13 (Matt R8-F1): the resolved quality when
+/// `protection` matches `source`, or `None` when it does not. This is the
+/// single match authority — the bool matcher above delegates, so a match and
+/// its resolution can never disagree. Every arm resolves match-time choices
+/// (`ChosenColor`/`ChosenCardType` to the chosen value, `ChosenPlayer` to the
+/// chosen player); only statically-scoped `FromPlayer` arms resolve.
+pub fn matching_protection_quality(
+    protection: &ProtectionTarget,
+    protected: &GameObject,
+    source: &GameObject,
+) -> Option<MatchedProtectionQuality> {
     // CR 709.4b: A split source off the stack has the combined colors of both
     // halves; on the stack (the usual protection-source case) it is the chosen
     // half. `effective_colors` no-ops for single-face and on-stack sources.
     let source_colors = source.effective_colors();
     match protection {
-        ProtectionTarget::Color(color) => source_colors.contains(color),
-        ProtectionTarget::CardType(type_name) => source_matches_card_type(source, type_name),
-        ProtectionTarget::Quality(quality) => source_matches_quality(source, quality),
-        ProtectionTarget::Multicolored => source_colors.len() > 1,
+        ProtectionTarget::Color(color) => source_colors
+            .contains(color)
+            .then_some(MatchedProtectionQuality::Color(*color)),
+        ProtectionTarget::CardType(type_name) => matching_card_type_quality(source, type_name),
+        ProtectionTarget::Quality(quality) => matching_colorlessness_quality(source, quality),
+        ProtectionTarget::Multicolored => {
+            (source_colors.len() > 1).then_some(MatchedProtectionQuality::Multicolored)
+        }
         ProtectionTarget::ChosenColor => protected
             .chosen_color()
-            .is_some_and(|color| source_colors.contains(&color)),
+            .filter(|color| source_colors.contains(color))
+            .map(MatchedProtectionQuality::Color),
         // CR 702.16 + CR 205.2: "Protection from the chosen card
         // type" — resolved from the protected permanent's own chosen card type.
         // This arm only fires for objects that themselves carry the choice
@@ -625,22 +657,23 @@ pub fn source_matches_protection_target(
         ProtectionTarget::ChosenCardType => protected
             .chosen_card_type()
             .and_then(|ct| ct.protection_quality_str())
-            .is_some_and(|quality| source_matches_card_type(source, quality)),
+            .and_then(|quality| matching_card_type_quality(source, quality)),
         // CR 702.16k: Resolve "the chosen player" from the protected
         // permanent's persisted choice. Protection covers objects that player
         // controls and objects they own that no other player controls; CR
         // 109.4 + CR 108.4a make controller-or-owner the shared authority.
         ProtectionTarget::ChosenPlayer => protected
             .chosen_player()
-            .is_some_and(|player| source.controller_or_owner() == player),
+            .filter(|player| source.controller_or_owner() == *player)
+            .map(MatchedProtectionQuality::Player),
         // CR 702.16j: "Protection from everything" — protection from each object
         // regardless of the source's characteristic values.
-        ProtectionTarget::Everything => true,
+        ProtectionTarget::Everything => Some(MatchedProtectionQuality::Everything),
         // CR 702.16a + CR 202.3: Filter-based protection — the source matches if
         // it satisfies every FilterProp in the typed filter. Only supports
         // object-intrinsic properties (Cmc, HasColor, PowerLE/GE, etc.) that can
         // be evaluated from the source alone without game state.
-        ProtectionTarget::Filter(filter) => source_matches_protection_filter(source, filter),
+        ProtectionTarget::Filter(filter) => matching_filter_fingerprint(source, filter),
         // CR 702.16k: "Protection from [a player]" — the source matches if it is
         // controlled by the scoped player(s) relative to the protected object's
         // controller, regardless of the source's characteristics. "Each of your
@@ -650,15 +683,34 @@ pub fn source_matches_protection_target(
         // (target/chosen/etc.) fail closed.
         ProtectionTarget::FromPlayer(scope) => match scope {
             crate::types::ability::ControllerRef::Opponent => {
-                source.controller != protected.controller
+                (source.controller != protected.controller).then_some(
+                    MatchedProtectionQuality::FromPlayer(ProtectionPlayerScope::Opponent),
+                )
             }
-            crate::types::ability::ControllerRef::You => source.controller == protected.controller,
-            _ => false,
+            crate::types::ability::ControllerRef::You => {
+                (source.controller == protected.controller).then_some(
+                    MatchedProtectionQuality::FromPlayer(ProtectionPlayerScope::You),
+                )
+            }
+            _ => None,
         },
     }
 }
 
 pub fn source_matches_card_type(source: &GameObject, type_name: &str) -> bool {
+    matching_card_type_quality(source, type_name).is_some()
+}
+
+/// CR 702.16g + CR 615.13 (Matt R8-F1): resolve the card-type quality
+/// `type_name` when it matches `source`. Core-type spellings resolve to the
+/// matched [`CoreType`](crate::types::card_type::CoreType) (case/plural
+/// folded); the creature-subtype fallback resolves to an FNV-1a fingerprint
+/// of the lowercased spelling, so spelling variants split rather than merge.
+/// The bool matcher above delegates, so the table below is the one authority.
+pub fn matching_card_type_quality(
+    source: &GameObject,
+    type_name: &str,
+) -> Option<MatchedProtectionQuality> {
     use crate::types::card_type::CoreType;
 
     let core = &source.card_types.core_types;
@@ -672,7 +724,9 @@ pub fn source_matches_card_type(source: &GameObject, type_name: &str) -> bool {
         (CoreType::Land, "land", "lands"),
     ] {
         if type_name.eq_ignore_ascii_case(singular) || type_name.eq_ignore_ascii_case(plural) {
-            return core.contains(&core_type);
+            return core
+                .contains(&core_type)
+                .then_some(MatchedProtectionQuality::CardType(core_type));
         }
     }
 
@@ -685,6 +739,7 @@ pub fn source_matches_card_type(source: &GameObject, type_name: &str) -> bool {
         .subtypes
         .iter()
         .any(|st| source_subtype_matches_protection_quality(&st.to_ascii_lowercase(), &quality))
+        .then(|| MatchedProtectionQuality::CardSubtype(fnv1a_64(quality.as_bytes())))
 }
 
 fn source_subtype_matches_protection_quality(source_subtype: &str, quality: &str) -> bool {
@@ -694,6 +749,17 @@ fn source_subtype_matches_protection_quality(source_subtype: &str, quality: &str
 }
 
 pub fn source_matches_quality(source: &GameObject, quality: &str) -> bool {
+    matching_colorlessness_quality(source, quality).is_some()
+}
+
+/// CR 702.16g + CR 615.13 (Matt R8-F1): resolve the color-count quality
+/// `quality` when it matches `source`. Only the three spellings below can
+/// resolve — anything else fails the match, so it never reaches a key. The
+/// bool matcher above delegates, so this match is the one authority.
+pub fn matching_colorlessness_quality(
+    source: &GameObject,
+    quality: &str,
+) -> Option<MatchedProtectionQuality> {
     // CR 709.4b: combined colors off the stack for a split source; no-op for
     // single-face and on-stack sources.
     let color_count = source.effective_colors().len();
@@ -701,42 +767,83 @@ pub fn source_matches_quality(source: &GameObject, quality: &str) -> bool {
         // CR 105.2c: An object with no colors is colorless. Uses the split-aware
         // combined color count so an off-stack split card is classified by both
         // halves (CR 709.4b).
-        "colorless" => color_count == 0,
-        "monocolored" => color_count == 1,
-        "multicolored" => color_count > 1,
-        _ => false,
+        "colorless" => (color_count == 0).then_some(MatchedProtectionQuality::Colorlessness(
+            ProtectionColorlessness::Colorless,
+        )),
+        "monocolored" => (color_count == 1).then_some(MatchedProtectionQuality::Colorlessness(
+            ProtectionColorlessness::Monocolored,
+        )),
+        "multicolored" => (color_count > 1).then_some(MatchedProtectionQuality::Colorlessness(
+            ProtectionColorlessness::Multicolored,
+        )),
+        _ => None,
     }
 }
 
-/// CR 702.16a + CR 202.3: Evaluate a filter-based protection predicate against
-/// a source object. Tests every `FilterProp` in the typed filter's properties
-/// (conjunction — all must match). Only supports object-intrinsic properties
-/// that can be resolved from the source alone without game state access.
-///
-fn source_matches_protection_filter(
+/// FNV-1a 64 constants for protection-quality fingerprints. Explicit — keys
+/// serialize into pause records, so the hash must be build-stable, never a
+/// hasher with random state.
+const FNV1A64_OFFSET: u64 = 0xcbf29ce484222325;
+const FNV1A64_PRIME: u64 = 0x100000001b3;
+
+fn fnv1a_feed(hash: u64, byte: u8) -> u64 {
+    (hash ^ u64::from(byte)).wrapping_mul(FNV1A64_PRIME)
+}
+
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    bytes
+        .iter()
+        .fold(FNV1A64_OFFSET, |hash, byte| fnv1a_feed(hash, *byte))
+}
+
+/// CR 702.16a + CR 202.3 + CR 615.13 (Matt R8-F1): the filter fingerprint
+/// when every `FilterProp` in the typed filter matches `source`
+/// (conjunction), or `None` otherwise. The fingerprint feeds the ordered
+/// effective `(comparator, threshold)` pairs only — ignored `TypedFilter`
+/// fields are excluded, so filters that match identically key identically,
+/// while prop-order/textual variants split (the correct direction: same
+/// ability, same filter value, same key). The bool matcher above delegates,
+/// so this walk is the one authority.
+fn matching_filter_fingerprint(
     source: &GameObject,
     filter: &crate::types::ability::TargetFilter,
-) -> bool {
-    use crate::types::ability::{FilterProp, QuantityExpr, TargetFilter};
+) -> Option<MatchedProtectionQuality> {
+    use crate::types::ability::{Comparator, FilterProp, QuantityExpr, TargetFilter};
 
     let TargetFilter::Typed(typed) = filter else {
-        return false;
+        return None;
     };
     // All FilterProp predicates must match (conjunction).
-    typed.properties.iter().all(|prop| match prop {
+    let mut hash = FNV1A64_OFFSET;
+    for prop in &typed.properties {
         // CR 202.3: Mana value comparison — only Fixed thresholds are valid
         // in protection text (no dynamic quantity refs like SelfManaValue).
-        FilterProp::Cmc { comparator, value } => {
-            let QuantityExpr::Fixed { value: threshold } = value else {
-                return false;
-            };
-            // CR 202.3d + CR 709.4b: combined MV off the stack for a split source.
-            comparator.evaluate(source.effective_mana_value() as i32, *threshold)
+        let FilterProp::Cmc { comparator, value } = prop else {
+            return None;
+        };
+        let QuantityExpr::Fixed { value: threshold } = value else {
+            return None;
+        };
+        // CR 202.3d + CR 709.4b: combined MV off the stack for a split source.
+        if !comparator.evaluate(source.effective_mana_value() as i32, *threshold) {
+            return None;
+        }
+        let discriminant = match comparator {
+            Comparator::GT => 0u8,
+            Comparator::LT => 1,
+            Comparator::GE => 2,
+            Comparator::LE => 3,
+            Comparator::EQ => 4,
+            Comparator::NE => 5,
+        };
+        hash = fnv1a_feed(hash, discriminant);
+        for byte in threshold.to_le_bytes() {
+            hash = fnv1a_feed(hash, byte);
         }
         // Future: other intrinsic properties (HasColor, PowerLE/GE, etc.)
         // can be added here as the class of filter-based protection grows.
-        _ => false,
-    })
+    }
+    Some(MatchedProtectionQuality::Filter(hash))
 }
 
 /// Batch parse keyword strings into typed Keyword values.

@@ -26,7 +26,7 @@ use crate::types::game_state::{
     WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
-use crate::types::keywords::KeywordKind;
+use crate::types::keywords::{KeywordKind, MatchedProtectionQuality};
 use crate::types::player::{PlayerCounterKind, PlayerId};
 use crate::types::proposed_event::ProposedEvent;
 
@@ -504,7 +504,7 @@ pub(crate) enum DamageResult {
 /// identical pre-pipeline gating.
 pub(crate) enum DamageGateOutcome {
     Proposed(ProposedEvent),
-    Protected(u32),
+    Protected(u32, MatchedProtectionQuality),
     Gated,
 }
 
@@ -548,8 +548,8 @@ pub(crate) fn pre_replacement_damage_gate(
             state.objects.get(target_obj_id),
             state.objects.get(&ctx.source_id),
         ) {
-            if keywords::protection_prevents_from(target_obj, source_obj) {
-                return DamageGateOutcome::Protected(amount);
+            if let Some(quality) = keywords::preventing_protection_quality(target_obj, source_obj) {
+                return DamageGateOutcome::Protected(amount, quality);
             }
         }
     }
@@ -558,12 +558,12 @@ pub(crate) fn pre_replacement_damage_gate(
     // protection from the damage source] is prevented." Mirror the object-
     // protection gate above for player targets.
     if let TargetRef::Player(player_id) = target {
-        if crate::game::static_abilities::player_protection_from(
+        if let Some(quality) = crate::game::static_abilities::preventing_player_protection_quality(
             state,
             *player_id,
             Some(ctx.source_id),
         ) {
-            return DamageGateOutcome::Protected(amount);
+            return DamageGateOutcome::Protected(amount, quality);
         }
     }
 
@@ -576,9 +576,10 @@ pub(crate) fn pre_replacement_damage_gate(
     })
 }
 
-/// CR 702.16e + CR 615.13 (Matt F4): publish one protection prevention the
-/// gate classified. Inside a simultaneous batch (live tally) it joins the
-/// batch aggregate under the dedicated protection key, so one application
+/// CR 702.16e + CR 615.13 (Matt F4, keyed by ability in R8-F1): publish
+/// one protection prevention the gate classified. Inside a simultaneous
+/// batch (live tally) it joins the batch aggregate under the protection key
+/// for the matched quality, so one application per (quality, recipient)
 /// publishes at the boundary; sequential damage (no live tally) keeps its
 /// immediate per-event emission so "when damage is prevented" triggers still
 /// observe the event.
@@ -587,12 +588,13 @@ pub(crate) fn emit_or_accumulate_protection_prevention(
     source_id: ObjectId,
     target: &TargetRef,
     amount: u32,
+    quality: MatchedProtectionQuality,
     events: &mut Vec<GameEvent>,
 ) {
     if state.combat_prevention_tally.is_some() {
         super::super::replacement::accumulate_batch_prevention(
             state,
-            crate::types::proposed_event::AppliedReplacementKey::Protection,
+            crate::types::proposed_event::AppliedReplacementKey::Protection { quality },
             target,
             amount,
         );
@@ -615,12 +617,13 @@ pub(crate) fn apply_damage_to_target(
 ) -> Result<DamageResult, EffectError> {
     let proposed = match pre_replacement_damage_gate(state, ctx, &target, amount, is_combat) {
         DamageGateOutcome::Proposed(proposed) => proposed,
-        DamageGateOutcome::Protected(prevented) => {
+        DamageGateOutcome::Protected(prevented, quality) => {
             emit_or_accumulate_protection_prevention(
                 state,
                 ctx.source_id,
                 &target,
                 prevented,
+                quality,
                 events,
             );
             return Ok(DamageResult::Applied(0));
@@ -1801,12 +1804,13 @@ fn resolve_each_target_power_damage(
                 entries.push((idx, ctx));
                 proposed_events.push(proposed);
             }
-            DamageGateOutcome::Protected(prevented) => {
+            DamageGateOutcome::Protected(prevented, quality) => {
                 emit_or_accumulate_protection_prevention(
                     state,
                     ctx.source_id,
                     &recipient,
                     prevented,
+                    quality,
                     events,
                 );
             }
@@ -3296,12 +3300,13 @@ fn resolve_each_source_deals_damage_inner(
         // live batch tally here (the helper aggregates); other gates skip.
         let proposed = match pre_replacement_damage_gate(state, ctx, target, *dmg, false) {
             DamageGateOutcome::Proposed(proposed) => proposed,
-            DamageGateOutcome::Protected(prevented) => {
+            DamageGateOutcome::Protected(prevented, quality) => {
                 emit_or_accumulate_protection_prevention(
                     state,
                     ctx.source_id,
                     target,
                     prevented,
+                    quality,
                     events,
                 );
                 continue;

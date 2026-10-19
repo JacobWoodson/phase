@@ -14,7 +14,7 @@ use super::card::{PrintedCardRef, TokenArtDescriptor, TokenImageRef};
 use super::card_type::{CoreType, Supertype};
 use super::events::EventObjectSnapshot;
 use super::identifiers::{ObjectId, ObjectIncarnationRef};
-use super::keywords::Keyword;
+use super::keywords::{Keyword, MatchedProtectionQuality};
 use super::mana::{ManaColor, ManaType, UnitDecision};
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
@@ -100,14 +100,18 @@ pub enum AppliedReplacementKey {
         index: usize,
         controller: PlayerId,
     },
-    /// CR 702.16e + CR 615.13 (Matt F4): prevention by player/object
-    /// protection inside a simultaneous batch. Protection has no registry
-    /// shield (and no rider), so it aggregates under its own key — one
-    /// application per recipient per batch — instead of fragmenting one
-    /// event per damage event. The gate cannot attribute simultaneous
-    /// protection to a single granter (notably the sourceless `Everything`
-    /// authority), so the key carries no granter identity.
-    Protection,
+    /// CR 702.16e + CR 615.13 (Matt F4, keyed by ability in R8-F1):
+    /// prevention by player/object protection inside a simultaneous batch.
+    /// Protection has no registry shield (and no rider), so it aggregates
+    /// under its own key — one application per (quality, recipient) per
+    /// batch — instead of fragmenting one event per damage event. The key
+    /// carries the matched protection quality (CR 702.16g: "protection from
+    /// [A] and from [B]" behaves as two separate abilities), never granter
+    /// identity: the gate claims each event for its first matching ability,
+    /// and qualities survive save/load while grantor tables do not.
+    Protection {
+        quality: MatchedProtectionQuality,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -128,7 +132,9 @@ enum TaggedAppliedReplacementKey {
         index: usize,
         controller: PlayerId,
     },
-    Protection,
+    Protection {
+        quality: MatchedProtectionQuality,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -168,9 +174,9 @@ impl AppliedReplacementKeyCompat {
                 index,
                 controller,
             },
-            AppliedReplacementKeyCompat::Tagged(TaggedAppliedReplacementKey::Protection) => {
-                AppliedReplacementKey::Protection
-            }
+            AppliedReplacementKeyCompat::Tagged(TaggedAppliedReplacementKey::Protection {
+                quality,
+            }) => AppliedReplacementKey::Protection { quality },
             AppliedReplacementKeyCompat::Legacy(ReplacementId {
                 source: ObjectId(0),
                 index,
@@ -214,7 +220,7 @@ impl AppliedReplacementKey {
             | AppliedReplacementKey::EntryControllerChoice { source, .. } => source,
             AppliedReplacementKey::Floating { .. }
             | AppliedReplacementKey::StepEndMana { .. }
-            | AppliedReplacementKey::Protection => ObjectId(0),
+            | AppliedReplacementKey::Protection { .. } => ObjectId(0),
         }
     }
 
@@ -227,7 +233,7 @@ impl AppliedReplacementKey {
             // Protection never reaches `as_replacement_id`: the aggregate
             // drain matches it before the registry lookup. The 0 is a
             // type-system placeholder, never a registry address.
-            AppliedReplacementKey::Protection => 0,
+            AppliedReplacementKey::Protection { .. } => 0,
         }
     }
 
@@ -1380,18 +1386,26 @@ mod tests {
         assert!(!set.contains(&id3));
     }
 
-    /// CR 702.16e + CR 615.13 (Matt F4): the protection tally key
-    /// round-trips through the tagged mirror, so paused-batch frames
-    /// carrying protection prevention survive save/load.
+    /// CR 702.16e + CR 615.13 (Matt F4, keyed by ability in R8-F1): the
+    /// protection tally key round-trips through the tagged mirror with its
+    /// matched quality, so paused-batch frames carrying protection
+    /// prevention survive save/load. The pre-quality shape (PR heads only,
+    /// never main) fails closed instead of loading as a quality-less key.
     #[test]
     fn protection_key_serde_round_trip() {
-        let key = AppliedReplacementKey::Protection;
+        let key = AppliedReplacementKey::Protection {
+            quality: MatchedProtectionQuality::CardType(CoreType::Artifact),
+        };
         let json = serde_json::to_string(&key).expect("the key serializes");
-        assert_eq!(json, r#"{"type":"Protection"}"#);
+        assert_eq!(
+            json,
+            r#"{"type":"Protection","quality":{"CardType":"Artifact"}}"#
+        );
         let back: AppliedReplacementKey =
             serde_json::from_str(&json).expect("the key deserializes");
         assert_eq!(back, key);
         assert_eq!(back.source(), ObjectId(0));
+        assert!(serde_json::from_str::<AppliedReplacementKey>(r#"{"type":"Protection"}"#).is_err());
     }
 
     #[test]

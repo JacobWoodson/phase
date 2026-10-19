@@ -1639,12 +1639,13 @@ pub(crate) fn apply_combat_damage(
                 });
                 proposed_events.push(proposed);
             }
-            DamageGateOutcome::Protected(prevented) => {
+            DamageGateOutcome::Protected(prevented, quality) => {
                 emit_or_accumulate_protection_prevention(
                     state,
                     ctx.source_id,
                     &target_ref,
                     prevented,
+                    quality,
                     &mut events,
                 );
             }
@@ -1948,7 +1949,14 @@ pub(crate) fn sorted_prevention_entries(
             } => (3, source.0, index, controller.0),
             // Protection aggregates last; it has no rider and no registry
             // address, so its rank only needs determinism, not order meaning.
-            AppliedReplacementKey::Protection => (4, 0, 0, 0),
+            // The matched quality rides whole (R8-F1): same quality stays
+            // contiguous, disjoint qualities order deterministically — the
+            // tally is a HashMap, so any rank tie would leak its iteration
+            // order into the published application sequence.
+            AppliedReplacementKey::Protection { quality } => {
+                let (minor, discriminant) = quality.sort_words();
+                (4, minor, 0, discriminant)
+            }
         };
         (rank, entry.recipient.clone())
     });
@@ -2025,7 +2033,7 @@ pub(crate) fn fire_batch_prevention_riders(
         // under its own key — no registry shield, no rider, never a
         // `ReplacementId`. Publish the aggregate application and resolve the
         // group without dispatch. Sourceless like any floating prevention.
-        if matches!(group[0].key, AppliedReplacementKey::Protection) {
+        if matches!(group[0].key, AppliedReplacementKey::Protection { .. }) {
             push_prevented_events(group, ObjectId(0), events);
             continue;
         }

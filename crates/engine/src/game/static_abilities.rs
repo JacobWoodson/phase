@@ -1818,17 +1818,46 @@ pub fn player_protection_from_object(
     player_id: PlayerId,
     source: Option<&crate::game::game_object::GameObject>,
 ) -> bool {
-    use crate::game::keywords::source_matches_card_type;
+    matching_player_protection(state, player_id, source).is_some()
+}
+
+/// CR 702.16 + CR 615.13 (Matt R8-F1): the resolved quality of the FIRST
+/// player-scope protection ability sheltering `player_id` from `source`.
+/// First-match-wins like the object path: the damage gate claims each event
+/// for this ability, and the batch tally keys by this quality plus the
+/// recipient, so disjoint abilities publish separate applications.
+pub fn preventing_player_protection_quality(
+    state: &GameState,
+    player_id: PlayerId,
+    source: Option<ObjectId>,
+) -> Option<crate::types::keywords::MatchedProtectionQuality> {
+    matching_player_protection(
+        state,
+        player_id,
+        source.and_then(|id| state.objects.get(&id)),
+    )
+}
+
+/// Single match authority behind [`player_protection_from_object`] and
+/// [`preventing_player_protection_quality`]: the resolved quality when a
+/// player-scope protection ability matches, or `None`. The bool matcher
+/// delegates, so a match and its resolution can never disagree.
+fn matching_player_protection(
+    state: &GameState,
+    player_id: PlayerId,
+    source: Option<&crate::game::game_object::GameObject>,
+) -> Option<crate::types::keywords::MatchedProtectionQuality> {
+    use crate::game::keywords::matching_card_type_quality;
     use crate::types::ability::ControllerRef;
-    use crate::types::keywords::ProtectionTarget;
+    use crate::types::keywords::{
+        MatchedProtectionQuality, ProtectionPlayerScope, ProtectionTarget,
+    };
 
     // CR 702.16j: protection from everything covers every source.
     if player_has_protection_from_everything(state, player_id) {
-        return true;
+        return Some(MatchedProtectionQuality::Everything);
     }
-    let Some(source_obj) = source else {
-        return false;
-    };
+    let source_obj = source?;
     let context = StaticCheckContext {
         player_id: Some(player_id),
         ..Default::default()
@@ -1858,15 +1887,15 @@ pub fn player_protection_from_object(
             ) {
                 continue;
             }
-            let protects = match target {
+            let matched = match target {
                 // CR 702.16j: handled by the short-circuit above.
-                ProtectionTarget::Everything => false,
+                ProtectionTarget::Everything => None,
                 // CR 702.16 + CR 205.2: protection from the card type
                 // chosen as the granting permanent (e.g. Serra's Emissary) entered.
                 ProtectionTarget::ChosenCardType => src_obj
                     .chosen_card_type()
                     .and_then(|ct| ct.protection_quality_str())
-                    .is_some_and(|quality| source_matches_card_type(source_obj, quality)),
+                    .and_then(|quality| matching_card_type_quality(source_obj, quality)),
                 // CR 702.16k: "Protection from [a player]" at the player level — the
                 // protected player has protection from each object the specified
                 // player(s) control. "Each of your opponents" (CR 702.16i) → the
@@ -1874,11 +1903,15 @@ pub fn player_protection_from_object(
                 // player is an opponent's object in 1v1 and free-for-all. Mirrors the
                 // object-level arm in `game/keywords.rs::source_matches_protection_target`.
                 ProtectionTarget::FromPlayer(scope) => match scope {
-                    ControllerRef::Opponent => source_obj.controller != player_id,
-                    ControllerRef::You => source_obj.controller == player_id,
+                    ControllerRef::Opponent => (source_obj.controller != player_id).then_some(
+                        MatchedProtectionQuality::FromPlayer(ProtectionPlayerScope::Opponent),
+                    ),
+                    ControllerRef::You => (source_obj.controller == player_id).then_some(
+                        MatchedProtectionQuality::FromPlayer(ProtectionPlayerScope::You),
+                    ),
                     // Target/chosen player refs have no static context here —
                     // fail closed (the parser never emits them for protection).
-                    _ => false,
+                    _ => None,
                 },
                 // Truly inert at the player level — no card grants these qualities to
                 // a player; object-level grants of these qualities flow through the
@@ -1889,14 +1922,14 @@ pub fn player_protection_from_object(
                 | ProtectionTarget::Multicolored
                 | ProtectionTarget::Quality(_)
                 | ProtectionTarget::CardType(_)
-                | ProtectionTarget::Filter(_) => false,
+                | ProtectionTarget::Filter(_) => None,
             };
-            if protects {
-                return true;
+            if let Some(quality) = matched {
+                return Some(quality);
             }
         }
     }
-    false
+    None
 }
 
 /// Allocation-free equivalent of `check_static_ability` for

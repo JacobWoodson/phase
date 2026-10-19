@@ -78,18 +78,22 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones::create_object;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AbilityCondition, AbilityDefinition, AbilityKind, ControllerRef, DamageTargetFilter,
-    DamageTargetPlayerScope, EachDamageRecipient, Effect, ObjectScope, PreventionAmount,
-    QuantityExpr, QuantityRef, ShieldKind, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    AbilityCondition, AbilityDefinition, AbilityKind, ChosenAttribute, ControllerRef,
+    DamageTargetFilter, DamageTargetPlayerScope, EachDamageRecipient, Effect, ObjectScope,
+    PreventionAmount, QuantityExpr, QuantityRef, ShieldKind, StaticDefinition, TargetFilter,
+    TargetRef, TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
+use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{PersistedGameState, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::keywords::{MatchedProtectionQuality, ProtectionTarget};
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
 /// Verbatim Selfless Squire (Scryfall). The second line is the trigger under test.
@@ -4253,6 +4257,125 @@ fn combat_protection_aggregates_simultaneous_damage() {
         counters_on(&runner, squire),
         3,
         "one trigger for 2 damage, plus 1 from Hardened Scales"
+    );
+}
+
+/// CR 702.16g + CR 615.13 (Matt R8-F1): two DISJOINT protection abilities
+/// publish two prevention applications, not one. P0 controls a seeded Squire,
+/// Scales, and two Emissary-pattern grantors — one choosing artifact, one
+/// enchantment ("You ... have protection from the chosen card type" as a
+/// `PlayerProtection(ChosenCardType)` static). P1 attacks with a 1/1 Artifact
+/// Creature (Gingerbrute pattern) and a 1/1 Enchantment Creature (Nyxborn
+/// Rollicker pattern). Each 1 is claimed by a different ability, so the
+/// boundary publishes TWO (P0,1) applications and Squire triggers twice for 1
+/// each: 2 + 2 = 4 counters with Scales. Pre-fix both preventions collapse
+/// under the quality-less key into ONE (P0,2) for 3 counters.
+#[test]
+fn disjoint_protections_publish_separate_applications() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    stock_libraries(&mut scenario);
+
+    let squire = add_squire(&mut scenario, P0);
+    let emissary_artifact = scenario.add_creature(P0, "Emissary Artifact", 2, 2).id();
+    let emissary_enchantment = scenario.add_creature(P0, "Emissary Enchantment", 2, 2).id();
+    let gingerbrute = scenario.add_creature(P1, "Gingerbrute", 1, 1).id();
+    let rollicker = scenario.add_creature(P1, "Rollicker", 1, 1).id();
+    scenario.add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES_TEXT);
+    let mut runner = scenario.build();
+
+    // Grantors + attacker types, following the established post-build pattern
+    // (cf. alternative_cost_defiler_offers): stats, base copies, then a flush.
+    {
+        let state = runner.state_mut();
+        for (grantor, choice) in [
+            (emissary_artifact, CoreType::Artifact),
+            (emissary_enchantment, CoreType::Enchantment),
+        ] {
+            let def = StaticDefinition::new(StaticMode::PlayerProtection(
+                ProtectionTarget::ChosenCardType,
+            ))
+            .affected(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            ));
+            let obj = state.objects.get_mut(&grantor).unwrap();
+            obj.static_definitions.push(def.clone());
+            std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def);
+            obj.chosen_attributes
+                .push(ChosenAttribute::CardType(choice));
+        }
+        for (attacker, core) in [
+            (gingerbrute, CoreType::Artifact),
+            (rollicker, CoreType::Enchantment),
+        ] {
+            let obj = state.objects.get_mut(&attacker).unwrap();
+            obj.card_types.core_types.push(core);
+            obj.base_card_types = obj.card_types.clone();
+        }
+    }
+    engine::game::layers::flush_layers(runner.state_mut());
+
+    assert!(
+        engine::game::static_abilities::player_protection_from(
+            runner.state(),
+            P0,
+            Some(gingerbrute)
+        ),
+        "reach guard: P0 must have protection from the artifact attacker"
+    );
+    assert!(
+        engine::game::static_abilities::player_protection_from(runner.state(), P0, Some(rollicker)),
+        "reach guard: P0 must have protection from the enchantment attacker"
+    );
+    assert_eq!(
+        engine::game::static_abilities::preventing_player_protection_quality(
+            runner.state(),
+            P0,
+            Some(gingerbrute)
+        ),
+        Some(MatchedProtectionQuality::CardType(CoreType::Artifact)),
+        "reach guard: the artifact attacker must resolve to the artifact quality"
+    );
+    assert_eq!(
+        engine::game::static_abilities::preventing_player_protection_quality(
+            runner.state(),
+            P0,
+            Some(rollicker)
+        ),
+        Some(MatchedProtectionQuality::CardType(CoreType::Enchantment)),
+        "reach guard: the enchantment attacker must resolve to the enchantment quality"
+    );
+
+    let crossed = pass_turn_to(&mut runner, P1);
+    assert!(
+        crossed,
+        "stall guard: the turn must actually have passed to P1"
+    );
+
+    let life_before = runner.state().players[P0.0 as usize].life;
+    let (ran, log) =
+        run_combat_collecting(&mut runner, P1, &[gingerbrute, rollicker], P0, &[], None);
+    assert!(ran, "stall guard: combat must actually have run");
+
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        life_before,
+        "both 1s must be prevented (none dealt through)"
+    );
+    assert_eq!(
+        prevented_pairs(&log),
+        vec![(TargetRef::Player(P0), 1), (TargetRef::Player(P0), 1)],
+        "two disjoint abilities publish TWO (P0,1) applications — pre-fix \
+         they collapse into ONE (P0,2)"
+    );
+    assert_eq!(
+        counters_on(&runner, squire),
+        4,
+        "two triggers for 1 each, plus 1 per trigger from Hardened Scales"
+    );
+    assert!(
+        runner.state().pending_each_source_batches.is_empty(),
+        "no batch records must leak from the unpaused path"
     );
 }
 
