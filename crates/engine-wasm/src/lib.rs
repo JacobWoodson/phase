@@ -1136,6 +1136,9 @@ pub fn is_card_commander_eligible_for_format(name: &str, format: JsValue) -> boo
             GameFormat::TinyLeaders => is_tiny_leader_eligible(face),
             GameFormat::Oathbreaker => face.is_oathbreaker,
             GameFormat::Brawl | GameFormat::HistoricBrawl => is_brawl_commander_eligible(face),
+            // CR 903.3's commander eligibility test applies unchanged —
+            // planar doesn't change eligibility.
+            GameFormat::PlanechaseCommander => is_commander_eligible(face),
             // Formats with no command zone: nothing can be designated.
             GameFormat::Standard
             | GameFormat::Pioneer

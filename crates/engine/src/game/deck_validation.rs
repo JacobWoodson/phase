@@ -1032,64 +1032,7 @@ fn evaluate_planechase(
         };
     }
 
-    // CR 901.15a: a shared planar deck must contain at least 40 cards, or at
-    // least ten cards per player if there are fewer than four players.
-    let min_planar_cards = 40usize.min(request.player_count.saturating_mul(10));
-    if request.planar_deck.len() < min_planar_cards {
-        reasons.push(format!(
-            "Planar deck has {} cards (minimum {min_planar_cards})",
-            request.planar_deck.len()
-        ));
-    }
-
-    let mut seen_names = HashSet::new();
-    let mut duplicates = BTreeSet::new();
-    let mut non_planar = BTreeSet::new();
-    let mut planes = 0usize;
-    let mut phenomena = 0usize;
-    for name in &request.planar_deck {
-        let Some(face) = db.get_face_by_name(name) else {
-            continue;
-        };
-        let canonical = face.name.to_lowercase();
-        if !seen_names.insert(canonical) {
-            duplicates.insert(face.name.clone());
-        }
-        let is_plane = face.card_type.core_types.contains(&CoreType::Plane);
-        let is_phenomenon = face.card_type.core_types.contains(&CoreType::Phenomenon);
-        if is_plane {
-            planes += 1;
-        }
-        if is_phenomenon {
-            phenomena += 1;
-        }
-        if !is_plane && !is_phenomenon {
-            non_planar.insert(face.name.clone());
-        }
-    }
-    if !duplicates.is_empty() {
-        reasons.push(summarize_cards(
-            "Planar deck singleton violations",
-            &duplicates,
-            6,
-        ));
-    }
-    if !non_planar.is_empty() {
-        reasons.push(summarize_cards(
-            "Planar deck cards must be Plane or Phenomenon",
-            &non_planar,
-            6,
-        ));
-    }
-    if planes == 0 {
-        reasons.push("Planar deck must contain at least one Plane".to_string());
-    }
-    let max_phenomena = request.player_count.saturating_mul(2);
-    if phenomena > max_phenomena {
-        reasons.push(format!(
-            "Planar deck has {phenomena} phenomena (maximum {max_phenomena})"
-        ));
-    }
+    validate_planar_deck(db, &request.planar_deck, request.player_count, &mut reasons);
 
     CompatibilityCheck {
         compatible: reasons.is_empty(),
@@ -1163,6 +1106,112 @@ fn evaluate_archenemy(
 // empty scheme deck is valid: heroes bring none (only the archenemy's
 // payload carries one — see `deck_loading.rs`), and one-deck-at-a-time
 // validation cannot know which seat submitted.
+/// Shared planar-deck construction rules (CR 901.15a): minimum 40 cards
+/// (or ten per player below four players), singleton, Plane-or-Phenomenon
+/// types only, at least one Plane, at most two phenomena per player.
+/// Called from BOTH `evaluate_planechase` (default Planechase) and
+/// `evaluate_planechase_commander` (the Commander composition) — the
+/// planar deck follows the same rules under either.
+fn validate_planar_deck(
+    db: &CardDatabase,
+    planar_deck: &[String],
+    player_count: usize,
+    reasons: &mut Vec<String>,
+) {
+    // CR 901.15a: a shared planar deck must contain at least 40 cards, or at
+    // least ten cards per player if there are fewer than four players.
+    let min_planar_cards = 40usize.min(player_count.saturating_mul(10));
+    if planar_deck.len() < min_planar_cards {
+        reasons.push(format!(
+            "Planar deck has {} cards (minimum {min_planar_cards})",
+            planar_deck.len()
+        ));
+    }
+
+    let mut seen_names = HashSet::new();
+    let mut duplicates = BTreeSet::new();
+    let mut non_planar = BTreeSet::new();
+    let mut planes = 0usize;
+    let mut phenomena = 0usize;
+    for name in planar_deck {
+        let Some(face) = db.get_face_by_name(name) else {
+            continue;
+        };
+        let canonical = face.name.to_lowercase();
+        if !seen_names.insert(canonical) {
+            duplicates.insert(face.name.clone());
+        }
+        let is_plane = face.card_type.core_types.contains(&CoreType::Plane);
+        let is_phenomenon = face.card_type.core_types.contains(&CoreType::Phenomenon);
+        if is_plane {
+            planes += 1;
+        }
+        if is_phenomenon {
+            phenomena += 1;
+        }
+        if !is_plane && !is_phenomenon {
+            non_planar.insert(face.name.clone());
+        }
+    }
+    if !duplicates.is_empty() {
+        reasons.push(summarize_cards(
+            "Planar deck singleton violations",
+            &duplicates,
+            6,
+        ));
+    }
+    if !non_planar.is_empty() {
+        reasons.push(summarize_cards(
+            "Planar deck cards must be Plane or Phenomenon",
+            &non_planar,
+            6,
+        ));
+    }
+    if planes == 0 {
+        reasons.push("Planar deck must contain at least one Plane".to_string());
+    }
+    let max_phenomena = player_count.saturating_mul(2);
+    if phenomena > max_phenomena {
+        reasons.push(format!(
+            "Planar deck has {phenomena} phenomena (maximum {max_phenomena})"
+        ));
+    }
+}
+
+// Called from BOTH `evaluate_selected_format`'s PlanechaseCommander arm (the
+// full path) and `quick_planechase_commander_check` (the summary path's
+// PlanechaseCommander arm) — mirrors `evaluate_planechase`'s sharing shape,
+// but the player deck follows CR 903.5 through the shared commander
+// validator while the supplementary planar deck follows CR 901.15a. An
+// empty planar deck is valid: one-deck-at-a-time validation cannot know
+// which seat submitted (only the host's payload carries the communal deck
+// — see `deck_loading.rs`).
+fn evaluate_planechase_commander(
+    db: &CardDatabase,
+    request: &DeckCompatibilityRequest,
+    unknown_cards: &BTreeSet<String>,
+    format_rules: &FormatConfig,
+) -> CompatibilityCheck {
+    let mut check = evaluate_commander_with_format(
+        db,
+        request,
+        unknown_cards,
+        CommanderVariantRules::planechase_commander(),
+        format_rules,
+    );
+    if !request.planar_deck.is_empty() {
+        let reasons_before = check.reasons.len();
+        validate_planar_deck(
+            db,
+            &request.planar_deck,
+            request.player_count,
+            &mut check.reasons,
+        );
+        check.compatible = check.compatible && check.reasons.len() == reasons_before;
+    }
+    check
+}
+
 fn evaluate_archenemy_commander(
     db: &CardDatabase,
     request: &DeckCompatibilityRequest,
@@ -1329,6 +1378,18 @@ impl CommanderVariantRules {
             eligible: is_commander_eligible,
             eligibility_error:
                 "Archenemy Commander cards must be legendary creatures or explicitly allow being a commander",
+            skip_commander_legality: false,
+            partner_grant: None,
+        }
+    }
+
+    /// Planechase Commander decks are Commander decks — same eligibility
+    /// predicate and Commander legality table, own error label.
+    fn planechase_commander() -> Self {
+        Self {
+            eligible: is_commander_eligible,
+            eligibility_error:
+                "Planechase Commander cards must be legendary creatures or explicitly allow being a commander",
             skip_commander_legality: false,
             partner_grant: None,
         }
@@ -2638,6 +2699,35 @@ fn quick_archenemy_commander_check(
     }
 }
 
+/// Summary-path twin of [`evaluate_planechase_commander`]: the shared
+/// commander quick check first, then the CR 901.15a planar rules when a
+/// planar deck was submitted. A failing planar deck keeps the commander
+/// check's unknown-cards set — the deck is still the same submission.
+fn quick_planechase_commander_check(
+    db: &CardDatabase,
+    request: &DeckCompatibilityRequest,
+    format_rules: &FormatConfig,
+) -> QuickCheckResult {
+    let check = quick_commander_check(
+        db,
+        request,
+        CommanderVariantRules::planechase_commander(),
+        format_rules,
+    );
+    if check.reason.is_some() || request.planar_deck.is_empty() {
+        return check;
+    }
+    let mut reasons = Vec::new();
+    validate_planar_deck(db, &request.planar_deck, request.player_count, &mut reasons);
+    match reasons.into_iter().next() {
+        Some(reason) => QuickCheckResult {
+            reason: Some(reason),
+            unknown_cards: check.unknown_cards,
+        },
+        None => check,
+    }
+}
+
 /// The Custom-format rejection sentinels shared by the summary and full
 /// deck-compatibility paths (and the authoritative `validate_deck_for_format`
 /// gate) so no two call sites can drift apart on wording. Four consts, not
@@ -2802,6 +2892,11 @@ fn evaluate_selected_format_summary(
         // scheme deck — see the matching arm in the full dispatch.
         GameFormat::ArchenemyCommander => {
             quick_archenemy_commander_check(db, request, &format_rules)
+        }
+        // CR 903.5 + CR 901.15a: Commander player deck plus communal
+        // planar deck — see the matching arm in the full dispatch.
+        GameFormat::PlanechaseCommander => {
+            quick_planechase_commander_check(db, request, &format_rules)
         }
         GameFormat::Brawl | GameFormat::HistoricBrawl => {
             quick_brawl_check(db, request, &format.label(), &format_rules)
@@ -3338,6 +3433,15 @@ fn evaluate_selected_format(
         // scheme deck — see the matching arm in the quick-check dispatch.
         GameFormat::ArchenemyCommander => {
             let check = evaluate_archenemy_commander(db, request, unknown_cards, &format_rules);
+            if !check.compatible {
+                reasons.extend(check.reasons);
+            }
+            check.compatible
+        }
+        // CR 903.5 + CR 901.15a: Commander player deck plus communal
+        // planar deck — see the matching arm in the quick-check dispatch.
+        GameFormat::PlanechaseCommander => {
+            let check = evaluate_planechase_commander(db, request, unknown_cards, &format_rules);
             if !check.compatible {
                 reasons.extend(check.reasons);
             }
@@ -6441,6 +6545,108 @@ mod tests {
             .selected_format_reasons
             .iter()
             .any(|reason| { reason.contains("Archenemy Commander cards must be") }));
+    }
+
+    fn planechase_commander_test_db() -> CardDatabase {
+        let mut cards = Map::new();
+        insert_planechase_card(&mut cards, "Legal Commander", &["Legendary"], &["Creature"]);
+        insert_planechase_card(&mut cards, "Plains", &["Basic"], &["Land"]);
+        insert_planechase_card(&mut cards, "Legal Standard", &[], &[]);
+        for index in 1..=40 {
+            insert_planechase_card(&mut cards, &format!("Plane {index}"), &[], &["Plane"]);
+        }
+        for index in 1..=5 {
+            insert_planechase_card(
+                &mut cards,
+                &format!("Phenomenon {index}"),
+                &[],
+                &["Phenomenon"],
+            );
+        }
+        CardDatabase::from_json_str(&Value::Object(cards).to_string()).unwrap()
+    }
+
+    fn planechase_commander_request(
+        main_count: usize,
+        commander: &str,
+        planar_deck: Vec<String>,
+        summary_only: bool,
+    ) -> DeckCompatibilityRequest {
+        DeckCompatibilityRequest {
+            main_deck: expand("Plains", main_count),
+            sideboard: Vec::new(),
+            commander: vec![commander.to_string()],
+            companion: Vec::new(),
+            planar_deck,
+            scheme_deck: Vec::new(),
+            signature_spell: Vec::new(),
+            selected_format: Some(SelectedFormat::Tag(GameFormat::PlanechaseCommander)),
+            selected_match_type: None,
+            player_count: 4,
+            summary_only,
+            draft_set_codes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn planechase_commander_accepts_commander_deck_without_planar_deck() {
+        // CR 903.5a: 99 main + commander = 100. An empty planar slot is
+        // valid: only the host's payload carries the communal deck.
+        let db = planechase_commander_test_db();
+        for summary_only in [false, true] {
+            let request =
+                planechase_commander_request(99, "Legal Commander", Vec::new(), summary_only);
+            let result = evaluate_deck_compatibility(&db, &request);
+            assert_eq!(
+                result.selected_format_compatible,
+                Some(true),
+                "summary_only={summary_only}: {:?}",
+                result.selected_format_reasons
+            );
+        }
+    }
+
+    #[test]
+    fn planechase_commander_accepts_forty_singleton_planar_deck() {
+        // CR 901.15a: at least 40 singleton planes/phenomena at 4 players.
+        let db = planechase_commander_test_db();
+        for summary_only in [false, true] {
+            let request =
+                planechase_commander_request(99, "Legal Commander", plane_names(40), summary_only);
+            let result = evaluate_deck_compatibility(&db, &request);
+            assert_eq!(
+                result.selected_format_compatible,
+                Some(true),
+                "summary_only={summary_only}: {:?}",
+                result.selected_format_reasons
+            );
+        }
+    }
+
+    #[test]
+    fn planechase_commander_rejects_short_planar_deck() {
+        let db = planechase_commander_test_db();
+        let request = planechase_commander_request(99, "Legal Commander", plane_names(39), false);
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert_eq!(result.selected_format_compatible, Some(false));
+        assert!(result
+            .selected_format_reasons
+            .iter()
+            .any(|reason| { reason.contains("minimum 40") }));
+    }
+
+    #[test]
+    fn planechase_commander_rejects_ineligible_commander() {
+        let db = planechase_commander_test_db();
+        let request = planechase_commander_request(99, "Legal Standard", Vec::new(), false);
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert_eq!(result.selected_format_compatible, Some(false));
+        assert!(result
+            .selected_format_reasons
+            .iter()
+            .any(|reason| { reason.contains("Planechase Commander cards must be") }));
     }
 
     #[test]

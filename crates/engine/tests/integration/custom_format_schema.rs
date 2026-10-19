@@ -836,6 +836,8 @@ fn commander_eligibility_rule_from_source_format_covers_every_builtin() {
         // CR 904.13a + CR 903.3.
         (GameFormat::ArchenemyCommander, Some(Standard)),
         (GameFormat::Planechase, None),
+        // CR 903.3, unchanged by CR 901 planar seating.
+        (GameFormat::PlanechaseCommander, Some(Standard)),
         (GameFormat::Momir, None),
         // CR 903.13g: Commander Draft games follow Commander's rules, and
         // CR 903.13f routes deck construction through CR 903.5, so CR 903.3's
@@ -908,6 +910,7 @@ fn game_format_serialization_is_byte_identical_to_old_derive_for_builtins() {
         (GameFormat::Archenemy, "Archenemy"),
         (GameFormat::ArchenemyCommander, "ArchenemyCommander"),
         (GameFormat::Planechase, "Planechase"),
+        (GameFormat::PlanechaseCommander, "PlanechaseCommander"),
         (GameFormat::Momir, "Momir"),
         (GameFormat::CommanderDraft, "CommanderDraft"),
         (GameFormat::Freeform, "Freeform"),

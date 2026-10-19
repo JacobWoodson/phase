@@ -1069,7 +1069,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
         }
     }
 
-    if state.format_config.format == crate::types::format::GameFormat::Planechase {
+    if state.format_config.format.is_planechase_family() {
         load_shared_planar_deck(state, &payload.player.planar_deck, PlayerId(0));
     }
     // CR 904.3 / CR 904.13d: both Archenemy variants load the archenemy
@@ -1229,7 +1229,7 @@ pub fn load_and_hydrate_decks(
         payload
     };
     let planechase_payload;
-    let payload = if state.format_config.format == crate::types::format::GameFormat::Planechase
+    let payload = if state.format_config.format.is_planechase_family()
         && payload.player.planar_deck.is_empty()
     {
         match db {

@@ -226,6 +226,9 @@ impl CommanderEligibilityRule {
             GameFormat::Commander
             | GameFormat::TwoHeadedGiantCommander
             | GameFormat::ArchenemyCommander
+            // CR 903.3's commander eligibility test applies unchanged —
+            // planar doesn't change eligibility.
+            | GameFormat::PlanechaseCommander
             | GameFormat::DuelCommander
             | GameFormat::PauperCommander
             | GameFormat::CommanderDraft => Ok(Some(Self::Standard)),

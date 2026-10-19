@@ -927,6 +927,10 @@ fn freeform_commander_declares_its_deck_size_subject() {
             DeckSizeSubject::MainDeckAndCommanders,
         ),
         (
+            GameFormat::PlanechaseCommander,
+            DeckSizeSubject::MainDeckAndCommanders,
+        ),
+        (
             GameFormat::CommanderDraft,
             DeckSizeSubject::MainDeckAndCommanders,
         ),
@@ -1661,6 +1665,17 @@ fn no_other_command_zone_format_s_rules_moved() {
         },
         Expected {
             format: GameFormat::ArchenemyCommander,
+            pairing: CommanderPairing::PartnerFamilies,
+            sideboard: SideboardPolicy::Forbidden,
+            copy_limit: DeckCopyLimit::UpTo(1),
+            deck_size_subject: DeckSizeSubject::MainDeckAndCommanders,
+            pool: CardPool::LegalityTable(LegalityFormat::Commander),
+            deck_size: DeckSizeRule::Exactly(100),
+            min_players: 2,
+            max_players: 6,
+        },
+        Expected {
+            format: GameFormat::PlanechaseCommander,
             pairing: CommanderPairing::PartnerFamilies,
             sideboard: SideboardPolicy::Forbidden,
             copy_limit: DeckCopyLimit::UpTo(1),

@@ -713,6 +713,13 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * PROTOCOL_VERSION moved twice for GameState-only changes and the derived lobby
  * window went disjoint from the deployed broker's.
  *
+ * 18 — Prospective: no lobby variant or field changes shape in this bump.
+ *      Moved ahead of the `PlanechaseCommander` GameFormat variant — see
+ *      LOBBY_PROTOCOL_VERSION's own `/// 18` entry in
+ *      crates/lobby-broker/src/protocol.rs. MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL
+ *      stays at 2. A pre-18 Rust broker rejects a lobby frame naming
+ *      PlanechaseCommander; MIN_LOBBY_PROTOCOL_FOR_PLANECHASE_COMMANDER
+ *      below is this client's floor for it.
  * 17 — Prospective: no lobby variant or field changes shape in this bump.
  *      Moved ahead of the `ArchenemyCommander` GameFormat variant — see
  *      LOBBY_PROTOCOL_VERSION's own `/// 17` entry in
@@ -864,7 +871,7 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * 1 — Initial lobby-owned version, covering the lobby variant set unchanged
  *     since #1880.
  */
-export const LOBBY_PROTOCOL_VERSION = 17;
+export const LOBBY_PROTOCOL_VERSION = 18;
 
 /**
  * Lowest broker LOBBY_PROTOCOL_VERSION this client accepts.
@@ -1018,6 +1025,18 @@ export const MIN_LOBBY_PROTOCOL_FOR_TWO_HEADED_GIANT_COMMANDER = 16;
 export const MIN_LOBBY_PROTOCOL_FOR_ARCHENEMY_COMMANDER = 17;
 
 /**
+ * Lowest broker `LOBBY_PROTOCOL_VERSION` whose `GameFormat` deserializer knows
+ * `PlanechaseCommander`; below it a lobby frame naming it is rejected as
+ * malformed.
+ *
+ * Pinned to a bare literal, deliberately NOT derived from
+ * LOBBY_PROTOCOL_VERSION, so a later bump cannot drag it forward and start
+ * refusing v18 brokers. `scripts/check-protocol-version.mjs` refuses a derived
+ * right-hand side for it.
+ */
+export const MIN_LOBBY_PROTOCOL_FOR_PLANECHASE_COMMANDER = 18;
+
+/**
  * The lowest broker `LOBBY_PROTOCOL_VERSION` that parses `format` in a lobby
  * frame, or `null` when every broker this client connects to parses it (see
  * MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL). Consult it before sending any lobby
@@ -1035,6 +1054,8 @@ export function lobbyProtocolRequiredForFormat(format: GameFormat): number | nul
       return MIN_LOBBY_PROTOCOL_FOR_TWO_HEADED_GIANT_COMMANDER;
     case "ArchenemyCommander":
       return MIN_LOBBY_PROTOCOL_FOR_ARCHENEMY_COMMANDER;
+    case "PlanechaseCommander":
+      return MIN_LOBBY_PROTOCOL_FOR_PLANECHASE_COMMANDER;
     case "Standard":
     case "Commander":
     case "Pioneer":

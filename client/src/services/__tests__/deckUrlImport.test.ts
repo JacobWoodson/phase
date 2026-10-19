@@ -243,6 +243,7 @@ const FORMAT_SHAPES: Record<BuiltInGameFormat, DeckShape> = {
   TwoHeadedGiant: "constructed",
   Archenemy: "constructed",
   Planechase: "constructed",
+  PlanechaseCommander: "commander",
   Commander: "commander",
   TwoHeadedGiantCommander: "commander",
   ArchenemyCommander: "commander",

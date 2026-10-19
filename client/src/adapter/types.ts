@@ -166,6 +166,7 @@ export type BuiltInGameFormat =
   | "Archenemy"
   | "ArchenemyCommander"
   | "Planechase"
+  | "PlanechaseCommander"
   | "Limited"
   | "Momir"
   | "CommanderDraft"

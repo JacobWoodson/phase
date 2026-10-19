@@ -137,6 +137,13 @@ pub enum GameFormat {
     /// CR 901: Planechase using the single communal planar deck option
     /// (CR 901.15a), plus normal 60-card player decks.
     Planechase,
+    /// Commander (CR 903: 100 singleton, command zone, 21 commander damage,
+    /// 40 life, 2–6 seats) composed with the single communal planar deck
+    /// option (CR 901.15a). Like Two-Headed Giant Commander this is a
+    /// played-consensus composition — no combined CR rule exists — with
+    /// Commander governing construction/life/seating and Planechase adding
+    /// the planar deck, starting-plane reveal, and die rolling unchanged.
+    PlanechaseCommander,
     /// Momir's Madness: 60 snow basic lands (12 each, no Snow-Covered Wastes),
     /// 20 life, a game-start command-zone emblem granting "{X}, Discard a card:
     /// Create a token that's a copy of a creature card with mana value X chosen
@@ -217,6 +224,7 @@ impl std::str::FromStr for GameFormat {
             "Archenemy" => Ok(GameFormat::Archenemy),
             "ArchenemyCommander" => Ok(GameFormat::ArchenemyCommander),
             "Planechase" => Ok(GameFormat::Planechase),
+            "PlanechaseCommander" => Ok(GameFormat::PlanechaseCommander),
             "Momir" => Ok(GameFormat::Momir),
             "CommanderDraft" => Ok(GameFormat::CommanderDraft),
             "Freeform" => Ok(GameFormat::Freeform),
@@ -255,6 +263,7 @@ impl std::fmt::Display for GameFormat {
             GameFormat::Archenemy => write!(f, "Archenemy"),
             GameFormat::ArchenemyCommander => write!(f, "ArchenemyCommander"),
             GameFormat::Planechase => write!(f, "Planechase"),
+            GameFormat::PlanechaseCommander => write!(f, "PlanechaseCommander"),
             GameFormat::Momir => write!(f, "Momir"),
             GameFormat::CommanderDraft => write!(f, "CommanderDraft"),
             GameFormat::Freeform => write!(f, "Freeform"),
@@ -1426,6 +1435,11 @@ impl GameFormat {
             GameFormat::ArchenemyCommander => {
                 CardPool::LegalityTable(LegalityFormat::Commander)
             }
+            // Planechase Commander decks are Commander decks — same card
+            // pool and ban list, no separate table.
+            GameFormat::PlanechaseCommander => {
+                CardPool::LegalityTable(LegalityFormat::Commander)
+            }
             GameFormat::Pioneer => CardPool::LegalityTable(LegalityFormat::Pioneer),
             GameFormat::Modern => CardPool::LegalityTable(LegalityFormat::Modern),
             GameFormat::Premodern => CardPool::LegalityTable(LegalityFormat::Premodern),
@@ -1489,14 +1503,16 @@ impl GameFormat {
     /// whether or not this format's deck validation consults it, which is
     /// `card_pool`'s question.
     pub fn recorded_legality_table(self) -> Option<LegalityFormat> {
-        // 2HG Commander and Archenemy Commander share Commander's card pool
-        // and ban list — card data records no separate table for either, so
-        // Commander's table is their recorded lens. The reverse lookup below
-        // cannot express sharing (each table maps to exactly one format),
-        // hence the explicit arm.
+        // 2HG Commander, Archenemy Commander, and Planechase Commander
+        // share Commander's card pool and ban list — card data records no
+        // separate table for any, so Commander's table is their recorded
+        // lens. The reverse lookup below cannot express sharing (each table
+        // maps to exactly one format), hence the explicit arm.
         if matches!(
             self,
-            GameFormat::TwoHeadedGiantCommander | GameFormat::ArchenemyCommander
+            GameFormat::TwoHeadedGiantCommander
+                | GameFormat::ArchenemyCommander
+                | GameFormat::PlanechaseCommander
         ) {
             return Some(LegalityFormat::Commander);
         }
@@ -1529,6 +1545,9 @@ impl GameFormat {
             // CR 904.13a + CR 903.3 + CR 702.124: same for Archenemy
             // Commander decks.
             | GameFormat::ArchenemyCommander
+            // CR 903.3 + CR 702.124: same for Planechase Commander decks
+            // (planar doesn't change pairing).
+            | GameFormat::PlanechaseCommander
             | GameFormat::DuelCommander
             | GameFormat::PauperCommander
             | GameFormat::CommanderDraft
@@ -1602,6 +1621,8 @@ impl GameFormat {
             | GameFormat::TwoHeadedGiantCommander
             // CR 904.13a + CR 903.5e: Commander decks, no sideboard.
             | GameFormat::ArchenemyCommander
+            // CR 903.5e via the shared commander validator: no sideboard.
+            | GameFormat::PlanechaseCommander
             | GameFormat::PauperCommander
             | GameFormat::DuelCommander
             | GameFormat::Oathbreaker
@@ -1678,6 +1699,8 @@ impl GameFormat {
             | GameFormat::TwoHeadedGiantCommander
             // CR 904.13a + CR 903.5b: Commander singleton decks.
             | GameFormat::ArchenemyCommander
+            // CR 903.5b: Planechase Commander decks are Commander singleton decks.
+            | GameFormat::PlanechaseCommander
             | GameFormat::PauperCommander
             | GameFormat::DuelCommander
             | GameFormat::TinyLeaders
@@ -1757,6 +1780,7 @@ impl GameFormat {
             | GameFormat::TwoHeadedGiant
             | GameFormat::Archenemy
             | GameFormat::Planechase
+            | GameFormat::PlanechaseCommander
             | GameFormat::Momir
             | GameFormat::CommanderDraft
             | GameFormat::Freeform
@@ -1784,6 +1808,8 @@ impl GameFormat {
             | GameFormat::TwoHeadedGiantCommander
             // CR 904.13a + CR 903.5a: exactly 100, INCLUDING the commander.
             | GameFormat::ArchenemyCommander
+            // CR 903.5a: exactly 100, INCLUDING the commander.
+            | GameFormat::PlanechaseCommander
             | GameFormat::DuelCommander
             | GameFormat::PauperCommander
             | GameFormat::CommanderDraft
@@ -1837,7 +1863,12 @@ impl GameFormat {
             | GameFormat::ArchenemyCommander
             // Freeform Commander grants the free first mulligan, matching
             // every other Commander-style duel above.
-            | GameFormat::FreeformCommander => true,
+            | GameFormat::FreeformCommander
+            // A two-seat Planechase Commander game is a duel fought with
+            // Commander decks, so the Commander-style grant reaches it like
+            // Archenemy Commander above. (3+ seats get the free first
+            // mulligan via CR 103.5c anyway.)
+            | GameFormat::PlanechaseCommander => true,
             GameFormat::Standard
             | GameFormat::Limited
             | GameFormat::Pioneer
@@ -1895,6 +1926,17 @@ impl GameFormat {
         matches!(self, GameFormat::Archenemy | GameFormat::ArchenemyCommander)
     }
 
+    /// Whether planar-deck machinery applies: the communal planar deck
+    /// (CR 901.15a), starting-plane reveal (CR 901.5), and die rolling
+    /// (CR 901.9). Both the 60-card variant and the Commander-composed
+    /// variant qualify — planar loading, reveal, and rolling reach both.
+    pub fn is_planechase_family(self) -> bool {
+        matches!(
+            self,
+            GameFormat::Planechase | GameFormat::PlanechaseCommander
+        )
+    }
+
     /// Whether this format uses a commander card and the commander-damage
     /// state-based action (CR 903.10a / CR 704.6c). True for every format
     /// whose `FormatConfig` has both `command_zone: true` and a non-`None`
@@ -1922,6 +1964,7 @@ impl GameFormat {
             | GameFormat::PauperCommander
             | GameFormat::Brawl
             | GameFormat::HistoricBrawl
+            | GameFormat::PlanechaseCommander
             // `command_zone: true` and
             // `commander_damage_threshold: Some(21)` travel together for this
             // format — `Derived` in `built_in_axes_no_looser_than_rules`.
@@ -2007,6 +2050,7 @@ impl GameFormat {
             GameFormat::Commander
             | GameFormat::TwoHeadedGiantCommander
             | GameFormat::ArchenemyCommander
+            | GameFormat::PlanechaseCommander
             | GameFormat::DuelCommander
             | GameFormat::PauperCommander
             | GameFormat::Brawl
@@ -2085,7 +2129,8 @@ impl GameFormat {
             // CR 903.13e: the drafted cards become the player's card pool and
             // they build a deck from it, so the engine supplies nothing.
             | GameFormat::CommanderDraft
-            | GameFormat::Planechase => false,
+            | GameFormat::Planechase
+            | GameFormat::PlanechaseCommander => false,
             // No custom-format use case for an engine-supplied fixed deck
             // exists today — a real one would need its own design, analogous
             // to Momir's Madness.
@@ -2107,7 +2152,7 @@ impl GameFormat {
     /// than reading any `StructuralRules` field.
     ///
     /// Used by `custom_format::CustomFormatDef::from_lobby_config` to reject
-    /// all four as lobby-config sources. Archenemy and Momir both also set
+    /// all five as lobby-config sources. Archenemy and Momir both also set
     /// `command_zone: true` with no `CommanderEligibilityRule`, so they are
     /// independently unrepresentable for that reason too; Planechase's
     /// `command_zone` is `false`, so this predicate is the only guard that
@@ -2122,6 +2167,10 @@ impl GameFormat {
             // default Archenemy (CR 904.13d), so Archenemy Commander is
             // unrepresentable for Custom for the same reason.
             | GameFormat::ArchenemyCommander
+            // The planar deck loads through the same format-gated path as
+            // default Planechase (CR 901.15a), so Planechase Commander is
+            // unrepresentable for Custom for the same reason.
+            | GameFormat::PlanechaseCommander
             | GameFormat::Momir => true,
             GameFormat::Standard
             | GameFormat::Limited
@@ -2188,6 +2237,7 @@ impl GameFormat {
             GameFormat::Archenemy => Cow::Borrowed("Archenemy"),
             GameFormat::ArchenemyCommander => Cow::Borrowed("Archenemy Commander"),
             GameFormat::Planechase => Cow::Borrowed("Planechase"),
+            GameFormat::PlanechaseCommander => Cow::Borrowed("Planechase Commander"),
             GameFormat::Momir => Cow::Borrowed("Momir's Madness"),
             GameFormat::CommanderDraft => Cow::Borrowed("Commander Draft"),
             GameFormat::Freeform => Cow::Borrowed("Freeform"),
@@ -2323,6 +2373,15 @@ impl GameFormat {
                 group: FormatGroup::Commander,
                 legality_key: GameFormat::ArchenemyCommander.legality_key(),
                 default_config: FormatConfig::archenemy_commander(),
+            },
+            FormatMetadata {
+                format: GameFormat::PlanechaseCommander,
+                label: "Planechase Commander",
+                short_label: "PLCC",
+                description: "Commander multiplayer with a communal planar deck",
+                group: FormatGroup::Commander,
+                legality_key: GameFormat::PlanechaseCommander.legality_key(),
+                default_config: FormatConfig::planechase_commander(),
             },
             FormatMetadata {
                 format: GameFormat::DuelCommander,
@@ -3244,6 +3303,33 @@ impl FormatConfig {
         }
     }
 
+    /// Commander (CR 903) composed with the communal planar deck option
+    /// (CR 901.15a). Commander governs construction (100 singleton),
+    /// life (40), seating (2–6), command zone, and 21 commander damage;
+    /// Planechase adds the shared planar deck, starting-plane reveal, and
+    /// die rolling unchanged.
+    pub fn planechase_commander() -> Self {
+        FormatConfig {
+            format: GameFormat::PlanechaseCommander,
+            starting_life: 40,
+            min_players: 2,
+            max_players: 6,
+            deck_size: DeckSizeRule::Exactly(100),
+            singleton: true,
+            command_zone: true,
+            commander_damage_threshold: Some(21),
+            range_of_influence: None,
+            team_based: false,
+            archenemy_player: None,
+            uses_commander: true,
+            sideboard_policy: GameFormat::PlanechaseCommander.sideboard_policy(),
+            default_deck_copy_limit: GameFormat::PlanechaseCommander.default_deck_copy_limit(),
+            supplies_fixed_deck: false,
+            allow_debug_actions: false,
+            custom_rules: None,
+        }
+    }
+
     /// CR 904.13 (Archenemy Commander option): one archenemy at 60 life
     /// against a heroes team sharing 60 (CR 904.13b), poison individual at
     /// 10 each (CR 904.13c), scheme deck of at least ten singleton schemes
@@ -3386,6 +3472,7 @@ impl FormatConfig {
             GameFormat::Archenemy => Self::archenemy(),
             GameFormat::ArchenemyCommander => Self::archenemy_commander(),
             GameFormat::Planechase => Self::planechase(),
+            GameFormat::PlanechaseCommander => Self::planechase_commander(),
             GameFormat::Momir => Self::momir(),
             GameFormat::CommanderDraft => Self::commander_draft(),
             GameFormat::Freeform => Self::freeform(),
@@ -5278,6 +5365,7 @@ mod tests {
                     vec![
                         GameFormat::ArchenemyCommander,
                         GameFormat::Commander,
+                        GameFormat::PlanechaseCommander,
                         GameFormat::TwoHeadedGiantCommander
                     ],
                     "only Commander and its composed variants may share the Commander table"
@@ -5334,6 +5422,7 @@ mod tests {
             GameFormat::Commander,
             GameFormat::TwoHeadedGiantCommander,
             GameFormat::ArchenemyCommander,
+            GameFormat::PlanechaseCommander,
             GameFormat::PauperCommander,
             GameFormat::DuelCommander,
             GameFormat::CommanderDraft,

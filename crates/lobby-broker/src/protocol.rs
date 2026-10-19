@@ -888,6 +888,17 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 /// broker's window went disjoint from the shipped client's. This constant is
 /// the fix — it moves only for reasons the lobby can actually observe.
 ///
+/// 18 — Prospective: no lobby variant or field changes shape in this
+///      commit. Moved ahead of the `PlanechaseCommander` `GameFormat`
+///      variant, on the same terms as 11, 16, and 17 (see those entries
+///      for the full mechanism). [`MIN_SUPPORTED_LOBBY_PROTOCOL`] stays
+///      at 2 and [`PROTOCOL_VERSION`] does not move alongside it. The
+///      client-side floor is
+///      `MIN_LOBBY_PROTOCOL_FOR_PLANECHASE_COMMANDER` in
+///      `client/src/adapter/ws-adapter.ts`. (Written as one unbroken
+///      paragraph on purpose, per the reason entry 5 gives: a blank `///`
+///      line before 4-space indented prose is an indented CODE block to
+///      rustdoc.)
 /// 17 — Prospective: no lobby variant or field changes shape in this
 ///      commit. Moved ahead of the `ArchenemyCommander` `GameFormat`
 ///      variant, on the same terms as 11 and 16 (see those entries for the
@@ -1185,7 +1196,7 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 ///     that direction can reject — into one legible handshake refusal.
 /// 1 — Initial lobby-owned version, covering the `LobbyClientMessage` /
 ///     `LobbyServerMessage` variant sets, unchanged since #1880.
-pub const LOBBY_PROTOCOL_VERSION: u32 = 17;
+pub const LOBBY_PROTOCOL_VERSION: u32 = 18;
 
 /// Lowest [`LOBBY_PROTOCOL_VERSION`] a broker accepts from a client.
 ///
@@ -2096,7 +2107,7 @@ mod tests {
     /// rather than silently re-coupling the lobby to full-game churn.
     #[test]
     fn lobby_protocol_version_is_independent_of_the_full_game_one() {
-        assert_eq!(LOBBY_PROTOCOL_VERSION, 17);
+        assert_eq!(LOBBY_PROTOCOL_VERSION, 18);
         // Deliberately still 2, not 12: every lobby version past 2 keeps this
         // floor's guarantee — that a version-2 client can still parse every
         // frame it already understands. Individually: 3 is additive in both
@@ -2116,8 +2127,9 @@ mod tests {
         // the same three carriers as 2, ignored the same way; 14 adds a hosted
         // report gate that has no production emitter yet; 15 removes that
         // `FormatConfig` field again, which parses cleanly in both directions
-        // because neither side sets `deny_unknown_fields`. See the constant's
-        // own changelog.
+        // because neither side sets `deny_unknown_fields`; 16, 17, and 18
+        // add no field or variant — pre-emptive steps moved ahead of new
+        // `GameFormat` variants. See the constant's own changelog.
         assert_eq!(MIN_SUPPORTED_LOBBY_PROTOCOL, 2);
         assert_ne!(
             LOBBY_PROTOCOL_VERSION, PROTOCOL_VERSION,
@@ -2308,7 +2320,7 @@ mod tests {
     /// and version 15 (`FormatConfig` loses that flag; the Wilderness pool is
     /// format-derived).
     #[test]
-    fn the_tournament_chain_spans_lobby_versions_four_through_seventeen() {
+    fn the_tournament_chain_spans_lobby_versions_four_through_eighteen() {
         const PRE_TOURNAMENT_LOBBY_VERSION: u32 = 3;
         const TOURNAMENT_SET_LOBBY_VERSION: u32 = PRE_TOURNAMENT_LOBBY_VERSION + 1;
         const CORRELATED_SETTLEMENT_LOBBY_VERSION: u32 = TOURNAMENT_SET_LOBBY_VERSION + 1;
@@ -2340,7 +2352,10 @@ mod tests {
         // The third pre-emptive step: no field, no variant — moved ahead
         // of the `ArchenemyCommander` `GameFormat` variant.
         const ARCHENEMY_COMMANDER_LOBBY_VERSION: u32 = TWO_HEADED_GIANT_COMMANDER_LOBBY_VERSION + 1;
-        assert_eq!(LOBBY_PROTOCOL_VERSION, ARCHENEMY_COMMANDER_LOBBY_VERSION);
+        // The fourth pre-emptive step: no field, no variant — moved ahead
+        // of the `PlanechaseCommander` `GameFormat` variant.
+        const PLANECHASE_COMMANDER_LOBBY_VERSION: u32 = ARCHENEMY_COMMANDER_LOBBY_VERSION + 1;
+        assert_eq!(LOBBY_PROTOCOL_VERSION, PLANECHASE_COMMANDER_LOBBY_VERSION);
     }
 
     /// The guard for [`is_known_lobby_tag`], which is a string `matches!` and

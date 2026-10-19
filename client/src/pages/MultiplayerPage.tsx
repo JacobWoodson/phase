@@ -28,6 +28,7 @@ import { MenuPanel, MenuShell } from "../components/menu/MenuShell";
 import { menuButtonClass } from "../components/menu/buttonStyles";
 import { MyDecks } from "../components/menu/MyDecks";
 import { ACTIVE_DECK_KEY, loadActiveDeck, touchDeckPlayed } from "../constants/storage";
+import { isPlanechaseFamilyFormat } from "../data/formatRegistry";
 import { withSavedDeckLibraryOrSkip } from "../services/savedDeckTransaction";
 import { parseRoomCode, stripPeerIdPrefix } from "../network/connection";
 import { evaluateDeckCompatibility } from "../services/deckCompatibility";
@@ -603,7 +604,7 @@ function MultiplayerPageContent({
         const aiSeatIndexes = new Set(action.settings.aiSeats.map((seat) => seat.seatIndex));
         const allOpponentsAreAi =
           opponentCount > 0
-          && action.settings.formatConfig.format !== "Planechase"
+          && !isPlanechaseFamilyFormat(action.settings.formatConfig.format)
           && Array.from({ length: opponentCount }, (_, i) => i + 1)
             .every((seatIndex) => aiSeatIndexes.has(seatIndex));
         if (allOpponentsAreAi) {
