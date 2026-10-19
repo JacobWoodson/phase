@@ -519,7 +519,7 @@ mod tests {
         let mut events = Vec::new();
         let result = sacrifice_permanent(&mut state, victim, PlayerId(0), &mut events);
 
-        // CR 109.5: the bar reports `Prohibited` (not a silent no-op) so
+        // CR 118.3: the bar reports `Prohibited` (not a silent no-op) so
         // cost paths fail payment instead of resolving as no-sacrifice.
         assert!(matches!(result, Ok(SacrificeOutcome::Prohibited)));
         // Permanent is still on the battlefield — nothing moved.

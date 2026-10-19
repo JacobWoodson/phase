@@ -1076,7 +1076,7 @@ fn pay_ability_cost_inner(
                 }
                 match super::sacrifice::sacrifice_permanent(state, source_id, player, events)? {
                     super::sacrifice::SacrificeOutcome::Complete => {}
-                    // CR 109.5: a mid-payment bar fails the cost, mirroring the
+                    // CR 118.3: a mid-payment bar fails the cost, mirroring the
                     // pre-check above.
                     super::sacrifice::SacrificeOutcome::Prohibited => {
                         return Ok(payment_failed("Cannot sacrifice this permanent as a cost"));

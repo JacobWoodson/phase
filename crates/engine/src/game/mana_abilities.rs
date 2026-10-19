@@ -3015,7 +3015,7 @@ fn pay_selected_mana_ability_sacrifice_cost(
             events,
         )? {
             sacrifice::SacrificeOutcome::Complete => {}
-            // CR 109.5: a mid-payment bar fails the cost instead of recording
+            // CR 118.3: a mid-payment bar fails the cost instead of recording
             // an unsacrificed permanent as paid.
             sacrifice::SacrificeOutcome::Prohibited => {
                 return Err(EngineError::ActionNotAllowed(
@@ -3126,7 +3126,7 @@ fn pay_mana_ability_cost_component(
             match sacrifice::sacrifice_permanent(state, pending.source_id, pending.player, events)?
             {
                 sacrifice::SacrificeOutcome::Complete => Ok(ManaAbilityPaymentProgress::Complete),
-                // CR 109.5: a mid-payment bar fails the cost, mirroring the
+                // CR 118.3: a mid-payment bar fails the cost, mirroring the
                 // pre-check above.
                 sacrifice::SacrificeOutcome::Prohibited => Err(EngineError::ActionNotAllowed(
                     "Cannot sacrifice this permanent as a cost".to_string(),
