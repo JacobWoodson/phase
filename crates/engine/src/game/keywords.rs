@@ -1032,6 +1032,8 @@ pub fn activate_ninjutsu(
             cost: effective_cost,
         },
         None,
+        // CR 702.49a: this seam pays only the ninjutsu mana cost; no counter leg can join it.
+        &mut None,
         events,
     )
     .map_err(|e| e.to_string())?

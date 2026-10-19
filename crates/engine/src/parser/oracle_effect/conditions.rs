@@ -3199,7 +3199,9 @@ pub(super) fn strip_player_property_superlative_conditional(
     let lhs = QuantityExpr::Ref {
         qty: nom_quantity::player_property_quantity(
             lhs_property,
-            PlayerScope::ParentObjectTargetController,
+            PlayerScope::ParentObjectTarget {
+                possession: crate::types::ability::PossessionAxis::Controller,
+            },
         ),
     };
     let rhs = QuantityExpr::Ref {
@@ -3207,7 +3209,9 @@ pub(super) fn strip_player_property_superlative_conditional(
             lhs_property,
             PlayerScope::AllPlayers {
                 aggregate,
-                exclude: Some(Box::new(PlayerScope::ParentObjectTargetController)),
+                exclude: Some(Box::new(PlayerScope::ParentObjectTarget {
+                    possession: crate::types::ability::PossessionAxis::Controller,
+                })),
             },
         ),
     };

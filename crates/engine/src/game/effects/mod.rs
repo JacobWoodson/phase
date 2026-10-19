@@ -1207,6 +1207,12 @@ pub(crate) fn settle_empty_forwarded_zone_result(state: &mut GameState, producer
 }
 
 pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    // CR 601.2h + CR 605.3b + CR 608.2c: a parked counter-cost root whose
+    // replacement subtree has retired resumes before any further resolution
+    // work; every frame left on top of it is outer work.
+    if state.counter_cost_root_is_due() {
+        return;
+    }
     counters::drain_pending_counter_moves(state, events);
     counters::drain_pending_counter_removals(state, events);
     counters::drain_pending_counter_additions(state, events);
@@ -1425,7 +1431,12 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             drain_pending_continuation(state, events);
             resume_resolution_frames(state, events);
         }
-        if !waits_for_resolution_choice(&state.waiting_for) {
+        // CR 601.2h + CR 605.3b + CR 608.2c: a parked counter-cost root whose
+        // replacement subtree has retired resumes before any further resolution
+        // work; every frame left on top of it is outer work. Once the subtree
+        // retired with the continuation that just ran, the paused dispatch on top
+        // belongs to an outer owner and stays paused.
+        if !waits_for_resolution_choice(&state.waiting_for) && !state.counter_cost_root_is_due() {
             // CR 615.5: a resumed continuation completes its own paused
             // resident drain only after it has not raised another choice.
             state.finish_active_paused_post_replacement_dispatch();
@@ -1438,6 +1449,12 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                 drain_pending_continuation(state, events);
             }
         }
+    }
+    // CR 601.2h + CR 605.3b + CR 608.2c: a parked counter-cost root whose
+    // replacement subtree has retired resumes before any further resolution
+    // work; every frame left on top of it is outer work.
+    if state.counter_cost_root_is_due() {
+        return;
     }
     // CR 701.38d: Resume per-ballot vote iteration after an interactive
     // choice resolves. Must run after change_zone_iteration (which may be
@@ -1695,6 +1712,12 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
         if waits_for_resolution_choice(&state.waiting_for) {
             state.resolution_stack.note_repeat_until_descendant_choice();
         }
+        return;
+    }
+    // CR 601.2h + CR 605.3b + CR 608.2c: a parked counter-cost root whose
+    // replacement subtree has retired resumes before any further resolution
+    // work; every frame left on top of it is outer work.
+    if state.counter_cost_root_is_due() {
         return;
     }
 
@@ -2546,7 +2569,15 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
         // landed us back at Priority (no further replacement choice), B1-drain the
         // deferred observer triggers parked during earlier pause segments plus the
         // ones this resume produced; otherwise leave them parked for the next drain.
-        let trigger_events: Vec<GameEvent> = events[events_before_drain..]
+        //
+        // CR 601.2h + CR 603.3: a live announcement takes custody of the span it
+        // owns; only the rest is collected here.
+        let owned = crate::game::announcement_triggers::take_inline_trigger_span(
+            state,
+            events,
+            events_before_drain,
+        );
+        let trigger_events: Vec<GameEvent> = events[owned]
             .iter()
             .filter(|ev| {
                 !matches!(
@@ -5400,6 +5431,26 @@ fn declined_search_parent_controller_available(
     }
 }
 
+// CR 108.3 + CR 608.2h: mirror `parent_target_owner` — the first object target
+// whose owner is known (live or LKI), else the propagated effect-context object.
+fn declined_search_parent_owner_available(state: &GameState, ability: &ResolvedAbility) -> bool {
+    ability
+        .target_occurrences()
+        .into_iter()
+        .enumerate()
+        .find_map(|(position, (target, _))| match target {
+            TargetRef::Object(id)
+                if state.objects.contains_key(&id) || state.lki_cache.contains_key(&id) =>
+            {
+                Some(declined_search_selected_object(
+                    state, ability, position, id,
+                ))
+            }
+            TargetRef::Object(_) | TargetRef::Player(_) => None,
+        })
+        .unwrap_or_else(|| ability.effect_context_object.is_some())
+}
+
 // CR 608.2c: each scope keeps the identity/fallback its ordinary reader consumes.
 fn declined_search_player_scope_dependency(
     state: &GameState,
@@ -5420,8 +5471,12 @@ fn declined_search_player_scope_dependency(
                 })
                 .unwrap_or(false)
         }),
-        PlayerScope::ParentObjectTargetController => !context
-            .is_some_and(|ability| declined_search_parent_controller_available(state, ability)),
+        PlayerScope::ParentObjectTarget { possession } => match possession {
+            PossessionAxis::Controller => !context
+                .is_some_and(|ability| declined_search_parent_controller_available(state, ability)),
+            PossessionAxis::Owner => !context
+                .is_some_and(|ability| declined_search_parent_owner_available(state, ability)),
+        },
         PlayerScope::RecipientController => context.is_some_and(|ability| {
             ability
                 .target_occurrences()
@@ -6712,7 +6767,7 @@ fn duration_outlives_declined_gate(duration: &Duration) -> bool {
             }
             | PlayerScope::RecipientController
             | PlayerScope::DefendingPlayer
-            | PlayerScope::ParentObjectTargetController
+            | PlayerScope::ParentObjectTarget { .. }
             | PlayerScope::SourceChosenPlayer
             | PlayerScope::AnyTurn
             | PlayerScope::SpecificPlayer { id: _ } => false,
@@ -16373,9 +16428,17 @@ pub(crate) fn resolve_ability_chain_step(
     // before it begins a new resolution; nested producers replace the context
     // after this node's effect completes.
     let root_context_owned;
-    let ability = if depth == 0 && ability.context.forwarded_result_context.is_some() {
+    let mut cost_removed_seed = None;
+    let ability = if depth == 0
+        && (ability.context.forwarded_result_context.is_some()
+            || ability.context.cost_removed_counter_amount.is_some())
+    {
         let mut owned = ability.clone();
         owned.context.forwarded_result_context = None;
+        // CR 602.2b + CR 601.2h + CR 608.2h: the cost-removed count is a
+        // root-only input; take it off the root so no hand-off or handler-local
+        // context clone carries it into a continuation that could reseed.
+        cost_removed_seed = owned.context.cost_removed_counter_amount.take();
         root_context_owned = owned;
         &root_context_owned
     } else {
@@ -16390,6 +16453,12 @@ pub(crate) fn resolve_ability_chain_step(
     // across unrelated ability resolutions.
     if depth == 0 {
         reset_top_level_resolution_state(state);
+        // CR 602.2b + CR 601.2h + CR 608.2h: counters removed to pay this
+        // activation's cost are the preceding "this way" amount its instructions
+        // read; a later producer re-stamps per CR 608.2c.
+        if let Some(n) = cost_removed_seed {
+            state.last_effect_amount = Some(crate::game::arithmetic::u32_to_i32_saturating(n));
+        }
     }
 
     // CR 700.2 ("each of those options is a mode") + CR 608.2c (instructions in
@@ -23157,7 +23226,7 @@ fn resolve_grant_next_spell_ability(
     // ("the next spell you cast"). Exhaustive over PlayerScope (no `_`), so any
     // future variant forces a maintainer to re-confirm its next-spell semantics.
     let player = match player_scope {
-        PlayerScope::Target => ability.target_player(),
+        PlayerScope::Target => Some(ability.target_player()),
         // CR 513.1: `AnyTurn` is a duration-timing referent that never reaches a
         // next-spell player-selection position; default to the controller.
         PlayerScope::Controller
@@ -23170,17 +23239,27 @@ fn resolve_grant_next_spell_ability(
         // from a value/quantity/player-selection position.
         | PlayerScope::SpecificPlayer { .. }
         | PlayerScope::DefendingPlayer
-        | PlayerScope::ParentObjectTargetController
-        | PlayerScope::SourceChosenPlayer => ability.controller,
+        | PlayerScope::SourceChosenPlayer => Some(ability.controller),
+        // CR 109.4 + CR 108.3: the controller/owner of the parent object target.
+        PlayerScope::ParentObjectTarget { possession } => match possession {
+            PossessionAxis::Controller => {
+                crate::game::ability_utils::parent_target_controller(ability, state)
+            }
+            PossessionAxis::Owner => crate::game::ability_utils::parent_target_owner(ability, state),
+        },
     };
-    state
-        .pending_next_spell_modifiers
-        .push(crate::types::game_state::PendingNextSpellModifier {
-            player,
-            modifier,
-            spell_filter,
-            source_id: Some(ability.source_id),
-        });
+    // CR 609.3: with no resolvable parent referent there is no recipient, so
+    // the grant does nothing rather than defaulting to the controller.
+    if let Some(player) = player {
+        state.pending_next_spell_modifiers.push(
+            crate::types::game_state::PendingNextSpellModifier {
+                player,
+                modifier,
+                spell_filter,
+                source_id: Some(ability.source_id),
+            },
+        );
+    }
     events.push(GameEvent::EffectResolved {
         kind: crate::types::ability::EffectKind::GrantNextSpellAbility,
         source_id: ability.source_id,
@@ -24329,7 +24408,9 @@ mod tests {
                 player: PlayerScope::Target,
             },
             QuantityRef::HandSize {
-                player: PlayerScope::ParentObjectTargetController,
+                player: PlayerScope::ParentObjectTarget {
+                    possession: PossessionAxis::Controller,
+                },
             },
             QuantityRef::TargetControllerCounter {
                 kind: crate::types::player::PlayerCounterKind::Poison,
@@ -24617,7 +24698,9 @@ mod tests {
             },
         ]));
         let attr = QuantityRef::BattlefieldEntriesThisTurn {
-            player: PlayerScope::ParentObjectTargetController,
+            player: PlayerScope::ParentObjectTarget {
+                possession: PossessionAxis::Controller,
+            },
             filter,
         };
         assert_eq!(
@@ -25045,14 +25128,18 @@ mod tests {
                 exclude: Some(Box::new(PlayerScope::RecipientController)),
             },
             PlayerScope::Target,
-            PlayerScope::ParentObjectTargetController,
+            PlayerScope::ParentObjectTarget {
+                possession: PossessionAxis::Controller,
+            },
             PlayerScope::AllPlayers {
                 aggregate: crate::types::ability::AggregateFunction::Sum,
                 exclude: Some(Box::new(PlayerScope::Target)),
             },
             PlayerScope::AllPlayers {
                 aggregate: crate::types::ability::AggregateFunction::Sum,
-                exclude: Some(Box::new(PlayerScope::ParentObjectTargetController)),
+                exclude: Some(Box::new(PlayerScope::ParentObjectTarget {
+                    possession: PossessionAxis::Controller,
+                })),
             },
         ] {
             let needs_parent = match &scope {

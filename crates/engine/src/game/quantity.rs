@@ -1597,7 +1597,7 @@ pub(crate) fn player_scope_is_source_context_previewable(scope: &PlayerScope) ->
         PlayerScope::ScopedPlayer
         | PlayerScope::Target
         | PlayerScope::RecipientController
-        | PlayerScope::ParentObjectTargetController
+        | PlayerScope::ParentObjectTarget { .. }
         | PlayerScope::SpecificPlayer { .. }
         | PlayerScope::AnyTurn => false,
     }
@@ -1942,7 +1942,7 @@ fn player_scope_recipient_read(scope: &PlayerScope) -> RecipientRead {
         | PlayerScope::Target
         | PlayerScope::Opponent { .. }
         | PlayerScope::DefendingPlayer
-        | PlayerScope::ParentObjectTargetController
+        | PlayerScope::ParentObjectTarget { .. }
         | PlayerScope::SourceChosenPlayer
         | PlayerScope::AnyTurn
         | PlayerScope::SpecificPlayer { .. } => RecipientRead::Unread,
@@ -1959,7 +1959,7 @@ fn single_player_scope_recipient_read(scope: &PlayerScope) -> RecipientRead {
         | PlayerScope::ScopedPlayer
         | PlayerScope::Target
         | PlayerScope::DefendingPlayer
-        | PlayerScope::ParentObjectTargetController
+        | PlayerScope::ParentObjectTarget { .. }
         | PlayerScope::SourceChosenPlayer
         | PlayerScope::AnyTurn
         | PlayerScope::SpecificPlayer { .. } => RecipientRead::Unread,
@@ -9280,9 +9280,13 @@ pub(crate) fn resolve_single_player_scope(
         }
         PlayerScope::DefendingPlayer => defending_player_for_quantity_context(state, ctx),
         // CR 109.4: controller of the parent object target.
-        PlayerScope::ParentObjectTargetController => {
-            ability.and_then(|a| crate::game::ability_utils::parent_target_controller(a, state))
-        }
+        PlayerScope::ParentObjectTarget {
+            possession: PossessionAxis::Controller,
+        } => ability.and_then(|a| crate::game::ability_utils::parent_target_controller(a, state)),
+        // CR 108.3: owner of the parent object target.
+        PlayerScope::ParentObjectTarget {
+            possession: PossessionAxis::Owner,
+        } => ability.and_then(|a| crate::game::ability_utils::parent_target_owner(a, state)),
         // CR 613.1: the player persisted on the source via an "as ~ enters,
         // choose a player" replacement (Entropic Specter, Sewer Nemesis).
         PlayerScope::SourceChosenPlayer => source_chosen_player_for_context(state, &ctx),
@@ -9389,8 +9393,17 @@ where
             .and_then(|pid| state.players.iter().find(|p| p.id == pid))
             .map_or(0, &mut extract),
         // CR 109.4 + CR 608.2c: controller of the parent object target.
-        PlayerScope::ParentObjectTargetController => ability
+        PlayerScope::ParentObjectTarget {
+            possession: PossessionAxis::Controller,
+        } => ability
             .and_then(|a| crate::game::ability_utils::parent_target_controller(a, state))
+            .and_then(|pid| state.players.iter().find(|p| p.id == pid))
+            .map_or(0, &mut extract),
+        // CR 108.3 + CR 608.2c: owner of the parent object target.
+        PlayerScope::ParentObjectTarget {
+            possession: PossessionAxis::Owner,
+        } => ability
+            .and_then(|a| crate::game::ability_utils::parent_target_owner(a, state))
             .and_then(|pid| state.players.iter().find(|p| p.id == pid))
             .map_or(0, &mut extract),
         // CR 613.1: the player persisted on the source via an "as ~ enters,
@@ -9499,7 +9512,7 @@ where
         | PlayerScope::Target
         | PlayerScope::RecipientController
         | PlayerScope::DefendingPlayer
-        | PlayerScope::ParentObjectTargetController
+        | PlayerScope::ParentObjectTarget { .. }
         | PlayerScope::SourceChosenPlayer
         | PlayerScope::AnyTurn
         | PlayerScope::SpecificPlayer { .. } => {
@@ -13980,7 +13993,9 @@ mod tests {
             PlayerScope::Target,
             PlayerScope::ScopedPlayer,
             PlayerScope::RecipientController,
-            PlayerScope::ParentObjectTargetController,
+            PlayerScope::ParentObjectTarget {
+                possession: PossessionAxis::Controller,
+            },
         ] {
             assert_eq!(
                 try_resolve_quantity_in_source_context(

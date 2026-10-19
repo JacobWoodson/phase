@@ -12528,7 +12528,9 @@ mod tests {
         let attribute = PlayerFilter::PlayerAttribute {
             relation: crate::types::ability::PlayerRelation::All,
             attr: Box::new(QuantityRef::BattlefieldEntriesThisTurn {
-                player: PlayerScope::ParentObjectTargetController,
+                player: PlayerScope::ParentObjectTarget {
+                    possession: crate::types::ability::PossessionAxis::Controller,
+                },
                 filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
                     FilterProp::Cmc {
                         comparator: Comparator::GE,

@@ -7477,7 +7477,9 @@ fn rw_player_filter(x: &PlayerFilter) -> RwProfile {
 
 fn rw_player_scope(x: &PlayerScope) -> RwProfile {
     match x {
-        PlayerScope::ParentObjectTargetController => reads_event_live(),
+        PlayerScope::ParentObjectTarget { .. } => {
+            reads_event_live()
+        }
         PlayerScope::AllPlayers { exclude, .. } => match exclude {
             Some(e) => rw_player_scope(e),
             None => RwProfile::empty(),
