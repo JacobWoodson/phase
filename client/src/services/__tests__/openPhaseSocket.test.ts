@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+﻿import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { lanSupported, probeLan, authorizeLan, invokeLan, channelListener } = vi.hoisted(() => ({
   lanSupported: vi.fn(), probeLan: vi.fn(), authorizeLan: vi.fn(), invokeLan: vi.fn(),
@@ -411,7 +411,7 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("rejects Full v150 before it can read a targeted-objects aggregate or tracked-set member filter", async () => {
+  it("rejects Full v150 before it can read a populated Bestow payload", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
     ws.deliverMessage(helloFrame({ protocol_version: 150 }));
@@ -422,10 +422,10 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("rejects Full v150 before it can read the gains rider's reshaped payload", async () => {
+  it("rejects Full v156 before it can read a targeted-objects aggregate or tracked-set member filter", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 150 }));
+    ws.deliverMessage(helloFrame({ protocol_version: 156 }));
 
     await expect(promise).rejects.toMatchObject({
       kind: "protocol_mismatch",
@@ -433,10 +433,10 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("accepts the literal Full v151 combined targeted-objects and gains-rider protocol", async () => {
+  it("accepts the literal Full v157 branch protocol", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 151 }));
+    ws.deliverMessage(helloFrame({ protocol_version: 157 }));
 
     await expect(promise).resolves.toBeDefined();
     expect(ws.close).not.toHaveBeenCalled();
@@ -461,6 +461,48 @@ describe("openPhaseSocket", () => {
       kind: "protocol_mismatch",
     });
     expect(ws.close).toHaveBeenCalled();
+  });
+
+  it("rejects Full v151 before it can read the shortcut suggestion", async () => {
+    const promise = openPhaseSocket("ws://test");
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(helloFrame({ protocol_version: 151 }));
+
+    await expect(promise).rejects.toMatchObject({
+      kind: "protocol_mismatch",
+    });
+    expect(ws.close).toHaveBeenCalled();
+  });
+
+  it("rejects Full v151 before it can silently drop an activated grant's kind selector", async () => {
+    const promise = openPhaseSocket("ws://test");
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(helloFrame({ protocol_version: 151 }));
+
+    await expect(promise).rejects.toMatchObject({
+      kind: "protocol_mismatch",
+    });
+    expect(ws.close).toHaveBeenCalled();
+  });
+
+  it("rejects Full v152 before it can silently drop an activated grant's kind selector", async () => {
+    const promise = openPhaseSocket("ws://test");
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(helloFrame({ protocol_version: 152 }));
+
+    await expect(promise).rejects.toMatchObject({
+      kind: "protocol_mismatch",
+    });
+    expect(ws.close).toHaveBeenCalled();
+  });
+
+  it("accepts the literal Full v153 kind-selected activated-grant protocol", async () => {
+    const promise = openPhaseSocket("ws://test");
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(helloFrame({ protocol_version: 153 }));
+
+    await expect(promise).resolves.toBeDefined();
+    expect(ws.close).not.toHaveBeenCalled();
   });
 
   it("rejects Full v139 before it can read the attack event's attacked players", async () => {
@@ -626,7 +668,7 @@ describe("openPhaseSocket", () => {
   });
 
 
-  // ── Lobby-owned protocol version ────────────────────────────────────────
+  // â”€â”€ Lobby-owned protocol version â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   it("accepts a LobbyOnly broker with a stale full-game protocol when its lobby version is current", async () => {
     // The regression this whole change exists for. `main` drifting two
@@ -875,8 +917,8 @@ describe("withReconnect", () => {
         onStateChange: (s) => states.push(s),
       });
 
-      // Initial attempt fails → reconnecting → retry1 fails → reconnecting
-      //   → retry2 fails → offline.
+      // Initial attempt fails â†’ reconnecting â†’ retry1 fails â†’ reconnecting
+      //   â†’ retry2 fails â†’ offline.
       for (let i = 0; i < 5; i++) {
         await vi.advanceTimersByTimeAsync(20);
       }

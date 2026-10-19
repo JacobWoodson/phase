@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+﻿import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -76,6 +76,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // `FilterProp::CrewedThisTurn`).
 // v140 adds `AttackSubject::EventAttackers` (the attacked players of a trigger's attack
 // event) to ability player scopes in GameState.
+// v151 carries populated Bestow restoration payloads (object instead of boolean).
 // v141 adds `ExileLinkKind::CastCost` (CR 607.2q cast-cost exile links) to GameState.
 // v142 adds `LinkedExileSnapshot.incarnation` (CR 400.7) to GameState's linked-exile snapshots.
 // v143 retypes GameState's modal no-repeat history keys to `ObjectIncarnationRef` (CR 400.7).
@@ -90,6 +91,8 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // `BatchCompletion::TopCardContestRoundComplete`).
 // v149 moves the CR 608.2n owed final part of a paused spell onto the resolution
 // carrier (`GameState.resolving_spell_final_part`; `deferred_spell_delivery` removed).
+// v152 adds `ShortcutDecisionSchema.suggested_declaration` and `.leading_aims`, and
+// `ShortcutProposal.leading_aims`.
 // Keep the measured base so a future merge cannot collapse independent wire
 // changes onto one number.
 const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
@@ -98,7 +101,7 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // event-deadline duration parse bump, the v79 activated-ability
 // cost-reduction election, the v80 exile look-link reshape, and the v81 Surge
 // cast election tag.
-// +11: the v82 CR 500.8–500.10 added-phase anchoring parse bump.
+// +11: the v82 CR 500.8â€“500.10 added-phase anchoring parse bump.
 // +12: the v83 target-gated activation costs.
 // +13: the v84 dungeon choice card and room previews.
 // +14: the v85 ignored-die display event.
@@ -113,7 +116,7 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +22: the v93 SacrificedForCost reduction provenance.
 // +23: the v94 phase-delayed departure look-back carrier
 // (SpellContext.creation_lookback_event) and TriggerSourceContext.mana_cost.
-// +24: the v95 FilterProp::BlockStatus reshape (Unblocked → BlockStatus { status }).
+// +24: the v95 FilterProp::BlockStatus reshape (Unblocked â†’ BlockStatus { status }).
 // +25: the v96 QuantityRef::NameStickerLetterCount tagged quantity.
 // +26: the v97 serialized TargetReadOrigin (`target_reads`) instruction
 // provenance.
@@ -182,16 +185,26 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 //      `BatchCompletion::TopCardContestRoundComplete`.
 // +78: v149 moves the owed final part of a paused spell onto the resolution carrier
 //      (`GameState.resolving_spell_final_part`; `deferred_spell_delivery` removed).
-// +80: v151 combines main's v150 (cast-this-way gains rider payload reshape)
-//      with this branch's v150 (`CardTypeSetSource::TargetedObjects` plus the
-//      `TrackedSet.filter` member restriction), which coined the same number
-//      for incompatible shapes.
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 80;
+// +79: v150 reshapes the cast-this-way gains rider's serialized payload (the permission's
+//      `enters_with_modifications` object and the effect's `rider` key), neither parseable
+//      by a v149 peer.
+// +80: v151 carries populated Bestow restoration payloads.
+// +81: v152 adds `ShortcutDecisionSchema.suggested_declaration` and `.leading_aims`,
+//      and `ShortcutProposal.leading_aims`.
+// +82: v153 adds the optional kind selector to GrantAllActivatedAbilitiesOf
+// and removes the loyalty-grant sibling variant.
+// +86: v157 carries this branch's wire shape, renumbered (coined as v150 here,
+//      as v151 "combined wire" at the bf867d08b merge, then v154 at the
+//      6e686ee71 merge): `CardTypeSetSource::TargetedObjects` plus the
+//      `TrackedSet.filter` member restriction. Main has taken v151 bestow,
+//      v152 shortcut schema and v153 Bolas grant, and v154-156 are claimed by
+//      queued/approved PRs.
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 86;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
 const EXPECTED_LOBBY_PROTOCOL_VERSION = 16;
-// The capability FLOOR for correlated tournament settlement — a different kind
+// The capability FLOOR for correlated tournament settlement â€” a different kind
 // of number from the other version constants here, and the reason it is pinned
 // separately. Those track a surface's current version; this one is frozen at the
 // version that INTRODUCED the ack and must never be bumped alongside
@@ -199,7 +212,7 @@ const EXPECTED_LOBBY_PROTOCOL_VERSION = 16;
 // that answers the ack perfectly well, silently disabling all four organizer
 // actions.
 const EXPECTED_MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK = 5;
-// The capability FLOOR for broker-owned default scoring — a second frozen
+// The capability FLOOR for broker-owned default scoring â€” a second frozen
 // floor, pinned for the same reason as the ack floor above and never bumped
 // alongside EXPECTED_LOBBY_PROTOCOL_VERSION. It is frozen at the version that
 // RELAXED CreateTournament.scoring to optional. Raising it would push every
@@ -211,7 +224,7 @@ const EXPECTED_MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING = 6;
 // frames carry it, and the same GameState shape change that moves
 // EXPECTED_PROTOCOL_VERSION must move this one too. It was previously ungated
 // here, so a full-game bump could ship with an unbumped P2P version and CI
-// stayed green — a v(n-1) host and a v(n) guest would then complete a
+// stayed green â€” a v(n-1) host and a v(n) guest would then complete a
 // handshake and only fail when the incompatible payload arrived.
 const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +6: wire 60 moves with full-game v78 for the event-deadline duration.
@@ -288,14 +301,20 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +74: wire 128 moves with full-game v146 for `ConfirmedPeriod.counted_by` and `.performance`.
 // +76: wire 130 moves with full-game v148 for Timesifter's top-card exile contest.
 // +77: wire 131 moves with full-game v149 for the carrier-owned final-part marker.
-// +79: wire 133 moves with full-game v151 for the combined wire (main's
-//      gains-rider reshape plus this branch's `TargetedObjects` aggregates
-//      and `TrackedSet.filter` member restriction).
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 79;
+// +78: wire 132 moves with full-game v150 for the cast-this-way gains rider's serialized
+//      payload reshape (the permission's `enters_with_modifications` object and the
+//      effect's `rider` key).
+// +79: wire 133 moves with full-game v151 for populated Bestow payloads.
+// +80: wire 134 moves with full-game v152 for the shortcut suggestion fields.
+// +81: wire 135 moves with full-game v153 for the kind-selected activated grant.
+// +85: wire 139 moves with full-game v157 for this branch's renumbered wire
+//      (`TargetedObjects` aggregates and the `TrackedSet.filter` member
+//      restriction).
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 85;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse
-// a mismatched peer before allocating a seat or consuming reconnect grace) —
+// a mismatched peer before allocating a seat or consuming reconnect grace) â€”
 // the most consequential kind of version number to leave ungated, because the
 // dangerous direction is the one that stays GREEN. Adding a draft message or a
 // player-view field without bumping this number left `draftProtocol.test.ts`
@@ -398,7 +417,7 @@ requirePattern(
   "lobby-worker/src/hello-gate.ts",
 );
 
-// ── Authored vs derived: which constants may carry a bare integer ──────────
+// â”€â”€ Authored vs derived: which constants may carry a bare integer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
 // Of the protocol constants declared in the files below, only the names listed
 // here may carry an integer. A derived constant replaced by its correct current
@@ -406,7 +425,7 @@ requirePattern(
 // the Rust and vitest suites, and reds only at the next bump. Ceilings: a
 // right-hand side that is constant but not a decimal integer (hex, arithmetic,
 // a block expression) reads as derived, and so does a decimal integer whose
-// type suffix falls outside INTEGER_RHS's `[iu]<digits>` alphabet — `<n>usize`,
+// type suffix falls outside INTEGER_RHS's `[iu]<digits>` alphabet â€” `<n>usize`,
 // `<n>isize` and TypeScript's `<n>n`; the name filter below lets a helper named
 // neither PROTOCOL nor MIN_SUPPORTED hold the literal while a protocol
 // constant derives from it; and the declaration regex sees one binding per
@@ -492,7 +511,7 @@ if (
   process.exit(1);
 }
 
-// ── P2P wire protocol: the third surface ───────────────────────────────────
+// â”€â”€ P2P wire protocol: the third surface â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
 // Pinned here for the same reason the full-game number is: a `GameState` shape
 // change crosses BOTH the WebSocket full-game wire and the P2P host/guest wire,
@@ -517,7 +536,7 @@ if (wireProtocolVersion !== EXPECTED_WIRE_PROTOCOL_VERSION) {
   process.exit(1);
 }
 
-// ── P2P draft wire: the FIFTH surface ──────────────────────────────────
+// â”€â”€ P2P draft wire: the FIFTH surface â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
 // Independent of all four numbers above: the draft host/guest pair versions its
 // own message set and its own player-view shape, and refuses a mismatch at
@@ -540,14 +559,13 @@ if (draftProtocolVersion !== EXPECTED_DRAFT_PROTOCOL_VERSION) {
   process.exit(1);
 }
 
-
-// ── Draft payload BOUNDS: a sixth surface, and a different kind of number ──
+// â”€â”€ Draft payload BOUNDS: a sixth surface, and a different kind of number â”€â”€
 //
 // `draftProtocol.ts` mirrors three engine constants that bound what a draft
 // message may STATE, so the transport can refuse an over-long payload without a
 // session. Each carried a `@sync-with` comment and nothing that reads it, and
 // the pile bound additionally CLAIMED to be "pinned by this module's test
-// against the engine constant's published figure" — which it was not: that test
+// against the engine constant's published figure" â€” which it was not: that test
 // asserts pile 3 rejected and pile 2 accepted, which pins the constant against
 // itself and passes for any value the two sides happen to share.
 //
@@ -555,7 +573,7 @@ if (draftProtocolVersion !== EXPECTED_DRAFT_PROTOCOL_VERSION) {
 // already pinned on its own side (`max_shared_stack_piles_matches_procedure_table`
 // folds `DraftKind::ALL`), so a future 4-pile procedure row moves the Rust value
 // and every Rust test stays green, while the unmoved TypeScript mirror rejects
-// legal pile-3 decisions at the transport — a rules-correct engine reachable
+// legal pile-3 decisions at the transport â€” a rules-correct engine reachable
 // only by a message the client refuses to send. Comparing the two literals is
 // the only thing that reds on that edit, and this is the script that already
 // reads Rust constants for exactly this purpose.
@@ -589,14 +607,14 @@ for (const name of DRAFT_PAYLOAD_BOUNDS) {
   }
 }
 
-// ── Lobby protocol: a SEPARATE surface with its own version ────────────────
+// â”€â”€ Lobby protocol: a SEPARATE surface with its own version â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
 // `PROTOCOL_VERSION` versions the full-game GameState/GameAction wire surface.
 // The lobby broker carries neither type, so most full-game bumps leave it
 // alone. It is not disjoint from them, though: its messages embed
 // `FormatConfig` and `MatchConfig`, which `GameState` also carries as fields,
 // so retyping one of those breaks lobby messages too and has to move BOTH
-// numbers. What is wrong is deriving one number from the other — the
+// numbers. What is wrong is deriving one number from the other â€” the
 // accept-window used to come from the full-game number, so a GameState-only
 // bump slid the lobby window and stranded every already-deployed client.
 
@@ -637,10 +655,10 @@ const clientDefaultScoringFloor = extractVersion(
 // expression) fails to match and trips "Could not find protocol version"
 // rather than silently re-coupling the two surfaces.
 //
-// That device is doing MORE work for the two FROZEN floors — the ack floor and
-// the default-scoring floor — than for the four current-version pins. The
+// That device is doing MORE work for the two FROZEN floors â€” the ack floor and
+// the default-scoring floor â€” than for the four current-version pins. The
 // plausible "improvement" to a frozen floor is to re-derive it from the current
-// version — `= LOBBY_PROTOCOL_VERSION` — which reads like removing a magic
+// version â€” `= LOBBY_PROTOCOL_VERSION` â€” which reads like removing a magic
 // number and is in fact a latent bug: at the next lobby bump every v5 broker,
 // which does mint the ack, would be refused as unsupported, and every v6
 // broker, which does apply the scoring default, likewise. The bare-integer
@@ -663,7 +681,7 @@ if (rustLobbyFloor !== clientLobbyFloor) {
 if (rustLobbyVersion !== EXPECTED_LOBBY_PROTOCOL_VERSION) {
   console.error(
     `Lobby protocol version must remain ${EXPECTED_LOBBY_PROTOCOL_VERSION}: got ${rustLobbyVersion}. ` +
-      `Bump it ONLY for a LobbyClientMessage/LobbyServerMessage shape change — never for a full-game bump.`,
+      `Bump it ONLY for a LobbyClientMessage/LobbyServerMessage shape change â€” never for a full-game bump.`,
   );
   process.exit(1);
 }
@@ -673,7 +691,7 @@ if (
 ) {
   console.error(
     `MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK must remain ${EXPECTED_MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK}: got ${clientTournamentAckFloor}. ` +
-      `It is FROZEN at the lobby version that introduced TournamentActionAck — not a moving target. ` +
+      `It is FROZEN at the lobby version that introduced TournamentActionAck â€” not a moving target. ` +
       `Do NOT bump it with LOBBY_PROTOCOL_VERSION: a newer broker still answers the ack, and raising this ` +
       `floor would refuse every one of them and silently disable all four organizer actions.`,
   );
@@ -683,7 +701,7 @@ if (
 if (clientDefaultScoringFloor !== EXPECTED_MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING) {
   console.error(
     `MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING must remain ${EXPECTED_MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING}: got ${clientDefaultScoringFloor}. ` +
-      `It is FROZEN at the lobby version that relaxed CreateTournament.scoring to optional — not a moving target. ` +
+      `It is FROZEN at the lobby version that relaxed CreateTournament.scoring to optional â€” not a moving target. ` +
       `Do NOT bump it with LOBBY_PROTOCOL_VERSION: a newer broker still applies the arity default, and raising this ` +
       `floor would pin this client to sending an explicit scoring policy against every broker that can default one.`,
   );
@@ -713,9 +731,9 @@ if (rustLobbyFloor > rustLobbyVersion) {
   process.exit(1);
 }
 
-// ── Directory announcement shape: a FOURTH constant surface ────────────────
+// â”€â”€ Directory announcement shape: a FOURTH constant surface â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
-// `DIRECTORY_VERSION` versions the ANNOUNCEMENT shape — the `POST /announce`
+// `DIRECTORY_VERSION` versions the ANNOUNCEMENT shape â€” the `POST /announce`
 // body Rust sends and the `GET /servers` envelope the client reads. It is
 // unrelated to all three wire protocols above: none of the lobby, full-game or
 // P2P message sets appears in a directory row. It moves only when
@@ -755,7 +773,7 @@ if (rustDirectoryVersion !== clientDirectoryVersion) {
 }
 
 // Not redundant with the mismatch check above. A COORDINATED bump of both
-// sides — exactly what an auto-merge of two branches can produce silently —
+// sides â€” exactly what an auto-merge of two branches can produce silently â€”
 // passes consistency and fails here.
 if (rustDirectoryVersion !== EXPECTED_DIRECTORY_VERSION) {
   console.error(
@@ -764,7 +782,7 @@ if (rustDirectoryVersion !== EXPECTED_DIRECTORY_VERSION) {
   );
   process.exit(1);
 }
-// ── Names that embed a version number ─────────────────────────────────────
+// â”€â”€ Names that embed a version number â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
 // A name carrying a version goes stale silently: `assert_eq!(PROTOCOL_VERSION,
 // <n>)` under `fn protocol_version_is_<n-1>` is green. The two sites below
@@ -794,8 +812,8 @@ requirePattern(draftProtocolTestSource, new RegExp(`is version ${D}(?![0-9])`),
   `client/src/network/__tests__/draftProtocol.test.ts it("is version ${D}")`);
 refusePattern(draftProtocolTestSource, new RegExp(`is version ${D - 1}(?![0-9])`),
   "client/src/network/__tests__/draftProtocol.test.ts");
-// And the assertion's own literal, so all three sites in the draft bump — the
-// source constant, this value and the title above — red THIS gate rather than
+// And the assertion's own literal, so all three sites in the draft bump â€” the
+// source constant, this value and the title above â€” red THIS gate rather than
 // only the vitest run, which CI schedules separately from `type-check` and
 // `build`. Anchored on `expect(DRAFT_PROTOCOL_VERSION)` rather than on a bare
 // `toBe(<n>)`, so the refuse leg can never fire on an unrelated assertion that
@@ -809,7 +827,7 @@ refusePattern(draftProtocolTestSource,
 
 // Both legs read the file's test TITLES, not its whole source, so coverage that legitimately
 // drives the superseded version in a body is not a bump leftover. Ceiling: double-quoted titles
-// only, so a backtick or single-quoted title falls out of the slice — admit-only, never a false
+// only, so a backtick or single-quoted title falls out of the slice â€” admit-only, never a false
 // refusal, which is what makes the narrowing safe.
 const p2pProtocolTestTitles = [
   ...p2pProtocolTestSource.matchAll(/\b(?:describe|it|test)\(\s*"([^"]*)"/g),

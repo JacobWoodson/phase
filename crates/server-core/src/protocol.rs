@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+﻿use std::collections::HashMap;
 
 use engine::game::interaction::ObjectActionPayload;
 use engine::types::ability::AbilityBlockEntry;
@@ -32,14 +32,14 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION;
 
 /// Minimum protocol version accepted by lobby-only brokers from clients that
 /// predate the lobby-owned version. Derived from `PROTOCOL_VERSION`, so it
-/// slides on full-game churn — which is exactly why
+/// slides on full-game churn â€” which is exactly why
 /// [`MIN_SUPPORTED_LOBBY_PROTOCOL`] exists. Legacy path only.
 pub const LOBBY_MIN_SUPPORTED_PROTOCOL: u32 = lobby_broker::MIN_SUPPORTED_PROTOCOL;
 
 /// Wire version of the lobby message set, independent of [`PROTOCOL_VERSION`].
 pub const LOBBY_PROTOCOL_VERSION: u32 = lobby_broker::LOBBY_PROTOCOL_VERSION;
 
-/// Lowest [`LOBBY_PROTOCOL_VERSION`] a lobby broker accepts. No upper bound —
+/// Lowest [`LOBBY_PROTOCOL_VERSION`] a lobby broker accepts. No upper bound â€”
 /// see `lobby_broker::protocol::MIN_SUPPORTED_LOBBY_PROTOCOL`.
 pub const MIN_SUPPORTED_LOBBY_PROTOCOL: u32 = lobby_broker::MIN_SUPPORTED_LOBBY_PROTOCOL;
 
@@ -108,7 +108,7 @@ pub struct AiSeatRequest {
 // `LobbyGame` and `DraftLobbyMetadata` are now DEFINED in `lobby-broker`
 // (the WASM-safe broker crate owns the lobby-listing wire types) and
 // re-exported here so `ServerMessage::LobbyUpdate { games: Vec<LobbyGame> }`
-// and the broker reference the same struct. The serde shape is unchanged —
+// and the broker reference the same struct. The serde shape is unchanged â€”
 // wire bytes are byte-identical (guarded by tests/lobby_wire_contract.rs).
 pub use lobby_broker::protocol::{DraftLobbyMetadata, LobbyGame, ServerErrorCode};
 
@@ -121,7 +121,7 @@ pub use lobby_broker::protocol::{
     PairingView, PlayerSummary, TournamentRequestId, TournamentSummary, TournamentView,
 };
 // The domain types those views embed, re-exported for the same reason. All are
-// already `Serialize`/`Deserialize` — `MatchArity` and `ScoringPolicy` through
+// already `Serialize`/`Deserialize` â€” `MatchArity` and `ScoringPolicy` through
 // validated `try_from`/`into` boundaries, so a malformed value is refused at
 // deserialization rather than discovered later inside pairing/scoring logic.
 pub use lobby_broker::tournament::{
@@ -336,7 +336,7 @@ pub enum ClientMessage {
     /// One opaque, engine-authored interaction response. The client echoes the
     /// submission the engine published in `ViewerInteraction`; it never derives
     /// a `GameAction` from the opportunity schema. Like `Action`, the
-    /// authenticated session — not the payload — determines the acting seat.
+    /// authenticated session â€” not the payload â€” determines the acting seat.
     ///
     /// Unlike `Action`, a bounds rejection on this variant is answered on
     /// `ServerMessage::ActionRejected`, not `ServerMessage::Error`: a free-form
@@ -347,7 +347,7 @@ pub enum ClientMessage {
         submission: InteractionSubmission,
     },
     /// Read-only preview of one engine-authored interaction response. The client
-    /// echoes the request it minted; the authenticated session — not the payload —
+    /// echoes the request it minted; the authenticated session â€” not the payload â€”
     /// determines the acting seat.
     ///
     /// The answer never travels on `ServerMessage::Error`: like `Interaction`, a
@@ -561,7 +561,7 @@ pub enum ClientMessage {
     /// exactly what an omitted payload means.
     RequestTakeback(Option<RewindTarget>),
     /// Approve or decline the table's pending takeback request. Any single
-    /// decline withdraws the request — rollback requires unanimous approval.
+    /// decline withdraws the request â€” rollback requires unanimous approval.
     RespondTakeback {
         approve: bool,
     },
@@ -583,7 +583,7 @@ pub enum ClientMessage {
         ///
         /// The mirror MUST relax with it. Leaving it required here would make
         /// broker-owned default scoring work over the lobby/Worker socket and
-        /// hard-fail over the native `phase-server` game socket — a functional
+        /// hard-fail over the native `phase-server` game socket â€” a functional
         /// asymmetry in the exact layer this mirror exists to keep identical.
         /// `to_lobby_client_message`'s arm stays a pass-through; "repairing"
         /// its compile error with `Some(*scoring)` instead is the defect this
@@ -615,7 +615,7 @@ pub enum ClientMessage {
     },
     JoinTournament {
         code: String,
-        /// Client-supplied stable entrant identity, opaque to the server —
+        /// Client-supplied stable entrant identity, opaque to the server â€”
         /// the same "the client names its own identity" precedent as
         /// `host_peer_id`.
         player_key: String,
@@ -695,7 +695,7 @@ pub enum ServerMessage {
         protocol_version: u32,
         mode: ServerMode,
         /// This server's `lobby_broker::LOBBY_PROTOCOL_VERSION`, advertised
-        /// alongside — never instead of — `protocol_version`, which clients
+        /// alongside â€” never instead of â€” `protocol_version`, which clients
         /// predating the lobby-owned version still gate on. Additive and
         /// optional in both directions.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -766,7 +766,7 @@ pub enum ServerMessage {
         /// CR 118.3: per-object read-out of activated abilities the acting player
         /// is not being offered solely because they can't pay the cost right now.
         /// Acting-player-scoped and empty for non-actors, exactly like
-        /// `legal_actions_by_object` above. Display only — never dispatchable.
+        /// `legal_actions_by_object` above. Display only â€” never dispatchable.
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         activation_block_reasons: HashMap<ObjectId, Vec<AbilityBlockEntry>>,
         /// Engine-authored presentation projections computed alongside
@@ -786,7 +786,7 @@ pub enum ServerMessage {
         /// omitted only for wire-compatible non-Full producers.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         full_key: Option<FullSessionKey>,
-        /// Engine events produced by `start_game` — currently the d20
+        /// Engine events produced by `start_game` â€” currently the d20
         /// first-player contest (`StartingPlayerContest`) event. Populated ONLY
         /// on the initial post-start broadcast; empty for late joiners and
         /// reconnects (a reconnecting player must not re-see the contest). The
@@ -833,12 +833,12 @@ pub enum ServerMessage {
         legal_actions_by_object: HashMap<ObjectId, Vec<ObjectActionPayload>>,
         /// CR 118.3: per-object "can't pay this cost right now" read-out.
         /// Acting-player-scoped and empty for non-actors, exactly like
-        /// `legal_actions_by_object` above. Display only — never dispatchable.
+        /// `legal_actions_by_object` above. Display only â€” never dispatchable.
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         activation_block_reasons: HashMap<ObjectId, Vec<AbilityBlockEntry>>,
         /// Engine-authored presentation projections for this state snapshot.
         /// See `engine::game::derived_views::DerivedViews`. Always populated
-        /// by server construction sites — the `#[serde(default)]` exists
+        /// by server construction sites â€” the `#[serde(default)]` exists
         /// only for wire-format forward compatibility, never as an intended
         /// silent fallback (CLAUDE.md: engine owns all logic).
         #[serde(default)]
@@ -899,7 +899,7 @@ pub enum ServerMessage {
     AuthoritativeStateExportFailed {
         message: String,
     },
-    /// Answer to a `PreviewInteraction` request, carrying the engine's own DTO —
+    /// Answer to a `PreviewInteraction` request, carrying the engine's own DTO â€”
     /// including its `Rejected` status, so there is no `*Rejected` sibling. Sent
     /// only to the requesting player.
     InteractionPreview {
@@ -1011,7 +1011,7 @@ pub enum ServerMessage {
         emote: String,
     },
     /// Live click counters of the running contest, sent between full state
-    /// transitions (display only — the counts never decide the winner).
+    /// transitions (display only â€” the counts never decide the winner).
     ContestProgress {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         full_key: Option<FullSessionKey>,
@@ -1115,7 +1115,7 @@ pub enum ServerMessage {
         /// When `organizer_token` stops being accepted, in epoch
         /// milliseconds. Mirrors
         /// [`lobby_broker::LobbyServerMessage::TournamentCreated`]'s, in the
-        /// same position — the position is load-bearing, see the client-mirror
+        /// same position â€” the position is load-bearing, see the client-mirror
         /// note above.
         expires_at_ms: u64,
         view: TournamentView,
@@ -2480,7 +2480,7 @@ mod tests {
     #[test]
     fn server_hello_omits_public_url_when_none() {
         // `skip_serializing_if` keeps the wire identical to a server with no
-        // advertised URL — and identical to the lobby-broker ServerHello, which
+        // advertised URL â€” and identical to the lobby-broker ServerHello, which
         // has no such field (asserted by the lobby wire-contract test).
         let msg = ServerMessage::ServerHello {
             server_version: "0.1.11".to_string(),
@@ -2914,7 +2914,7 @@ mod tests {
 
     /// A client that predates multi-set pods sends the single `"set_code"`
     /// string. It must arrive as the one-element sequence it always meant
-    /// rather than failing the whole frame — the same contract
+    /// rather than failing the whole frame â€” the same contract
     /// `DraftSource`'s `code`/`codes` alias gives snapshots.
     #[test]
     fn create_draft_frame_accepts_the_legacy_single_set_code() {
@@ -3093,7 +3093,7 @@ mod tests {
             rarity: "common".to_string(),
             colors: vec!["W".to_string()],
             cmc: 1,
-            type_line: "Creature — Test".to_string(),
+            type_line: "Creature â€” Test".to_string(),
             draft_effect: None,
         };
         let second_pull = DraftCardInstance {
@@ -3473,22 +3473,33 @@ mod tests {
         }
     }
 
-    /// v151: combined wire — main's v150 (reshaped cast-this-way gains rider
-    /// payload) and this branch's v150 (`CardTypeSetSource::TargetedObjects`
-    /// plus the `TrackedSet.filter` member restriction) coined one number for
-    /// incompatible shapes, so the combined candidate moves to a fresh numeral.
-    /// A v150 peer of either dialect must be refused before it receives v151
-    /// state.
+    /// v157: this branch's wire shape, renumbered (coined as v150 here, as
+    /// v151 "combined wire" at the bf867d08b merge, then v154 at the 6e686ee71
+    /// merge): `CardTypeSetSource::TargetedObjects` plus the `TrackedSet.filter`
+    /// member restriction. Main has taken v151 bestow, v152 shortcut schema
+    /// and v153 Bolas grant, and v154-156 are claimed by queued/approved PRs,
+    /// so the combined candidate moves to this fresh numeral. A v156 peer must
+    /// be refused before it receives v157 state.
+    ///
+    /// v153: `GrantAllActivatedAbilitiesOf` gains the optional `kind` selector
+    /// and the loyalty-grant sibling variant is removed. A v152 peer
+    /// drops the defaulted field silently and over-grants, so it must be
+    /// refused before it receives v153 state.
+    ///
+    /// v152: `ShortcutDecisionSchema` gains `suggested_declaration` and
+    /// `leading_aims`, and `ShortcutProposal` gains `leading_aims`; a v151 peer
+    /// drops them, so it must be refused before it receives v152 state.
+    /// v151: populated Bestow form payloads require a versioned full-game peer.
     /// v149: `GameState::deferred_spell_delivery` is gone and
     /// `GameState::resolving_spell_final_part` marks the CR 608.2n final part a
     /// paused instant or sorcery still owes; a v148 peer drops the key and would
     /// move the spell before its paused instructions finish, so it must be refused
     /// before it receives v149 state.
-    /// v148: Timesifter's top-card exile contest — `Effect::ExileTopCardContest`
+    /// v148: Timesifter's top-card exile contest â€” `Effect::ExileTopCardContest`
     /// in serialized ability definitions and the parked
     /// `BatchCompletion::TopCardContestRoundComplete`; a v147 peer cannot parse
     /// either tag, so it must be refused before it receives v148 state.
-    /// v147: online physical contests (Eye to Eye, Mouth to Mouth) —
+    /// v147: online physical contests (Eye to Eye, Mouth to Mouth) â€”
     /// `WaitingFor::PhysicalContest`, `Effect::PhysicalContest`, the two
     /// `PhysicalContest*` `GameEvent`s, `ClientMessage::ContestClick` and
     /// `ServerMessage::ContestProgress`; a v146 peer cannot parse the new tags, so
@@ -3526,7 +3537,7 @@ mod tests {
     /// ability's `player_scope` inside `GameState`; a v139 peer cannot parse the
     /// tag, so it must be refused before it receives v140 state.
     ///
-    /// v139: CR 702.122c per-turn crew relation —
+    /// v139: CR 702.122c per-turn crew relation â€”
     /// `GameState::crew_history_this_turn` and `FilterProp::CrewedThisTurn`, both
     /// inside `GameState`; a v138 peer cannot parse the new filter tag, so it
     /// must be refused before it receives v139 state.
@@ -3537,7 +3548,7 @@ mod tests {
     /// resolves an activation trigger's "copy that ability" differently, so it
     /// must be refused before it receives v134 state.
     ///
-    /// v133: CR 614.12a pre-entry as-enters choices —
+    /// v133: CR 614.12a pre-entry as-enters choices â€”
     /// `NamedChoiceSourceBinding::PendingEntry`, `ProposedEvent::ZoneChange`'s
     /// `enter_with_choices` and `PendingReplacement::delivery_boundary`, all
     /// inside `GameState`; a v132 peer cannot parse the new binding tag, so it
@@ -3617,14 +3628,14 @@ mod tests {
     /// 5; a v115 peer refuses that resolution state, so it must be refused before it
     /// receives v116 state.
     /// `MulliganChoice` gains `FreeReveal` and `MulliganDeclaration` gains `kind`
-    /// (the Dandân free reveal mulligan); a v114 peer cannot deserialize the
+    /// (the DandÃ¢n free reveal mulligan); a v114 peer cannot deserialize the
     /// choice and would carry out a held free reveal as a regular mulligan, so it
     /// must be refused before it receives v115 state.
     /// `WaitingFor::MulliganDecision` gains `declared` (CR 103.5 declare round),
     /// serialized in `GameState.waiting_for`; a v113 peer would drop it silently,
     /// so it must be refused before it receives v114 state.
     /// `ResolvedZoneChangeCommand` gains `rebound_from` (CR 108.3 as modified by
-    /// the Dandân hand-entry rebind), serialized inside
+    /// the DandÃ¢n hand-entry rebind), serialized inside
     /// `GameState.resolved_rules_journal`; a v112 peer would drop it silently,
     /// so it must be refused before it receives v113 state.
     /// `ContinuousModification` gains `SubstituteTextWord` (CR 612.1), serialized
@@ -3719,19 +3730,19 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_151_for_combined_targeted_objects_and_gains_rider() {
-        assert_eq!(PROTOCOL_VERSION, 151);
+    fn protocol_version_is_157_for_targeted_objects_and_set_filter() {
+        assert_eq!(PROTOCOL_VERSION, 157);
     }
 
-    /// The bump alone is inert — a version number nobody enforces prevents no
+    /// The bump alone is inert â€” a version number nobody enforces prevents no
     /// pairing. This is the assertion with teeth: full-game servers accept ONLY
     /// the current protocol, so an older peer cannot complete a handshake with
     /// a server that may answer an accepted action on a variant it does not
     /// understand.
     ///
-    /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
-    /// this guards — and this test reds while
-    /// `protocol_version_is_151_for_combined_targeted_objects_and_gains_rider`
+    /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` â€” the exact regression
+    /// this guards â€” and this test reds while
+    /// `protocol_version_is_157_for_targeted_objects_and_set_filter`
     /// stays green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {
@@ -3816,7 +3827,7 @@ mod tests {
     /// R15. The last-action frame the client actually sends carries **no**
     /// `data` key at all, which is byte-identical to the frame every deployed
     /// client already sends. `ClientMessage` is adjacently tagged, and serde
-    /// synthesizes a missing-content arm only for unit and newtype variants —
+    /// synthesizes a missing-content arm only for unit and newtype variants â€”
     /// and only an `Option<T>` payload recovers from it. A struct variant here
     /// would reject this frame with ``missing field `data` ``, so this
     /// assertion is what fails if the variant shape regresses.

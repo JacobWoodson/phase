@@ -11,8 +11,8 @@
 //! `server_core::ServerMessage::LobbyUpdate { games: Vec<LobbyGame> }` and the
 //! broker both reference the same struct.
 //!
-//! Incoming frames are deserialized via a **two-stage parse** (`Envelope` →
-//! tag match → variant): `#[serde(other)]` is invalid on adjacently-tagged
+//! Incoming frames are deserialized via a **two-stage parse** (`Envelope` â†’
+//! tag match â†’ variant): `#[serde(other)]` is invalid on adjacently-tagged
 //! enums, so an unrecognized `type` is routed to the reject path explicitly
 //! rather than collapsing into a magic catch-all variant (plan decision A2).
 
@@ -35,15 +35,15 @@ pub enum ServerErrorCode {
 /// Client-minted correlator for one gated tournament action. Opaque to the
 /// broker: minted by the caller, echoed on the reply, never stored.
 ///
-/// It identifies a *request*, never a *requester* — authority remains the
+/// It identifies a *request*, never a *requester* â€” authority remains the
 /// `organizer_token`/`player_token` in the payload, and this value must never be
 /// read as permission. It is not an idempotency token either: replaying the same
 /// id re-executes the action, exactly as `PreviewManaPayment`'s `request_id`
 /// does on the full-game surface.
 ///
 /// A newtype rather than the bare `u64` its `server_core` siblings use, because
-/// `ReportMatchResult` already carries a [`crate::tournament::PairingId`] — a
-/// bare `u32` alias — and a second unlabelled integer on that signature is
+/// `ReportMatchResult` already carries a [`crate::tournament::PairingId`] â€” a
+/// bare `u32` alias â€” and a second unlabelled integer on that signature is
 /// precisely the confusion the newtype idiom exists to prevent.
 /// `#[serde(transparent)]` keeps it wire-identical to a bare `u64`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -53,29 +53,57 @@ pub struct TournamentRequestId(pub u64);
 /// Wire-protocol version shared by the native server, client, and Cloudflare
 /// lobby Worker. Bump when any `ClientMessage` or `ServerMessage` variant is
 /// added, removed, renamed, or has a field type changed. Adding a new optional
-/// field with `#[serde(default)]` does not require a bump — **unless the client
+/// field with `#[serde(default)]` does not require a bump â€” **unless the client
 /// stops deriving a fallback for it.** That clause is about wire
 /// *parseability*, not capability: once the client renders a feature only from
 /// the new field, an old server that omits it produces a silent feature loss
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
-/// 151 — Combined wire: main's 150 and the 150 this branch coined
-///      independently carried incompatible shapes under one number, so the
-///      combined candidate moves to a fresh numeral both dialects refuse.
-///      From main's 150: the cast-this-way gains rider's serialized payload
-///      is reshaped (`CastingPermission::ExileWithAltCost.enters_with_modifications`
-///      becomes a `PendingEntersModifications` object and
-///      `Effect::AddPendingEntersModifications` carries its `rider` object in
-///      place of the required `modifications` array). From this branch's 150:
-///      `CardTypeSetSource` gains `TargetedObjects` (`{"type":"TargetedObjects"}`,
-///      CR 608.2c + CR 115.1: the resolving ability's chosen targets, read by
-///      identity for "those cards" aggregates) and `TrackedSet` gains a
-///      semantics-bearing `filter` member restriction (`#[serde(default)]`).
-///      Full-game peers and P2P move in lockstep (wire 133); no lobby carrier
-///      names it.
+/// 157 â€” This branch's wire shape, renumbered (coined as 150 on this branch
+///      and as 151 "combined wire" at the bf867d08b merge, then 154 at the
+///      6e686ee71 merge): `CardTypeSetSource` gains `TargetedObjects`
+///      (`{"type":"TargetedObjects"}`, CR 608.2c + CR 115.1: the resolving
+///      ability's chosen targets, read by identity for "those cards"
+///      aggregates) and `TrackedSet` gains a semantics-bearing `filter`
+///      member restriction (`#[serde(default)]`). Main has taken 151 bestow,
+///      152 shortcut schema and 153 Bolas grant, and 154-156 are claimed by
+///      queued/approved PRs, so the combined candidate moves to this fresh
+///      numeral both dialects refuse. Full-game peers and P2P move in
+///      lockstep (wire 139); no lobby carrier names it.
 ///
-/// 149 — The CR 608.2n final part of a spell's resolution is owed on the
+/// 153 â€” `ContinuousModification::GrantAllActivatedAbilitiesOf` gains the
+///      optional kind selector `kind: Option<ActivatedAbilityKind>`, and the
+///      loyalty-grant sibling variant is removed (Nicol Bolas,
+///      Dragon-God's loyalty grant is `kind: Some(Loyalty)` on the activated
+///      authority â€” the same parameterization shape as entry 127's FilterProp
+///      merge). The field rides in `GameState`'s transient continuous effects
+///      with `#[serde(default)]`, and the enum has no `deny_unknown_fields`,
+///      so a v152 peer reading kind-bearing Bolas state drops `kind` SILENTLY
+///      and over-grants every activated ability of every other planeswalker â€”
+///      the silent-skew class entry 129 refuses to tolerate without a
+///      handshake-refusable bump. The removed tag never shipped (no committed
+///      export names it), so no migration shim exists; branch-era saved states
+///      fail loudly on the unknown variant. P2P moves in lockstep (wire 135);
+///      lobby messages are unchanged.
+/// 152 â€” `ShortcutDecisionSchema` gains `suggested_declaration` (the offer's
+///      eliminating suggestion) and `leading_aims` (published slots a trigger on
+///      the stack already targets), and `ShortcutProposal` gains `leading_aims`.
+///      A v151 peer drops them. Full-game peers and P2P move in lockstep
+///      (wire 134).
+///
+/// 151: Populated `GameObject.bestow_form` carries removed creature subtypes as
+///      an object instead of the legacy boolean. Old readers cannot decode it;
+///      full-game and P2P (wire 133) refuse them before state delivery.
+/// 150 â€” The cast-this-way gains rider's serialized payload is reshaped:
+///      `CastingPermission::ExileWithAltCost.enters_with_modifications` becomes a
+///      `PendingEntersModifications` object (a bare `ContinuousModification`
+///      array on a v149 peer) and `Effect::AddPendingEntersModifications` carries
+///      its `rider` object in place of the required `modifications` array (the
+///      compat reader accepts the legacy shapes; a v149 peer cannot parse either
+///      new shape). Full-game peers and P2P move in lockstep (wire 132); no lobby
+///      carrier names it.
+/// 149 â€” The CR 608.2n final part of a spell's resolution is owed on the
 ///      resolution carrier. `GameState::deferred_spell_delivery` (v110: the
 ///      destination recorded while a spell paused on its own free-cast window)
 ///      is removed, and `GameState` gains `resolving_spell_final_part`
@@ -91,20 +119,20 @@ pub struct TournamentRequestId(pub u64);
 ///      ran, and replaying them would install a second delayed trigger. Lobby
 ///      messages are unchanged.
 ///
-/// 148 — Timesifter's top-card exile contest. `Effect::ExileTopCardContest`
+/// 148 â€” Timesifter's top-card exile contest. `Effect::ExileTopCardContest`
 ///      (with its nested winner `AbilityDefinition`) serializes in ability
 ///      definitions inside `GameState`, and a paused contest round parks
 ///      `BatchCompletion::TopCardContestRoundComplete` on its resolution frame.
 ///      A v147 peer cannot parse either tag. Full-game peers and P2P move in
 ///      lockstep; no lobby carrier names it (wire 130).
-/// 147 — Online physical contests (Eye to Eye, Mouth to Mouth). `WaitingFor::
+/// 147 â€” Online physical contests (Eye to Eye, Mouth to Mouth). `WaitingFor::
 ///      PhysicalContest` (serialized `ContestState` inside `GameState`),
 ///      `Effect::PhysicalContest`, `GameEvent::PhysicalContestStarted` /
 ///      `PhysicalContestResolved`, `ClientMessage::ContestClick` and
 ///      `ServerMessage::ContestProgress`. A v146 peer cannot parse the new
 ///      `WaitingFor`/`Effect`/`GameEvent` tags or either message. Full-game
 ///      peers and P2P move in lockstep; no lobby carrier names it (wire 129).
-/// 146 — `ConfirmedPeriod` gains `performance` and `counted_by` (`CountedBy::Replay { departures }`, CR
+/// 146 â€” `ConfirmedPeriod` gains `performance` and `counted_by` (`CountedBy::Replay { departures }`, CR
 ///      732.2a: the offer's count is the repetitions the counting replay performed,
 ///      with the seats that left in each) and `PredictedDeparture` serializes inside
 ///      it, carried in `WaitingFor::LoopShortcut` and `ShortcutProposal`; their
@@ -113,30 +141,30 @@ pub struct TournamentRequestId(pub u64);
 ///      peer drops the field and would take such an offer as the threshold
 ///      authority's. Full-game peers and P2P move in lockstep (wire 128); no lobby
 ///      carrier names it.
-/// 145 — `ParentTargetMissingReason` gains `SearchLibrary` (CR 701.23b),
+/// 145 â€” `ParentTargetMissingReason` gains `SearchLibrary` (CR 701.23b),
 ///      serialized on `ResolvedAbility.parent_target_missing_reason`; a v144
 ///      peer cannot parse the tag. P2P moves in lockstep (wire 127); lobby
 ///      messages unchanged.
 ///
-/// 144 — One-time boons (#7495) add serialized `GameState` tags, and the
+/// 144 â€” One-time boons (#7495) add serialized `GameState` tags, and the
 ///      perpetual P/T edit is retyped. `Effect::CreateBoon` (with its granted
 ///      `TriggerDefinition`), `Effect::NoteNumber`, the `HasBoon` trigger and
 ///      static conditions, and `WaitingFor::ChooseTokenHost` are new tags with
-///      no fallback: a v143 peer fails deserialization on any of them — a
+///      no fallback: a v143 peer fails deserialization on any of them â€” a
 ///      conditional PARSE bump like 76/79, breaking only while a boon grant,
 ///      note, or host prompt is actually serialized.
 ///      `PerpetualModification::ModifyPowerToughness` retypes
 ///      `power_delta`/`toughness_delta: i32` to required `power`/`toughness:
 ///      QuantityExpr` (plus a defaulted `keywords` rider): a v143 peer's
 ///      bare-integer fields miss the new required keys, and a v144 peer's
-///      tagged exprs fail a v143 `i32` — the break is unconditional for
+///      tagged exprs fail a v143 `i32` â€” the break is unconditional for
 ///      frames carrying the edit, in BOTH directions. Saved games still
 ///      load: the former `power_delta`/`toughness_delta` keys survive as
 ///      serde aliases, with the bare ints riding the existing `QuantityExpr`
 ///      legacy-integer decoder into `Fixed`. P2P moves in lockstep (wire
 ///      126); lobby messages are unchanged.
 ///
-/// 143 — `GameState.modal_modes_chosen_this_turn` and
+/// 143 â€” `GameState.modal_modes_chosen_this_turn` and
 ///      `GameState.modal_modes_chosen_this_game` retype from
 ///      `HashSet<(ObjectId, usize)>` to `HashSet<(ObjectIncarnationRef, usize)>`
 ///      (CR 400.7: a permanent that leaves and returns is a new object, so its
@@ -146,40 +174,40 @@ pub struct TournamentRequestId(pub u64);
 ///      loads legacy bare-id saves. Full-game peers and P2P move in lockstep
 ///      (wire 125); no lobby carrier names it.
 ///
-/// 142 — `LinkedExileSnapshot` gains `incarnation` (CR 400.7), serialized in
+/// 142 â€” `LinkedExileSnapshot` gains `incarnation` (CR 400.7), serialized in
 ///      `GameState.linked_exile_lki`, `TriggerSourceContext.linked_exile_snapshot`
 ///      and `ZoneChangeRecord.linked_exile_snapshot`. A v141 peer re-encoding
 ///      state drops the key, and a v142 peer would read a dropped key as the
 ///      legacy sentinel and lose the pile. Full-game peers and P2P move in
 ///      lockstep (wire 124); no lobby carrier names it.
 ///
-/// 141 — `ExileLinkKind` gains `CastCost` (`"CastCost"`, CR 607.2q: a card
+/// 141 â€” `ExileLinkKind` gains `CastCost` (`"CastCost"`, CR 607.2q: a card
 ///      exiled to pay a cost of casting a permanent spell, linked to that spell
 ///      and to the permanent it becomes), serialized in `GameState.exile_links`.
 ///      A v140 peer cannot parse the tag. Full-game peers and P2P move in
 ///      lockstep (wire 123); no lobby carrier names it.
 ///
-/// 140 — `AttackSubject` gains `EventAttackers` (`"EventAttackers"`, the
+/// 140 â€” `AttackSubject` gains `EventAttackers` (`"EventAttackers"`, the
 ///      players a trigger's attack event's attackers were declared attacking,
 ///      CR 508.6), serialized inside `GameState` wherever a resolving or pending
 ///      ability carries a `player_scope` (Zurzoth, Chaos Rider). A v139 peer
 ///      cannot parse the tag. Full-game peers and P2P move in lockstep (wire
 ///      122); no lobby carrier names it.
 ///
-/// 139 — CR 702.122c per-turn crew relation: `GameState` gains
+/// 139 â€” CR 702.122c per-turn crew relation: `GameState` gains
 ///      `crew_history_this_turn` (the Vehicle/crewer incarnation pairs) and
 ///      `FilterProp` gains `CrewedThisTurn { relation }`, both serialized inside
 ///      `GameState`; a v138 peer cannot parse the new filter tag. Full-game
 ///      peers and P2P move in lockstep (wire 121); no lobby carrier names it.
-/// 134 — `GameEvent::AbilityActivated` gains `stack_entry` (`Option<ObjectId>`,
-///      omitted when absent) — the stack object a stack-using activation
+/// 134 â€” `GameEvent::AbilityActivated` gains `stack_entry` (`Option<ObjectId>`,
+///      omitted when absent) â€” the stack object a stack-using activation
 ///      created (CR 602.2a), which an activation trigger's "copy that ability"
 ///      names (CR 707.10). Events ride in `GameState` (`current_trigger_event`,
 ///      each triggered ability's stored event), and an older peer drops the
 ///      field silently, resolving those copies differently. Full-game peers and
 ///      P2P move in lockstep (wire 116); no lobby carrier names it.
 ///
-/// 133 — CR 614.12a pre-entry as-enters choices: `ProposedEvent::ZoneChange`
+/// 133 â€” CR 614.12a pre-entry as-enters choices: `ProposedEvent::ZoneChange`
 ///      gains `enter_with_choices` (the answers riding the entry event),
 ///      `PendingReplacement` gains `delivery_boundary` (the event the paused
 ///      delivery's owner parked on), and `NamedChoiceSourceBinding` gains
@@ -188,33 +216,33 @@ pub struct TournamentRequestId(pub u64);
 ///      tag. Full-game peers and P2P move in lockstep (wire 115); no lobby
 ///      carrier names it.
 ///
-/// 132 — `GameObject::exile_from_stack_linked_source` carries the stamping
+/// 132 â€” `GameObject::exile_from_stack_linked_source` carries the stamping
 ///      incarnation (`ObjectIncarnationRef`, CR 400.7). A v131 peer cannot
 ///      decode a set rider; a legacy bare id decodes as `LEGACY_INCARNATION`
 ///      and is attributed to no live object. Full-game peers and P2P move in
 ///      lockstep (wire 114); no lobby carrier names it.
 ///
-/// 131 — `PlayerFilter` gains `AnyOf { filters }`
-///      (`{"type":"AnyOf","filters":[…]}`, the union of player sets) and
+/// 131 â€” `PlayerFilter` gains `AnyOf { filters }`
+///      (`{"type":"AnyOf","filters":[â€¦]}`, the union of player sets) and
 ///      `TargetPlayer` (`{"type":"TargetPlayer"}`, the first declared player
 ///      target), serialized inside `GameState` wherever a resolving or pending
 ///      ability carries a `player_scope`. A v130 peer cannot parse either tag.
 ///      Full-game peers and P2P move in lockstep (wire 113); no lobby carrier
 ///      names it.
 ///
-/// 130 — `GameState::linked_exile_lki` holds one incarnation-bounded
+/// 130 â€” `GameState::linked_exile_lki` holds one incarnation-bounded
 ///      `LinkedExileLki` per departure (CR 400.7). A v129 peer cannot decode a
 ///      non-empty map. Full-game peers and P2P move in lockstep (wire 112); no
 ///      lobby carrier names it.
 ///
-/// 129 — Loop-shortcut and period-confirmation shapes, one bump over 128. P2P
+/// 129 â€” Loop-shortcut and period-confirmation shapes, one bump over 128. P2P
 ///      moves in lockstep (wire 111); lobby messages are unchanged.
 ///      - `ShortcutDecisionSchema` replaced `max_iterations: u32` with the pair
 ///        `measured_repetition_bound: Option<u32>` and `deliverable_capacity:
 ///        u32`, so `WaitingFor::LoopShortcut` publishes the threshold the
 ///        reduction measured separately from the count this engine will
 ///        deliver. Both new fields carry a `#[serde(default)]`, the removed one
-///        did too, and the struct has no `deny_unknown_fields` — so this half
+///        did too, and the struct has no `deny_unknown_fields` â€” so this half
 ///        is a capability bump rather than a parse bump: a v128 frame's
 ///        `max_iterations` is dropped here and a v129 frame's absent key
 ///        defaults there, leaving a stale peer driving a count neither side
@@ -241,7 +269,7 @@ pub struct TournamentRequestId(pub u64);
 ///      - `ConfirmedPeriod` gains its reach and `PeriodicDelta` its cleanup
 ///        pair.
 ///
-/// 127 — `FilterProp`'s three attachment-referent siblings
+/// 127 â€” `FilterProp`'s three attachment-referent siblings
 ///      (`AttachedToSource`, `AttachedToRecipient`, `AttachedToPlayer`) are one
 ///      parameterized prop, `{"type":"AttachedTo","to":{"type":"Source"}}`
 ///      (`to` is an internally tagged `AttachmentReferent`: `Source`,
@@ -250,7 +278,7 @@ pub struct TournamentRequestId(pub u64);
 ///      writes only the new shape; deserialization still accepts the three old
 ///      tags (`filter_prop_from_value`), so a v127 peer reads v126 state but a
 ///      v126 peer cannot parse a v127 `GameState` holding any attachment
-///      filter — an unconditional PARSE bump. The same version also makes
+///      filter â€” an unconditional PARSE bump. The same version also makes
 ///      retarget choices positional (CR 115.7d + CR 707.10c):
 ///      `GameAction::RetargetSpell.new_targets` is `[TargetRef | null]` (`null`
 ///      keeps a position's target, a bare target chooses it, so a v126 bare
@@ -263,7 +291,7 @@ pub struct TournamentRequestId(pub u64);
 ///      the keep permissions only from the engine's fields. Lobby messages are
 ///      unchanged, and P2P moves in lockstep (wire 109).
 ///      (Reserved as 119 and then 121 while under review; it landed after 126, so 119 stays unused.)
-/// 128 — `TargetFilter` gains `DeclaredPlayer { group }` (CR 608.2c + CR 115.1a),
+/// 128 â€” `TargetFilter` gains `DeclaredPlayer { group }` (CR 608.2c + CR 115.1a),
 ///      the player a later clause names after a declared target player. It
 ///      reaches every serialized ability, so a v127 peer cannot deserialize it
 ///      and the exact-match handshake refuses the pairing. `SpellContext` also
@@ -271,10 +299,10 @@ pub struct TournamentRequestId(pub u64);
 ///      ability's creating chain named by group, omitted when empty; amended in
 ///      place, not bumped. Full-game peers and P2P move in lockstep (wire 110);
 ///      lobby messages are unchanged.
-/// 126 — `ZoneChangeRecord` gains `arrival` (the owner and controller the destination object holds), serialized inside `GameState` and in the resolved-rules journal's zone-change commands; a v125 peer rejects the journal when the departure owner differs from the command owner. Full-game peers and P2P move in lockstep (wire 108); no lobby carrier names it.
-/// 125 — `MulliganDecisionEntry` and `MulliganDeclaration` (inside `WaitingFor::MulliganDecision`) gain `free_reveals_taken`. Full-game peers and P2P move in lockstep (wire 107); no lobby carrier names it.
-/// 124 — the resolved-rules journal admits a land-play `rebound_from` on a `ResolvedZoneChangeCommand` (Library/Graveyard/Exile -> Battlefield), serialized inside `GameState.resolved_rules_journal`. A v123 peer rejects the state as an invalid resolved-rules journal. Full-game peers and P2P move in lockstep (wire 106); no lobby carrier names it.
-/// 123 — `FilterProp::PrepareSpell` ("a prepared spell" cast-trigger qualifier,
+/// 126 â€” `ZoneChangeRecord` gains `arrival` (the owner and controller the destination object holds), serialized inside `GameState` and in the resolved-rules journal's zone-change commands; a v125 peer rejects the journal when the departure owner differs from the command owner. Full-game peers and P2P move in lockstep (wire 108); no lobby carrier names it.
+/// 125 â€” `MulliganDecisionEntry` and `MulliganDeclaration` (inside `WaitingFor::MulliganDecision`) gain `free_reveals_taken`. Full-game peers and P2P move in lockstep (wire 107); no lobby carrier names it.
+/// 124 â€” the resolved-rules journal admits a land-play `rebound_from` on a `ResolvedZoneChangeCommand` (Library/Graveyard/Exile -> Battlefield), serialized inside `GameState.resolved_rules_journal`. A v123 peer rejects the state as an invalid resolved-rules journal. Full-game peers and P2P move in lockstep (wire 106); no lobby carrier names it.
+/// 123 â€” `FilterProp::PrepareSpell` ("a prepared spell" cast-trigger qualifier,
 ///      CR 722.3d), `scope` on `Effect::BecomePrepared` /
 ///      `BecomeUnprepared` (mass "each creature you control becomes
 ///      prepared", CR 722.3a + CR 115.10a), `prepared_copy_source` on
@@ -286,25 +314,25 @@ pub struct TournamentRequestId(pub u64);
 ///      prepare because serde ignores the unknown field. Full-game peers and
 ///      P2P move in lockstep (wire 105); lobby carriers hold no `GameState`
 ///      and are unchanged.
-/// 122 — `PermissionGrantee` gains `TriggeringSourceController` (CR 603.2 + CR 109.4: a cast grant bound to the controller of the object that caused the trigger — Curse of Hospitality), serialized in the ability definitions of `GameState`, and `GameEvent::DamageDealt.source_incarnation` / `GameEvent::CombatDamageDealtToPlayer.source_incarnations` (CR 400.7) are carried in pending triggers. A v121 peer cannot deserialize the tag. Full-game peers and P2P move in lockstep (wire 104); no lobby carrier names it.
-/// 121 — `GameState::triggered_abilities_added_mana_this_turn` records
+/// 122 â€” `PermissionGrantee` gains `TriggeringSourceController` (CR 603.2 + CR 109.4: a cast grant bound to the controller of the object that caused the trigger â€” Curse of Hospitality), serialized in the ability definitions of `GameState`, and `GameEvent::DamageDealt.source_incarnation` / `GameEvent::CombatDamageDealtToPlayer.source_incarnations` (CR 400.7) are carried in pending triggers. A v121 peer cannot deserialize the tag. Full-game peers and P2P move in lockstep (wire 104); no lobby carrier names it.
+/// 121 â€” `GameState::triggered_abilities_added_mana_this_turn` records
 ///       (trigger definition, receiving player), so copied triggers check
 ///       their own controller's successful mana history. A v120 peer cannot
 ///       decode a nonempty pair ledger. P2P moves in lockstep (wire 103);
 ///       lobby-only messages are unchanged.
-/// 120 — CR 601.2a spell announcement: `GameObject::spell_announcement`,
+/// 120 â€” CR 601.2a spell announcement: `GameObject::spell_announcement`,
 ///      `GameState::next_spell_announcement` and the `targeter` on
 ///      `GameEvent::BecomesTarget`. A v119 peer cannot deserialize the new
 ///      state. P2P moves to wire 102. (119/101 is reserved for the Legends of Jidoor PR.)
-/// 118 — `AbilityCondition::ManaColorSpent` and `TriggerCondition::ManaColorSpent` retype `color` from `ManaColor` to `SpentColor` (`ColorWord` or `ManaSymbol`, CR 612.2), serialized in the ability and trigger definitions of `GameState`. A v117 peer cannot deserialize the tagged color and would rewrite a printed mana symbol under a color-word text change. Full-game peers and P2P move in lockstep (wire 100); no lobby carrier names it.
-/// 117 — `DerivedViews` gains `shared_piles`, the engine-published seat whose `Player` container stores a shared library and graveyard (a shared-zone format's piles), omitted for a per-player format. A v116 peer drops the key and renders per-seat piles for a state whose other seat's containers are empty. Full-game peers and P2P move in lockstep (wire 99); no lobby carrier names it.
-/// 116 — `RESOLUTION_STATE_WIRE_VERSION` 4 to 5: the multi-draw resolution frame gains the simultaneous-draw `dealer` (a shared-library format's in-game simultaneous draw), serialized in `GameState`'s resolution frames and omitted when absent. A v115 peer refuses the version-5 resolution state. Full-game peers and P2P move in lockstep (wire 98); no lobby carrier names it.
-/// 115 — `MulliganChoice` gains `FreeReveal` and `MulliganDeclaration` gains `kind`: the Dandân free reveal mulligan (CR 103.5 as modified by the Dandân rule), a `GameAction::MulliganDecision` payload and a held declaration in `GameState.waiting_for`. A v114 peer cannot deserialize the choice and would carry out a held free reveal as a regular mulligan. Full-game peers and P2P move in lockstep (wire 97); no lobby carrier names either.
-/// 114 — `WaitingFor::MulliganDecision` gains `declared`, the mulligans recorded in a CR 103.5 declare round until every player has declared. It is serialized in `GameState.waiting_for`, omitted when empty and defaulted when absent, so a v113 peer reading a v114 state in a shared-library format's mulligan round drops the held declarations. Full-game peers and P2P move in lockstep (wire 96); no lobby carrier names it.
-/// 113 — `ResolvedZoneChangeCommand` gains `rebound_from`, the owner a card had before a Hand entry from a shared zone rebound it to the taker (CR 108.3 as modified by the Dandân announcement). It is serialized inside `GameState.resolved_rules_journal`, omitted when ownership is unchanged, and defaulted when absent, so a v112 peer reading a v113 state with a rebound card drops the field silently. Full-game peers and P2P move in lockstep (wire 95); no lobby carrier names it.
-/// 112 — `ContinuousModification` gains `SubstituteTextWord` (CR 612.1), serialized inside `GameState`'s transient continuous effects, so a v111 peer cannot parse the tag and must be refused before it receives v112 state.
-/// 111 — `GameFormat` gains `Dandan`. It serializes as its `Display` string and deserializes through `FromStr`, whose unknown-name arm returns `Err`, so a v110 peer cannot parse a `GameState`, or a `FormatConfig` in a lobby frame, whose format names it. The six new `GameFormat` axis methods are read from the format and add no serialized shape. Full-game peers and P2P move in lockstep (wire 93); lobby carriers move too, see `LOBBY_PROTOCOL_VERSION` 16.
-/// 110 — `GameState.deferred_spell_delivery` holds a resolving spell's move to
+/// 118 â€” `AbilityCondition::ManaColorSpent` and `TriggerCondition::ManaColorSpent` retype `color` from `ManaColor` to `SpentColor` (`ColorWord` or `ManaSymbol`, CR 612.2), serialized in the ability and trigger definitions of `GameState`. A v117 peer cannot deserialize the tagged color and would rewrite a printed mana symbol under a color-word text change. Full-game peers and P2P move in lockstep (wire 100); no lobby carrier names it.
+/// 117 â€” `DerivedViews` gains `shared_piles`, the engine-published seat whose `Player` container stores a shared library and graveyard (a shared-zone format's piles), omitted for a per-player format. A v116 peer drops the key and renders per-seat piles for a state whose other seat's containers are empty. Full-game peers and P2P move in lockstep (wire 99); no lobby carrier names it.
+/// 116 â€” `RESOLUTION_STATE_WIRE_VERSION` 4 to 5: the multi-draw resolution frame gains the simultaneous-draw `dealer` (a shared-library format's in-game simultaneous draw), serialized in `GameState`'s resolution frames and omitted when absent. A v115 peer refuses the version-5 resolution state. Full-game peers and P2P move in lockstep (wire 98); no lobby carrier names it.
+/// 115 â€” `MulliganChoice` gains `FreeReveal` and `MulliganDeclaration` gains `kind`: the DandÃ¢n free reveal mulligan (CR 103.5 as modified by the DandÃ¢n rule), a `GameAction::MulliganDecision` payload and a held declaration in `GameState.waiting_for`. A v114 peer cannot deserialize the choice and would carry out a held free reveal as a regular mulligan. Full-game peers and P2P move in lockstep (wire 97); no lobby carrier names either.
+/// 114 â€” `WaitingFor::MulliganDecision` gains `declared`, the mulligans recorded in a CR 103.5 declare round until every player has declared. It is serialized in `GameState.waiting_for`, omitted when empty and defaulted when absent, so a v113 peer reading a v114 state in a shared-library format's mulligan round drops the held declarations. Full-game peers and P2P move in lockstep (wire 96); no lobby carrier names it.
+/// 113 â€” `ResolvedZoneChangeCommand` gains `rebound_from`, the owner a card had before a Hand entry from a shared zone rebound it to the taker (CR 108.3 as modified by the DandÃ¢n announcement). It is serialized inside `GameState.resolved_rules_journal`, omitted when ownership is unchanged, and defaulted when absent, so a v112 peer reading a v113 state with a rebound card drops the field silently. Full-game peers and P2P move in lockstep (wire 95); no lobby carrier names it.
+/// 112 â€” `ContinuousModification` gains `SubstituteTextWord` (CR 612.1), serialized inside `GameState`'s transient continuous effects, so a v111 peer cannot parse the tag and must be refused before it receives v112 state.
+/// 111 â€” `GameFormat` gains `Dandan`. It serializes as its `Display` string and deserializes through `FromStr`, whose unknown-name arm returns `Err`, so a v110 peer cannot parse a `GameState`, or a `FormatConfig` in a lobby frame, whose format names it. The six new `GameFormat` axis methods are read from the format and add no serialized shape. Full-game peers and P2P move in lockstep (wire 93); lobby carriers move too, see `LOBBY_PROTOCOL_VERSION` 16.
+/// 110 â€” `GameState.deferred_spell_delivery` holds a resolving spell's move to
 ///       its zone while it is paused on its own free-cast window (CR 608.2n +
 ///       CR 608.2g: Finale of Promise, Collected Conjuring). An older peer
 ///       would leave the spell on the stack in no zone after the window, so
@@ -312,67 +340,67 @@ pub struct TournamentRequestId(pub u64);
 ///       `WaitingFor::SpellCopyOrderChoice` and
 ///       `PendingRepeatIteration.copy_order_fixed` (CR 405.3: the controller
 ///       orders a batch of spell copies).
-/// 109 — CR 201.5a granter binding: `ObjectScope::GrantingObject` and
+/// 109 â€” CR 201.5a granter binding: `ObjectScope::GrantingObject` and
 ///      `ObjectScope::SpecificObject`, `TargetFilter::GrantingObject { bound }`,
 ///      `PlayerFilter::GrantingObjectCaster`, plus the `granting_object` stamp on
 ///      `AbilityDefinition`, `TriggerDefinition`, `StaticDefinition`,
 ///      `ReplacementDefinition`, `SpellContext` and `TriggerSourceContext`.
 ///      A v108 peer cannot deserialize the new state. P2P moves to wire 91.
-/// 108 — Serialized `IllegalTargetsDisposition::StillResolves` lets a root
+/// 108 â€” Serialized `IllegalTargetsDisposition::StillResolves` lets a root
 ///       ability continue after its chosen target becomes illegal. Older peers
 ///       would silently apply the ordinary non-resolution rule, so full-game
 ///       and P2P refuse the capability mismatch (wire 90).
-/// 107 — `UntilCondition::NextMatches` gains `count` ("until you exile two
-///      nonland cards …" — Invasion of Alara, CR 608.2c), the paused loop
+/// 107 â€” `UntilCondition::NextMatches` gains `count` ("until you exile two
+///      nonland cards â€¦" â€” Invasion of Alara, CR 608.2c), the paused loop
 ///      (`PendingExileFromTopUntil`) keeps its `hits`,
 ///      `ZoneChoiceCandidateSource` gains `ParentTargets`, and `SpellContext`
 ///      gains `exile_until_batch` (the loop's cards, carried by a paused
 ///      continuation). A v106 peer reads a counted loop as a one-card loop and
 ///      cannot parse the new candidate source. P2P moves in lockstep
 ///      (wire 89).
-/// 106 — Full-game replacement-choice preferences, exact source/definition
+/// 106 â€” Full-game replacement-choice preferences, exact source/definition
 ///       identities, remembered ordering/optional actions, and prompt
 ///       eligibility metadata. P2P moves in lockstep (wire 88); lobby-only
 ///       messages are unchanged.
-/// 105 — Deferred mana-source selections carry a nominal base quantity.
+/// 105 â€” Deferred mana-source selections carry a nominal base quantity.
 ///      Older peers cannot decode the new tagged output payload; the full-game
 ///      handshake rejects the mismatch. P2P moves in lockstep (wire 87).
 ///      Lobby-only messages are unchanged.
-/// 104 — `PendingCast` gains `delved_cards` (serde default, skipped when
+/// 104 â€” `PendingCast` gains `delved_cards` (serde default, skipped when
 ///      empty), `PendingCostMoveResume::DelveManaPayment` is removed and
 ///      `PendingCostMoveCompletion::FinalizeDelvedCast` is added: delve fuel
 ///      is exiled when the total cost is paid (#9400). A PARSE bump: a v103
 ///      peer cannot decode a parked delve commit, and a v104 peer cannot
 ///      decode the removed variant. Full-game peers and P2P move in lockstep
 ///      (wire 86); lobby carriers hold no `GameState` and are unchanged.
-/// 103 — `FormatConfig` loses `allow_experimental_dungeons`: the per-session
+/// 103 â€” `FormatConfig` loses `allow_experimental_dungeons`: the per-session
 ///      capability flag behind the experimental dungeon pool is gone, and
-///      the pool is now format-derived — Baldur's Gate Wilderness joins the
+///      the pool is now format-derived â€” Baldur's Gate Wilderness joins the
 ///      normal venture options and the initiative choice in exactly the
 ///      formats whose own rules positively restrict nothing (Freeform and
 ///      Freeform Commander). A CAPABILITY bump like 90's own: the key is
 ///      simply absent now, and neither side sets `deny_unknown_fields`, so
-///      a v102 peer still parses the frame — but it would fail the pool
+///      a v102 peer still parses the frame â€” but it would fail the pool
 ///      closed and run a freeform game without the Wilderness the rules now
 ///      require, a silent rule change no parse error would catch.
 ///      Full-game peers and P2P move in lockstep (wire 85); lobby carriers
 ///      move too, see `LOBBY_PROTOCOL_VERSION` 15.
-/// 102 — `QuantityRef::SharedCardTypes` adds a tagged quantity carried in
+/// 102 â€” `QuantityRef::SharedCardTypes` adds a tagged quantity carried in
 ///      serialized ability definitions and saved GameState. Readers without
 ///      this tag cannot deserialize that quantity. P2P moves in lockstep
 ///      (wire 84), following the mana-activation schema in full-game 101 / wire 83.
-/// 101 — `ActivatedAbilityKind` gains `Mana` (CR 605.1a): activating a mana
+/// 101 â€” `ActivatedAbilityKind` gains `Mana` (CR 605.1a): activating a mana
 ///      ability now emits `GameEvent::AbilityActivated { kind: "Mana" }`
 ///      (CR 605.3). The event also gains `departed_source_lki`
-///      (`Option<Box<LKISnapshot>>`, omitted when absent) — the source's last
-///      known information when a cost moved it off the battlefield (CR 113.7) —
+///      (`Option<Box<LKISnapshot>>`, omitted when absent) â€” the source's last
+///      known information when a cost moved it off the battlefield (CR 113.7) â€”
 ///      and `AbilityActivationRecord` gains `source_zone` (omitted when it is the
 ///      battlefield). Events ride in `GameState` (`current_trigger_event`,
-///      stack trigger batches), so a v100 peer cannot parse a `Mana` kind — a
+///      stack trigger batches), so a v100 peer cannot parse a `Mana` kind â€” a
 ///      PARSE bump. Lobby messages are unchanged, and P2P moves in lockstep
 ///      (wire 83).
-/// 100 — `Effect::AdditionalPhase` states what it adds as the text words it
-///      (CR 500.8–500.10). Its `phase` field (a `Phase`) was replaced by
+/// 100 â€” `Effect::AdditionalPhase` states what it adds as the text words it
+///      (CR 500.8â€“500.10). Its `phase` field (a `Phase`) was replaced by
 ///      `segment`, the adjacently tagged `TurnSegment` 82 introduced
 ///      (`{"type":"Phase","data":"Combat"}`,
 ///      `{"type":"CreatedPhase","data":"Untap"}`,
@@ -384,17 +412,17 @@ pub struct TournamentRequestId(pub u64);
 ///      `{"type":"TargetedPlayer","data":{"type":"Player"}}`). Neither
 ///      `segment` nor `recipient` has a serde default and abilities ride inside
 ///      `GameObject`, so every full-GameState frame holding any
-///      additional-phase card is unparseable across the pair — an
+///      additional-phase card is unparseable across the pair â€” an
 ///      unconditional PARSE bump like 82. Lobby messages are unchanged, and
 ///      P2P moves in lockstep (wire 82).
-/// 99 — `StaticMode::GraveyardCastPermission` gains `pool`
+/// 99 â€” `StaticMode::GraveyardCastPermission` gains `pool`
 ///      (`GraveyardPermissionPool`, `#[serde(default, skip_serializing_if = ...)]`):
-///      `AnyGraveyard` is "from any graveyard" (CR 404.1 + CR 601.3 — The Great
+///      `AnyGraveyard` is "from any graveyard" (CR 404.1 + CR 601.3 â€” The Great
 ///      Work). A v98 peer silently defaults it to the own graveyard and refuses a
 ///      cast from another player's graveyard the permission allows, and desyncs.
 ///
-/// 98 — `PerPlayerScope` gains `Opponents` (CR 102.2 + CR 102.3), the
-///      team-relative population of "for each opponent, choose …" (Ultimate
+/// 98 â€” `PerPlayerScope` gains `Opponents` (CR 102.2 + CR 102.3), the
+///      team-relative population of "for each opponent, choose â€¦" (Ultimate
 ///      Magic: Meteor), written as `{"Each":"Opponents"}` inside `ZoneOwner`.
 ///      `ZoneOpponentChooserPurpose` gains `PerPlayerChoiceOrder` (CR 101.4c:
 ///      the chooser picks whose selection to make next) and `SubstituteChooser`
@@ -402,21 +430,21 @@ pub struct TournamentRequestId(pub u64);
 ///      parked per-player zone-choice frame gains `current` and `nominee`. A
 ///      v97 peer cannot deserialize the new values. Full-game peers and P2P move in lockstep
 ///      (wire 80); lobby messages are unchanged.
-/// 97 — `ResolvedAbility.target_reads` and `AbilityDefinition.target_reads`
+/// 97 â€” `ResolvedAbility.target_reads` and `AbilityDefinition.target_reads`
 ///      (`TargetReadOrigin`, `#[serde(default, skip_serializing_if = ...)]`) are
 ///      new: `ParentAnnouncement` marks an instruction whose `Target` reads name
 ///      the object the immediately preceding instruction announced (CR 115.1 +
-///      CR 608.2c — Conformer Shuriken's "If that creature has greater power
-///      than this creature, …"), so it announces no target slot of its own and
+///      CR 608.2c â€” Conformer Shuriken's "If that creature has greater power
+///      than this creature, â€¦"), so it announces no target slot of its own and
 ///      inherits its parent's validated target. A v96 peer silently defaults the
 ///      field, rebuilds the extra slot or reads the wrong object, and desyncs.
 ///      Full-game peers and P2P move in lockstep (wire 79); lobby messages are
 ///      unchanged.
-/// 96 — `QuantityRef::NameStickerLetterCount` adds a tagged name-sticker
+/// 96 â€” `QuantityRef::NameStickerLetterCount` adds a tagged name-sticker
 ///      statistic to GameState ability definitions. A v95 peer cannot decode
 ///      the new tag; full-game peers and P2P move in lockstep (wire 78).
 ///      Lobby messages are unchanged.
-/// 95 — `FilterProp::Unblocked` is reshaped to `FilterProp::BlockStatus { status:
+/// 95 â€” `FilterProp::Unblocked` is reshaped to `FilterProp::BlockStatus { status:
 ///      AttackerBlockStatus }` (`Blocked` | `Unblocked`), so "blocked creature"
 ///      filters (CR 509.1h: an attacking creature stays blocked for the rest of
 ///      combat once blocked) are expressible. The legacy `"Unblocked"` tag still
@@ -424,7 +452,7 @@ pub struct TournamentRequestId(pub u64);
 ///      cannot parse the new `"BlockStatus"` tag carried in `GameState` ability
 ///      definitions. Full-game peers and P2P move in lockstep (wire 77); lobby
 ///      messages are unchanged.
-/// 94 — `SpellContext.creation_lookback_event` (`#[serde(default,
+/// 94 â€” `SpellContext.creation_lookback_event` (`#[serde(default,
 ///      skip_serializing_if = "Option::is_none")]`) carries the battlefield
 ///      departure a phase-delayed triggered ability was created under (CR 603.7
 ///      + CR 603.10a + CR 608.2h: "that many", "its power" and "this creature's
@@ -434,17 +462,17 @@ pub struct TournamentRequestId(pub u64);
 ///      delayed ability differently, so the exact-match handshake refuses the
 ///      pairing. Full-game peers and P2P move in lockstep (wire 76); lobby
 ///      messages are unchanged.
-/// 93 — `ReductionProvenance` gains `SacrificedForCost(SpellCostSource)`, the
+/// 93 â€” `ReductionProvenance` gains `SacrificedForCost(SpellCostSource)`, the
 ///      reduction an Emerge or Offering sacrifice earns before a deferred
 ///      target declaration (CR 601.2f + CR 702.119a + CR 702.48c). It reaches
 ///      `WaitingFor::OrderCostReductions` and `PendingCast`, and a v92 peer
 ///      cannot deserialize it. Full-game and P2P move in lockstep: wire 75.
-/// 92 — `ResolvedAbility.parent_target_missing_reason` is now serialized
+/// 92 â€” `ResolvedAbility.parent_target_missing_reason` is now serialized
 ///      (`#[serde(default, skip_serializing_if = "Option::is_none")]`, it was
 ///      `#[serde(skip)]`) and `ParentTargetMissingReason` gains `RevealUntil`
 ///      (CR 701.20a + CR 603.12: a reveal-until that revealed no matching card),
 ///      read by the new `EffectOutcomeSignal::RevealUntilMatched` guard of the
-///      "When you reveal … this way" reflexive (Yuna's Whistle, Calibrated
+///      "When you reveal â€¦ this way" reflexive (Yuna's Whistle, Calibrated
 ///      Blast). A paused continuation carries the verdict across a `GameState`
 ///      round trip. The same bump carries the CR 701.20a reveal lease:
 ///      `ResolvedInformationLifetime::UntilStackObjectLeaves` and the
@@ -455,20 +483,20 @@ pub struct TournamentRequestId(pub u64);
 ///      tags and would drop the field, minting a reflexive trigger the rules
 ///      forbid. Full-game peers and P2P move in lockstep (wire 74); lobby
 ///      messages are unchanged.
-/// 91 — `PendingManaAbility::chosen_counter_count: Option<u32>` is retyped to
+/// 91 â€” `PendingManaAbility::chosen_counter_count: Option<u32>` is retyped to
 ///      `chosen_counter_counts: Vec<u32>` (#9207), preserving each announced
 ///      amount for a composite `RemoveCounter` cost. The field is required,
 ///      so v90 state cannot deserialize as v91 state. P2P moves to wire 73.
-/// 90 — `FormatConfig` gained `allow_experimental_dungeons`, the per-session
+/// 90 â€” `FormatConfig` gained `allow_experimental_dungeons`, the per-session
 ///      capability flag behind the experimental dungeon pool (Baldur's Gate
 ///      Wilderness joins the normal venture options and the initiative choice
 ///      when set). A CAPABILITY bump like 24 and 50: the field is
 ///      `#[serde(default)]`, so either side still parses a peer that omits
-///      it — but a v89 peer would silently fail the flag closed to `false`
+///      it â€” but a v89 peer would silently fail the flag closed to `false`
 ///      and run the game without the pool the host chose, a rule change no
 ///      parse error would catch. Full-game peers and P2P move in lockstep
 ///      (wire 72); lobby carriers move too, see `LOBBY_PROTOCOL_VERSION` 13.
-/// 89 — CR 118.9b graveyard permissions that require a casting method ("You
+/// 89 â€” CR 118.9b graveyard permissions that require a casting method ("You
 ///      may cast this card from your graveyard using its blitz ability.":
 ///      Sabin, Master Monk; Tenacious Underdog; Detective's Phoenix):
 ///      `StaticMode::GraveyardCastPermission` gains `required_cast_keyword`,
@@ -480,42 +508,42 @@ pub struct TournamentRequestId(pub u64);
 ///      `authority`, `SpellContext` gains `graveyard_permission_latch`, and
 ///      `WaitingFor::ChoosePermanentTypeSlot` gains `permission`. Full-game
 ///      peers and P2P move in lockstep (wire 71); lobby messages are unchanged.
-/// 88 — `WaitingFor::DeclareBlockers` gains `block_capacities`
-///      (CR 509.1a + CR 101.1): for each able blocker, its block limit —
+/// 88 â€” `WaitingFor::DeclareBlockers` gains `block_capacities`
+///      (CR 509.1a + CR 101.1): for each able blocker, its block limit â€”
 ///      `null` for any number. Serde-additive
 ///      (`#[serde(default, skip_serializing_if = "HashMap::is_empty")]`), but
 ///      the client bounds the pile stepper with it; a v87 host would silently
 ///      omit it. Full-game handshakes must refuse that capability mismatch,
 ///      as in 60. Lobby messages are unchanged; P2P moves in lockstep
 ///      (wire 70).
-/// 87 — `WaitingFor::DigRestSplitChoice` and `Effect::Dig.rest_split_top_count`
+/// 87 â€” `WaitingFor::DigRestSplitChoice` and `Effect::Dig.rest_split_top_count`
 ///      extend serialized game state for Telling Time-class rest piles. A v86
 ///      peer cannot represent the split choice; full-game and P2P peers move
 ///      in lockstep (wire 69). Lobby messages are unchanged.
-/// 86 — `GameEvent::Melded` is a new tagged variant in full-game event frames.
+/// 86 â€” `GameEvent::Melded` is a new tagged variant in full-game event frames.
 ///      A v85 client cannot present the meld sequence from a v86 server, so
 ///      full-game and P2P peers move in lockstep (wire 68). Lobby messages are
 ///      unchanged.
-/// 85 — `GameEvent` gained the tagged `DieRollIgnored { player_id, sides,
+/// 85 â€” `GameEvent` gained the tagged `DieRollIgnored { player_id, sides,
 ///      result }` display-only variant. `StateUpdate.events` carries it to
 ///      clients; a v84 peer would accept the session but omit ignored dice from
 ///      the roll overlay. Full-game peers reject that silent display skew at
 ///      handshake. P2P moves in lockstep; lobby messages are unchanged.
-/// 84 — `WaitingFor::ChooseDungeon` options (`DungeonPreview`) gained required
+/// 84 â€” `WaitingFor::ChooseDungeon` options (`DungeonPreview`) gained required
 ///      `card` (`DungeonCardView`), `rooms` (`Vec<DungeonRoomNodeView>`), and
-///      `room_count` fields, publishing the whole dungeon behind each choice —
+///      `room_count` fields, publishing the whole dungeon behind each choice â€”
 ///      the card's Scryfall identity plus every room with its outgoing edges
-///      and its position on the card face — so the prompt can preview each
+///      and its position on the card face â€” so the prompt can preview each
 ///      card instead of describing only its entry room. A PARSE bump like 67,
 ///      not a silent capability loss like 24: none of the fields carries a
 ///      serde default, so a v83 peer cannot deserialize a snapshot paused at
-///      the dungeon choice. The break is symmetric — a v84 client reading a
+///      the dungeon choice. The break is symmetric â€” a v84 client reading a
 ///      v83 host's option finds no `card` and throws in render rather than
 ///      degrading. Saved games still load: the choice-preview migration
 ///      rebuilds older options from their `dungeon` key. P2P moves in
 ///      lockstep; lobby messages are unchanged.
 ///
-/// 83 — CR 601.2c + CR 602.2b target-gated activation costs (Professor Hojo,
+/// 83 â€” CR 601.2c + CR 602.2b target-gated activation costs (Professor Hojo,
 ///      Kopala): `StaticMode::ReduceAbilityCost` gains `targets` and
 ///      `frequency`, `GameState` gains the per-turn activation journal
 ///      `abilities_activated_this_turn_by_player`, `ResolvedAbility` gains its
@@ -525,8 +553,8 @@ pub struct TournamentRequestId(pub u64);
 ///      A v82 peer would drop the new fields silently, which in P2P prices
 ///      one activation differently on host and guest.
 ///
-/// 82 — Added phases and steps anchored, identified and counted per
-///      CR 500.8–500.10. Every change rides full-game state; lobby messages
+/// 82 â€” Added phases and steps anchored, identified and counted per
+///      CR 500.8â€“500.10. Every change rides full-game state; lobby messages
 ///      are unchanged, and P2P moves in lockstep (wire 64).
 ///      `Effect::AdditionalPhase.after` changed from `Phase` to the adjacently
 ///      tagged `ExtraPhaseAnchor` (`Step(Phase)` / `ThisStep` /
@@ -534,11 +562,11 @@ pub struct TournamentRequestId(pub u64);
 ///      `{"type":"FirstOfTurn","data":"PostcombatMain"}`). `after` has no
 ///      serde default and abilities ride inside `GameObject`, so every
 ///      full-GameState frame holding any additional-phase card is unparseable
-///      across the pair — an unconditional PARSE bump like 23 and 68.
+///      across the pair â€” an unconditional PARSE bump like 23 and 68.
 ///      `DelayedTriggerCondition` gained `AtBeginningOfAddedPhase { phase,
 ///      entry }` (`{"type":"AtBeginningOfAddedPhase","phase":"BeginCombat"}`),
 ///      which "at the beginning of that combat" (Moraug, World at War,
-///      Swinging Ship) parses to; an older peer cannot parse it — PARSE, as
+///      Swinging Ship) parses to; an older peer cannot parse it â€” PARSE, as
 ///      above. `ExtraPhase.phase` (a `Phase`) was replaced by `segment`, a
 ///      `TurnSegment` (`{"type":"Phase","data":"Combat"}`,
 ///      `{"type":"CreatedPhase","data":"Upkeep"}`,
@@ -546,7 +574,7 @@ pub struct TournamentRequestId(pub u64);
 ///      changed its element type from `Phase` to
 ///      `InsertedPhaseResume { anchor, segment, entry }`. Neither `segment`
 ///      defaults, so a frame whose `extra_phases` or `extra_phase_resume` is
-///      non-empty is unparseable in both directions — PARSE, as above; empty
+///      non-empty is unparseable in both directions â€” PARSE, as above; empty
 ///      vectors serialize identically. `ExtraPhase.id` and
 ///      `InsertedPhaseResume.entry` (an `ExtraPhaseId`, a bare `u64` naming
 ///      the scheduled extra phase or step), `GameState`'s allocator
@@ -559,24 +587,24 @@ pub struct TournamentRequestId(pub u64);
 ///      `GameState.combat_phases_started_this_turn` and
 ///      `end_steps_started_this_turn` (two `u32`s) were replaced by
 ///      `steps_started_this_turn`, a per-step tally keyed by `Phase`
-///      (`{"BeginCombat": n, "End": m, …}`) and omitted while empty. All three
+///      (`{"BeginCombat": n, "End": m, â€¦}`) and omitted while empty. All three
 ///      fields default, so a frame parses in both directions, but the counts
 ///      do not cross: the receiving side reads zero, so the "first combat
 ///      phase / first end step of the turn" conditions can answer differently
-///      on the two peers — a silent disagreement, which is why that change
+///      on the two peers â€” a silent disagreement, which is why that change
 ///      alone would also be a bump rather than an additive field (see 24). A
 ///      session persisted mid-turn before the upgrade counts that turn's
 ///      steps from zero until its next turn begins; no compat deserializer
 ///      ships.
 ///
-/// 81 — CR 702.117a Surge cast election: `AlternativeCastKeyword::Surge` is a
+/// 81 â€” CR 702.117a Surge cast election: `AlternativeCastKeyword::Surge` is a
 ///      new tag on a `#[serde(tag = "type")]` enum carried by
 ///      `WaitingFor::AlternativeCastChoice` in serialized `GameState`, with no
 ///      fallback. A conditional PARSE bump like 76/79: a v80 peer fails to
 ///      parse only when a Surge prompt is actually serialized. Full-game peers
 ///      and P2P move in lockstep (wire 63); lobby messages are unchanged.
 ///
-/// 80 — CR 406.3 exile look authority: `ExileLinkKind::HideawayLookable`
+/// 80 â€” CR 406.3 exile look authority: `ExileLinkKind::HideawayLookable`
 ///      changed from a unit variant to `{ grant, lookers, source_incarnation }`
 ///      in serialized `GameState`, and `source_incarnation` has no serde
 ///      default, so neither side parses the other's look links. A PARSE bump
@@ -584,7 +612,7 @@ pub struct TournamentRequestId(pub u64);
 ///      it directly. Full-game peers and P2P move in lockstep (wire 62); lobby
 ///      messages are unchanged.
 ///
-/// 79 — CR 601.2f + CR 602.2b activated-ability cost-reduction election:
+/// 79 â€” CR 601.2f + CR 602.2b activated-ability cost-reduction election:
 ///      `ReductionProvenance` gains `AbilityCostRider` and `TransientEffect`,
 ///      new variants on a `#[serde(tag = "type", content = "data")]` enum with
 ///      no fallback, so a v78 peer fails deserialization on either tag when an
@@ -597,7 +625,7 @@ pub struct TournamentRequestId(pub u64);
 ///      byte-identical to v78. Full-game peers and P2P move in lockstep
 ///      (wire 61); lobby messages are unchanged.
 ///
-/// 78 — CR 611.2a + CR 601.2i event-deadline duration ("until a player casts
+/// 78 â€” CR 611.2a + CR 601.2i event-deadline duration ("until a player casts
 ///      a creature spell"): `Duration::UntilEvent` is a new variant of an enum
 ///      with no `#[serde(other)]` fallback, carried in full-game state by
 ///      ability definitions and by `TransientContinuousEffect`, so a v77 peer
@@ -607,7 +635,7 @@ pub struct TournamentRequestId(pub u64);
 ///      this condition rather than forcing it. Full-game peers and P2P move in
 ///      lockstep (wire 60); lobby messages are unchanged.
 ///
-/// 77 — Prospective: no `GameState` or `GameAction` shape change lands in
+/// 77 â€” Prospective: no `GameState` or `GameAction` shape change lands in
 ///      this commit. Moved ahead of new `GameFormat` variants.
 ///      `GameFormat` serializes as its `Display`
 ///      string and deserializes through `FromStr`
@@ -629,19 +657,19 @@ pub struct TournamentRequestId(pub u64);
 ///      `MIN_SUPPORTED_SERVER_PROTOCOL == PROTOCOL_VERSION`, plus the
 ///      client's `info.protocolVersion > PROTOCOL_VERSION` ceiling), so no
 ///      older peer ever receives a v77 `GameState` at all and the
-///      deserializer asymmetry above never gets a chance to matter here —
+///      deserializer asymmetry above never gets a chance to matter here â€”
 ///      see [`LOBBY_PROTOCOL_VERSION`]'s own `/// 11` entry for the surface
 ///      where it does. (Written as one unbroken paragraph on purpose, per
 ///      the reason entry 5 gives: a blank `///` line before 4-space
 ///      indented prose is an indented CODE block to rustdoc.)
 ///
-/// 76 — CR 601.2f caster-elected cost-reduction ordering:
+/// 76 â€” CR 601.2f caster-elected cost-reduction ordering:
 ///      `WaitingFor::OrderCostReductions` and `GameAction::OrderCostReductions`
 ///      are new variants on two `#[serde(tag = "type", content = "data")]`
 ///      enums that carry no `#[serde(other)]` and no fallback variant, so a
 ///      v75 peer fails deserialization outright on either tag and a v76 peer
 ///      cannot round-trip a frame a v75 peer would have to invent. A PARSE
-///      bump like 27 and 34, not a capability bump like 24 — and a CONDITIONAL
+///      bump like 27 and 34, not a capability bump like 24 â€” and a CONDITIONAL
 ///      one: the prompt only forms when two legal reduction orders lock in
 ///      different total costs, or when a CR 601.2b hybrid announcement reaches
 ///      a total the default cannot. Every other cast's frames are
@@ -653,42 +681,42 @@ pub struct TournamentRequestId(pub u64);
 ///      peer parses every v75 one, so they ride this condition rather than
 ///      forcing it, and no persisted `PendingCast` changes shape.
 ///
-/// 75 — `ResolutionCastCleanup`, its delayed-trigger receipts, and every
+/// 75 â€” `ResolutionCastCleanup`, its delayed-trigger receipts, and every
 ///      receipt-eligible delayed-install origin now carry the producer-issued
 ///      paid-offer owner. A pre-75 peer can confuse two otherwise equivalent
 ///      paused offers, so full-game peers and P2P move in lockstep (wire 57);
 ///      lobby messages are unchanged.
 ///
-/// 74 — `ResolutionCastCleanup` now carries an exact delayed-trigger receipt
+/// 74 â€” `ResolutionCastCleanup` now carries an exact delayed-trigger receipt
 ///      (token, installed instance, and source) while a paid resolution cast is
 ///      paused. A pre-74 peer cannot preserve that authority through a state
 ///      handoff, so it could leave a cancelled offer's trigger armed. Full-game
 ///      peers and P2P move in lockstep (wire 56); lobby messages are unchanged.
 ///
-/// 73 — `CastingVariantChoiceOption` gained required `face`, making a paused
+/// 73 â€” `CastingVariantChoiceOption` gained required `face`, making a paused
 ///      Fuse split-card menu an exact `(variant, face)` tuple. The resumed
 ///      choice also preserves an added paid-cast cost. Old snapshots cannot
 ///      safely bind the face or cost, so full-game peers must refuse the skew.
 ///      Lobby messages are unchanged.
-/// 72 — `ResolutionCastFacePolicy` replaces the legacy free-cast-window
+/// 72 â€” `ResolutionCastFacePolicy` replaces the legacy free-cast-window
 ///      filter with a required serialized carrier. The same release added
 ///      `WaitingFor::CastOffer { kind: CastOfferKind::GraveyardPaidCast }`,
 ///      which carries two additive fields: `additional_cost: Option<ManaCost>` (Ogre
 ///      Battlecaster's "{R}{R} in addition to its other costs", CR 601.2b) and
 ///      `installed_triggers: Vec<DelayedTriggerInstanceId>` (the delayed
 ///      triggers a declined offer withdraws). Both are serde-defaulted and
-///      skipped when empty, so a v71 peer parses a v72 offer — and that is the
+///      skipped when empty, so a v71 peer parses a v72 offer â€” and that is the
 ///      break: it then displays and PAYS the offered card at its printed cost
 ///      alone, while the v72 host charges the addition, and its decline
 ///      withdraws nothing. The same paid offer now also opens for seven more
-///      printed cards (the paid "cast target … card from your graveyard"
+///      printed cards (the paid "cast target â€¦ card from your graveyard"
 ///      class, CR 608.2g) whose v71 peers granted a lingering permission
-///      instead — a `WaitingFor` a v71 guest never expects mid-resolution. Full
+///      instead â€” a `WaitingFor` a v71 guest never expects mid-resolution. Full
 ///      game stays exact-match; P2P moves in lockstep (wire 54); lobby messages
 ///      are unchanged.
-/// 71 — `DraftKind::Winston` and `DraftAction::SharedStackDecision` are
+/// 71 â€” `DraftKind::Winston` and `DraftAction::SharedStackDecision` are
 ///      serialized by draft WebSocket messages. A PARSE bump like 27 and 34,
-///      not a capability bump like 24 — but a CONDITIONAL one, and the
+///      not a capability bump like 24 â€” but a CONDITIONAL one, and the
 ///      condition is worth naming: neither type carries `#[serde(other)]` or a
 ///      fallback variant, so a v70 peer fails deserialization outright on
 ///      `"Winston"` or on the `SharedStackDecision` tag, and a v71 peer
@@ -704,7 +732,7 @@ pub struct TournamentRequestId(pub u64);
 ///      `SpectatorDraftView::shared_stack` and `DraftSession::shared_stack`
 ///      are additive: each is `Option` with `#[serde(default,
 ///      skip_serializing_if = "Option::is_none")]`, so a v70 peer parses a v71
-///      non-Winston view and a v71 peer parses every v70 snapshot — exempt on
+///      non-Winston view and a v71 peer parses every v70 snapshot â€” exempt on
 ///      their own, and listed because 71 carries them, not because they force
 ///      it. The same `skip_serializing_if` is why no existing persisted draft
 ///      snapshot changes shape, and why the TypeScript mirrors of those fields
@@ -716,8 +744,8 @@ pub struct TournamentRequestId(pub u64);
 ///      never persisted, and `DraftProcedureDto` crosses only the
 ///      wasm-bindgen boundary, not this protocol. Lobby messages are
 ///      unchanged: `DraftLobbyMetadata::draft_kind` is a length-bounded
-///      `String` whose producer is `format!("{:?}", …)`, so `"Winston"` needs
-///      no lobby version move — only its doc's label list.
+///      `String` whose producer is `format!("{:?}", â€¦)`, so `"Winston"` needs
+///      no lobby version move â€” only its doc's label list.
 ///
 ///   AMENDED IN PLACE, NOT BUMPED (1/3). The `DraftError` list above lost
 ///   `SharedStackRequiresHumanSeats`, which was the engine's refusal of a
@@ -731,9 +759,9 @@ pub struct TournamentRequestId(pub u64);
 ///   `grep -rn SharedStackRequiresHumanSeats client/` is empty.
 ///
 ///   AMENDED IN PLACE, NOT BUMPED (2/3). `SharedStackState::history` and
-///   `SharedStackView::history` — vectors of the new
+///   `SharedStackView::history` â€” vectors of the new
 ///   `SharedStackDecisionRecord` (seat, pile, decision, pile_size; no card,
-///   deliberately and permanently) — were added after this entry was
+///   deliberately and permanently) â€” were added after this entry was
 ///   written. 71 is unreleased upstream (upstream is 70), so no peer has
 ///   ever spoken a 71 without them and there is no version for a bump to
 ///   separate: a second number would announce a break between two shapes
@@ -746,23 +774,23 @@ pub struct TournamentRequestId(pub u64);
 ///   Winston-pod condition as the rest of this entry: a non-Winston pod's
 ///   frames stay byte-identical to v70.
 ///
-///   AMENDED IN PLACE, NOT BUMPED (3/3), on the same evidence — 71 is
+///   AMENDED IN PLACE, NOT BUMPED (3/3), on the same evidence â€” 71 is
 ///   unreleased upstream, so no peer has ever spoken a 71 without these:
 ///     * `SharedStackState::forced_draws` and `SharedStackView::forced_draw`
-///       — the card a seat's final-pile decline drew off the top of the main
+///       â€” the card a seat's final-pile decline drew off the top of the main
 ///       stack, sight unseen. The state field is per seat with
 ///       `#[serde(default)]`; the view field is the ONLY card-bearing
 ///       private field on that view and is projected to the drawing seat
 ///       alone, never to an opponent and never to either spectator
 ///       visibility. Rides the Winston-pod condition like the rest.
 ///     * `SeatPublicView::drafted_card_count` and
-///       `DraftPlayerView::distribution` — and THESE TWO BREAK THE
+///       `DraftPlayerView::distribution` â€” and THESE TWO BREAK THE
 ///       CONDITION. They ride every kind's frames, so the sentence above
 ///       ("every other kind's draft frames are byte-identical to v70") is
 ///       true of everything named before this paragraph and false of these.
 ///       Both are required (non-`Option`) engine-built fields, so a v70
 ///       server's view fails to satisfy a v71 client's shape for EVERY kind,
-///       not just Winston — which is what the version gate is for, and it
+///       not just Winston â€” which is what the version gate is for, and it
 ///       already refuses the mismatch. `drafted_card_count` is a count and
 ///       never an identity, and it is public in every kind: a pick-and-pass
 ///       seat's total follows from the pick number, and a shared stack's is
@@ -770,39 +798,39 @@ pub struct TournamentRequestId(pub u64);
 ///       published for the same reason `launch_capability` is, and
 ///       deliberately NOT status-gated, so a surface that outlives the
 ///       drafting phase can still tell a pile pod from a passing one.
-/// 70 — `OutsideGameChoiceSource::BoosterPack` replaced its `set_code: String`
+/// 70 â€” `OutsideGameChoiceSource::BoosterPack` replaced its `set_code: String`
 ///      with a required `origin: PackOrigin` (`Set(code)` or `Cube`), so a
 ///      `WaitingFor::OutsideGameChoice` for an opened pack no longer decodes
 ///      on a v69 peer, and a v69 frame no longer decodes here. The handshake
 ///      must refuse the pairing. P2P moves in lockstep; lobby messages are
 ///      unchanged.
-/// 69 — `GameEvent` gained the tagged variant `ExtraTurnCreated { player_id,
+/// 69 â€” `GameEvent` gained the tagged variant `ExtraTurnCreated { player_id,
 ///      anchor }`. Event-bearing full-game frames can now carry that tag, so
 ///      the full-game handshake must reject v68 peers that do not share the
 ///      variant contract. P2P moves in lockstep; lobby messages are unchanged.
-/// 68 — `PendingManaAbility::chosen_tappers` changed from `Vec<ObjectId>` to
-///      `Option<Vec<ObjectId>>` (#8698) — a `GameState` payload field type
+/// 68 â€” `PendingManaAbility::chosen_tappers` changed from `Vec<ObjectId>` to
+///      `Option<Vec<ObjectId>>` (#8698) â€” a `GameState` payload field type
 ///      change, so an ANSWERED zero-tapper selection of the CR 107.3a
 ///      X-sentinel form (X=0) is distinguishable from a selection stage that
 ///      has not been answered at all, and `chosen_tappers` intentionally
 ///      carries no `#[serde(default)]` (a missing `chosen_tappers` must fail
 ///      deserialization, not silently read as unanswered and re-surface the
-///      same `WaitingFor::PayCost` forever — the exact livelock the retype
+///      same `WaitingFor::PayCost` forever â€” the exact livelock the retype
 ///      fixes), so old and new peers can't parse each other's serialized
 ///      snapshots.
-/// 67 — `DerivedViews::DungeonRoomView` gained required `card`
+/// 67 â€” `DerivedViews::DungeonRoomView` gained required `card`
 ///      (`DungeonCardView`) and `rooms` (`Vec<DungeonRoomNodeView>`) fields,
 ///      publishing the dungeon card's Scryfall identity and the full room
 ///      graph with each room's outgoing edges and its position on the card
 ///      face. A PARSE bump like 66, not a silent capability loss like 24:
 ///      neither field carries a serde default, so a v66 peer cannot
 ///      deserialize a snapshot in which anyone is venturing. The break is
-///      symmetric — a v67 client reading a v66 host's `dungeon_rooms` entry
+///      symmetric â€” a v67 client reading a v66 host's `dungeon_rooms` entry
 ///      finds no `card` and throws in render rather than degrading. Follows
 ///      the same reasoning as the earlier dungeon-projection bump, which
 ///      chose a parse break over letting a mismatched peer play on with a
 ///      dead panel.
-/// 66 — `ReplacementCondition::FirstTokenCreationEachTurn` moved its required
+/// 66 â€” `ReplacementCondition::FirstTokenCreationEachTurn` moved its required
 ///      `player` field to an optional `active_player_req`, and
 ///      `CopyTargetPurpose` gained a `CopyTokenSource` variant. Both are
 ///      one-way parse breaks. `player` was a REQUIRED field through v65 and
@@ -815,7 +843,7 @@ pub struct TournamentRequestId(pub u64);
 ///      because it enforces that the Rust and TS constants AGREE, not
 ///      that the number is UNCLAIMED.
 ///      Lobby messages are unchanged.
-/// 65 — `DraftMatchStart` now announces the exact Full-session identity for
+/// 65 â€” `DraftMatchStart` now announces the exact Full-session identity for
 ///      the spawned match. Draft reconnect uses the authenticated draft seat
 ///      to attach that socket to the same Full-session lifetime, and Full
 ///      follow-up frames carry the identity needed to reject stale-generation
@@ -825,7 +853,7 @@ pub struct TournamentRequestId(pub u64);
 ///      branch was open, and `check-protocol-version.mjs` could not catch the
 ///      collision because it enforces that the Rust and TS constants AGREE,
 ///      not that the number is UNCLAIMED. Lobby messages are unchanged.
-/// 64 — Retroactive bump for two new-tag changes that landed under 62/63
+/// 64 â€” Retroactive bump for two new-tag changes that landed under 62/63
 ///      WITHOUT their own bump. Both are one-way parse breaks by the rule
 ///      entries 46, 51 and 62 state ("no serde default can rescue an unknown
 ///      variant"), so the exact-match full-game handshake must refuse the
@@ -837,7 +865,7 @@ pub struct TournamentRequestId(pub u64);
 ///          ride `GameState.waiting_for` and `GameAction`.
 ///      (b) #8332 added `slots` + `slot_pools` to `WaitingFor::RetargetChoice`
 ///          and `controller` to `StackEntryDisplay`. These carry
-///          `#[serde(default)]`, so an old peer decodes and then MISRENDERS —
+///          `#[serde(default)]`, so an old peer decodes and then MISRENDERS â€”
 ///          `RetargetChoiceModal.tsx` indexes `slot_pools`, whose `??` guards
 ///          an undefined element rather than an undefined array, so an old
 ///          host paired with a new guest throws during render.
@@ -846,7 +874,7 @@ pub struct TournamentRequestId(pub u64);
 ///      could not have caught either one: it enforces that the Rust and TS
 ///      constants AGREE, not that they were INCREMENTED, and both PRs kept
 ///      them agreeing at the wrong value. Lobby messages are unchanged.
-/// 63 — `WaitingFor::ReplacementChoice` gained an engine-owned
+/// 63 â€” `WaitingFor::ReplacementChoice` gained an engine-owned
 ///      `ReplacementChoiceKind` discriminator and a `last_applied_decides`
 ///      flag. Both are `#[serde(default)]`, so a v62 peer decodes the payload
 ///      successfully and then falls back to the `Order` default: it renders a
@@ -854,21 +882,21 @@ pub struct TournamentRequestId(pub u64);
 ///      outcome for a compositional collision that has none. A silent
 ///      misrender rather than a decode failure, so the exact-match full-game
 ///      handshake must refuse the pairing. Lobby messages are unchanged.
-/// 62 — `ServerMessage::{GameStarted, StateUpdate}` gained
-///      `activation_block_reasons: HashMap<ObjectId, Vec<AbilityBlockEntry>>` —
+/// 62 â€” `ServerMessage::{GameStarted, StateUpdate}` gained
+///      `activation_block_reasons: HashMap<ObjectId, Vec<AbilityBlockEntry>>` â€”
 ///      the CR 118.3 "you can't pay this cost right now" read-out, scoped to the
 ///      acting player and empty for everyone else. It carries
 ///      `#[serde(default, skip_serializing_if = "HashMap::is_empty")]`, so a v61
 ///      payload reads as the absent/empty map it always meant. The break is the
 ///      other direction, and it is over-determined: `AbilityBlockKind` is
 ///      `#[serde(tag = "type")]`, so the new `CostNotPayableNow` arm emits a TAG
-///      VALUE no v61 peer has a case for — a v61 Rust peer fails to deserialize
+///      VALUE no v61 peer has a case for â€” a v61 Rust peer fails to deserialize
 ///      the entry, and a v61 client indexes its reason-key record with an
 ///      unknown member and renders `t(undefined)`. New tag, not merely a new
 ///      field, so the bump does not rest on the serde attributes above.
 ///
-/// 61 — `Effect::ChooseCounterKind` gained `domain: CounterKindDomain` and
-///      `chooser: CounterKindChooser` — the population a counter-kind choice
+/// 61 â€” `Effect::ChooseCounterKind` gained `domain: CounterKindDomain` and
+///      `chooser: CounterKindChooser` â€” the population a counter-kind choice
 ///      draws its legal kinds from, and whether the GAME draws one at random
 ///      instead of prompting the controller (CR 608.2d). Both carry
 ///      `#[serde(default)]`, so a v60 payload reads as the on-target/controller
@@ -876,55 +904,55 @@ pub struct TournamentRequestId(pub u64);
 ///      no field to receive `Printed`/`Random` into and sets no
 ///      `deny_unknown_fields` to reject them, so it reads Crystalline Giant's
 ///      printed-list random draw as an on-target choice, finds no counters on a
-///      fresh Giant, and places nothing — the exact defect this bump ships the
+///      fresh Giant, and places nothing â€” the exact defect this bump ships the
 ///      fix for (#7796). Abilities and trigger definitions ride inside
 ///      `GameObject`, so every full-GameState frame carries the shape. Full-game
 ///      floors are exact-match on both sides, so the pairing is refused at the
 ///      handshake. Lobby messages are unchanged.
-/// 60 — `DerivedViews::back_face_spell_costs` publishes, for each card the
+/// 60 â€” `DerivedViews::back_face_spell_costs` publishes, for each card the
 ///      viewer may cast whose player chooses a spell face at cast time (a split
-///      card such as a Room, a spell//spell MDFC — CR 709.3 + CR 712.11b), the
+///      card such as a Room, a spell//spell MDFC â€” CR 709.3 + CR 712.11b), the
 ///      live cost of the OTHER face; `spell_costs` reports the live face only.
 ///      The cost badge renders both faces from this map. Serde-additive, but
 ///      the client renders the map directly; a v59 host would silently show a
 ///      Room's single-face badge again, on top of the second half's printed
 ///      cost. Full-game handshakes must refuse that capability mismatch. Lobby
 ///      messages are unchanged.
-/// 59 — `InteractionResponseSpec::Shortcut::preview` changed from
+/// 59 â€” `InteractionResponseSpec::Shortcut::preview` changed from
 ///      `Option<InteractionShortcutPreview>` to `Vec<InteractionShortcutPreview>`,
 ///      one element per offerable count, and each element gained
 ///      `allocation: Vec<AmountAssignment>`, the declaration's shape over that
-///      element's count. The retype is the break; `allocation` is not — it carries
+///      element's count. The retype is the break; `allocation` is not â€” it carries
 ///      `#[serde(default, skip_serializing_if = "Vec::is_empty")]`, neither type
 ///      sets `deny_unknown_fields`, and it parses in both directions. A PARSE bump
-///      like 23, 36 and 42, not a capability bump like 24 — and an ASYMMETRIC one,
-///      so both directions are stated. v58 → v59 fails on EVERY shortcut offer: the
+///      like 23, 36 and 42, not a capability bump like 24 â€” and an ASYMMETRIC one,
+///      so both directions are stated. v58 â†’ v59 fails on EVERY shortcut offer: the
 ///      old field carried no `skip_serializing_if`, so a v58 peer always emits the
 ///      key, and neither `null` nor an object deserializes into a sequence.
-///      v59 → v58 fails only on an offer that actually carries a preview, because
+///      v59 â†’ v58 fails only on an offer that actually carries a preview, because
 ///      an empty list omits the key and a v58 peer's `Option` field reads that as
 ///      `None`. The retype breaks the declared Rust types, but no production Rust
-///      code deserializes `ServerMessage` — the browser half is what decodes those
+///      code deserializes `ServerMessage` â€” the browser half is what decodes those
 ///      frames, with `JSON.parse` and no validation, which is why the handshake is
 ///      the only place the pairing is refusable. No shim ships
-///      — no `deserialize_with`, no dual-parse path, no version-conditional branch —
+///      â€” no `deserialize_with`, no dual-parse path, no version-conditional branch â€”
 ///      and full-game floors are exact-match on both sides
 ///      (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`, and
 ///      `MIN_SUPPORTED_SERVER_PROTOCOL` in `client/src/adapter/ws-adapter.ts`), so
 ///      the pair is refused before it sends the frame. Lobby messages are unchanged.
-/// 58 — `DraftPlayerView::commanders_required` publishes the procedure-owned
+/// 58 â€” `DraftPlayerView::commanders_required` publishes the procedure-owned
 ///      commander designation count. The client renders designation controls
 ///      from this required field rather than inferring them from `DraftKind`;
 ///      older full servers omit it. Lobby messages are unchanged.
-/// 57 — `GameAction::BeginResolveAll` gained `scope: ResolveAllScope` (`Own`
+/// 57 â€” `GameAction::BeginResolveAll` gained `scope: ResolveAllScope` (`Own`
 ///      binds only the requester and resolves immediately; `Shared` opens the
 ///      table-wide consent protocol), and `PriorityPassingMode` gained
 ///      `FullControl`, which is now engine-authoritative rather than a
 ///      frontend-only toggle.
-/// 56 — Host-only authoritative-state export request/response variants. Native
+/// 56 â€” Host-only authoritative-state export request/response variants. Native
 ///      P2P host diagnostics must use a trusted server envelope rather than a
 ///      redacted player view. Lobby messages are unchanged.
-/// 55 — `DerivedViews::room_half_identities` publishes both halves of every
+/// 55 â€” `DerivedViews::room_half_identities` publishes both halves of every
 ///      battlefield Room in printed order, resolved through the COPIED halves
 ///      for a permanent that copies a Room (CR 709.5b + CR 707.2). The unlock
 ///      special action's offer names the half and shows its unlock cost
@@ -934,18 +962,18 @@ pub struct TournamentRequestId(pub u64);
 ///      deriving halves from raw state; a v54 host would silently label every
 ///      offered door "Tap for Mana" again. Full-game handshakes must refuse
 ///      that capability mismatch. Lobby messages are unchanged.
-/// 54 — `CreateDraftWithSettings` now carries a tagged `DraftSourceIntent`.
+/// 54 â€” `CreateDraftWithSettings` now carries a tagged `DraftSourceIntent`.
 ///      A Chaos client sends only candidate set codes; the Full server resolves
 ///      and persists the private seat-by-round assignment matrix. This changes
 ///      a Full-server client message, so the full handshake refuses stale
 ///      peers. Lobby messages are unchanged.
-/// 53 — `DraftPlayerView::launch_capability` publishes the engine-authorized
+/// 53 â€” `DraftPlayerView::launch_capability` publishes the engine-authorized
 ///      post-draft multiplayer launch. The client renders this procedure-owned
 ///      capability instead of inferring it from `DraftKind`; an older server
 ///      would omit it and silently hide a completed Commander pod's launch.
 ///      Full-game handshakes must refuse that capability mismatch. Lobby
 ///      messages are unchanged.
-/// 52 — `DerivedViews::storm_count` publishes the engine-owned number of
+/// 52 â€” `DerivedViews::storm_count` publishes the engine-owned number of
 ///      copies a current Storm trigger will create, or a newly cast Storm spell
 ///      would create. The field is serde-additive, but the client renders this
 ///      scalar directly rather than deriving Storm from raw state; a v51 host
@@ -956,11 +984,11 @@ pub struct TournamentRequestId(pub u64);
 /// handshake. When making such changes, plan a deprecation window where
 /// both the old and new variants coexist, then bump and remove the old.
 ///
-/// 51 — Casting permissions gained a typed lifetime. Two parts:
+/// 51 â€” Casting permissions gained a typed lifetime. Two parts:
 ///      (a) `CastingPermission::ExileWithAltAbilityCost` gained `duration` and
 ///      `source_id`; `::ExileWithAltCost` gained `source_id` beside the
 ///      `duration` it already carried. `source_id` is the granting permanent
-///      that bounds a host-lifetime duration — additive behind serde defaults.
+///      that bounds a host-lifetime duration â€” additive behind serde defaults.
 ///      (b) `Duration` gained the `WhileControllingHost` ("for as long as you
 ///      control ~") and `WhileHostOnBattlefield` ("for as long as ~ remains on
 ///      the battlefield") variants (CR 611.2b). Each new tag is a ONE-WAY
@@ -968,7 +996,7 @@ pub struct TournamentRequestId(pub u64);
 ///      containing it, and no serde default can rescue an unknown variant, so
 ///      the full-game handshake must refuse the pairing. Lobby messages are
 ///      unchanged.
-/// 50 — `FormatConfig` gained `default_deck_copy_limit`, the resolved
+/// 50 â€” `FormatConfig` gained `default_deck_copy_limit`, the resolved
 ///      per-format deck-copy ceiling (CR 100.2a / CR 100.2b / CR 903.5b)
 ///      `max_deck_copies` and the deck-compatibility admission path now both
 ///      read, replacing per-function hardcoded literals and bare-`GameFormat`
@@ -976,36 +1004,36 @@ pub struct TournamentRequestId(pub u64);
 ///      bump like 24: the field is `#[serde(default =
 ///      "default_deck_copy_limit_fallback")]` (`UpTo(1)`, the tightest
 ///      possible cap), so a peer missing it still deserializes `GameState`
-///      cleanly — but silently loses the format's real declared limit and
+///      cleanly â€” but silently loses the format's real declared limit and
 ///      falls back to the fail-closed singleton cap, wrongly rejecting a
 ///      legal 4-of deck under Standard/Pioneer/etc. rather than admitting one
 ///      it shouldn't. The direction is symmetric: whichever peer lacks the
 ///      field degrades the same way, fail-closed, never fail-open. Lobby
 ///      carriers move too; see `LOBBY_PROTOCOL_VERSION` 3.
-/// 49 — Full-server `DraftPlayerView` payloads require public-seat
+/// 49 â€” Full-server `DraftPlayerView` payloads require public-seat
 ///      `active_pack_count`. An older v48 server can complete the handshake
 ///      yet omit that serde-additive field while the TypeScript client accepts
 ///      the JSON, leaving it unable to render a seat's active-pack presence.
 ///      Full handshakes must refuse the capability mismatch. Lobby messages
 ///      are unchanged.
-/// 48 — Full-server `DraftPlayerView` payloads require the engine-owned
+/// 48 â€” Full-server `DraftPlayerView` payloads require the engine-owned
 ///      `pick_selection_mode`. An older server can omit it while the
 ///      TypeScript client accepts the JSON, then silently treats an ordered
 ///      Commander Draft pick as direct selection. Lobby messages are unchanged.
-/// 47 — Resolution-time optional fixed sacrifice payments add a typed
+/// 47 â€” Resolution-time optional fixed sacrifice payments add a typed
 ///      replacement-resumable continuation to `GameState`.
-/// 46 — `QuantityRef::Aggregate` and `QuantityRef::TrackedSetAggregate` were
+/// 46 â€” `QuantityRef::Aggregate` and `QuantityRef::TrackedSetAggregate` were
 ///      replaced on the serialized `GameState` surface by the canonical
 ///      `QuantityRef::PropertyAggregate` tag with a validated `source` object.
 ///      New peers accept the two legacy input tags, but a v45 peer cannot
 ///      deserialize the canonical tag emitted by v46, so full-game handshakes
 ///      must refuse the one-way parse mismatch. Lobby messages are unchanged.
-/// 45 — `GameState` gained serialized cast-occurrence provenance and prepared-copy links.
-/// 44 — Resolution-time optional `PayCost(OneOf)` branch choice added a
+/// 45 â€” `GameState` gained serialized cast-occurrence provenance and prepared-copy links.
+/// 44 â€” Resolution-time optional `PayCost(OneOf)` branch choice added a
 ///      serialized `WaitingFor`/`GameAction` pair.
-/// 43 — Engine-owned stack-resolution automation retired the legacy native
+/// 43 â€” Engine-owned stack-resolution automation retired the legacy native
 ///      Resolve All request/result wire messages.
-/// 42 — `FormatConfig.deck_size` changed from a bare `u16` to the adjacently
+/// 42 â€” `FormatConfig.deck_size` changed from a bare `u16` to the adjacently
 ///      tagged `DeckSizeRule` enum (`Minimum(u16)` / `Exactly(u16)`), because
 ///      CR 903.13f(1) makes Commander Draft a command-zone format with a
 ///      minimum rather than an exact size, and `GameFormat` gained a
@@ -1013,39 +1041,39 @@ pub struct TournamentRequestId(pub u64);
 ///      not a capability bump like 24: `FormatConfig::deck_size` carries
 ///      neither `#[serde(default)]` nor `deserialize_with`, so a v41 peer's
 ///      `"deck_size": 60` fails against the adjacently tagged enum and a v42
-///      peer's `{"type":"Minimum","data":60}` fails against a v41 `u16` — the
+///      peer's `{"type":"Minimum","data":60}` fails against a v41 `u16` â€” the
 ///      break is unconditional and runs in BOTH directions, for every format.
 ///      `GameState::format_config`'s `#[serde(default = "FormatConfig::standard")]`
 ///      does NOT rescue it: a field-level default applies only when the key is
 ///      ABSENT, and an old peer sends the key present with the old inner shape,
 ///      so the default never runs. The `GameFormat::CommanderDraft` variant is
-///      the second and narrower half — it breaks only when that variant is
+///      the second and narrower half â€” it breaks only when that variant is
 ///      actually serialized.
-/// 41 — Operational failure responses are correlated to their pending action.
-/// 40 — Action rejection responses carry engine-owned structured context.
-/// 39 — `ManaRestriction::CannotCastSpellFromZone` adds a serialized
+/// 41 â€” Operational failure responses are correlated to their pending action.
+/// 40 â€” Action rejection responses carry engine-owned structured context.
+/// 39 â€” `ManaRestriction::CannotCastSpellFromZone` adds a serialized
 ///      GameState/ManaUnit restriction used by Karolina Dean. Older peers
 ///      cannot deserialize that externally tagged enum variant. Lobby messages
 ///      are unchanged.
-/// 38 — `WaitingFor::ChooseObjectsSelection` publishes the resolving effect's
+/// 38 â€” `WaitingFor::ChooseObjectsSelection` publishes the resolving effect's
 ///      `min` and optional `max` bounds. Older clients parse and silently
 ///      ignore these additive fields, then offer selections outside the
 ///      engine-authoritative range; refuse that capability mismatch at the
 ///      full-game handshake. Lobby messages are unchanged.
-/// 37 — `PayCostKind::TapCreatures` changed from `{ aggregate:
+/// 37 â€” `PayCostKind::TapCreatures` changed from `{ aggregate:
 ///      Option<TapCreaturesAggregate> }` to a required `{ mode:
-///      TapCreaturesSelectionMode }` (Fixed/VariableX/Aggregate) — the fix
+///      TapCreaturesSelectionMode }` (Fixed/VariableX/Aggregate) â€” the fix
 ///      that also unlocks the `u32::MAX` X-sentinel tap-cost form (Glacian,
 ///      Powerstone Engineer + 8 sibling cards, #7799). `mode` carries no
 ///      `#[serde(default)]`: a `GameState` snapshot paused mid-TapCreatures
 ///      payment (Crew/Saddle/Teamwork/Conspire, or the newly-unlocked
 ///      X-sentinel form) under the old `aggregate` shape now fails
 ///      deserialization rather than risk silently misclassifying an
-///      aggregate payment as fixed-count (or vice versa) — exactly the
+///      aggregate payment as fixed-count (or vice versa) â€” exactly the
 ///      ambiguity `TapCreaturesSelectionMode` exists to make
 ///      unrepresentable. Old and new peers can't parse each other's
 ///      serialized snapshots while such a payment is in flight.
-/// 36 — `WaitingFor::ChooseDungeon::options` changed from `Vec<DungeonId>` to
+/// 36 â€” `WaitingFor::ChooseDungeon::options` changed from `Vec<DungeonId>` to
 ///      `Vec<DungeonPreview>`, and `WaitingFor::ChooseDungeonRoom` dropped
 ///      `option_names`, gained a required `dungeon_name`, and changed `options`
 ///      from `Vec<u8>` to `Vec<RoomPreview>`, so each option carries the room's
@@ -1053,32 +1081,32 @@ pub struct TournamentRequestId(pub u64);
 ///      not a capability bump like 24: none of the new fields carry
 ///      `#[serde(default)]`, so a v35 peer fails deserialization on a
 ///      dungeon-choice `GameState` outright rather than degrading silently.
-///      `DerivedViews::dungeon_rooms` rides along in the same bump — it IS
+///      `DerivedViews::dungeon_rooms` rides along in the same bump â€” it IS
 ///      `#[serde(default)]`, but the client deleted its `dungeon_progress`
 ///      room-index derivation, so a v35 server that omits it would leave a new
 ///      client rendering no dungeon badge at all.
-/// 35 — `DerivedViews::current_target_kind` publishes the engine's CR 115.1
+/// 35 â€” `DerivedViews::current_target_kind` publishes the engine's CR 115.1
 ///      classification of the live target announcement. A CAPABILITY bump like
 ///      24 and 32, not a parse bump: the field is `Option` +
 ///      `skip_serializing_if`, but the client deleted `inferTargetNoun`, so a
 ///      v34 server that omits it would leave a new client naming no target at
-///      all — silently, with no parse error to catch it.
-/// 34 — `DraftKind::CommanderDraft` (CR 903.13a) is serialized by draft
+///      all â€” silently, with no parse error to catch it.
+/// 34 â€” `DraftKind::CommanderDraft` (CR 903.13a) is serialized by draft
 ///      WebSocket messages, and `DraftAction::Pick` renamed
 ///      `card_instance_id: String` to `card_instance_ids: Vec<String>` to carry
 ///      a whole CR 903.13b pick step. The rename is a PARSE bump, not a
 ///      capability bump: `card_instance_ids` carries no `#[serde(default)]`, so
 ///      a v33 `Pick` frame fails deserialization on a v34 peer and vice versa.
 ///      `DraftAction::SubmitDeck::commanders` is additive and `#[serde(default)]`
-///      — exempt on its own; it is listed because 34 carries it, not because it
+///      â€” exempt on its own; it is listed because 34 carries it, not because it
 ///      forces 34.
 ///      For a client that advertises `lobby_protocol_version`, this number
 ///      does not gate lobby admission: both ends compare the LOBBY number
 ///      instead, and the client echoes the broker's own `protocol_version`
 ///      back (`openPhaseSocket.ts`) so the legacy window compares a value to
-///      itself. On the LEGACY path it DOES gate, at both ends — the
+///      itself. On the LEGACY path it DOES gate, at both ends â€” the
 ///      `MIN_SUPPORTED_PROTOCOL ..= PROTOCOL_VERSION` window here, and a
-///      client-side ceiling in `ws-adapter.ts` that runs BEFORE that echo —
+///      client-side ceiling in `ws-adapter.ts` that runs BEFORE that echo â€”
 ///      so a client built in the window between the previous bump and the
 ///      lobby-owned version is evicted by this move. No RELEASED tag sits on
 ///      the legacy path with a `protocol_version` inside the post-bump
@@ -1086,19 +1114,19 @@ pub struct TournamentRequestId(pub u64);
 ///      own ceiling and stays refused. Lobby gating lives in
 ///      `LOBBY_PROTOCOL_VERSION` / `MIN_SUPPORTED_LOBBY_PROTOCOL`, which
 ///      move to 2 alongside this bump for the `FormatConfig.deck_size`
-///      retype — that pair is what evicts a released cohort; see its own
+///      retype â€” that pair is what evicts a released cohort; see its own
 ///      changelog entry for who and for what is lost.
-/// 33 — `LegendCandidateIdentity::Unknown` prevents face-down legend candidates
+/// 33 â€” `LegendCandidateIdentity::Unknown` prevents face-down legend candidates
 ///      from publishing an affirmative original/copy identity.
-/// 32 — `DerivedViews::legend_candidate_identities` publishes the engine-authored
+/// 32 â€” `DerivedViews::legend_candidate_identities` publishes the engine-authored
 ///      original/copy/token-copy identity for each active legend-rule choice. The
 ///      field is `#[serde(default)]`, but the client deliberately no longer derives
 ///      this rules-sensitive identity from raw objects; an older server would
 ///      silently omit every choice identity.
-/// 31 — `WaitingFor::LoopShortcut` publishes the engine-issued `declaration`, and
+/// 31 â€” `WaitingFor::LoopShortcut` publishes the engine-issued `declaration`, and
 ///      `InteractionResponseSpec::Shortcut` publishes `preview`, the per-axis
 ///      consequence of the offered count. Both are `Option` and neither type sets
-///      `deny_unknown_fields`, so a v30 peer still *parses* the frame — this is a
+///      `deny_unknown_fields`, so a v30 peer still *parses* the frame â€” this is a
 ///      capability bump like 24, not a parse bump. UNLIKE 24, no pairing is left to
 ///      exercise the gap, so this entry names no silent-drop hazard. Full-game floors
 ///      are exact-match on both sides (`server_core::MIN_SUPPORTED_PROTOCOL ==
@@ -1112,44 +1140,44 @@ pub struct TournamentRequestId(pub u64);
 ///      an explicit rejection rather than a silent drop. The P2P games this broker
 ///      matchmakes are gated tighter still, on build-commit equality
 ///      (`check_build_commit`), not on a protocol window.
-/// 30 — Serialized player-action completion provenance and modal continuations.
-/// 29 — Added requester-correlated `ResolveAllRejected` response frames.
-/// 28 — Added native `ResolveAll` request/result frames.
-/// 27 — Added `DraftKind::Sealed`, serialized by draft WebSocket messages.
-/// 26 — Added `ServerMessage::ActionNoOp` for accepted transport no-ops.
-/// 25 — `DebugCardEntries` added a serialized, private resolution frame for
+/// 30 â€” Serialized player-action completion provenance and modal continuations.
+/// 29 â€” Added requester-correlated `ResolveAllRejected` response frames.
+/// 28 â€” Added native `ResolveAll` request/result frames.
+/// 27 â€” Added `DraftKind::Sealed`, serialized by draft WebSocket messages.
+/// 26 â€” Added `ServerMessage::ActionNoOp` for accepted transport no-ops.
+/// 25 â€” `DebugCardEntries` added a serialized, private resolution frame for
 ///      multi-card sandbox battlefield entries that pause for replacement or
 ///      as-enters choices. Old peers cannot deserialize that `GameState` shape.
-/// 24 — `DerivedViews::unbounded_families` carries the engine-owned per-seat
-///      family collapse state behind each `∞` badge. The field is
+/// 24 â€” `DerivedViews::unbounded_families` carries the engine-owned per-seat
+///      family collapse state behind each `âˆž` badge. The field is
 ///      `#[serde(default)]`, so this is a capability bump rather than a parse
 ///      bump: the client deleted its row-flag OR-fold derivation, so a v23
 ///      server that omits the field would leave a new client rendering NO
 ///      infinity badges at all, silently and with no parse error to catch it.
-/// 23 — `PayableResource::ManaGeneric` changed from `{ per_x }` to
-///      `{ base_cost: ManaCost }` (#6410) — a `GameState` payload field type
+/// 23 â€” `PayableResource::ManaGeneric` changed from `{ per_x }` to
+///      `{ base_cost: ManaCost }` (#6410) â€” a `GameState` payload field type
 ///      change, and `base_cost` intentionally carries no `#[serde(default)]`
 ///      (a missing `base_cost` must fail deserialization, not silently
 ///      resolve to a zero-cost payment), so old and new peers can't parse
 ///      each other's serialized snapshots.
-/// 20 — Actor-scoped priority-passing settings and filtered per-player state.
-/// 19 — Connive's exact `EventObjectSnapshot` subject and resident paused
+/// 20 â€” Actor-scoped priority-passing settings and filtered per-player state.
+/// 19 â€” Connive's exact `EventObjectSnapshot` subject and resident paused
 ///      post-replacement drains changed serialized full-game state. Phase 4
 ///      later pinned the existing v2 resolution wire shape; it did not add a
 ///      second protocol change.
-/// 18 — Serialized GameState trigger provenance and paused logical zone-change
+/// 18 â€” Serialized GameState trigger provenance and paused logical zone-change
 ///      owners are now wire-visible.
-/// 16 — Meld pair/attacking-entry choices after mana-payment preview variants.
-/// 15 — Mana-payment preview request/response variants.
-/// 14 — `PrecastCopyShortcut` action and its two `WaitingFor` variants.
-/// 13 — `WaitingFor::MulliganBottomCards` removed from the full-game state
+/// 16 â€” Meld pair/attacking-entry choices after mana-payment preview variants.
+/// 15 â€” Mana-payment preview request/response variants.
+/// 14 â€” `PrecastCopyShortcut` action and its two `WaitingFor` variants.
+/// 13 â€” `WaitingFor::MulliganBottomCards` removed from the full-game state
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 151;
+pub const PROTOCOL_VERSION: u32 = 157;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
-/// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
+/// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** â€” the
 /// legacy path only. Lobby traffic has a one-version rollout window; full game
 /// servers may choose a stricter floor when state/action payloads change.
 ///
@@ -1171,55 +1199,55 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 /// multiplayer down: `PROTOCOL_VERSION` moved twice for `GameState`-only
 /// changes, [`MIN_SUPPORTED_PROTOCOL`] is derived from it, and the deployed
 /// broker's window went disjoint from the shipped client's. This constant is
-/// the fix — it moves only for reasons the lobby can actually observe.
+/// the fix â€” it moves only for reasons the lobby can actually observe.
 ///
-/// 16 — `GameFormat` gains `Dandan` (see `PROTOCOL_VERSION` 110). Every lobby frame that carries a `GameFormat` (entry 11 names the carriers) can now name it, and a Rust broker below 16 rejects that frame because `GameFormat::deserialize` fails on the unknown name; the client-side floor for that pairing is `MIN_LOBBY_PROTOCOL_FOR_DANDAN` in `client/src/adapter/ws-adapter.ts`, frozen at 16. [`MIN_SUPPORTED_LOBBY_PROTOCOL`] does not move, for the reasons entry 11 gives, and [`PROTOCOL_VERSION`] moves for its own reason, `GameState` carrying the name (110).
-/// 15 — `FormatConfig` loses `allow_experimental_dungeons` (see
+/// 16 â€” `GameFormat` gains `Dandan` (see `PROTOCOL_VERSION` 110). Every lobby frame that carries a `GameFormat` (entry 11 names the carriers) can now name it, and a Rust broker below 16 rejects that frame because `GameFormat::deserialize` fails on the unknown name; the client-side floor for that pairing is `MIN_LOBBY_PROTOCOL_FOR_DANDAN` in `client/src/adapter/ws-adapter.ts`, frozen at 16. [`MIN_SUPPORTED_LOBBY_PROTOCOL`] does not move, for the reasons entry 11 gives, and [`PROTOCOL_VERSION`] moves for its own reason, `GameState` carrying the name (110).
+/// 15 â€” `FormatConfig` loses `allow_experimental_dungeons` (see
 ///      `PROTOCOL_VERSION` 103 for the full entry): the per-session toggle is
 ///      gone and the Baldur's Gate Wilderness pool is format-derived. Same
 ///      three carriers as 13: `CreateGameWithSettings` on
-///      [`LobbyClientMessage`] (client → broker), `JoinTargetInfo` and
-///      `PeerInfo` on [`LobbyServerMessage`] (broker → client). Like 13, a
-///      CAPABILITY bump, not a parse bump — neither side sets
+///      [`LobbyClientMessage`] (client â†’ broker), `JoinTargetInfo` and
+///      `PeerInfo` on [`LobbyServerMessage`] (broker â†’ client). Like 13, a
+///      CAPABILITY bump, not a parse bump â€” neither side sets
 ///      `deny_unknown_fields`, so a v14 frame carrying the stale key and a
-///      v15 frame omitting it both deserialize cleanly — so
+///      v15 frame omitting it both deserialize cleanly â€” so
 ///      [`MIN_SUPPORTED_LOBBY_PROTOCOL`] does NOT move: a v14 client keeps
 ///      creating and joining games whose Wilderness pool the format, not a
 ///      flag, now decides.
-/// 14 — `PairingView.report_gate` (broker → client, on `TournamentUpdate` and
-///      the `GetTournament` reply) gains a `ReportGate::Hosted` arm — the "a
+/// 14 â€” `PairingView.report_gate` (broker â†’ client, on `TournamentUpdate` and
+///      the `GetTournament` reply) gains a `ReportGate::Hosted` arm â€” the "a
 ///      field's type changed" trigger, a serialized enum's value space growing.
 ///      No broker emits `Hosted` yet: it is set only once server-authoritative
 ///      hosting is wired (a later PR, which gates that behind its own
 ///      `MIN_LOBBY_PROTOCOL_FOR_HOSTED_MATCH` client floor), so
-///      [`MIN_SUPPORTED_LOBBY_PROTOCOL`] does not move — a pre-14 reader never
+///      [`MIN_SUPPORTED_LOBBY_PROTOCOL`] does not move â€” a pre-14 reader never
 ///      receives the new arm today, and the browser mirror
 ///      (`client/src/adapter/types.ts` `ReportGate`) adds it in lockstep so the
 ///      wire union stays 1:1.
-/// 13 — `FormatConfig` gained `allow_experimental_dungeons` (see
+/// 13 â€” `FormatConfig` gained `allow_experimental_dungeons` (see
 ///      `PROTOCOL_VERSION` 90 for the full entry). Same three carriers as 2:
-///      `CreateGameWithSettings` on [`LobbyClientMessage`] (client → broker),
-///      `JoinTargetInfo` and `PeerInfo` on [`LobbyServerMessage`] (broker →
-///      client). Like 3, this is a CAPABILITY bump, not a parse bump — the
+///      `CreateGameWithSettings` on [`LobbyClientMessage`] (client â†’ broker),
+///      `JoinTargetInfo` and `PeerInfo` on [`LobbyServerMessage`] (broker â†’
+///      client). Like 3, this is a CAPABILITY bump, not a parse bump â€” the
 ///      field is `#[serde(default)]` and still deserializes cleanly on either
-///      side — so [`MIN_SUPPORTED_LOBBY_PROTOCOL`] does NOT move: a v12
+///      side â€” so [`MIN_SUPPORTED_LOBBY_PROTOCOL`] does NOT move: a v12
 ///      client can still create/join a game, it just can't declare or observe
 ///      the experimental-dungeon override, silently getting the fail-closed
 ///      `false` instead of the host's choice. That is a capability loss, not
-///      a broken session — the same shape as `PROTOCOL_VERSION`'s own
+///      a broken session â€” the same shape as `PROTOCOL_VERSION`'s own
 ///      capability-bump entries (24, 50, 84), not this file's own entry 2.
-/// 12 — `JoinTargetInfo` on [`LobbyServerMessage`] (broker → client) gains an
-///      optional `draft_metadata`, the shape [`LobbyGame`] already carries —
+/// 12 â€” `JoinTargetInfo` on [`LobbyServerMessage`] (broker â†’ client) gains an
+///      optional `draft_metadata`, the shape [`LobbyGame`] already carries â€”
 ///      the "a lobby field is added" trigger. [`MIN_SUPPORTED_LOBBY_PROTOCOL`]
 ///      does not move and no client floor is added: a reader that predates the
 ///      field ignores it (neither this enum nor its `server_core` twin sets
 ///      `deny_unknown_fields`, and the browser decodes with `JSON.parse`), and a
 ///      12 client facing a pre-12 broker classifies a typed code from its lobby
-///      snapshot alone. (One unbroken paragraph on purpose — see
+///      snapshot alone. (One unbroken paragraph on purpose â€” see
 ///      entry 5's note on the rustdoc indented-code-block trap.)
-/// 11 — Prospective: no lobby variant or field changes shape in this
+/// 11 â€” Prospective: no lobby variant or field changes shape in this
 ///      commit. Moved ahead of new `GameFormat` variants.
-///      [`MIN_SUPPORTED_LOBBY_PROTOCOL`] stays at 2 — see
+///      [`MIN_SUPPORTED_LOBBY_PROTOCOL`] stays at 2 â€” see
 ///      below for why. `GameFormat` serializes as its `Display` string and
 ///      deserializes through `FromStr`
 ///      (`crates/engine/src/types/format.rs`), whose unknown-name arm
@@ -1245,44 +1273,44 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 ///      `GameFormat::deserialize` rejects the frame. The client-side floor
 ///      for that pairing is `MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS` in
 ///      `client/src/adapter/ws-adapter.ts`. [`MIN_SUPPORTED_LOBBY_PROTOCOL`]
-///      does not move: moving it would evict every v2–v10 lobby client from
+///      does not move: moving it would evict every v2â€“v10 lobby client from
 ///      browsing and joining over a value most of them will never
 ///      encounter. [`PROTOCOL_VERSION`] does not move alongside it either: no
 ///      variant here carries `GameState` or `GameAction`. (Written as one
 ///      unbroken paragraph on purpose, per the reason entry 5 gives:
 ///      a blank `///` line before 4-space indented prose is an indented
 ///      CODE block to rustdoc.)
-/// 10 — Requested room codes. `CreateGameWithSettings` gains an optional
-///     `requested_code` (`#[serde(default)]`) — the "a lobby field is added"
-///     trigger — carrying a caller-pre-minted `[A-Z0-9]{6}` code (the Discord
+/// 10 â€” Requested room codes. `CreateGameWithSettings` gains an optional
+///     `requested_code` (`#[serde(default)]`) â€” the "a lobby field is added"
+///     trigger â€” carrying a caller-pre-minted `[A-Z0-9]{6}` code (the Discord
 ///     LFG bot mints it before the host creates the room) that the host claims
 ///     instead of a broker-minted one; `None` keeps broker minting.
-///     [`ServerErrorCode`], carried server → client on `Error.code`, gains
+///     [`ServerErrorCode`], carried server â†’ client on `Error.code`, gains
 ///     `game_not_found` (a lookup or join code that resolves to no listing) and
 ///     `code_in_use` (a requested code already held). Purely ADDITIVE, so
 ///     [`MIN_SUPPORTED_LOBBY_PROTOCOL`] does **not** move: a pre-10 broker drops
 ///     the unknown field and mints its own code, a silent capability loss the
 ///     client detects as `GameCreated.game_code != requested`; a pre-10 client
 ///     reads the new codes as an ignored optional string, and every coded
-///     message keeps its prose, so substring classification still works — the
+///     message keeps its prose, so substring classification still works â€” the
 ///     only out-of-build consumer of these frames is the browser's
 ///     `JSON.parse`. Any client-side floor gating on requested codes belongs to
 ///     the client change that first relies on them. [`PROTOCOL_VERSION`] does
 ///     not move: the `ClientMessage` twin is an optional `#[serde(default)]`
 ///     field whose fallback the client derives, which that constant's policy
 ///     exempts, and no variant here carries `GameState`. (One unbroken
-///     paragraph on purpose — see entry 5's note on the rustdoc
+///     paragraph on purpose â€” see entry 5's note on the rustdoc
 ///     indented-code-block trap.)
-/// 9 — Recoverable credential rotation via idempotent replay.
+/// 9 â€” Recoverable credential rotation via idempotent replay.
 ///     `RenewTournamentCredential` gains a `rotation_nonce` field
-///     (`#[serde(default)]`, optional) — the "a lobby field is added" trigger.
+///     (`#[serde(default)]`, optional) â€” the "a lobby field is added" trigger.
 ///     `renew_credential` used to mint a new secret, commit it, and invalidate
 ///     the old one atomically, so a renewal reply lost after the commit stranded
 ///     the holder on a dead, unrenewable secret (the #8782 \[HIGH\]). Now a
 ///     rotation from the current secret records the secret it superseded beside
 ///     that nonce, and a retry presenting the superseded secret WITH the same
 ///     nonce REPLAYS the already-committed secret instead of minting a second one
-///     — so a lost reply is recoverable, while a superseded secret alone (a
+///     â€” so a lost reply is recoverable, while a superseded secret alone (a
 ///     wrong or absent nonce) can neither mint nor obtain a credential, keeping
 ///     the authority with its legitimate holder rather than allowing a takeover.
 ///     Purely ADDITIVE, so [`MIN_SUPPORTED_LOBBY_PROTOCOL`] does **not** move:
@@ -1295,39 +1323,39 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 ///     `client/src/adapter/ws-adapter.ts`, the same shape as 6(c)'s
 ///     `MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING`), since replay recovery only
 ///     exists at or above this version. [`PROTOCOL_VERSION`] does not move: no
-///     variant here carries `GameState`. (One unbroken paragraph on purpose —
+///     variant here carries `GameState`. (One unbroken paragraph on purpose â€”
 ///     see entry 5's note on the rustdoc indented-code-block trap.)
-/// 8 — Tournament match structure: a per-event best-of choice. `CreateTournament`
+/// 8 â€” Tournament match structure: a per-event best-of choice. `CreateTournament`
 ///     gains `match_type: Option<MatchType>` (Bo1 / Bo3); `None` resolves to the
-///     arity default (`Bo3` head-to-head, `Bo1` for pods — which are single-game
+///     arity default (`Bo3` head-to-head, `Bo1` for pods â€” which are single-game
 ///     per MSTR), preserving pre-8 behaviour exactly. `TournamentSummary` gains
-///     the resolved `match_type`, server → client. One field added, optional
-///     (`#[serde(default)]`) — the "a lobby field is added" trigger and nothing
+///     the resolved `match_type`, server â†’ client. One field added, optional
+///     (`#[serde(default)]`) â€” the "a lobby field is added" trigger and nothing
 ///     else. Purely ADDITIVE, so [`MIN_SUPPORTED_LOBBY_PROTOCOL`] does not move
 ///     and no client-side floor is needed: a client's `match_type` reaching a
 ///     pre-8 broker deserializes away as an unknown field (a silent capability
-///     loss — the event runs Bo3 head-to-head as before — not a parse error),
+///     loss â€” the event runs Bo3 head-to-head as before â€” not a parse error),
 ///     and a pre-8 broker's summary omitting it is inert against a `JSON.parse`
 ///     client. This lets a 2-player event be Bo1 (e.g. single-game single
 ///     elimination); the broker's `validate_match_result` keys the reported
-///     outcome shape on `match_type` (Bo1 ⇒ single winner, empty `game_wins`;
-///     Bo3 ⇒ the completed 2-of-3 tally, head-to-head only).
+///     outcome shape on `match_type` (Bo1 â‡’ single winner, empty `game_wins`;
+///     Bo3 â‡’ the completed 2-of-3 tally, head-to-head only).
 ///     [`PROTOCOL_VERSION`] does not move: no variant here carries `GameState`.
-/// 7 — Tournament game-format label and an "automatic + N" round option. Three
+/// 7 â€” Tournament game-format label and an "automatic + N" round option. Three
 ///     fields are added, all `#[serde(default)]` and OPTIONAL, so this is the
 ///     "a lobby field is added" trigger and nothing else. (a)
-///     `CreateTournament` gains `format: Option<GameFormat>` — a display label
+///     `CreateTournament` gains `format: Option<GameFormat>` â€” a display label
 ///     for the event's format, mirroring the `format: Option<GameFormat>`
-///     [`LobbyGame`] already carries — and (b) `plus_rounds: Option<u32>`,
+///     [`LobbyGame`] already carries â€” and (b) `plus_rounds: Option<u32>`,
 ///     which adds N to the bracket- and arity-derived default round count for
 ///     the "Swiss plus N" community shape (mutually exclusive with the existing
 ///     `total_rounds` override, rejected at validation). (c) [`TournamentSummary`]
-///     gains `format: Option<GameFormat>`, server → client, so a browsing or
+///     gains `format: Option<GameFormat>`, server â†’ client, so a browsing or
 ///     spectating client sees the resolved label without recomputing it. This
 ///     entry is one unbroken paragraph on purpose, for the reason entry 5 below
-///     spells out — a blank `///` line before 4-space-indented prose is a
+///     spells out â€” a blank `///` line before 4-space-indented prose is a
 ///     rustdoc code block. Purely ADDITIVE in BOTH directions, so
-///     [`MIN_SUPPORTED_LOBBY_PROTOCOL`] does **not** move and — unlike 6(c) — no
+///     [`MIN_SUPPORTED_LOBBY_PROTOCOL`] does **not** move and â€” unlike 6(c) â€” no
 ///     client-side capability floor is needed. A new client's `format`/`plus_rounds`
 ///     reaching a pre-7 broker deserialize away as unknown fields (no enum here
 ///     sets `deny_unknown_fields`), so the event is created with no label and
@@ -1335,28 +1363,28 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 ///     A pre-7 broker's summary omitting `format` is inert against a new client
 ///     whose consumer is `JSON.parse`. [`PROTOCOL_VERSION`] does **not** move:
 ///     no variant here carries `GameState` or `GameAction`.
-/// 6 — Broker-owned tournament action legality, broker-owned default scoring,
+/// 6 â€” Broker-owned tournament action legality, broker-owned default scoring,
 ///     and expiring/rotating tournament credentials. Three triggers fire at
 ///     once and any one of them alone would be mandatory. (a) Two
-///     [`LobbyClientMessage`]/[`LobbyServerMessage`] variants are added —
-///     `RenewTournamentCredential` and `TournamentCredentialRenewed` — the
+///     [`LobbyClientMessage`]/[`LobbyServerMessage`] variants are added â€”
+///     `RenewTournamentCredential` and `TournamentCredentialRenewed` â€” the
 ///     "a lobby variant is added" trigger. (b) [`PairingView`] gains a required
 ///     `report_gate` and [`TournamentSummary`] gains a required `open_actions`
-///     and a required `scoring`, all three server → client, so the broker
+///     and a required `scoring`, all three server â†’ client, so the broker
 ///     rather than every client owns which affordances are legal and what an
 ///     event actually scores. (c) `CreateTournament::scoring` is RELAXED from a
 ///     required [`crate::tournament::ScoringPolicy`] to an optional one, with
-///     `None` meaning "the broker applies `ScoringPolicy::default_for_arity`" —
+///     `None` meaning "the broker applies `ScoringPolicy::default_for_arity`" â€”
 ///     the "a field type changed" trigger. `TournamentCreated` and
 ///     `TournamentJoined` additionally gain a required `expires_at_ms` beside
 ///     the token each already carried, because a credential that expires is
 ///     useless to a holder who cannot learn when. [`MIN_SUPPORTED_LOBBY_PROTOCOL`]
 ///     does **not** move, and the asymmetry between (b) and (c) is the reason
-///     it does not have to. The server → client additions are inert against an
+///     it does not have to. The server â†’ client additions are inert against an
 ///     older client: the consumer is `JSON.parse`, which ignores unknown
-///     fields, so nothing it already understood breaks. The client → broker
-///     relaxation is NOT symmetric — a new client omitting `scoring` against a
-///     pre-6 broker gets a hard `missing field` parse error, not a degrade —
+///     fields, so nothing it already understood breaks. The client â†’ broker
+///     relaxation is NOT symmetric â€” a new client omitting `scoring` against a
+///     pre-6 broker gets a hard `missing field` parse error, not a degrade â€”
 ///     but that direction is gated by a CLIENT-side capability floor
 ///     (`MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING` in
 ///     `client/src/adapter/ws-adapter.ts`), which keeps a below-floor client
@@ -1364,9 +1392,9 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 ///     broker floor move would evict every older client over a field they can
 ///     simply keep sending. [`PROTOCOL_VERSION`] does **not** move either: no
 ///     variant here carries `GameState` or `GameAction`.
-/// 5 — Request-correlated settlement for the four GATED tournament actions.
-///     Two [`LobbyServerMessage`] variants are added — `TournamentActionAck`
-///     and `TournamentActionRejected` — which is the first of the four triggers
+/// 5 â€” Request-correlated settlement for the four GATED tournament actions.
+///     Two [`LobbyServerMessage`] variants are added â€” `TournamentActionAck`
+///     and `TournamentActionRejected` â€” which is the first of the four triggers
 ///     listed above and is what makes this bump mandatory. Both are
 ///     requester-only point replies carrying the [`TournamentRequestId`] the
 ///     caller minted, so a caller can tell its own outcome from an ambient
@@ -1386,12 +1414,12 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 ///     uncorrelated caller sees no change on the wire at all. Finally,
 ///     [`PROTOCOL_VERSION`] does **not** move: no variant here carries
 ///     `GameState` or `GameAction`, so the lobby number is the one that
-///     governs — the same rule the tournament set itself followed at 4, which
+///     governs â€” the same rule the tournament set itself followed at 4, which
 ///     added twelve variants across three crates and moved only this constant.
 ///     (Written as one unbroken paragraph on purpose. A blank `///` line
 ///     followed by this 4-space indentation is an indented CODE block to
 ///     rustdoc, which then tries to compile the prose as a doctest.)
-/// 4 — The tournament-organizer message set: seven [`LobbyClientMessage`]
+/// 4 â€” The tournament-organizer message set: seven [`LobbyClientMessage`]
 ///     variants (`CreateTournament`, `JoinTournament`, `GetTournament`,
 ///     `StartTournamentRound`, `ReportMatchResult`, `DropFromTournament`,
 ///     `EndTournament`) and five [`LobbyServerMessage`] variants
@@ -1400,55 +1428,55 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 ///     added" is the first of the four triggers listed above, so this bump is
 ///     required by this constant's own documented policy.
 ///     Purely ADDITIVE, which is why [`MIN_SUPPORTED_LOBBY_PROTOCOL`] does
-///     **not** move alongside it — the asymmetry with 2 is deliberate. Bump 2
+///     **not** move alongside it â€” the asymmetry with 2 is deliberate. Bump 2
 ///     retyped a field three existing carriers already held in both
 ///     directions, so a v1 peer could neither send nor interpret a frame it
 ///     routinely exchanged; only a floor move could say that out loud. Nothing
 ///     here changes any existing variant's shape. A v2 client keeps parsing
 ///     every frame it already understood, never sends a tournament variant,
-///     and — for the broker → client half where `JSON.parse` validates nothing
-///     — receives no tournament frame at all unless it first subscribed to a
+///     and â€” for the broker â†’ client half where `JSON.parse` validates nothing
+///     â€” receives no tournament frame at all unless it first subscribed to a
 ///     surface it has no code for. Raising the floor would evict that entire
 ///     cohort's lobby session to protect it from messages it cannot receive.
-///     On the client → broker half a v4-only tag reaching a v2 broker is
+///     On the client â†’ broker half a v4-only tag reaching a v2 broker is
 ///     already answered per-frame by [`ParsedFrame::UnknownTag`], which is the
 ///     stated reason no upper bound exists either.
-/// 3 — `FormatConfig` gained `default_deck_copy_limit` (see `PROTOCOL_VERSION`
+/// 3 â€” `FormatConfig` gained `default_deck_copy_limit` (see `PROTOCOL_VERSION`
 ///     50 for the full entry). Same three carriers as 2:
-///     `CreateGameWithSettings` on [`LobbyClientMessage`] (client → broker),
-///     `JoinTargetInfo` and `PeerInfo` on [`LobbyServerMessage`] (broker →
-///     client). Unlike 2, this is a CAPABILITY bump, not a parse bump — the
+///     `CreateGameWithSettings` on [`LobbyClientMessage`] (client â†’ broker),
+///     `JoinTargetInfo` and `PeerInfo` on [`LobbyServerMessage`] (broker â†’
+///     client). Unlike 2, this is a CAPABILITY bump, not a parse bump â€” the
 ///     field is `#[serde(default)]` and still deserializes cleanly on either
-///     side — so [`MIN_SUPPORTED_LOBBY_PROTOCOL`] does NOT move: a v2 client
+///     side â€” so [`MIN_SUPPORTED_LOBBY_PROTOCOL`] does NOT move: a v2 client
 ///     can still create/join a game, it just can't declare or observe a
 ///     non-default deck-copy-limit override, silently getting the fail-closed
 ///     `UpTo(1)` fallback instead of the format's real default. That is a
-///     capability loss, not a broken session — the same shape as
+///     capability loss, not a broken session â€” the same shape as
 ///     `PROTOCOL_VERSION`'s own capability-bump entries (24, 50), not this
 ///     file's own entry 2.
-/// 2 — `FormatConfig::deck_size` changed from a bare `u16` to the adjacently
-///     tagged `DeckSizeRule` — a field TYPE change, one of the four triggers
+/// 2 â€” `FormatConfig::deck_size` changed from a bare `u16` to the adjacently
+///     tagged `DeckSizeRule` â€” a field TYPE change, one of the four triggers
 ///     listed above.
 ///     Three lobby carriers hold a `FormatConfig`, in both directions:
-///     `CreateGameWithSettings` on [`LobbyClientMessage`] (client → broker),
+///     `CreateGameWithSettings` on [`LobbyClientMessage`] (client â†’ broker),
 ///     and `JoinTargetInfo` and `PeerInfo` on [`LobbyServerMessage`]
-///     (broker → client). The client → broker one fails LOUDLY: serde refuses
+///     (broker â†’ client). The client â†’ broker one fails LOUDLY: serde refuses
 ///     a bare integer for an adjacently tagged enum, so the frame is reported
-///     as [`ParsedFrame::Malformed`]. The two broker → client carriers cannot
-///     fail at all — the browser deserializes them with `JSON.parse`, which
+///     as [`ParsedFrame::Malformed`]. The two broker â†’ client carriers cannot
+///     fail at all â€” the browser deserializes them with `JSON.parse`, which
 ///     validates nothing, and the TypeScript declaration is erased at
 ///     runtime. That asymmetry is WHY a version number is the only available
-///     signal here: on the broker → client half no per-frame check exists to
+///     signal here: on the broker â†’ client half no per-frame check exists to
 ///     reject a stale shape.
 ///     What the paired floor move evicts: the entire lobby session of every
-///     client built against lobby version 1 — hosting, browsing and joining
-///     alike — even though exactly one `LobbyClientMessage` variant actually
+///     client built against lobby version 1 â€” hosting, browsing and joining
+///     alike â€” even though exactly one `LobbyClientMessage` variant actually
 ///     carries a `FormatConfig` and the rest would still have parsed. It
 ///     migrates nothing and does not make such a client work; it converts a
-///     mid-session create-game failure — and, on the join path, a `deck_size`
+///     mid-session create-game failure â€” and, on the join path, a `deck_size`
 ///     in a shape that build cannot interpret and that no per-frame check on
-///     that direction can reject — into one legible handshake refusal.
-/// 1 — Initial lobby-owned version, covering the `LobbyClientMessage` /
+///     that direction can reject â€” into one legible handshake refusal.
+/// 1 â€” Initial lobby-owned version, covering the `LobbyClientMessage` /
 ///     `LobbyServerMessage` variant sets, unchanged since #1880.
 pub const LOBBY_PROTOCOL_VERSION: u32 = 16;
 
@@ -1464,23 +1492,23 @@ pub const LOBBY_PROTOCOL_VERSION: u32 = 16;
 /// The LOWER bound exists for the opposite reason, and the cohort the sentence
 /// above names is exactly the one it evicts. A client that only browses and
 /// joins never sends `CreateGameWithSettings`, and every other
-/// [`LobbyClientMessage`] variant it uses still parses — so on the client →
+/// [`LobbyClientMessage`] variant it uses still parses â€” so on the client â†’
 /// broker direction there is indeed little to refuse it over. But every
 /// `JoinTargetInfo` and `PeerInfo` that cohort RECEIVES carries the same
 /// [`FormatConfig`], on the direction where the deserializer is the browser's
 /// `JSON.parse`. It is handed a `deck_size` whose shape its build cannot
 /// interpret, nothing in that build reads the field, and a stale shape cannot
-/// fail there — no per-frame rejection is possible on that half at all. That
+/// fail there â€” no per-frame rejection is possible on that half at all. That
 /// absence of any other voice is the ground for the floor: the handshake is
 /// the only place the mismatch can be said out loud. The upper bound stays
 /// absent because [`ParsedFrame::UnknownTag`] is available there; the lower
-/// bound exists because on the broker → client half nothing equivalent is.
+/// bound exists because on the broker â†’ client half nothing equivalent is.
 pub const MIN_SUPPORTED_LOBBY_PROTOCOL: u32 = 2;
 
 /// Public-lobby view of a single registered game. Populated by the server,
 /// never by clients. Field shape mirrors the pre-extraction
 /// `server_core::protocol::LobbyGame` exactly for wire compatibility.
-/// `PartialEq` is additive over the pre-extraction type — needed so the broker's
+/// `PartialEq` is additive over the pre-extraction type â€” needed so the broker's
 /// `Outbound`/`LobbyServerMessage` can derive it for order-sequence assertions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LobbyGame {
@@ -1491,7 +1519,7 @@ pub struct LobbyGame {
     /// Display string (e.g. `"0.1.11"`). Human-readable; not a compatibility gate.
     #[serde(default)]
     pub host_version: String,
-    /// Git short-hash of the host's build. The compatibility gate — clients on
+    /// Git short-hash of the host's build. The compatibility gate â€” clients on
     /// a different commit cannot join because GameState / rules may have diverged.
     #[serde(default)]
     pub host_build_commit: String,
@@ -1500,10 +1528,10 @@ pub struct LobbyGame {
     #[serde(default)]
     pub current_players: u32,
     /// Configured seat count for this game. For 1v1 formats this is 2; for
-    /// Commander it ranges 2–4.
+    /// Commander it ranges 2â€“4.
     #[serde(default)]
     pub max_players: u32,
-    /// Game format (Standard, Commander, etc.) — lets lobby UIs filter or
+    /// Game format (Standard, Commander, etc.) â€” lets lobby UIs filter or
     /// badge the row. Optional because older persisted entries predate the
     /// field.
     #[serde(default)]
@@ -1540,15 +1568,15 @@ pub struct DraftLobbyMetadata {
     pub set_code: String,
     /// Draft kind label: "Quick", "Premier", "Traditional", "Sealed",
     /// "CommanderDraft", or "Winston". The field is a `String`, so adding a
-    /// label is documentation only — the wire shape is transparent to it and
+    /// label is documentation only â€” the wire shape is transparent to it and
     /// no deserialization changes.
     ///
     /// This doc IS the registration: the field is a length-bounded `String`
     /// (`validation.rs`'s `MAX_DRAFT_KIND_LEN = 32`, no allowlist) whose
-    /// producers are `format!("{:?}", …)` over the engine's `DraftKind`
+    /// producers are `format!("{:?}", â€¦)` over the engine's `DraftKind`
     /// (`server-core/src/persist.rs`, `phase-server/src/main.rs`), so a new
     /// kind owes no producer edit. For the same reason
-    /// [`LOBBY_PROTOCOL_VERSION`] correctly does NOT move for a new kind —
+    /// [`LOBBY_PROTOCOL_VERSION`] correctly does NOT move for a new kind â€”
     /// no lobby variant's wire shape observes the label.
     pub draft_kind: String,
     /// Human-readable cube name when the pod is a cube draft. Absent for
@@ -1564,7 +1592,7 @@ pub struct DraftLobbyMetadata {
 // ---------------------------------------------------------------------------
 //
 // Projections of `crate::tournament`'s durable types onto the wire, populated
-// by the server and never by clients — the same framing [`LobbyGame`] carries.
+// by the server and never by clients â€” the same framing [`LobbyGame`] carries.
 // They exist for exactly one reason: `TournamentMeta` and `TournamentPlayer`
 // hold `organizer_token`/`player_token`, and those two secrets must never
 // reach a client that does not already own them. Serializing the domain types
@@ -1610,7 +1638,7 @@ pub struct PairingView {
     /// `None` while the pairing is still pending.
     pub outcome: Option<crate::tournament::PairingOutcome>,
     /// Whether the broker would accept a report for this pairing from a
-    /// correctly credentialed, seated, non-dropped entrant — every conjunct of
+    /// correctly credentialed, seated, non-dropped entrant â€” every conjunct of
     /// [`crate::tournament::TournamentManager::report_result`]'s gate that does
     /// not depend on who is asking, computed by the single authority
     /// [`crate::tournament::TournamentMeta::report_gate`].
@@ -1623,7 +1651,7 @@ pub struct PairingView {
     pub report_gate: crate::tournament::ReportGate,
 }
 
-/// One row of the tournament list — enough to render a lobby listing without
+/// One row of the tournament list â€” enough to render a lobby listing without
 /// fetching the full [`TournamentView`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TournamentSummary {
@@ -1632,7 +1660,7 @@ pub struct TournamentSummary {
     pub arity: crate::tournament::MatchArity,
     pub bracket: crate::tournament::BracketShape,
     pub status: crate::tournament::TournamentStatus,
-    /// **Active** entrants — `TournamentMeta::active_player_count`, not
+    /// **Active** entrants â€” `TournamentMeta::active_player_count`, not
     /// `players.len()`. A listing answers "how many players are still in this
     /// event", which is what a browsing client is deciding on; a dropped
     /// player is not one of them. [`TournamentView::players`] still carries
@@ -1641,12 +1669,12 @@ pub struct TournamentSummary {
     pub player_count: u32,
     pub current_round: u32,
     /// The scheduled length, read through
-    /// [`crate::tournament::TournamentMeta::total_rounds`] — the single
+    /// [`crate::tournament::TournamentMeta::total_rounds`] â€” the single
     /// authority that resolves the organizer override, the latched default,
     /// and the live default in that order.
     pub total_rounds: u32,
     pub created_at: u64,
-    /// The RESOLVED scoring policy this event is actually scored under —
+    /// The RESOLVED scoring policy this event is actually scored under â€”
     /// either the organizer's explicit choice or
     /// [`crate::tournament::ScoringPolicy::default_for_arity`] applied by the
     /// broker when `CreateTournament::scoring` was omitted.
@@ -1663,22 +1691,22 @@ pub struct TournamentSummary {
     /// A SET over one typed axis rather than three sibling `can_*: bool`
     /// fields. Reporting is deliberately absent: its gate is pairing-scoped and
     /// lives on [`PairingView::report_gate`]. Like that field this is
-    /// viewer-INdependent — the authorization conjuncts cannot ride a frame
+    /// viewer-INdependent â€” the authorization conjuncts cannot ride a frame
     /// fanned to every subscriber.
     ///
     /// It lives on the summary rather than on [`TournamentView`] so the
     /// tournament LIST page can gate its affordances off the same field without
     /// fetching a full view, and because the summary already carries `status`,
-    /// `current_round` and `total_rounds` — the very inputs the gate reads.
+    /// `current_round` and `total_rounds` â€” the very inputs the gate reads.
     pub open_actions: std::collections::BTreeSet<crate::tournament::TournamentAction>,
-    /// The event's game format, a display label only (Standard, Commander, …).
+    /// The event's game format, a display label only (Standard, Commander, â€¦).
     /// `None` when the organizer named none. Mirrors [`LobbyGame::format`]: the
     /// tournament never touches `GameState`, so it carries the `GameFormat`
     /// label rather than a full [`FormatConfig`], and enforces no deck legality.
     /// Additive in lobby protocol 7; absent from a pre-7 broker's summary.
     #[serde(default)]
     pub format: Option<GameFormat>,
-    /// The RESOLVED match structure (Bo1 / Bo3) this event runs — the organizer's
+    /// The RESOLVED match structure (Bo1 / Bo3) this event runs â€” the organizer's
     /// explicit choice or the arity default the broker applied. Bo3 only ever
     /// appears at head-to-head; pods are always Bo1 (single-game per MSTR).
     /// Additive in lobby protocol 8; absent from a pre-8 broker's summary.
@@ -1711,7 +1739,7 @@ impl From<&crate::tournament::TournamentMeta> for TournamentSummary {
 /// recomputed fresh from that history.
 ///
 /// `players`/`pairings` map 1:1 from
-/// [`crate::tournament::TournamentMeta::players`]/`.pairings` — a full view,
+/// [`crate::tournament::TournamentMeta::players`]/`.pairings` â€” a full view,
 /// never a filtered subset. Dropped players stay listed (their `dropped` flag
 /// is the distinction a client renders), and every round's pairings stay
 /// present, because the standings are only interpretable against the history
@@ -1766,7 +1794,7 @@ impl From<&crate::tournament::TournamentMeta> for TournamentView {
 /// the `type`/`data` tags and field shapes match the canonical enum exactly.
 ///
 /// Deserialize incoming frames with [`parse_lobby_client_message`], NOT a bare
-/// `serde_json::from_str` — that routes unknown tags to the reject path.
+/// `serde_json::from_str` â€” that routes unknown tags to the reject path.
 /// (No `PartialEq`: `DeckData` is not `PartialEq`, matching the canonical
 /// `ClientMessage`, which is also not `PartialEq`.)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1779,7 +1807,7 @@ pub enum LobbyClientMessage {
         /// The client's [`LOBBY_PROTOCOL_VERSION`]. `None` from clients built
         /// before the lobby owned its own version; those fall back to the
         /// `protocol_version` window. Additive and optional, so an older broker
-        /// ignores it and an older client omits it — no `PROTOCOL_VERSION` bump
+        /// ignores it and an older client omits it â€” no `PROTOCOL_VERSION` bump
         /// is required for either direction to keep parsing.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         lobby_protocol_version: Option<u32>,
@@ -1850,7 +1878,7 @@ pub enum LobbyClientMessage {
     // --- Tournament organizer (lobby protocol 4) --------------------------
     //
     // Authority on every gated variant below is the TOKEN carried in the
-    // payload, compared against the stored `organizer_token`/`player_token` —
+    // payload, compared against the stored `organizer_token`/`player_token` â€”
     // never the socket's `ConnState`. That is the whole point of the model:
     // closing and reopening a connection must not cost an organizer their
     // event or a player their standing.
@@ -1863,12 +1891,12 @@ pub enum LobbyClientMessage {
         /// the arity-derived default
         /// ([`crate::tournament::ScoringPolicy::default_for_arity`]), applied
         /// by the broker and sent back resolved on
-        /// [`TournamentSummary::scoring`] — the same shape `total_rounds`
+        /// [`TournamentSummary::scoring`] â€” the same shape `total_rounds`
         /// below already has, for the same reason: the rule belongs to the
         /// broker, and a client that computed it would be a second copy of it.
         ///
-        /// `#[serde(default)]` is redundant on an `Option` — serde already
-        /// defaults a missing one to `None` — and is written anyway because
+        /// `#[serde(default)]` is redundant on an `Option` â€” serde already
+        /// defaults a missing one to `None` â€” and is written anyway because
         /// every other optional field in this enum carries it and consistency
         /// in a wire contract is worth more than terseness. It is not
         /// load-bearing.
@@ -1877,19 +1905,19 @@ pub enum LobbyClientMessage {
         bracket: crate::tournament::BracketShape,
         /// Organizer override for the scheduled round count, an EXACT count that
         /// wins outright. `None` uses the bracket- and arity-selected default.
-        /// Mutually exclusive with `plus_rounds` below — supplying both is
+        /// Mutually exclusive with `plus_rounds` below â€” supplying both is
         /// rejected at [`crate::validation`].
         #[serde(default)]
         total_rounds: Option<u32>,
         /// "Automatic + N": add N to the bracket- and arity-derived default
         /// round count (the "Swiss plus N" community shape). `None` adds
         /// nothing. Kept a separate field from `total_rounds` rather than folded
-        /// into it because the broker still owns the base default — a client
+        /// into it because the broker still owns the base default â€” a client
         /// that resolved `default + N` itself would be the recomputed rule the
         /// resolver exists to keep server-side. Additive in lobby protocol 7.
         #[serde(default)]
         plus_rounds: Option<u32>,
-        /// The event's game-format label (Standard, Commander, …), sent back
+        /// The event's game-format label (Standard, Commander, â€¦), sent back
         /// resolved on [`TournamentSummary::format`]. Display metadata only: the
         /// tournament never touches `GameState` and enforces no deck legality.
         /// `None` names no format. Additive in lobby protocol 7.
@@ -1905,7 +1933,7 @@ pub enum LobbyClientMessage {
         match_type: Option<MatchType>,
     },
     /// Register as an entrant. `player_key` is **client-supplied** and opaque
-    /// to the broker — the stable per-entrant identity, following
+    /// to the broker â€” the stable per-entrant identity, following
     /// `host_peer_id`'s precedent. The `player_token` that authorizes this
     /// entrant's later actions is minted by the broker in reply.
     JoinTournament {
@@ -1924,8 +1952,8 @@ pub enum LobbyClientMessage {
         organizer_token: String,
         /// This caller's [`TournamentRequestId`]. `None` from clients built
         /// before the lobby correlated its gated actions; those are answered
-        /// exactly as before — broadcast only, no ack. Additive and optional,
-        /// so an older broker ignores it and an older client omits it — no
+        /// exactly as before â€” broadcast only, no ack. Additive and optional,
+        /// so an older broker ignores it and an older client omits it â€” no
         /// `PROTOCOL_VERSION` bump is required for either direction to keep
         /// parsing.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1939,7 +1967,7 @@ pub enum LobbyClientMessage {
         player_token: String,
         outcome: crate::tournament::PodOutcome,
         /// This caller's [`TournamentRequestId`]. See
-        /// [`LobbyClientMessage::StartTournamentRound`] — same additive,
+        /// [`LobbyClientMessage::StartTournamentRound`] â€” same additive,
         /// optional shape, same `None`-means-uncorrelated meaning.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<TournamentRequestId>,
@@ -1949,7 +1977,7 @@ pub enum LobbyClientMessage {
         code: String,
         player_token: String,
         /// This caller's [`TournamentRequestId`]. See
-        /// [`LobbyClientMessage::StartTournamentRound`] — same additive,
+        /// [`LobbyClientMessage::StartTournamentRound`] â€” same additive,
         /// optional shape, same `None`-means-uncorrelated meaning.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<TournamentRequestId>,
@@ -1959,7 +1987,7 @@ pub enum LobbyClientMessage {
         code: String,
         organizer_token: String,
         /// This caller's [`TournamentRequestId`]. See
-        /// [`LobbyClientMessage::StartTournamentRound`] — same additive,
+        /// [`LobbyClientMessage::StartTournamentRound`] â€” same additive,
         /// optional shape, same `None`-means-uncorrelated meaning.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<TournamentRequestId>,
@@ -1992,7 +2020,7 @@ pub enum LobbyClientMessage {
         /// (now-superseded) `token`, and the broker replays the already-committed
         /// secret instead of minting a second one
         /// ([`crate::tournament::TournamentCredential::renew`]). A superseded
-        /// token WITHOUT the matching nonce cannot mint or replay — that is what
+        /// token WITHOUT the matching nonce cannot mint or replay â€” that is what
         /// stops a stolen superseded secret becoming a fresh authority.
         ///
         /// `#[serde(default)]` for wire tolerance: an empty nonce simply never
@@ -2006,7 +2034,7 @@ pub enum LobbyClientMessage {
 impl LobbyClientMessage {
     /// This frame's gated-action correlator, if it carries one.
     ///
-    /// Exhaustive by construction — no wildcard arm — so a future gated variant
+    /// Exhaustive by construction â€” no wildcard arm â€” so a future gated variant
     /// that forgets a correlator is visible here as a compile error rather than
     /// silently uncorrelated. Every non-gated variant answers `None` because it
     /// has no correlator to carry, which is the same answer a gated variant
@@ -2061,8 +2089,8 @@ pub enum LobbyServerMessage {
         build_commit: String,
         protocol_version: u32,
         mode: ServerMode,
-        /// This broker's [`LOBBY_PROTOCOL_VERSION`]. Advertised alongside — not
-        /// instead of — `protocol_version`, which older clients still gate on
+        /// This broker's [`LOBBY_PROTOCOL_VERSION`]. Advertised alongside â€” not
+        /// instead of â€” `protocol_version`, which older clients still gate on
         /// and which therefore must keep tracking the full-game constant.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         lobby_protocol_version: Option<u32>,
@@ -2133,7 +2161,7 @@ pub enum LobbyServerMessage {
     // it. Every broadcast variant below carries a [`TournamentView`] or
     // [`TournamentSummary`], neither of which has a token field to leak.
     /// Point reply to `CreateTournament`. Carries the minted `organizer_token`
-    /// — never broadcast.
+    /// â€” never broadcast.
     TournamentCreated {
         code: String,
         organizer_token: String,
@@ -2148,7 +2176,7 @@ pub enum LobbyServerMessage {
         view: TournamentView,
     },
     /// Point reply to `JoinTournament`. Carries this entrant's minted
-    /// `player_token` — never broadcast.
+    /// `player_token` â€” never broadcast.
     TournamentJoined {
         code: String,
         player_token: String,
@@ -2175,13 +2203,13 @@ pub enum LobbyServerMessage {
     },
     /// Requester-only acknowledgement of one gated tournament action. Carries
     /// the [`TournamentRequestId`] the caller minted, so a caller can tell its
-    /// own outcome from an ambient `TournamentUpdate` for the same tournament —
+    /// own outcome from an ambient `TournamentUpdate` for the same tournament â€”
     /// which may come from another participant, from this caller's own
     /// concurrent `GetTournament`, or from the reaper.
     ///
     /// Sent `ToSelf`, never fanned out: the correlator is meaningless to every
-    /// other subscriber. It carries **no token** — the caller already holds the
-    /// one that authorized the action — so unlike `TournamentCreated` /
+    /// other subscriber. It carries **no token** â€” the caller already holds the
+    /// one that authorized the action â€” so unlike `TournamentCreated` /
     /// `TournamentJoined` this point reply has nothing to leak.
     TournamentActionAck {
         request_id: TournamentRequestId,
@@ -2193,8 +2221,8 @@ pub enum LobbyServerMessage {
     ///
     /// One refusal shape, not the result/rejected/failed trio the full-game
     /// surface uses: the lobby draws no distinction between an engine rejection
-    /// DTO and an operational failure — every refusal here is prose from one
-    /// `fn error` — so importing that split would be proliferation. Carries no
+    /// DTO and an operational failure â€” every refusal here is prose from one
+    /// `fn error` â€” so importing that split would be proliferation. Carries no
     /// token and no view.
     TournamentActionRejected {
         request_id: TournamentRequestId,
@@ -2203,7 +2231,7 @@ pub enum LobbyServerMessage {
 
     // --- Credential rotation (lobby protocol 6) ---------------------------
     /// Point reply to `RenewTournamentCredential`, carrying the FRESHLY MINTED
-    /// secret that replaces the presented one — never broadcast, and the third
+    /// secret that replaces the presented one â€” never broadcast, and the third
     /// variant in this enum that carries a token.
     ///
     /// Rotation rather than extension: the presented secret stops being
@@ -2280,12 +2308,12 @@ pub enum ParsedFrame {
 }
 
 /// The set of `type` tags this broker recognizes. Kept as a function (not a
-/// const slice match) so it stays trivially in sync with the enum variants —
+/// const slice match) so it stays trivially in sync with the enum variants â€”
 /// every arm of [`deserialize_variant`] has a matching entry here.
 ///
 /// **This gate is NOT compile-checked.** Unlike the exhaustive `match`es over
 /// [`LobbyClientMessage`] elsewhere in this crate, a variant added to the enum
-/// without an entry here still compiles — and then every frame carrying it is
+/// without an entry here still compiles â€” and then every frame carrying it is
 /// answered [`ParsedFrame::UnknownTag`], as if a client had invented the tag.
 /// `every_client_variant_tag_is_known` in this module's tests is the standing
 /// guard: it asserts a representative frame for each variant round-trips
@@ -2355,7 +2383,7 @@ mod tests {
     use super::*;
 
     /// The two surfaces must not share a number. `scripts/check-protocol-version.mjs`
-    /// carries the structural half of this guard — it matches
+    /// carries the structural half of this guard â€” it matches
     /// `LOBBY_PROTOCOL_VERSION` only against a bare integer literal, so
     /// re-deriving it from `PROTOCOL_VERSION` fails the cross-language gate
     /// rather than silently re-coupling the lobby to full-game churn.
@@ -2363,20 +2391,20 @@ mod tests {
     fn lobby_protocol_version_is_independent_of_the_full_game_one() {
         assert_eq!(LOBBY_PROTOCOL_VERSION, 16);
         // Deliberately still 2, not 12: every lobby version past 2 keeps this
-        // floor's guarantee — that a version-2 client can still parse every
+        // floor's guarantee â€” that a version-2 client can still parse every
         // frame it already understands. Individually: 3 is additive in both
         // directions (an optional, defaulted field); 4 adds variants only,
         // harmless to a v2 client's `JSON.parse` handling; 5 is
         // additive in both directions (variants plus an optional, defaulted
-        // field); 6 is additive in the only direction this floor governs — its
-        // server → client fields are ignored by a consumer that doesn't name
-        // them — and its relaxation (`scoring`) makes the broker MORE
+        // field); 6 is additive in the only direction this floor governs â€” its
+        // server â†’ client fields are ignored by a consumer that doesn't name
+        // them â€” and its relaxation (`scoring`) makes the broker MORE
         // permissive, not less; 7 and 8 are additive, optional fields only; 9
-        // is additive, a client → broker field a version-2 client, predating
+        // is additive, a client â†’ broker field a version-2 client, predating
         // it, never sends; 10 adds an optional, defaulted `requested_code`
         // field plus two additive `ServerErrorCode` variants, both ignored by
         // a pre-10 consumer; 11 adds no field or variant; 12 adds an optional
-        // broker → client field that a consumer which does not name it
+        // broker â†’ client field that a consumer which does not name it
         // ignores; 13 adds an optional, defaulted `FormatConfig` field on
         // the same three carriers as 2, ignored the same way; 14 adds a hosted
         // report gate that has no production emitter yet; 15 removes that
@@ -2403,12 +2431,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 151);
+        assert_eq!(PROTOCOL_VERSION, 157);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 150);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 156);
     }
 
     #[test]
@@ -2436,7 +2464,7 @@ mod tests {
 
     #[test]
     fn unknown_tag_routes_to_reject() {
-        // `Action` is a real canonical tag but NOT a lobby tag — must reject,
+        // `Action` is a real canonical tag but NOT a lobby tag â€” must reject,
         // not parse into a magic variant.
         let frame = r#"{"type":"Action","data":{"action":"PassPriority"}}"#;
         match parse_lobby_client_message(frame) {
@@ -2484,7 +2512,7 @@ mod tests {
     const FIXTURE_EXPIRY_MS: u64 = u64::MAX;
 
     /// A tournament with real tokens, two entrants (one dropped), and a
-    /// resolved round-1 pairing — enough shape that a projection which merely
+    /// resolved round-1 pairing â€” enough shape that a projection which merely
     /// forgot to populate a field cannot pass the leak tests vacuously.
     fn meta_fixture() -> TournamentMeta {
         TournamentMeta {
@@ -2549,7 +2577,7 @@ mod tests {
     /// `draft_metadata` to the `JoinTargetInfo` reply.
     ///
     /// This test's predecessor asserted the tournament set sat exactly ONE bump
-    /// past `FormatConfig` — a relationship that stopped being true the moment
+    /// past `FormatConfig` â€” a relationship that stopped being true the moment
     /// correlation took 5. Retargeting its number alone would have left a test
     /// whose name states a relationship it no longer checks, so the span is
     /// what it pins now, and the name says "chain", not "surface", because
@@ -2557,10 +2585,10 @@ mod tests {
     /// again at 6, once more at 7 for the format label and the "automatic + N"
     /// round option, and again at 8 for the match structure (Bo1 / Bo3): the
     /// chain grows a step and the name grows with it, rather than the tail
-    /// constant being quietly re-pointed. Version 9 DOES add wire surface —
+    /// constant being quietly re-pointed. Version 9 DOES add wire surface â€”
     /// `RenewTournamentCredential` gains `rotation_nonce`, `#[serde(default)]`
     /// but with no `skip_serializing_if`, so it serializes unconditionally
-    /// once present — but the field is additive on both sides (a pre-9
+    /// once present â€” but the field is additive on both sides (a pre-9
     /// broker ignores it; a pre-9 client simply never sends the frame), so
     /// it extends the chain the same way 3 through 8 did rather than forcing
     /// a floor move. Version 10 is the first
@@ -2585,16 +2613,16 @@ mod tests {
         const RECOVERABLE_ROTATION_LOBBY_VERSION: u32 = MATCH_STRUCTURE_LOBBY_VERSION + 1;
         // The first step outside the tournament surface: requested room codes.
         const REQUESTED_ROOM_CODE_LOBBY_VERSION: u32 = RECOVERABLE_ROTATION_LOBBY_VERSION + 1;
-        // The one true non-surface step: no field, no variant — a
+        // The one true non-surface step: no field, no variant â€” a
         // pre-emptive bump moved ahead of new `GameFormat` variants.
         const PREEMPTIVE_FORMAT_LOBBY_VERSION: u32 = REQUESTED_ROOM_CODE_LOBBY_VERSION + 1;
-        // Adds an optional field (`draft_metadata`) to a broker → client reply.
+        // Adds an optional field (`draft_metadata`) to a broker â†’ client reply.
         const JOIN_TARGET_DRAFT_METADATA_LOBBY_VERSION: u32 = PREEMPTIVE_FORMAT_LOBBY_VERSION + 1;
         // Adds an optional field (`allow_experimental_dungeons`) to `FormatConfig`.
         const EXPERIMENTAL_DUNGEONS_LOBBY_VERSION: u32 =
             JOIN_TARGET_DRAFT_METADATA_LOBBY_VERSION + 1;
         // Adds a `Hosted` arm to `PairingView.report_gate` (a serialized enum's
-        // value space grows) — the "a field's type changed" trigger.
+        // value space grows) â€” the "a field's type changed" trigger.
         const HOSTED_MATCH_LOBBY_VERSION: u32 = EXPERIMENTAL_DUNGEONS_LOBBY_VERSION + 1;
         // Removes `allow_experimental_dungeons` from `FormatConfig`; the
         // Baldur's Gate Wilderness pool is format-derived instead.
@@ -2643,7 +2671,7 @@ mod tests {
             ),
             // The four gated variants again, this time as a CORRELATED client
             // sends them. Adding the correlator changes no tag, so nothing in
-            // `is_known_lobby_tag` moves — but a frame that parsed only in its
+            // `is_known_lobby_tag` moves â€” but a frame that parsed only in its
             // uncorrelated shape would be a silent capability loss for exactly
             // the four actions this correlator exists for.
             (
@@ -2676,7 +2704,7 @@ mod tests {
             ),
             // Lobby protocol 6 relaxed `scoring` to optional, so the frame a
             // v6 client sends when it wants the broker's arity default has to
-            // parse too — its absence is the whole point of the relaxation.
+            // parse too â€” its absence is the whole point of the relaxation.
             (
                 "CreateTournament (scoring omitted)",
                 r#"{"type":"CreateTournament","data":{"name":"Friday Night","arity":4,"bracket":"Swiss","total_rounds":3}}"#,
@@ -2687,7 +2715,7 @@ mod tests {
             match parse_lobby_client_message(frame) {
                 ParsedFrame::Message(_) => {}
                 other => panic!(
-                    "{tag} must parse to a Message — an UnknownTag here means \
+                    "{tag} must parse to a Message â€” an UnknownTag here means \
                      is_known_lobby_tag was not extended: {other:?}"
                 ),
             }
@@ -2863,7 +2891,7 @@ mod tests {
 
         for msg in correlated {
             let json = serde_json::to_string(&msg).expect("serializes");
-            // `#[serde(transparent)]` — the correlator is a bare integer on the
+            // `#[serde(transparent)]` â€” the correlator is a bare integer on the
             // wire, not a wrapper object.
             assert!(
                 json.contains(r#""request_id":4"#),
@@ -2900,7 +2928,7 @@ mod tests {
     }
 
     /// A frame from a client that predates correlation parses, and parses as
-    /// UNCORRELATED — the property that lets a v5 broker keep answering a v4
+    /// UNCORRELATED â€” the property that lets a v5 broker keep answering a v4
     /// client unchanged.
     #[test]
     fn a_pre_correlation_frame_parses_with_no_request_id() {
@@ -2919,7 +2947,7 @@ mod tests {
         // Reach-guard: the assertion above passes because of
         // `#[serde(default)]`, not because this test is insensitive to a
         // missing field. The same payload against a shape whose correlator is
-        // REQUIRED must fail — so `default` is load-bearing rather than
+        // REQUIRED must fail â€” so `default` is load-bearing rather than
         // incidental.
         #[derive(Deserialize)]
         #[allow(dead_code)]
@@ -2942,7 +2970,7 @@ mod tests {
     /// [`LobbyClientMessage::tournament_request_id`] is total and discriminating.
     ///
     /// The exhaustive match it is written as cannot be checked by the compiler
-    /// for CORRECTNESS — only for totality — so this pins that each gated
+    /// for CORRECTNESS â€” only for totality â€” so this pins that each gated
     /// variant returns its own id while every other variant returns `None`.
     #[test]
     fn tournament_request_id_is_total_and_only_gated_variants_carry_one() {
@@ -3004,7 +3032,7 @@ mod tests {
         }
 
         // The discriminating case: `None` is NOT a blanket answer for "not
-        // gated" — a gated variant from a pre-correlation client answers `None`
+        // gated" â€” a gated variant from a pre-correlation client answers `None`
         // too, and it must, because there is genuinely nothing to correlate.
         assert_eq!(
             LobbyClientMessage::EndTournament {
@@ -3018,7 +3046,7 @@ mod tests {
     }
 
     /// V7. `CreateTournament::scoring` is optional from lobby protocol 6, and
-    /// the relaxation is asymmetric — which is the whole reason
+    /// the relaxation is asymmetric â€” which is the whole reason
     /// `MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING` exists on the client.
     ///
     /// Three directions are pinned here rather than one, because each is a
@@ -3088,7 +3116,7 @@ mod tests {
 
         // The asymmetry, pinned as an EXPECTED failure. This is what a v6
         // client omitting `scoring` would hit against a pre-6 broker: a hard
-        // `missing field` error, not a degrade — so the client gates on a
+        // `missing field` error, not a degrade â€” so the client gates on a
         // capability floor rather than trying and recovering.
         let err = serde_json::from_str::<PreSixCreateTournament>(without_scoring)
             .expect_err("the pre-6 shape must REFUSE an omitted policy");
@@ -3138,7 +3166,7 @@ mod tests {
 
     /// V1/V2, wire half. The projections carry the manager's answer rather
     /// than computing one of their own, and the answer actually varies with the
-    /// tournament's state — which is what makes the field worth sending.
+    /// tournament's state â€” which is what makes the field worth sending.
     #[test]
     fn the_views_carry_the_brokers_action_legality_verbatim() {
         let running = meta_fixture();
@@ -3156,7 +3184,7 @@ mod tests {
         assert_eq!(
             view.pairings[0].report_gate,
             ReportGate::Open,
-            "an already-reported pairing stays reportable — corrections are legal"
+            "an already-reported pairing stays reportable â€” corrections are legal"
         );
 
         // The discriminating half: the same fixture in a terminal status
@@ -3172,7 +3200,7 @@ mod tests {
     }
 
     /// The two correlated settlement replies carry no token, so neither can
-    /// leak one — the same structural byte-level assertion
+    /// leak one â€” the same structural byte-level assertion
     /// `broadcast_tournament_messages_never_carry_a_token` makes for the
     /// fan-out variants, applied to the point replies that are NOT allowed the
     /// exemption `TournamentCreated`/`TournamentJoined` hold.
