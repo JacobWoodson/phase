@@ -6066,6 +6066,22 @@ pub(crate) fn static_condition_to_ability_condition(
         // rebind (cf. `IsMonarch` below), so the whole condition stays
         // unrepresented and coverage stays honest.
         StaticCondition::PlayerAttackedPlayer { attacker, defender } => {
+            // CR 603.7a + CR 109.4 (Matt R7-F5): a `ChosenPlayer` endpoint
+            // resolves against the target delayed-trigger creation stamps —
+            // and ONLY there. Outside the matching stamped body (an immediate
+            // Choose→conditional has no stamp; ordinary choice completion
+            // writes only `chosen_players`) the `Target` mapping below would
+            // consult no player or an unrelated declared target, so the
+            // whole condition stays unrepresented and coverage stays honest.
+            // The index must match the stamp exactly: creation stamps only
+            // the temporal binding's player.
+            for endpoint in [attacker, defender] {
+                if let ControllerRef::ChosenPlayer { index } = endpoint {
+                    if ctx.stamped_delayed_chosen_player != Some(*index) {
+                        return None;
+                    }
+                }
+            }
             match (
                 player_attack_endpoint_to_scope(attacker),
                 player_attack_endpoint_to_scope(defender),
@@ -14026,9 +14042,12 @@ mod tests {
     /// `PlayerScope::SpecificPlayer` is duration-timing-only and the
     /// condition authority rejects it, so mapping the endpoint would bridge
     /// a matching ledger entry to a condition that still yields false (or
-    /// true under `Not`). The declared-target positive still bridges to
-    /// `Target`/`Controller`; evaluation cells live in
-    /// `player_attacked_player_predicate_matrix`.
+    /// true under `Not`). CR 603.7a + CR 109.4 (Matt R7-F5): the
+    /// `ChosenPlayer` endpoint bridges only with the matching stamped
+    /// delayed context (creation stamps the temporal binding's player);
+    /// without it — or with a mismatched index — it stays unrepresented.
+    /// The declared-target positive still bridges to `Target`/`Controller`;
+    /// evaluation cells live in `player_attacked_player_predicate_matrix`.
     #[test]
     fn initial_verb_bridge_refuses_specific_player_attack_endpoint() {
         use crate::types::player::PlayerId;
@@ -14044,16 +14063,50 @@ mod tests {
                 None
             );
         }
+        // CR 603.7a + CR 109.4 (Matt R7-F5): a `ChosenPlayer` endpoint
+        // resolves only against the target delayed-trigger creation stamps,
+        // so without the stamped context the bridge refuses it (the
+        // immediate Choose→conditional misfire). A non-matching index is
+        // refused too — creation stamps only the temporal binding's player.
+        // With the matching stamp the mapping keeps working (Faramir's path).
         let sc = StaticCondition::PlayerAttackedPlayer {
             attacker: ControllerRef::ChosenPlayer { index: 0 },
             defender: ControllerRef::You,
         };
         assert_eq!(
             static_condition_to_ability_condition(&sc, &mut ParseContext::default()),
+            None,
+            "a ChosenPlayer attack endpoint without the stamped delayed \
+             context must stay unrepresented, not silently bind Target"
+        );
+        let mismatched = StaticCondition::PlayerAttackedPlayer {
+            attacker: ControllerRef::ChosenPlayer { index: 1 },
+            defender: ControllerRef::You,
+        };
+        assert_eq!(
+            static_condition_to_ability_condition(
+                &mismatched,
+                &mut ParseContext {
+                    stamped_delayed_chosen_player: Some(0),
+                    ..ParseContext::default()
+                },
+            ),
+            None,
+            "a non-matching stamp index must also stay unrepresented"
+        );
+        assert_eq!(
+            static_condition_to_ability_condition(
+                &sc,
+                &mut ParseContext {
+                    stamped_delayed_chosen_player: Some(0),
+                    ..ParseContext::default()
+                },
+            ),
             Some(AbilityCondition::PlayerAttackedPlayer {
                 attacker: PlayerScope::Target,
                 defender: PlayerScope::Controller,
-            })
+            }),
+            "a ChosenPlayer attack endpoint with the matching stamp must keep bridging"
         );
     }
 }

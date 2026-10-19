@@ -44858,6 +44858,12 @@ fn parse_effect_chain_ir_body(
                         .is_some()
                         .then_some(ControllerRef::ScopedPlayer)
                 }),
+            // CR 603.7a + CR 109.4 (Matt R7-F5): a chunk parsed as part of a
+            // stamped delayed-trigger body inherits the stamp index, so a
+            // leading "if" inside the body resolves against the same stamp
+            // as a trailing guard. `None` for ordinary chunks (the temporal
+            // sites restore the chain context after the body parse).
+            stamped_delayed_chosen_player: ctx.stamped_delayed_chosen_player,
             // CR 608.2c + CR 109.4: chain-spanning count of `Choose(Player)`
             // clauses already finalized — supplies the next `ChosenPlayer`
             // index.
@@ -45227,6 +45233,19 @@ fn parse_effect_chain_ir_body(
                 .and_then(|expr| expr.clone())
         });
         if let Some(prefix_condition) = prefix_delayed {
+            // CR 603.7a + CR 109.4 (Matt R7-F5): publish the stamp index
+            // while the inner body parses, so the attack-endpoint bridge
+            // resolves `ChosenPlayer` endpoints against the target creation
+            // will stamp. Save/set/restore: siblings after this chunk (and
+            // any outer body, when delayed triggers nest) must not see it.
+            let saved_stamp = ctx.stamped_delayed_chosen_player;
+            ctx.stamped_delayed_chosen_player = match &prefix_condition {
+                DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    binding: DelayedTriggerPlayerBinding::ChosenPlayer { index },
+                    ..
+                } => Some(*index),
+                _ => None,
+            };
             let (inner_text, inner_multi_target) = strip_any_number_quantifier(text_after_prefix);
             // CR 603.7a + CR 608.2c: a conditional delayed instruction followed
             // by an Otherwise sentence (Faramir) parses the branch INSIDE the
@@ -45278,6 +45297,7 @@ fn parse_effect_chain_ir_body(
                 }
                 None => parse_effect_chain_ir(&inner_text, kind, ctx),
             };
+            ctx.stamped_delayed_chosen_player = saved_stamp;
             let mut inner_def = lower_effect_chain_ir(&inner_ir);
             if let Some(spec) = inner_multi_target {
                 inner_def = inner_def.multi_target(spec);
@@ -45445,6 +45465,19 @@ fn parse_effect_chain_ir_body(
         // shared helper (see its doc); table default preserved otherwise.
         let delayed_condition =
             rebind_temporal_to_chosen_player(delayed_condition, builder.clauses());
+        // CR 603.7a + CR 109.4 (Matt R7-F5): the suffix twin of the prefix
+        // stamp publication above — the body parses inline below, so the
+        // window covers the clause alternatives and restores right after
+        // (tight on purpose: the `continue` exits further down must never
+        // leak the index into a sibling chunk).
+        let saved_suffix_stamp = ctx.stamped_delayed_chosen_player;
+        ctx.stamped_delayed_chosen_player = match &delayed_condition {
+            Some(DelayedTriggerCondition::AtNextPhaseForPlayer {
+                binding: DelayedTriggerPlayerBinding::ChosenPlayer { index },
+                ..
+            }) => Some(*index),
+            _ => None,
+        };
         let (text_no_qty, mut multi_target) = strip_any_number_quantifier(text_no_temporal);
         let retained_type_clause = {
             let lower = text_no_qty.to_lowercase();
@@ -45580,6 +45613,7 @@ fn parse_effect_chain_ir_body(
                 (parse_effect_clause(&text_no_qty, ctx), repeat_for)
             }
         };
+        ctx.stamped_delayed_chosen_player = saved_suffix_stamp;
         let (clause, multi_target) = lift_untargeted_declared_slot_destroy(
             clause,
             multi_target,
