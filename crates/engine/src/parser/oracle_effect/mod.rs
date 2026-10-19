@@ -45441,17 +45441,7 @@ fn parse_effect_chain_ir_body(
                 let next_text = strip_leading_sequence_connector(&next.text).trim();
                 let next_lower = next_text.to_lowercase();
                 let matched = nom_on_lower(next_text, &next_lower, |i| {
-                    value(
-                        (),
-                        alt((
-                            tag("otherwise, "),
-                            tag("otherwise "),
-                            tag("if not, "),
-                            tag("if no player does, "),
-                            tag("if no one does, "),
-                        )),
-                    )
-                    .parse(i)
+                    crate::parser::oracle_nom::condition::parse_otherwise_branch_connector(i)
                 });
                 matched.map(|_| {
                     // Chunks arrive with the sentence delimiter stripped, so
