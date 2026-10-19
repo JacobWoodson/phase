@@ -9,9 +9,11 @@ pub(crate) mod context;
 pub mod diagnostic;
 pub(crate) mod doc;
 pub(crate) mod effect_chain;
+pub(crate) mod feature;
 pub(crate) mod relation;
 pub(crate) mod replacement;
 pub(crate) mod static_ir;
+pub mod trace;
 pub(crate) mod trigger;
 
 #[cfg(test)]

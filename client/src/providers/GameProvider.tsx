@@ -2,42 +2,72 @@ import { createContext, useEffect, useRef, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
-import type { FormatConfig, GameAction, MatchConfig, MatchType } from "../adapter/types";
+import {
+  type FormatConfig,
+  type GameAction,
+  type MatchConfig,
+  type MatchType,
+  persistedGameStateView,
+} from "../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../adapter/types";
 import { P2PHostAdapter, P2PGuestAdapter } from "../adapter/p2p-adapter";
 import type { P2PAdapterEvent } from "../adapter/p2p-adapter";
 import { WasmAdapter, getSharedAdapter } from "../adapter/wasm-adapter";
-import { WebSocketAdapter } from "../adapter/ws-adapter";
+import {
+  NativeEngineVersionMismatchError,
+  WebSocketAdapter,
+  acknowledgeFullTerminalDelivery,
+  bootstrapFullTerminalDelivery,
+  readFullTerminalResult,
+} from "../adapter/ws-adapter";
 import { audioManager } from "../audio/AudioManager";
-import type { DeckData, WsAdapterEvent } from "../adapter/ws-adapter";
+import type { DeckData, NativeAiSeat, WsAdapterEvent } from "../adapter/ws-adapter";
 import {
   ACTIVE_DECK_KEY,
   isRandomDeckSelection,
   loadActiveDeck,
-  loadSavedDeckBracket,
+  loadActiveDeckBracket,
 } from "../constants/storage";
 import type { CommanderBracket } from "../types/bracket";
-import type { CommanderBracketTier } from "../types/bracketEstimate";
-import type { AiDeckCandidate } from "../services/aiDeckCatalog";
+import { bracketToEngineTier, type CommanderBracketTier } from "../types/bracketEstimate";
 import { buildLegalAiDeckCatalog } from "../services/aiDeckCatalog";
 import { pickRandomDeckCandidate } from "../services/randomDeckSelection";
+import { cedhSeatProblem, pickAiSeatDecks } from "../services/aiRandomPool";
+import { resolveLocalAiSeatPlan, type LocalAiSeatPlan } from "../services/localAiSeatPlan";
 import { AI_DECK_RANDOM, usePreferencesStore } from "../stores/preferencesStore";
-import { effectiveAiDifficulty } from "../services/cedhLock";
+import { CEDH_DIFFICULTY, effectiveAiDifficulty } from "../services/cedhLock";
 import { createGameLoopController } from "../game/controllers/gameLoopController";
 import { dispatchAction, processRemoteUpdate } from "../game/dispatch";
+import { resyncFromAdapterSafely } from "../game/staleStateWatchdog";
+import { debugLog } from "../game/debugLog";
 import { clearPromptOverlayState } from "../game/sessionCleanup";
-import { usePhaseStopsSync } from "../hooks/usePhaseStopsSync";
+import { useGameplayPreferencesSync } from "../hooks/useGameplayPreferencesSync";
 import { hostRoom, joinRoom } from "../network/connection";
 import type { BrokerClient } from "../services/brokerClient";
 import { loadP2PSession } from "../services/p2pSession";
-import { expandParsedDeck, type ExpandedDeck, type ParsedDeck } from "../services/deckParser";
+import { loadP2PTerminalResult } from "../services/p2pTerminalResult";
+import { expandParsedDeck, type ParsedDeck } from "../services/deckParser";
 import { formatSuppliesDeck } from "../data/formatRegistry";
+import { emptySeatDeck, pileSeatDeck, pileSourceFromParam, type PileSource } from "../services/pileSource";
 import { consumeRecentAutoUpdateMarker } from "../pwa/updateMarker";
-import { ensureCardDatabase } from "../services/cardData";
-import { loadDraftRun } from "../services/quickDraftPersistence";
+import { inspectActiveQuickDraftLifecycle, loadDraftRun } from "../services/quickDraftPersistence";
+import { loadGameStrict } from "../services/gamePersistence";
+import type { DraftRunState } from "../services/quickDraftPersistence";
 import { SPECTATOR_PLAYER_ID } from "../constants/game";
 import { clearWsSession, loadWsSession, saveWsSession } from "../services/multiplayerSession";
+import {
+  commitFullTerminalDelivery,
+  loadFullTerminalDelivery,
+  replaceFullTerminalDelivery,
+  type FullTerminalDelivery,
+} from "../services/fullTerminalResult";
 import { detectServerUrl } from "../services/serverDetection";
+import {
+  canAttemptNativeEngine,
+  ensureNativeEngine,
+  nativeEngineKeyForCurrentOrigin,
+} from "../services/nativeEngine";
+import { NativeEngineSocket } from "../services/nativeEngineSocket";
 import {
   clearGame,
   clearActiveGame,
@@ -45,17 +75,19 @@ import {
   loadActiveGame,
   loadGame,
   loadP2PHostSession,
+  nextGameSessionGeneration,
   saveActiveGame,
   useGameStore,
 } from "../stores/gameStore";
 import type { AISeatBinding } from "../game/controllers/aiController";
 import { useMultiplayerStore } from "../stores/multiplayerStore";
 import { useMultiplayerDraftStore } from "../stores/multiplayerDraftStore";
+import { isCoherentUnresolvedDraftStage } from "../stores/draftStore";
 import {
   assignRandomAvatars,
   avatarCardNameForName,
-  fetchAvatarArtUrl,
 } from "../services/playerAvatars";
+import type { PlayerAvatarIdentity } from "../services/playerAvatars";
 
 /** Build per-seat AI controller bindings for a game about to start. Reads
  *  the session-scoped `aiSeats` snapshot from `ActiveGameMeta` (written at
@@ -78,36 +110,31 @@ function resolveAiSeatBindings(
   }));
 }
 
-let avatarGeneration = 0;
+export function isDeckRejectedError(error: unknown): error is AdapterError {
+  return error instanceof AdapterError && error.code === AdapterErrorCode.DECK_REJECTED;
+}
 
 function setupRandomAvatars(playerCount: number, seed: string, preservePlayerNames = false) {
-  const generation = ++avatarGeneration;
   const avatars = assignRandomAvatars(playerCount, seed);
   const names = new Map<number, string>();
+  const playerAvatars = new Map<number, PlayerAvatarIdentity>();
   names.set(0, "You");
-  for (let i = 1; i < avatars.length; i++) {
-    names.set(i, avatars[i].name);
+  for (const [playerId, avatar] of avatars.entries()) {
+    if (playerId > 0) names.set(playerId, avatar.name);
+    playerAvatars.set(playerId, { kind: "card", cardName: avatar.cardName });
   }
   useMultiplayerStore.setState(
-    preservePlayerNames ? { playerAvatars: new Map() } : { playerNames: names, playerAvatars: new Map() },
+    preservePlayerNames ? { playerAvatars } : { playerNames: names, playerAvatars },
   );
-  for (let i = 0; i < avatars.length; i++) {
-    fetchAvatarArtUrl(avatars[i].cardName).then((url) => {
-      if (!url || avatarGeneration !== generation) return;
-      const next = new Map(useMultiplayerStore.getState().playerAvatars);
-      next.set(i, url);
-      useMultiplayerStore.setState({ playerAvatars: next });
-    });
-  }
 }
 
 function setupCommanderAvatars(
   gameState: { objects: Record<number, { name: string; owner: number; is_commander?: boolean }> },
   preservePlayerNames = false,
 ) {
-  const generation = ++avatarGeneration;
   const names = new Map<number, string>();
   const commanderNames = new Map<number, string>();
+  const playerAvatars = new Map<number, PlayerAvatarIdentity>();
 
   for (const obj of Object.values(gameState.objects)) {
     if (!obj?.is_commander) continue;
@@ -117,25 +144,43 @@ function setupCommanderAvatars(
 
   for (const [playerId, cardName] of commanderNames) {
     names.set(playerId, cardName.split(",")[0].split(" //")[0]);
+    playerAvatars.set(playerId, { kind: "card", cardName });
   }
 
   useMultiplayerStore.setState(
-    preservePlayerNames ? { playerAvatars: new Map() } : { playerNames: names, playerAvatars: new Map() },
+    preservePlayerNames ? { playerAvatars } : { playerNames: names, playerAvatars },
   );
-
-  for (const [playerId, cardName] of commanderNames) {
-    fetchAvatarArtUrl(cardName).then((url) => {
-      if (!url || avatarGeneration !== generation) return;
-      const next = new Map(useMultiplayerStore.getState().playerAvatars);
-      next.set(playerId, url);
-      useMultiplayerStore.setState({ playerAvatars: next });
-    });
-  }
 }
 
 function setupDraftMatchAvatars(seed: string) {
-  const generation = ++avatarGeneration;
-  const matchPairing = useMultiplayerDraftStore.getState().matchPairing;
+  const { matchPairing, commanderLaunch, commanderSeat } = useMultiplayerDraftStore.getState();
+
+  // CR 903.13a: a Commander pod launches ONE shared N-seat game, so none of the
+  // pairwise derivation below applies — `matchPairing` is null by design and
+  // `localPlayerId` would hand every one of the four players seat 0, each guest
+  // then rendering and acting as the HOST's seat.
+  //
+  // Fenced on the game id because `commanderLaunch` outlives its game: unfenced,
+  // a LATER draft-match game would take this branch on a stale launch. Keyed on
+  // the launch and not on `matchPairing == null`, which would also swallow an
+  // unpaired ordinary draft-match.
+  //
+  // Writes `activePlayerId` and NOTHING else — the names and avatars for an
+  // N-seat commander game are the extended online/p2p avatar effect's, which
+  // derives them from each player's own commander. Returning before the
+  // wholesale `setState` below is what keeps that from being erased.
+  //
+  // Re-derived on every run rather than consumed once: this effect's cleanup
+  // calls `clearWireAssignedSeat()`, so a one-shot write would leave the seat
+  // null after any remount. A null seat writes NOTHING — falling back to 0 here
+  // is the exact defect this branch exists to remove.
+  if (commanderLaunch?.gameId === seed) {
+    if (commanderSeat !== null) {
+      useMultiplayerStore.getState().setActivePlayerId(commanderSeat);
+    }
+    return;
+  }
+
   const randomAvatars = assignRandomAvatars(2, seed);
   const names = new Map<number, string>();
 
@@ -150,25 +195,44 @@ function setupDraftMatchAvatars(seed: string) {
   names.set(localPlayerId, "You");
   names.set(opponentPlayerId, opponentName);
 
-  useMultiplayerStore.setState({
-    activePlayerId: localPlayerId,
-    playerNames: names,
-    playerAvatars: new Map(),
-  });
-
   const avatarCards = new Map<number, string | undefined>([
     [localPlayerId, randomAvatars[localPlayerId]?.cardName ?? randomAvatars[0]?.cardName],
     [opponentPlayerId, avatarCardNameForName(opponentName) ?? randomAvatars[opponentPlayerId]?.cardName],
   ]);
+  const playerAvatars = new Map<number, PlayerAvatarIdentity>();
   for (const [playerId, cardName] of avatarCards) {
     if (!cardName) continue;
-    fetchAvatarArtUrl(cardName).then((url) => {
-      if (!url || avatarGeneration !== generation) return;
-      const next = new Map(useMultiplayerStore.getState().playerAvatars);
-      next.set(playerId, url);
-      useMultiplayerStore.setState({ playerAvatars: next });
-    });
+    playerAvatars.set(playerId, { kind: "card", cardName });
   }
+  useMultiplayerStore.setState({
+    activePlayerId: localPlayerId,
+    playerNames: names,
+    playerAvatars,
+  });
+}
+
+/**
+ * Drop this client's wire-assigned seat when a game session tears down.
+ *
+ * `activePlayerId` is written only from a wire (`playerIdentity`, P2P
+ * `game_setup`, `setupDraftMatchAvatars`) and had no clear, so it outlived the
+ * game that assigned it. Two consecutive wire-assigned games therefore shared
+ * one value: until the second game's assignment arrived, `resolveLocalSeat`
+ * handed out the FIRST game's seat. `SeatSource` does not cover this — it is
+ * keyed on mode (`"seat-zero"` makes a solo game ignore the field), not on
+ * session, so online → online reads the stale seat.
+ *
+ * Safe against a remount (React StrictMode double-mounts in dev) because every
+ * wire-assigned mode re-establishes the seat when its effect re-runs:
+ * draft-match re-runs `setupDraftMatchAvatars`, and a fresh WS/P2P-guest
+ * adapter re-emits `playerIdentity` from `GameStarted` / `reconnect_ack`. The
+ * P2P HOST is the one path with no remount re-emit (it emits only from its
+ * game-start flow and from a resumed `initialize`) — it is unaffected because
+ * the host is always seat 0, which is exactly what `resolveLocalSeat` falls
+ * back to.
+ */
+function clearWireAssignedSeat(): void {
+  useMultiplayerStore.getState().setActivePlayerId(null);
 }
 
 function playerNamesRecordToMap(playerNames: Record<number, string>): Map<number, string> {
@@ -183,37 +247,6 @@ function parsedDeckToDeckData(deck: ParsedDeck): DeckData {
   return expandParsedDeck(deck);
 }
 
-/**
- * Read the declared bracket for the currently active deck from localStorage.
- * Returns `null` when no deck is selected or the deck carries no bracket tag.
- * This is the sole call site for bracket → active-deck bridging so future
- * bracket storage changes only need to update this function.
- */
-function loadActiveDeckBracket(): CommanderBracket | null {
-  const name = localStorage.getItem(ACTIVE_DECK_KEY);
-  if (!name || isRandomDeckSelection(name)) return null;
-  return loadSavedDeckBracket(name);
-}
-
-/**
- * Convert the numeric `CommanderBracket` (1–5) stored on deck metadata into the
- * lowercase string tier the Rust engine expects on `PlayerDeckList.bracket_tier`.
- *
- * Uses the inverse of `BRACKET_TIER_NUMERIC` from `bracketEstimate.ts`.
- * Returns `"core"` (the engine's `Default`) for any unrecognised value so
- * that missing or invalid tags degrade safely.
- */
-function bracketToEngineTier(bracket: CommanderBracket | null | undefined): CommanderBracketTier {
-  switch (bracket) {
-    case 1: return "exhibition";
-    case 2: return "core";
-    case 3: return "upgraded";
-    case 4: return "optimized";
-    case 5: return "cedh";
-    default: return "core";
-  }
-}
-
 type ExpandedDeckWithTier = {
   main_deck: string[];
   sideboard: string[];
@@ -221,6 +254,7 @@ type ExpandedDeckWithTier = {
   planar_deck: string[];
   scheme_deck: string[];
   signature_spell: string[];
+  companion: string[];
   sticker_sheets: string[];
   bracket_tier: CommanderBracketTier;
 };
@@ -235,91 +269,117 @@ type DeckListPayload = {
   ai_difficulties: string[];
 };
 
-function candidatePassesFilters(
-  candidate: AiDeckCandidate,
-  archetypeFilter: ReturnType<typeof usePreferencesStore.getState>["aiArchetypeFilter"],
-  coverageFloor: number,
-): boolean {
-  if (candidate.coveragePct != null && candidate.coveragePct < coverageFloor) return false;
-  return archetypeFilter === "Any" || !candidate.archetype || candidate.archetype === archetypeFilter;
+function hasExactKeys(value: unknown, required: readonly string[], optional: readonly string[] = []): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  return required.every((key) => Object.prototype.hasOwnProperty.call(value, key))
+    && keys.every((key) => required.includes(key) || optional.includes(key));
 }
 
-function pickOpponentDeck(
-  catalog: AiDeckCandidate[],
-  requestedDeckId: string,
-  excludeIds: Set<string>,
-  archetypeFilter: ReturnType<typeof usePreferencesStore.getState>["aiArchetypeFilter"],
-  coverageFloor: number,
-  selectedFormat?: FormatConfig["format"] | null,
-): AiDeckCandidate {
-  if (requestedDeckId !== AI_DECK_RANDOM) {
-    const pinned = catalog.find((candidate) => candidate.id === requestedDeckId);
-    if (pinned) return pinned;
+function sameStringArray(value: unknown, expected: readonly string[]): boolean {
+  return Array.isArray(value) && value.length === expected.length
+    && value.every((entry, index) => typeof entry === "string" && entry === expected[index]);
+}
+
+/** The raw object is forwarded unchanged to the engine, so every key and value must match publication. */
+function matchesPublishedDraftPayload(value: unknown, run: DraftRunState): boolean {
+  if (!hasExactKeys(value, ["player", "opponent", "ai_decks"], ["booster_pack_pool"])) return false;
+  const matchesDeck = (deck: unknown, mainDeck: string[]) => hasExactKeys(deck, ["main_deck", "sideboard", "commander"])
+    && sameStringArray(deck.main_deck, mainDeck)
+    && sameStringArray(deck.sideboard, [])
+    && sameStringArray(deck.commander, []);
+  if (!matchesDeck(value.player, run.playerDeck) || !matchesDeck(value.opponent, run.opponentDeck)
+    || !Array.isArray(value.ai_decks) || value.ai_decks.length !== 0) return false;
+  const pool = run.booster_pack_pool;
+  if (pool === undefined) return !Object.prototype.hasOwnProperty.call(value, "booster_pack_pool");
+  if (pool === null) return value.booster_pack_pool === null;
+  return Array.isArray(pool) && sameStringArray(value.booster_pack_pool, pool);
+}
+
+function nativeAiSeatsFromDeckList(deckList: DeckListPayload): NativeAiSeat[] {
+  return [deckList.opponent, ...deckList.ai_decks].map((deck, index) => ({
+    seatIndex: index + 1,
+    difficulty: deckList.ai_difficulties[index] ?? "Medium",
+    deck,
+  }));
+}
+
+/** Restores normal local resume behavior only after native setup has failed. */
+function saveWasmAiResumePointer(
+  gameId: string,
+  fallbackDifficulty: string | undefined,
+  playerCount: number | undefined,
+  formatConfig: FormatConfig | undefined,
+): void {
+  // A start flow that already wrote this game's seat snapshot (Host Game's
+  // all-AI path) owns the per-seat difficulty and deck: keep it rather than
+  // re-deriving the seats from single-player preferences.
+  const existing = loadActiveGame();
+  if (existing?.id === gameId && existing.aiSeats && existing.aiSeats.length > 0) {
+    saveActiveGame({
+      id: gameId,
+      mode: "ai",
+      difficulty: existing.aiSeats[0].difficulty,
+      aiSeats: existing.aiSeats,
+      formatConfig: existing.formatConfig ?? formatConfig,
+    });
+    return;
   }
-
-  const filtered = catalog.filter((candidate) =>
-    candidatePassesFilters(candidate, archetypeFilter, coverageFloor)
-  );
-  return pickRandomDeckCandidate(filtered.length > 0 ? filtered : catalog, {
-    selectedFormat,
-    excludeIds,
-  }) ?? catalog[0];
+  const { aiSeats, cedhMode } = usePreferencesStore.getState();
+  const opponentCount = Math.max(1, (playerCount ?? 2) - 1);
+  const seats = Array.from({ length: opponentCount }, (_, index) => {
+    const seat = aiSeats[index];
+    return {
+      difficulty: effectiveAiDifficulty(seat?.difficulty ?? fallbackDifficulty ?? "Medium", cedhMode),
+      deckId: seat?.deckId === AI_DECK_RANDOM ? null : seat?.deckId ?? null,
+    };
+  });
+  saveActiveGame({
+    id: gameId,
+    mode: "ai",
+    difficulty: seats[0]?.difficulty ?? fallbackDifficulty ?? "Medium",
+    aiSeats: seats,
+    formatConfig,
+  });
 }
 
-// Placeholder decklist for fixed-deck formats (Momir's Madness): the player
-// builds nothing, and the engine synthesizes the real deck for every seat. The
-// builders below ignore its contents for such formats.
+function nativeFallbackReason(error: unknown): string {
+  return error instanceof NativeEngineVersionMismatchError
+    ? "server_version_mismatch"
+    : "native_engine_unavailable";
+}
+
+// The empty decklist a seat submits when it has no deck to send.
 const EMPTY_PARSED_DECK: ParsedDeck = { main: [], sideboard: [] };
 
-function buildPlayerOnlyDeckList(deck: ParsedDeck, playerBracket?: CommanderBracket | null): DeckListPayload {
-  const expanded = expandParsedDeck(deck);
-  const player: ExpandedDeckWithTier = { ...expanded, bracket_tier: bracketToEngineTier(playerBracket) };
-  return {
-    player,
-    opponent: {
-      main_deck: [],
-      sideboard: [],
-      commander: [],
-      planar_deck: [],
-      scheme_deck: [],
-      signature_spell: [],
-      sticker_sheets: [],
-      bracket_tier: "core",
-    },
-    ai_decks: [],
-    ai_difficulties: [],
-  };
+function emptySeat(): ExpandedDeckWithTier {
+  return { ...emptySeatDeck(), bracket_tier: "core" };
+}
+
+function buildPlayerOnlyDeckList(player: ExpandedDeckWithTier): DeckListPayload {
+  return { player, opponent: emptySeat(), ai_decks: [], ai_difficulties: [] };
 }
 
 async function buildLocalAiDeckList(
   t: TFunction,
   deck: ParsedDeck | null,
   playerCount: number,
-  formatConfig?: FormatConfig,
-  selectedMatchType?: MatchType,
-  playerBracket?: CommanderBracket | null,
+  formatConfig: FormatConfig | undefined,
+  selectedMatchType: MatchType | undefined,
+  playerBracket: CommanderBracket | null,
+  pileSource: PileSource,
+  seats: readonly LocalAiSeatPlan[],
 ): Promise<DeckListPayload> {
-  // Fixed-deck formats (Momir's Madness) supply the deck for every seat from the
-  // engine, so there is no AI deck catalog to draw from — submit empty seats and
-  // let `load_and_hydrate_decks` synthesize the identical fixed deck per player.
+  // Supplied-deck formats have no AI deck catalog: the pile seat submits the
+  // host's pile (empty for the default or an engine-fixed deck) and every other
+  // seat submits nothing, leaving the engine to load the shared or fixed deck.
   if (formatConfig && formatSuppliesDeck(formatConfig.format)) {
-    const { aiSeats, cedhMode } = usePreferencesStore.getState();
     const opponentCount = Math.max(1, playerCount - 1);
-    const emptySeat = (): ExpandedDeckWithTier => ({
-      main_deck: [],
-      sideboard: [],
-      commander: [],
-      planar_deck: [],
-      scheme_deck: [],
-      signature_spell: [],
-      sticker_sheets: [],
-      bracket_tier: "core",
-    });
-    const aiDifficulties = Array.from({ length: opponentCount }, (_, i) =>
-      effectiveAiDifficulty(aiSeats[i]?.difficulty ?? "Medium", cedhMode),
-    );
+    const pile = await pileSeatDeck(formatConfig.format, pileSource);
+    if (!pile) throw new Error(t("multiplayer:page.couldNotLoadDeck"));
+    const aiDifficulties = seats.map((seat) => seat.difficulty);
     return {
-      player: emptySeat(),
+      player: { ...pile, bracket_tier: "core" },
       opponent: emptySeat(),
       ai_decks: Array.from({ length: opponentCount - 1 }, emptySeat),
       ai_difficulties: aiDifficulties,
@@ -343,6 +403,7 @@ async function buildLocalAiDeckList(
       planar_deck: [],
       scheme_deck: [],
       signature_spell: [],
+      companion: [],
       sticker_sheets: [],
       bracket_tier: "core",
     });
@@ -374,12 +435,47 @@ async function buildLocalAiDeckList(
     };
   }
 
-  const { aiSeats, cedhMode, aiArchetypeFilter, aiCoverageFloor } = usePreferencesStore.getState();
+  const { aiArchetypeFilter, aiCoverageFloor, aiBracketFilter } = usePreferencesStore.getState();
+  // The seat snapshot already maps table cEDH into each seat's difficulty, and
+  // the engine's cEDH bracket gate fires per seat — so the table is cEDH
+  // exactly when any seat plays at cEDH difficulty.
+  const tableCedh = seats.some((seat) => seat.difficulty === CEDH_DIFFICULTY);
   const catalog = await buildLegalAiDeckCatalog({
     selectedFormat: formatConfig?.format,
     selectedMatchType,
   });
   if (catalog.candidates.length === 0) {
+    throw new Error(
+      formatConfig?.format
+        ? t("gameProvider.noLegalAiDecks.withFormat", { format: formatConfig.format })
+        : t("gameProvider.noLegalAiDecks.generic"),
+    );
+  }
+
+  // The bracket/cEDH restriction is the same pool the setup page previews
+  // (`restrictAiPoolByBracket`): Random seats draw from it, so a 1–3 filter
+  // can never field a bracket-4+ deck. Pinned seats bypass the pool —
+  // `pickAiSeatDecks` resolves explicit ids against the full catalog.
+  const requestedDeckIds = seats.map((seat) => seat.deckId);
+  // An empty pool means the table's bracket constraint excluded every legal
+  // deck (the catalog itself is non-empty here). In cEDH mode the engine
+  // rejects any non-bracket-5 deck at init (`validate_cedh_bracket`, gated
+  // on CEDH AI difficulties), so there is no legal fallback: fail fast
+  // unless every seat is pinned to an explicit deck. Otherwise (manual
+  // filter) any legal deck plays fine — the setup page warns about the
+  // empty pool (soft gate, Start stays enabled), so fall back to the full
+  // legal catalog.
+  // A pinned non-bracket-5 deck (`PinnedDeckNotCedh`) is left to the engine's own
+  // cEDH bracket gate at init, which reports the specific bracket error.
+  if (
+    cedhSeatProblem({
+      catalog: catalog.candidates,
+      requestedDeckIds,
+      bracketFilter: aiBracketFilter,
+      cedhMode: tableCedh,
+      selectedFormat: formatConfig?.format ?? null,
+    }) === "NoCedhDeckForRandom"
+  ) {
     throw new Error(
       formatConfig?.format
         ? t("gameProvider.noLegalAiDecks.withFormat", { format: formatConfig.format })
@@ -406,36 +502,23 @@ async function buildLocalAiDeckList(
     excludeIds.add(playerPick.id);
   }
 
-  const opponentCount = Math.max(1, playerCount - 1);
-  const picks: AiDeckCandidate[] = [];
-  for (let i = 0; i < opponentCount; i++) {
-    // Unconfigured seats default to Random — NOT to `aiSeats[0]`. Falling
-    // through to seat 0 would re-introduce the original bug: if the user
-    // pinned one deck for a 2-player session and a 4-player resume-fallback
-    // fires, every missing seat would clone that pinned deck.
-    const requestedDeckId = aiSeats[i]?.deckId ?? AI_DECK_RANDOM;
-    const result = pickOpponentDeck(
-      catalog.candidates,
-      requestedDeckId,
-      excludeIds,
-      aiArchetypeFilter,
-      aiCoverageFloor,
-      formatConfig?.format,
-    );
-    picks.push(result);
-    excludeIds.add(result.id);
-  }
+  const picks = pickAiSeatDecks({
+    catalog: catalog.candidates,
+    requestedDeckIds,
+    archetypeFilter: aiArchetypeFilter,
+    coverageFloor: aiCoverageFloor,
+    bracketFilter: aiBracketFilter,
+    cedhMode: tableCedh,
+    selectedFormat: formatConfig?.format,
+    excludeIds,
+  });
 
   const playerExpanded = expandParsedDeck(playerDeck);
   const playerTier = bracketToEngineTier(resolvedPlayerBracket);
   // Build ai_difficulties in the same order as the AI seats: opponent first,
   // then any additional ai_decks. Seat 0 maps to the opponent, seats 1+ map
-  // to ai_decks. Missing seat prefs default to "Medium".
-  // cEDH is a table-wide toggle: every seat resolves to "CEDH" when it's on,
-  // regardless of the remembered per-seat difficulty.
-  const aiDifficulties = picks.map((_, i) =>
-    effectiveAiDifficulty(aiSeats[i]?.difficulty ?? "Medium", cedhMode),
-  );
+  // to ai_decks. The plan's difficulties are already cEDH-mapped.
+  const aiDifficulties = seats.map((seat) => seat.difficulty);
   return {
     player: { ...playerExpanded, bracket_tier: playerTier },
     opponent: { ...expandParsedDeck(picks[0].deck), bracket_tier: bracketToEngineTier(picks[0].bracket) },
@@ -522,6 +605,14 @@ export interface GameProviderProps {
   roomName?: string;
   source?: string;
   draftId?: string;
+  /**
+   * The lobby authority this join or spectate was launched from, carried by
+   * the route (`/game?...&server=`). Absent for flows with no explicit
+   * origin, which fall back to the hosting server via `detectServerUrl()`.
+   */
+  serverUrl?: string;
+  /** The saved-deck name the host picked as a `HostPile` format's pile; absent = the default pile. */
+  pile?: string;
   onWsEvent?: (event: WsAdapterEvent) => void;
   onP2PEvent?: (event: P2PAdapterEvent) => void;
   onReady?: () => void;
@@ -549,6 +640,8 @@ export function GameProvider({
   roomName,
   source,
   draftId,
+  serverUrl: originUrl,
+  pile,
   onWsEvent,
   onP2PEvent,
   onReady,
@@ -559,9 +652,9 @@ export function GameProvider({
 }: GameProviderProps) {
   const { t } = useTranslation("game");
 
-  // Sync the persistent phaseStops preference into engine-owned state so the
-  // engine remains the single authority for auto-pass / empty-blocker decisions.
-  usePhaseStopsSync();
+  // Sync persistent gameplay preferences into engine-owned state so the
+  // engine remains the single authority for priority recommendations.
+  useGameplayPreferencesSync();
 
   // Refs for callback props — these are notifications that should never
   // cause the game setup effect to re-run.
@@ -586,31 +679,66 @@ export function GameProvider({
   useEffect(() => {
     if (mode !== "ai") return;
     let applied = false;
-    const unsub = useGameStore.subscribe((state) => {
-      if (applied || !state.gameState?.command_zone?.length) return;
-      applied = true;
+    const applyCommanderAvatars = (state: ReturnType<typeof useGameStore.getState>) => {
+      if (state.gameId !== gameId || !state.gameState?.command_zone?.length) return false;
       setupCommanderAvatars(state.gameState);
+      return true;
+    };
+    const unsub = useGameStore.subscribe((state) => {
+      if (applied || !applyCommanderAvatars(state)) return;
+      applied = true;
       unsub();
     });
     const state = useGameStore.getState();
-    if (!applied && state.gameState?.command_zone?.length) {
+    if (!applied && applyCommanderAvatars(state)) {
       applied = true;
-      setupCommanderAvatars(state.gameState);
       unsub();
     }
     return unsub;
   }, [mode, gameId]);
 
   useEffect(() => {
-    if (mode !== "online" && mode !== "p2p-host" && mode !== "p2p-join") return;
+    // A Commander pod's launched game is admitted here for its names and
+    // avatars, and ONLY for those — its seat stays with `setupDraftMatchAvatars`
+    // in the effect below, whose cleanup is what nulls the seat, so writer and
+    // cleanup have to share an effect. This is a deliberate re-division of the
+    // name/avatar authority `setupDraftMatchAvatars` holds for 1v1 pod matches,
+    // not the repair of an oversight: the modes above take their names from a
+    // LOBBY (hence `preservePlayerNames`), and a 1v1 pod match has neither a
+    // lobby nor more than two seats. An N-seat Commander game has no lobby names
+    // either — it has commanders, which is exactly what `setupCommanderAvatars`
+    // already derives an N-player identity map from.
+    //
+    // Same session fence as the seat branch, and for the same reason:
+    // `commanderLaunch` outlives its game.
+    const commanderLaunch = useMultiplayerDraftStore.getState().commanderLaunch;
+    const isCommanderDraftMatch = mode === "draft-match" && commanderLaunch?.gameId === gameId;
+    if (
+      mode !== "online" && mode !== "p2p-host" && mode !== "p2p-join"
+      && !isCommanderDraftMatch
+    ) return;
     const state = useGameStore.getState().gameState;
     const count = state?.players.length ?? playerCount ?? 2;
     setupRandomAvatars(count, gameId, true);
+    if (isCommanderDraftMatch) {
+      // `useMultiplayerStore` is module-level, so a PREVIOUS draft-match's
+      // `{0: "You", 1: …}` survives into this game — and on a seat-2 client
+      // `getOpponentDisplayName(0)` would then label the HOST's seat "You".
+      // Cleared here in the effect body, exactly once: inside
+      // `applyCommanderAvatars` it would re-blank the map on every store update
+      // until the commanders land, and after that gate it would be dead code.
+      // An absent name renders as the viewer-relative fallback instead, and the
+      // viewer's own name is computed from their identity, never read from here.
+      useMultiplayerStore.setState({ playerNames: new Map() });
+    }
     let appliedCommanderAvatars = false;
     const applyCommanderAvatars = (gameState: typeof state) => {
       if (!gameState?.format_config?.uses_commander || !gameState.command_zone?.length) return;
       appliedCommanderAvatars = true;
-      setupCommanderAvatars(gameState, true);
+      // The lobby modes keep their names; the Commander pod game has none to
+      // keep and takes commander-derived ones for every seat. Never `false` for
+      // `setupRandomAvatars` above — that one would write a literal "You".
+      setupCommanderAvatars(gameState, !isCommanderDraftMatch);
     };
     applyCommanderAvatars(state);
     const unsub = useGameStore.subscribe((next) => {
@@ -631,15 +759,38 @@ export function GameProvider({
     // responds.
     clearPromptOverlayState();
 
-    const { initGame, resumeGame, resumeP2PHost, reset, setGameMode } = useGameStore.getState();
+    const {
+      initGame,
+      resumeGame,
+      resumeP2PHost,
+      resumeNativeSolo,
+      reset,
+      setEngineMode,
+      setGameMode,
+    } = useGameStore.getState();
+    const nativeEngineKey = nativeEngineKeyForCurrentOrigin();
+    const shouldUseNativeAi =
+      mode === "ai"
+      && source !== "draft"
+      && source !== "multiplayer"
+      && firstPlayer === undefined
+      && canAttemptNativeEngine(usePreferencesStore.getState().nativeEngineEnabled)
+      && nativeEngineKey !== null;
+    const shouldUseNativeP2P =
+      mode === "p2p-host"
+      && canAttemptNativeEngine(usePreferencesStore.getState().nativeEngineEnabled)
+      && nativeEngineKey !== null;
     setGameMode(mode);
+    setEngineMode(mode === "ai" ? (shouldUseNativeAi ? null : "wasm") : null);
 
     const isOnline = mode === "online" || mode === "spectate";
     const isSpectate = mode === "spectate";
     const isP2P = mode === "p2p-host" || mode === "p2p-join";
     if (!isOnline && !isP2P) {
       if (mode === "ai") {
-        setupRandomAvatars(playerCount ?? 2, gameId);
+        if (!shouldUseNativeAi) {
+          setupRandomAvatars(playerCount ?? 2, gameId);
+        }
       } else if (mode === "draft-match") {
         setupDraftMatchAvatars(gameId);
       } else {
@@ -671,6 +822,7 @@ export function GameProvider({
     // direct `peer.destroy()` calls would double-destroy and also skip the
     // per-session cleanup that `dispose()` performs.
     let p2pAdapter: P2PHostAdapter | P2PGuestAdapter | null = null;
+    let nativeAdapter: WebSocketAdapter | null = null;
     let controller: ReturnType<typeof createGameLoopController> | null = null;
 
     if (mode === "draft-match") {
@@ -683,15 +835,17 @@ export function GameProvider({
       audioManager.setContext("battlefield");
       return () => {
         audioManager.setContext("menu");
+        clearPromptOverlayState();
+        clearWireAssignedSeat();
       };
     }
 
     if (isP2P) {
-      const parsedDeck = loadActiveDeck();
-      // Fixed-deck formats (Momir's Madness) supply the deck from the engine for
-      // host and guests alike, so no active deck is required to host/join.
-      const suppliesDeck = formatConfig ? formatSuppliesDeck(formatConfig.format) : false;
-      if (!parsedDeck && !suppliesDeck) {
+      // A supplied-deck format reads no active deck; the host's guest gate, not
+      // the guest, decides whether a guest's submission fits the room.
+      const suppliedFormat = formatConfig && formatSuppliesDeck(formatConfig.format) ? formatConfig.format : null;
+      const parsedDeck = suppliedFormat ? null : loadActiveDeck();
+      if (mode === "p2p-host" && !parsedDeck && !suppliedFormat) {
         onNoDeckRef.current?.();
         return;
       }
@@ -708,6 +862,9 @@ export function GameProvider({
           void Notification.requestPermission().catch(() => {});
         }
         p2pUnsubscribe = adapter.onEvent((event) => {
+          if (event.type === "playerLatencies") {
+            useMultiplayerStore.setState({ playerLatencies: event.latencies });
+          }
           if (event.type === "playerIdentity") {
             useMultiplayerStore.getState().setActivePlayerId(event.playerId);
             if (event.playerNames) {
@@ -717,7 +874,10 @@ export function GameProvider({
             }
           }
           if (event.type === "stateChanged") {
-            processRemoteUpdate(event.state, event.events, event.legalResult, event.logEntries);
+            processRemoteUpdate(event.snapshot, event.events, event.logEntries).catch((err) => {
+              debugLog(`p2p remote update failed: ${err instanceof Error ? err.message : String(err)}`);
+              resyncFromAdapterSafely("delivery rejected");
+            });
           }
           if (event.type === "guestConnected") {
             notifyOpponentJoined(tRef.current);
@@ -728,12 +888,6 @@ export function GameProvider({
 
       const setupP2P = async () => {
         const effectivePlayerCount = playerCount ?? 2;
-        const deckList = buildPlayerOnlyDeckList(
-          parsedDeck ?? EMPTY_PARSED_DECK,
-          loadActiveDeckBracket(),
-        );
-        signal.throwIfAborted();
-
         // Resources that may need undoing on abort/error. `broker` is
         // closed unconditionally when set; `serverGameCode` gates the
         // compensating `unregister` call — we only un-do a registration
@@ -743,35 +897,93 @@ export function GameProvider({
         let hostPeerHandle: { destroy: () => void } | null = null;
 
         try {
+          let player: ExpandedDeckWithTier;
+          if (!suppliedFormat) {
+            player = {
+              ...expandParsedDeck(parsedDeck ?? EMPTY_PARSED_DECK),
+              bracket_tier: bracketToEngineTier(loadActiveDeckBracket()),
+            };
+          } else if (mode === "p2p-host") {
+            const pileDeck = await pileSeatDeck(suppliedFormat, pileSourceFromParam(pile));
+            if (!pileDeck) {
+              if (!signal.aborted) onNoDeckRef.current?.(tRef.current("multiplayer:page.couldNotLoadDeck"));
+              return;
+            }
+            player = { ...pileDeck, bracket_tier: "core" };
+          } else {
+            player = emptySeat();
+          }
+          const deckList = buildPlayerOnlyDeckList(player);
+          signal.throwIfAborted();
+
           if (mode === "p2p-host") {
-            const activeHost = useMultiplayerStore.getState().getActiveP2PHost();
-            if (activeHost?.gameId === gameId) {
-              const adapter = activeHost.adapter;
+            // Browser P2P hosts always own seat zero. Do this before claiming
+            // a pre-game adapter: its one-shot identity event may already have
+            // fired while the lobby was starting the game.
+            useMultiplayerStore.getState().setActivePlayerId(0);
+            const adapter = useMultiplayerStore.getState().takeActiveP2PHost(gameId);
+            if (adapter) {
               p2pAdapter = adapter;
               wireP2PEvents(adapter);
               await resumeP2PHost(gameId, adapter);
               signal.throwIfAborted();
             } else {
-            // Resume detection: if both the engine state and the P2P
-            // host session were persisted for this gameId, the host
-            // crashed/reloaded mid-game and should dial back in on the
-            // same room code so returning guests (whose IDB tokens are
-            // keyed on `phase-<roomCode>`) still match. Partial state
-            // (only one record present) is treated as inconsistent:
-            // clear both and fall through to a fresh game.
+            // WASM hosts persist the engine state plus P2P metadata. Native
+            // hosts persist only P2P metadata and local phase-server tokens:
+            // the server owns the authoritative game state.
             const [savedState, savedSession] = await Promise.all([
               loadGame(gameId),
               loadP2PHostSession(gameId),
             ]);
             signal.throwIfAborted();
 
-            const isResume =
-              savedState !== null && savedSession !== null && savedSession.gameStarted;
-            if ((savedState !== null) !== (savedSession !== null)) {
+            if (savedSession) {
+              const terminal = await loadP2PTerminalResult(savedSession.sessionKey);
+              signal.throwIfAborted();
+              if (terminal) {
+                onP2PEventRef.current?.({ type: "terminalResult", result: terminal });
+                return;
+              }
+            }
+
+            const isNativeResume = savedSession?.nativeSession !== undefined;
+            const isWasmResume =
+              !isNativeResume
+              && savedState !== null
+              && savedSession !== null
+              && savedSession.gameStarted;
+            const isResume = isNativeResume || isWasmResume;
+            if (!isNativeResume && (savedState !== null) !== (savedSession !== null)) {
               // Inconsistent: one record present, the other missing.
               // Drop both so the menu's Resume button doesn't re-offer.
               await clearGame(gameId);
               await clearP2PHostSession(gameId);
+            }
+
+            // Native P2P state belongs to the local phase-server, never the
+            // browser's WASM snapshot. For a fresh room, start that binary
+            // before publishing a PeerJS lobby entry; if it cannot start, the
+            // established WASM host remains the fallback for this attempt.
+            let nativeP2P: { expectedServerVersion?: string } | undefined;
+            if (((shouldUseNativeP2P && !isWasmResume) || isNativeResume) && nativeEngineKey) {
+              try {
+                await ensureNativeEngine(nativeEngineKey);
+                signal.throwIfAborted();
+                nativeP2P = {
+                  expectedServerVersion:
+                    "release" in nativeEngineKey ? nativeEngineKey.release.version : undefined,
+                };
+              } catch (err) {
+                if (isNativeResume) {
+                  throw new Error(
+                    `The local native engine is required to resume this hosted game: ${err instanceof Error ? err.message : String(err)}`,
+                  );
+                }
+                console.warn("[P2P] native engine unavailable; using WASM host", err);
+              }
+            }
+            if (isNativeResume && !nativeP2P) {
+              throw new Error("The local native engine is unavailable for this hosted game.");
             }
 
             // Only open a fresh broker client when starting a fresh
@@ -797,7 +1009,6 @@ export function GameProvider({
               const store = useMultiplayerStore.getState();
               const result = await store.openBroker({
                 hostPeerId: host.peer.id,
-                deck: deckList.player,
                 displayName: store.displayName || "Host",
                 public: true,
                 password: null,
@@ -805,15 +1016,15 @@ export function GameProvider({
                 playerCount: effectivePlayerCount,
                 matchConfig: matchConfig ?? { match_type: "Bo1" },
                 formatConfig: formatConfig ?? null,
-                aiSeats: [],
                 roomName: roomName ?? null,
                 draftMetadata: null,
-              });
-              signal.throwIfAborted();
+              }, signal);
+              // Owned before the abort check, so the catch releases a broker that resolved late.
               if (result) {
                 broker = result.broker;
                 serverGameCode = result.gameCode;
               }
+              signal.throwIfAborted();
             }
 
             // Only show the lobby tile for fresh hosts waiting for guests.
@@ -848,10 +1059,15 @@ export function GameProvider({
                 gameId,
                 roomCode: host.roomCode,
                 hostDisplayName: useMultiplayerStore.getState().displayName || undefined,
-                resumeData: isResume && savedState && savedSession
-                  ? { state: savedState, session: savedSession }
+                resumeData: isResume && savedSession
+                  ? isNativeResume
+                    ? { session: savedSession }
+                    : savedState
+                      ? { state: savedState, session: savedSession }
+                      : undefined
                   : undefined,
               },
+              nativeP2P,
             );
             p2pAdapter = adapter;
             // Ownership of the Peer transfers to the adapter here; don't
@@ -861,10 +1077,9 @@ export function GameProvider({
             wireP2PEvents(adapter);
 
             if (isResume) {
-              // Resume path: adapter.initialize() loads the saved state
-              // via wasm.resumeMultiplayerHostState; resumeP2PHost
-              // pulls state + legal actions into the store. Skip
-              // initializeGame entirely — the engine is already live.
+              // The adapter restores either the WASM snapshot or reconnects
+              // its local phase-server viewers, then resumeP2PHost seeds the
+              // store from that authority. No second initializeGame call.
               await resumeP2PHost(gameId, adapter);
             } else {
               await initGame(gameId, adapter, undefined, formatConfig, effectivePlayerCount, matchConfig);
@@ -878,16 +1093,7 @@ export function GameProvider({
           } else {
             // p2p-join
             const code = joinCode!;
-            const { conn, peer } = await joinRoom(code, signal, 10_000);
-            hostPeerHandle = peer;
-            signal.throwIfAborted();
-
             // Two deliberately-decoupled identifiers:
-            //  - dial target: `conn.peer` — the *actual* host peer id we just
-            //    connected to (= `phase2-<code>`). Auto-reconnect re-dials
-            //    this, so it must be the live id the host registered under;
-            //    reconstructing a literal prefix here is how the dial silently
-            //    broke after the PEER_ID_PREFIX bump.
             //  - sessionKey: the IndexedDB key for the persisted reconnect
             //    token, held on the legacy `phase-` prefix so tokens saved
             //    before the bump still resolve. IndexedDB (not sessionStorage)
@@ -895,6 +1101,24 @@ export function GameProvider({
             //    their original seat.
             const sessionKey = `phase-${code}`;
             const existing = await loadP2PSession(sessionKey);
+            signal.throwIfAborted();
+            if (existing) {
+              const terminal = await loadP2PTerminalResult(existing.authority.sessionKey);
+              signal.throwIfAborted();
+              if (terminal) {
+                onP2PEventRef.current?.({ type: "terminalResult", result: terminal });
+                return;
+              }
+            }
+            // Dial target: `conn.peer` is the actual current host peer id;
+            // reconnect reuses it rather than reconstructing a prefix.
+            // No timeout override: `joinRoom`'s 30s default is sized for a
+            // relayed ICE negotiation. A 10s budget aborted TURN-relayed joins
+            // mid-negotiation, and it bought nothing for a mistyped code —
+            // that path rejects immediately on `peer-unavailable`, never on the
+            // timeout.
+            const { conn, peer } = await joinRoom(code, signal);
+            hostPeerHandle = peer;
             signal.throwIfAborted();
             const adapter = new P2PGuestAdapter(
               deckList,
@@ -905,6 +1129,7 @@ export function GameProvider({
               useMultiplayerStore.getState().displayName || undefined,
               undefined,
               sessionKey,
+              existing?.authority,
             );
             p2pAdapter = adapter;
             hostPeerHandle = null;
@@ -932,6 +1157,7 @@ export function GameProvider({
               /* best-effort */
             });
           }
+          if (broker) useMultiplayerStore.getState().closeBroker(broker);
           hostPeerHandle?.destroy();
           if (signal.aborted) return;
           const message = err instanceof Error ? err.message : String(err);
@@ -961,11 +1187,14 @@ export function GameProvider({
         ac.abort();
         if (controller) controller.dispose();
         if (p2pUnsubscribe) p2pUnsubscribe();
+        useMultiplayerStore.setState({ playerLatencies: {} });
         // `adapter.dispose()` is the SOLE tear-down path for the host/guest
         // Peer (see plan §4 "Peer ownership"). It also closes per-guest
         // sessions, clears timers, and disposes the WASM engine.
         if (p2pAdapter) p2pAdapter.dispose();
         audioManager.setContext("menu");
+        clearPromptOverlayState();
+        clearWireAssignedSeat();
         reset();
       };
     }
@@ -974,11 +1203,14 @@ export function GameProvider({
 
     if (isOnline || isReconnect) {
       const parsedDeck = isSpectate ? null : loadActiveDeck();
-      const deck = isSpectate
-        ? { main_deck: [], sideboard: [] }
-        : parsedDeck
-          ? parsedDeckToDeckData(parsedDeck)
-          : { main_deck: [], sideboard: [] };
+      // A guest of a supplied-deck room submits nothing; the room's format rides the join URL.
+      const suppliedJoin = Boolean(joinCode) && formatConfig !== undefined && formatSuppliesDeck(formatConfig.format);
+      const deck = parsedDeck && !suppliedJoin
+        ? {
+            ...parsedDeckToDeckData(parsedDeck),
+            bracket_tier: bracketToEngineTier(loadActiveDeckBracket()),
+          }
+        : emptySeatDeck();
 
       const mpStore = useMultiplayerStore.getState();
       mpStore.setConnectionStatus("connecting");
@@ -1020,7 +1252,101 @@ export function GameProvider({
       // Use smart server detection for initial connection
       const setupWs = async () => {
         if (cancelled) return;
-        const serverUrl = import.meta.env.VITE_WS_URL ?? await detectServerUrl();
+        const reconnectSession = isReconnect ? loadWsSession() : null;
+        if (wsMode === "host" && !reconnectSession) {
+          // Online play is entered by a join code or a saved session; with neither there is no game to attach to.
+          useMultiplayerStore.getState().setConnectionStatus("disconnected");
+          useMultiplayerStore.getState().showToast(tRef.current("gameProvider.toasts.connectionFailed"));
+          onWsEventRef.current?.({ type: "reconnectFailed" });
+          return;
+        }
+        if (reconnectSession) {
+          const terminalDelivery = await loadFullTerminalDelivery(reconnectSession.fullKey);
+          if (cancelled) return;
+
+          if (terminalDelivery) {
+            // A retained terminal capability is read only through the small raw
+            // socket helper. This branch intentionally returns before any
+            // playable adapter, controller, deck, or reconnect setup exists.
+            try {
+              const refreshed = await readFullTerminalResult(
+                reconnectSession.serverUrl,
+                terminalDelivery.credential,
+              );
+              if (cancelled) return;
+              if (refreshed && !(await replaceFullTerminalDelivery(refreshed))) {
+                throw new Error("Failed to retain terminal delivery");
+              }
+              const display = refreshed ?? terminalDelivery;
+              void acknowledgeFullTerminalDelivery(
+                reconnectSession.serverUrl,
+                display.delivery_id,
+                display.credential,
+              ).catch(() => {});
+              clearWsSession();
+              onWsEventRef.current?.({
+                type: "terminalDelivery",
+                delivery: display,
+              });
+            } catch (error) {
+              if (!cancelled) {
+                useMultiplayerStore.getState().setConnectionStatus("disconnected");
+                onWsEventRef.current?.({
+                  type: "terminalUnavailable",
+                  message: error instanceof Error ? error.message : "Terminal result is unavailable",
+                });
+              }
+            }
+            return;
+          }
+
+          let bootstrap: FullTerminalDelivery | null;
+          try {
+            bootstrap = await bootstrapFullTerminalDelivery(
+              reconnectSession.serverUrl,
+              reconnectSession.fullKey,
+              reconnectSession.playerToken,
+              crypto.randomUUID(),
+            );
+          } catch (error) {
+            if (!cancelled) {
+              useMultiplayerStore.getState().setConnectionStatus("disconnected");
+              onWsEventRef.current?.({
+                type: "terminalUnavailable",
+                message: error instanceof Error ? error.message : "Terminal result is unavailable",
+              });
+            }
+            return;
+          }
+          if (cancelled) return;
+          if (bootstrap) {
+            if (!(await commitFullTerminalDelivery(bootstrap))) {
+              useMultiplayerStore.getState().setConnectionStatus("disconnected");
+              onWsEventRef.current?.({
+                type: "terminalUnavailable",
+                message: "Failed to retain terminal delivery",
+              });
+              return;
+            }
+            void acknowledgeFullTerminalDelivery(
+              reconnectSession.serverUrl,
+              bootstrap.delivery_id,
+              bootstrap.credential,
+            ).catch(() => {});
+            clearWsSession();
+            onWsEventRef.current?.({ type: "terminalDelivery", delivery: bootstrap });
+            return;
+          }
+        }
+        // Origin precedence: an explicit build override wins; then the
+        // server a resumable session was recorded on (that server holds the
+        // session); then the origin the route carried; and only with none of
+        // those, this client's hosting server.
+        const serverUrl =
+          import.meta.env.VITE_WS_URL
+          ?? reconnectSession?.serverUrl
+          ?? originUrl
+          ?? await detectServerUrl();
         if (cancelled) return;
 
         wsAdapter = new WebSocketAdapter(
@@ -1065,11 +1391,15 @@ export function GameProvider({
             if (needAdapter) {
               useGameStore.setState({ adapter: wsAdapter });
             }
-            processRemoteUpdate(event.state, event.events, event.legalResult, event.logEntries);
+            processRemoteUpdate(event.snapshot, event.events, event.logEntries, event.rewindTargets).catch((err) => {
+              debugLog(`remote update failed: ${err instanceof Error ? err.message : String(err)}`);
+              resyncFromAdapterSafely("delivery rejected");
+            });
             useMultiplayerStore.getState().setConnectionStatus("connected");
+            const wsState = event.snapshot.state;
             if (
-              event.state.match_phase === "Completed"
-              || (!event.state.match_phase && event.state.waiting_for.type === "GameOver")
+              wsState.match_phase === "Completed"
+              || (!wsState.match_phase && wsState.waiting_for.type === "GameOver")
             ) {
               clearActiveGame();
             }
@@ -1152,10 +1482,9 @@ export function GameProvider({
             audioManager.setContext("battlefield");
           }).catch((err) => {
             if (cancelled) return;
-            const msg = err instanceof Error ? err.message : String(err);
             useMultiplayerStore.getState().setConnectionStatus("disconnected");
-            if (msg.includes("Deck not legal")) {
-              onWsEventRef.current?.({ type: "deckRejected", reason: msg });
+            if (isDeckRejectedError(err)) {
+              onWsEventRef.current?.({ type: "deckRejected", reason: err.message });
             } else {
               useMultiplayerStore.getState().showToast(tRef.current("gameProvider.toasts.connectionFailed"));
             }
@@ -1176,6 +1505,8 @@ export function GameProvider({
         useMultiplayerStore.getState().setIsSpectator(false);
         useMultiplayerStore.getState().setSpectators([]);
         audioManager.setContext("menu");
+        clearPromptOverlayState();
+        clearWireAssignedSeat();
         reset();
       };
     }
@@ -1187,9 +1518,96 @@ export function GameProvider({
     // On cleanup, we clear the WASM game state but keep the worker alive.
     const setupLocal = async () => {
       if (cancelled) return;
-
-      const savedState = await loadGame(gameId);
       const adapter = getSharedAdapter();
+      const soloDraft = source === "draft" && !!draftId;
+      const draftDeckKey = `phase:draft-deck:${gameId}`;
+      const reportDraftError = (error: unknown) => {
+        if (!cancelled) onNoDeckRef.current?.(error instanceof Error ? error.message : String(error));
+      };
+      const unavailableDraftStage = () => new Error(tRef.current("draft:run.resumeUnavailable"));
+      const loadExactDraftRun = async (): Promise<DraftRunState> => {
+        const meta = await inspectActiveQuickDraftLifecycle("inspect");
+        if (!meta || meta.id !== draftId) throw unavailableDraftStage();
+        const run = await loadDraftRun(draftId!);
+        if (!run) throw unavailableDraftStage();
+        if (!isCoherentUnresolvedDraftStage(run, draftId!, gameId)
+          || (meta.setCode === "custom-cube" && !Array.isArray(run.booster_pack_pool))) {
+          throw unavailableDraftStage();
+        }
+        return run;
+      };
+      const startDraftDeck = async (raw: string) => {
+        try {
+          const deckList = JSON.parse(raw) as DeckListPayload;
+          if (soloDraft) {
+            const run = await loadExactDraftRun();
+            if (cancelled) return;
+            if (!matchesPublishedDraftPayload(deckList, run)) throw unavailableDraftStage();
+          }
+          await initGame(
+            gameId,
+            adapter,
+            deckList,
+            formatConfig,
+            playerCount,
+            matchConfig,
+            firstPlayer,
+            soloDraft ? "strict" : "best-effort",
+          );
+          if (cancelled) return;
+          controller = createGameLoopController({
+            mode: mode === "local" ? "local" : "ai", difficulty,
+            aiSeats: resolveAiSeatBindings(gameId, playerCount, difficulty), playerCount,
+          });
+          controller.start();
+          if (cancelled) return;
+          audioManager.setContext("battlefield");
+        } catch (error) {
+          console.error("Draft deck validation failed:", error);
+          reportDraftError(error);
+          return;
+        }
+        try {
+          if (sessionStorage.getItem(draftDeckKey) === raw) sessionStorage.removeItem(draftDeckKey);
+        } catch (error) {
+          // A playable game has started. Keep the handoff for a later cleanup
+          // attempt when storage is unavailable instead of reporting a failed start.
+          console.warn("Could not consume draft deck handoff:", error);
+        }
+      };
+      const startExactDraftStage = async () => {
+        try {
+          const run = await loadExactDraftRun();
+          if (cancelled) return;
+          const deckList = {
+            booster_pack_pool: run.booster_pack_pool,
+            player: { main_deck: run.playerDeck, sideboard: [], commander: [] },
+            opponent: { main_deck: run.opponentDeck, sideboard: [], commander: [] },
+            ai_decks: [],
+          };
+          await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer, "strict");
+          if (cancelled) return;
+          controller = createGameLoopController({
+            mode: mode === "local" ? "local" : "ai", difficulty,
+            aiSeats: resolveAiSeatBindings(gameId, playerCount, difficulty), playerCount,
+          });
+          controller.start();
+          if (!cancelled) audioManager.setContext("battlefield");
+        } catch (error) {
+          console.error("Draft IDB deck fallback failed:", error);
+          reportDraftError(error);
+        }
+      };
+      let draftDeckRaw: string | null = null;
+      let savedState;
+      try {
+        savedState = await (soloDraft ? loadGameStrict(gameId) : loadGame(gameId));
+      } catch (error) {
+        if (cancelled) return;
+        reportDraftError(error);
+        return;
+      }
+      if (cancelled) return;
 
       // Horde: the archenemy (Horde) seat is an AI, never the local human (who
       // is always seat 0 in solo Play-vs-AI). Remap the registry default
@@ -1201,18 +1619,75 @@ export function GameProvider({
         formatConfig?.format === "Horde"
           ? { ...formatConfig, archenemy_player: 1 }
           : formatConfig;
+      if (soloDraft) {
+        try {
+          draftDeckRaw = sessionStorage.getItem(draftDeckKey);
+        } catch (error) {
+          if (!savedState) {
+            reportDraftError(error);
+            return;
+          }
+          console.warn("Could not read draft deck handoff during saved-game restore:", error);
+        }
+      }
+
+      if (soloDraft) {
+        if (!savedState) {
+          if (draftDeckRaw !== null) await startDraftDeck(draftDeckRaw);
+          else await startExactDraftStage();
+          return;
+        }
+        try {
+          await loadExactDraftRun();
+          if (cancelled) return;
+        } catch (error) {
+          reportDraftError(error);
+          return;
+        }
+        try {
+          await resumeGame(gameId, adapter, savedState);
+        } catch (error) {
+          if (cancelled) return;
+          console.warn("Failed to resume saved draft game:", error);
+          reportDraftError(error);
+          return;
+        }
+        if (cancelled) return;
+        try {
+          const resumedPlayerCount = persistedGameStateView(savedState).players.length;
+          controller = createGameLoopController({
+            mode: mode === "local" ? "local" : "ai", difficulty,
+            aiSeats: resolveAiSeatBindings(gameId, resumedPlayerCount, difficulty),
+            playerCount: resumedPlayerCount,
+          });
+          controller.start();
+          if (cancelled) return;
+          audioManager.setContext("battlefield");
+        } catch (error) {
+          reportDraftError(error);
+          return;
+        }
+        if (draftDeckRaw !== null) {
+          try {
+            if (sessionStorage.getItem(draftDeckKey) === draftDeckRaw) sessionStorage.removeItem(draftDeckKey);
+          } catch (error) {
+            console.warn("Could not consume draft deck handoff:", error);
+          }
+        }
+        return;
+      }
 
       if (savedState) {
         try {
-          // Load card DB before restore so the engine can rehydrate objects
-          // and handle token creation / effects after resume.
-          await ensureCardDatabase().catch(() => {/* card DB is best-effort */});
-          if (cancelled) return;
+          // WasmAdapter.restoreState() loads the card DB into its shared worker
+          // before rehydrating. Do not also initialize the main-thread runtime:
+          // that duplicates both the WASM module and full card corpus, which can
+          // exceed the WebContent memory budget on iOS.
           await resumeGame(gameId, adapter, savedState);
           if (cancelled) return;
           // Derive player count from the restored state — the URL param may be
           // absent on resume (e.g. navigating directly to a saved game URL).
-          const resumedPlayerCount = savedState.players?.length ?? playerCount;
+          const resumedPlayerCount = persistedGameStateView(savedState).players.length;
           controller = createGameLoopController({
             mode: mode === "local" ? "local" : "ai",
             difficulty,
@@ -1251,6 +1726,8 @@ export function GameProvider({
               formatConfig,
               matchConfig?.match_type,
               loadActiveDeckBracket(),
+              pileSourceFromParam(pile),
+              resolveLocalAiSeatPlan(gameId, playerCount ?? 2),
             );
           } catch (deckErr) {
             onNoDeckRef.current?.(deckErr instanceof Error ? deckErr.message : String(deckErr));
@@ -1287,76 +1764,19 @@ export function GameProvider({
       }
 
       // No saved state — start a new game.
-      // Draft mode: deck data was pre-built by DraftPage and stored in
-      // sessionStorage. Use it directly instead of loadActiveDeck + buildDeckList.
-      const draftDeckKey = `phase:draft-deck:${gameId}`;
-      const draftDeckRaw = sessionStorage.getItem(draftDeckKey);
-      if (draftDeckRaw) {
-        sessionStorage.removeItem(draftDeckKey);
-        const deckList = JSON.parse(draftDeckRaw) as {
-          player: ExpandedDeck;
-          opponent: ExpandedDeck;
-          ai_decks: ExpandedDeck[];
-        };
+      // Quick drafts and local Commander pods publish their full engine payload
+      // in sessionStorage, including opaque original cube metadata.
+      if (!soloDraft) {
         try {
-          await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
-          if (cancelled) return;
-          controller = createGameLoopController({
-            mode: mode === "local" ? "local" : "ai",
-            difficulty,
-            aiSeats: resolveAiSeatBindings(gameId, playerCount, difficulty),
-            playerCount,
-          });
-          controller.start();
-          audioManager.setContext("battlefield");
-        } catch (err) {
-          console.error("Draft deck validation failed:", err);
-          if (!cancelled) onNoDeckRef.current?.();
-        }
-        return;
-      }
-
-      if (source === "draft" && draftId) {
-        const run = await loadDraftRun(draftId);
-        if (run) {
-          const deckList = {
-            player: {
-              main_deck: run.playerDeck,
-              sideboard: [] as string[],
-              commander: [] as string[],
-              planar_deck: [] as string[],
-              scheme_deck: [] as string[],
-              sticker_sheets: [] as string[],
-              signature_spell: [] as string[],
-            },
-            opponent: {
-              main_deck: run.opponentDeck,
-              sideboard: [] as string[],
-              commander: [] as string[],
-              planar_deck: [] as string[],
-              scheme_deck: [] as string[],
-              sticker_sheets: [] as string[],
-              signature_spell: [] as string[],
-            },
-            ai_decks: [],
-          };
-          try {
-            await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
-            if (cancelled) return;
-            controller = createGameLoopController({
-              mode: mode === "local" ? "local" : "ai",
-              difficulty,
-              aiSeats: resolveAiSeatBindings(gameId, playerCount, difficulty),
-              playerCount,
-            });
-            controller.start();
-            audioManager.setContext("battlefield");
-          } catch (err) {
-            console.error("Draft IDB deck fallback failed:", err);
-            if (!cancelled) onNoDeckRef.current?.();
-          }
+          draftDeckRaw = sessionStorage.getItem(draftDeckKey);
+        } catch (error) {
+          reportDraftError(error);
           return;
         }
+      }
+      if (draftDeckRaw !== null) {
+        await startDraftDeck(draftDeckRaw);
+        return;
       }
 
       const activeDeckName = localStorage.getItem(ACTIVE_DECK_KEY);
@@ -1377,6 +1797,8 @@ export function GameProvider({
           formatConfig,
           matchConfig?.match_type,
           loadActiveDeckBracket(),
+          pileSourceFromParam(pile),
+          resolveLocalAiSeatPlan(gameId, playerCount ?? 2),
         );
       } catch (deckErr) {
         onNoDeckRef.current?.(deckErr instanceof Error ? deckErr.message : String(deckErr));
@@ -1418,7 +1840,262 @@ export function GameProvider({
       }
     };
 
-    setupLocal();
+    if (shouldUseNativeAi && nativeEngineKey) {
+      const setupNativeAi = async () => {
+        // A native socket that dies before the session is live is not a lost
+        // connection the player can act on — the `catch` below silently falls
+        // back to WASM, so surfacing GamePage's terminal connection-lost banner
+        // would paint it over a healthy local game that plays on underneath.
+        let nativeSessionLive = false;
+        // A native pointer marks a server-authoritative game held by the local
+        // phase-server; it is resumed by reconnecting, not by loading a local
+        // snapshot. Presence of `nativeSession` on this game's active pointer is
+        // the resume signal (fresh games have no pointer yet at this point).
+        const activePointer = loadActiveGame();
+        const nativeResume =
+          activePointer?.id === gameId ? activePointer.nativeSession : undefined;
+        // Populated only for a fresh game; a reconnect ignores the deck entirely.
+        let deckList: DeckListPayload | undefined;
+        try {
+          // A local snapshot belongs to the established WASM path — but only for
+          // a fresh game. A native resume has no local snapshot (state lives in
+          // the phase-server), so a stray one must never hijack the reconnect.
+          if (!nativeResume && (await loadGame(gameId))) {
+            setEngineMode("wasm");
+            await setupLocal();
+            return;
+          }
+          if (cancelled) return;
+
+          if (!nativeResume) {
+            const activeDeckName = localStorage.getItem(ACTIVE_DECK_KEY);
+            const randomPlayerDeck = isRandomDeckSelection(activeDeckName);
+            const parsedDeck = randomPlayerDeck ? null : loadActiveDeck();
+            const suppliesDeck = formatConfig ? formatSuppliesDeck(formatConfig.format) : false;
+            if (!parsedDeck && !suppliesDeck && !randomPlayerDeck) {
+              onNoDeckRef.current?.();
+              return;
+            }
+
+            try {
+              deckList = await buildLocalAiDeckList(
+                tRef.current,
+                randomPlayerDeck ? null : (parsedDeck ?? EMPTY_PARSED_DECK),
+                playerCount ?? 2,
+                formatConfig,
+                matchConfig?.match_type,
+                loadActiveDeckBracket(),
+                pileSourceFromParam(pile),
+                resolveLocalAiSeatPlan(gameId, playerCount ?? 2),
+              );
+            } catch (deckErr) {
+              if (!cancelled) {
+                onNoDeckRef.current?.(deckErr instanceof Error ? deckErr.message : String(deckErr));
+              }
+              return;
+            }
+            if (cancelled) return;
+          }
+
+          await ensureNativeEngine(nativeEngineKey);
+          if (cancelled) return;
+
+          const expectedServerVersion =
+            "release" in nativeEngineKey ? nativeEngineKey.release.version : undefined;
+          nativeAdapter = new WebSocketAdapter(
+            "native-engine",
+            "host",
+            deckList?.player ?? emptySeatDeck(),
+            undefined,
+            undefined,
+            undefined,
+            "Player",
+            nativeResume
+              ? {
+                  nativePregame: {
+                    kind: "reconnect",
+                    gameCode: nativeResume.gameCode,
+                    playerId: nativeResume.playerId,
+                    playerToken: nativeResume.playerToken,
+                    fullKey: nativeResume.fullKey,
+                    socketFactory: () => new NativeEngineSocket(),
+                    expectedServerVersion,
+                  },
+                }
+              : {
+                  nativeAi: {
+                    socketFactory: () => new NativeEngineSocket(),
+                    aiSeats: nativeAiSeatsFromDeckList(deckList!),
+                    playerCount: playerCount ?? 2,
+                    formatConfig,
+                    matchConfig,
+                    expectedServerVersion,
+                  },
+                },
+          );
+
+          const handleNativeEvent = (event: WsAdapterEvent) => {
+            if (event.type === "stateChanged") {
+              const adapter = nativeAdapter;
+              if (!useGameStore.getState().adapter && adapter) {
+                useGameStore.setState({ adapter });
+              }
+              processRemoteUpdate(event.snapshot, event.events, event.logEntries, event.rewindTargets).catch((err) => {
+                debugLog(`remote update failed: ${err instanceof Error ? err.message : String(err)}`);
+                resyncFromAdapterSafely("delivery rejected");
+              });
+            }
+            if (event.type === "gameOver") {
+              useGameStore.setState({
+                waitingFor: { type: "GameOver", data: { winner: event.winner } },
+              });
+            }
+            if (event.type === "requestRejected") {
+              // A NEW forwarding branch, not an addition to an existing group:
+              // `stateChanged` and `gameOver` above are handled inline and are
+              // never forwarded, so the only pre-existing `onWsEventRef` call
+              // in this handler is the terminal one below. This event must
+              // reach GamePage (which toasts it) while touching nothing else —
+              // it must not null `nativeAdapter`, dispose the controller, or
+              // clear the store adapter. `nativeSessionLive` is the existing
+              // guard against firing into a torn-down page.
+              //
+              // The online path needs no counterpart: its listener forwards
+              // every event unconditionally.
+              if (nativeSessionLive) onWsEventRef.current?.(event);
+            }
+            if (event.type === "reconnectFailed" || event.type === "error") {
+              const adapter = nativeAdapter;
+              nativeAdapter = null;
+              controller?.dispose();
+              controller = null;
+              adapter?.dispose();
+              if (useGameStore.getState().adapter === adapter) {
+                useGameStore.setState({ adapter: null });
+              }
+              // GamePage's existing reconnect-failed/error surface is terminal
+              // and provides the Return-to-Menu action for this native session.
+              // Setup failures instead reject the pending init, which the
+              // `catch` turns into a fallback with no banner.
+              if (nativeSessionLive) onWsEventRef.current?.(event);
+            }
+          };
+
+          setEngineMode("native");
+          if (nativeResume) {
+            // Reconnect and seed from the server's authoritative state. Events
+            // are wired AFTER this: `initialize()` emits the initial
+            // `stateChanged` synchronously, which `resumeNativeSolo`'s snapshot
+            // fetch already captures — a listener here would double-apply it.
+            await resumeNativeSolo(gameId, nativeAdapter);
+            if (cancelled) {
+              nativeAdapter.dispose();
+              return;
+            }
+            wsUnsubscribe = nativeAdapter.onEvent(handleNativeEvent);
+          } else {
+            wsUnsubscribe = nativeAdapter.onEvent(handleNativeEvent);
+            await initGame(
+              gameId,
+              nativeAdapter,
+              undefined,
+              formatConfig,
+              playerCount,
+              matchConfig,
+            );
+            if (cancelled) {
+              nativeAdapter.dispose();
+              return;
+            }
+          }
+
+          setGameMode("native-ai");
+          controller = createGameLoopController({ mode: "online" });
+          controller.start();
+          nativeSessionLive = true;
+          // Persist the resume pointer only now that the session is live — an
+          // earlier write would strand a Resume button if setup failed midway.
+          // Suspending (navigating away) keeps this pointer; only an explicit
+          // Concede (useConcedeHandler → clearGame) removes it. The player token
+          // lives only here — it is the reconnect credential.
+          const session = nativeAdapter.nativeSession;
+          if (session) {
+            saveActiveGame(
+              nativeResume && activePointer
+                ? { ...activePointer, nativeSession: session }
+                : {
+                    id: gameId,
+                    mode: "ai",
+                    difficulty: difficulty ?? "Medium",
+                    aiSeats: deckList
+                      ? nativeAiSeatsFromDeckList(deckList).map((seat) => ({
+                          difficulty: seat.difficulty,
+                        }))
+                      : undefined,
+                    formatConfig,
+                    nativeSession: session,
+                  },
+            );
+          }
+          audioManager.setContext("battlefield");
+        } catch (error) {
+          // Setup failed before the session went live — suspend (never concede);
+          // there is nothing authoritative to end.
+          nativeAdapter?.dispose();
+          nativeAdapter = null;
+          if (cancelled) return;
+
+          if (nativeResume) {
+            // A resume has no local snapshot to fall back to — the state lives
+            // only in the phase-server. Surface the failure via the terminal
+            // reconnect/error banner instead of silently starting a fresh WASM
+            // game (which would look like the suspended game vanished). The
+            // pointer is kept so the player can retry once the engine is back.
+            setGameMode("ai");
+            setEngineMode("native", nativeFallbackReason(error));
+            onWsEventRef.current?.({
+              type: "error",
+              message: error instanceof Error ? error.message : String(error),
+            });
+            return;
+          }
+
+          const fallbackReason = nativeFallbackReason(error);
+          setGameMode("ai");
+          setEngineMode("wasm", fallbackReason);
+          // Losing the native engine is otherwise invisible — the game simply
+          // plays slower. EngineModeBadge carries the standing signal; this is
+          // the one-shot that says it happened just now.
+          useMultiplayerStore.getState().showToast(
+            tRef.current(
+              fallbackReason === "server_version_mismatch"
+                ? "common:engineBadge.versionMismatchTooltip"
+                : "common:engineBadge.inBrowserTooltip",
+            ),
+          );
+          saveWasmAiResumePointer(gameId, difficulty, playerCount, formatConfig);
+          await setupLocal();
+        }
+      };
+
+      void setupNativeAi();
+
+      return () => {
+        cancelled = true;
+        if (controller) controller.dispose();
+        if (wsUnsubscribe) wsUnsubscribe();
+        // Suspend, don't concede: leaving the game page keeps the server-side
+        // session alive and resumable via the persisted native pointer. Only an
+        // explicit Concede (useConcedeHandler) ends the game. `dispose()` still
+        // tears down the socket/loop; it just omits the concede frame.
+        nativeAdapter?.dispose();
+        audioManager.setContext("menu");
+        clearPromptOverlayState();
+        scheduleStoreReset(reset);
+      };
+    }
+
+    void setupLocal();
 
     return () => {
       cancelled = true;
@@ -1447,9 +2124,12 @@ export function GameProvider({
             logHistory: [],
             nextLogSeq: 0,
             adapter: null,
+            gameSessionGeneration: nextGameSessionGeneration(),
             waitingFor: null,
             legalActions: [],
             autoPassRecommended: false,
+            endContinuousEffectOffers: [],
+            manaPaymentShortcutActions: [],
             spellCosts: {},
             stateHistory: [],
             turnCheckpoints: [],
@@ -1459,7 +2139,7 @@ export function GameProvider({
         scheduleStoreReset(reset);
       }
     };
-  }, [gameId, mode, difficulty, joinCode, formatConfig, playerCount, matchConfig, firstPlayer, useBroker, roomName, source, draftId]);
+  }, [gameId, mode, difficulty, joinCode, formatConfig, playerCount, matchConfig, firstPlayer, useBroker, roomName, source, draftId, originUrl, pile]);
 
   return (
     <GameDispatchContext.Provider value={dispatchAction}>

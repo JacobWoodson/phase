@@ -15,8 +15,8 @@
 //! DistinctCounterKindsAmong` for-EACH-kind loop (Bribe Taker / Quarry Hauler).
 
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, EffectError, EffectKind, PlayerFilter, ResolvedAbility,
-    TargetFilter, TargetRef,
+    AbilityDefinition, AbilityKind, ChooseOneOfKind, Effect, EffectError, EffectKind, PlayerFilter,
+    ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::counter::positive_counter_types;
 use crate::types::events::GameEvent;
@@ -52,6 +52,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::ChooseCounterAdjustment,
             source_id: ability.source_id,
+            subject: None,
         });
     };
 
@@ -125,6 +126,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ChooseCounterAdjustment,
         source_id: ability.source_id,
+        subject: None,
     });
 
     // Delegate to the existing ChooseOneOf machinery. The parent target is
@@ -134,6 +136,7 @@ pub fn resolve(
         Effect::ChooseOneOf {
             chooser: PlayerFilter::Controller,
             branches,
+            kind: ChooseOneOfKind::Ordinary,
         },
         vec![TargetRef::Object(target_id)],
         ability.source_id,

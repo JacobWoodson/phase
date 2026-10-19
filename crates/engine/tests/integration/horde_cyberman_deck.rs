@@ -251,6 +251,7 @@ fn horde_payload(db: &CardDatabase) -> DeckPayload {
         },
         ai_decks: Vec::new(),
         ai_difficulties: Vec::new(),
+        booster_pack_pool: None,
     }
 }
 

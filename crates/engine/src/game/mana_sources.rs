@@ -15,82 +15,190 @@
 
 use crate::types::ability::ManaSpendRestriction;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, ManaProduction,
-    PlayerFilter, QuantityExpr, TargetFilter, TriggerDefinition, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, ControllerRef,
+    CostPaidObjectSnapshot, Effect, ManaProduction, PlayerFilter, QuantityExpr, ResolvedAbility,
+    SacrificeCost, SacrificeRequirement, TargetFilter, TriggerDefinition, TriggerDefinitionRef,
+    TypedFilter,
 };
+use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
-use crate::types::game_state::{GameState, ProductionOverride};
+use crate::types::card_type::Supertype;
+use crate::types::events::{GameEvent, ManaTapState};
+use crate::types::game_state::{GameState, ManaAbilityResume, ProductionOverride, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{
-    ManaColor, ManaCostShard, ManaPip, ManaRestriction, ManaType, PaymentContext,
+    ManaColor, ManaCostShard, ManaPip, ManaRestriction, ManaSourceOutput, ManaSourceQuantity,
+    ManaSourceSelection, ManaType, PaymentContext, TapsForManaSelection,
 };
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 use crate::types::TriggerMode;
 
+use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use super::mana_abilities;
+use super::mana_abilities::ManaPayabilityMode;
 use super::mana_payment;
 use super::restrictions;
+use super::triggers::trigger_source_context_for_latch;
+use super::turn_control;
 
-/// CR 605.3b — Complete classification of a mana ability's penalty axis.
+pub use crate::types::mana::ManaSourcePenalty;
+
+/// One concrete mana unit a currently legal land-mana selection would produce.
 ///
-/// Constructed **once** per `ManaSourceOption` in `scan_mana_abilities` via
-/// `mana_ability_penalty`. Every consumer reads this via the provided methods;
-/// no consumer re-inspects the underlying `AbilityDefinition`. This is the
-/// single-authority design that eliminates drift between auto-tap ordering,
-/// `max_x_value` gating, and `UntapLandForMana` undoability.
+/// This is a read-only projection, not a `ManaUnit`: no pool identity, source
+/// bookkeeping, or spend grants exist until the activation resolves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LiveManaOutputUnit {
+    pub mana_type: ManaType,
+    pub restrictions: Vec<ManaRestriction>,
+}
+
+/// The reducer-owned Priority entry point for a selected mana source.
 ///
-/// Ordering of variants is NOT significant — callers must go through
-/// `tier_byte()` + `priority_amount()` for sort, `expected_life_cost()` for
-/// AI scoring, `is_undoable()` for UI undo gating.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ManaSourcePenalty {
-    /// Tap-only cost, no controller-harming continuation, and the resolution
-    /// chain is pure `Effect::Mana`. Basic lands, mana dorks, mana rocks,
-    /// filter lands, Verge lands, commander-color lands, Chromatic Lantern, etc.
-    None,
+/// This is intentionally a route rather than a legality result. The normal
+/// reducer remains responsible for validating the frozen selection before it
+/// activates the source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PriorityManaRoute {
+    LandTap,
+    NonlandActivation,
+}
 
-    /// CR 605.3b: The resolution chain contains a non-mana sub-effect that is
-    /// not classified into a more specific variant (i.e., not damage to
-    /// controller, not life loss to controller). Examples include depletion-
-    /// counter lands (Gemstone Mine), self-haste mana lands (Urza's Tower
-    /// variants), `RemoveCounter`-on-self lands, and `Effect::Unimplemented`
-    /// continuations whose semantics the parser hasn't decoded yet.
-    ///
-    /// Conservative default: any side-effect we don't otherwise understand is
-    /// assumed to commit irreversible game state, so `is_undoable()` returns
-    /// `false`. Sorts within the same outer bucket as `None` (`tier_byte() = 0`)
-    /// but with a worse `priority_amount()` than basics, so auto-tap still
-    /// prefers truly free sources first.
-    HasIrreversibleContinuation,
+/// An engine-authored land-mana announcement for the Priority preflight.
+/// Its frozen selection can cross into the reducer facade only through the
+/// engine-only conversion capability.
+pub(in crate::game) struct PriorityLandManaAnnouncement {
+    selection: ManaSourceSelection,
+}
 
-    /// CR 605.3b: Resolution chain contains a `DealDamage { target: Controller }`
-    /// and/or `LoseLife { target: Controller|None }` whose amounts sum to a
-    /// fixed total. `fixed_amount = None` means the chain contains a non-fixed
-    /// (`QuantityExpr::Ref` / `DivideRounded` / etc.) amount — treated as
-    /// maximally bad in `priority_amount()` for conservative auto-tap.
-    ///
-    /// Examples: painlands (1), Ancient Tomb (2), future N-damage lands,
-    /// hypothetical X-damage pain land (`None`).
-    DealsDamageOnResolution { fixed_amount: Option<u16> },
+impl PriorityLandManaAnnouncement {
+    fn new(selection: ManaSourceSelection) -> Self {
+        Self { selection }
+    }
 
-    /// Cost contains `AbilityCost::PayLife { amount }`. `fixed_amount` is
-    /// `Some(n)` iff the `QuantityExpr` collapses to `Fixed { value: n }`;
-    /// otherwise `None` (War-Room-style commanders'-colors cost).
-    ///
-    /// Examples: Mana Confluence (1), Starting Town (1).
-    PaysLifeOnActivation { fixed_amount: Option<u16> },
+    pub(in crate::game) fn selection(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> &ManaSourceSelection {
+        &self.selection
+    }
+}
 
-    /// CR 605.3b + CR 701.21: Cost contains an `AbilityCost::Sacrifice(_)`
-    /// component — bare or nested in a `Composite`, for any target filter. The
-    /// activation sacrifices a permanent (the source itself OR another), so the
-    /// sacrifice is irreversible and the activation is never rewindable.
-    ///
-    /// Covers both self-sac tokens (Treasure, Gold, Lotus Petal —
-    /// `Composite[Tap, Sacrifice{SelfRef}]`) and sacrifice-engine mana sources
-    /// (Krark-Clan Ironworks — bare `Sacrifice{Typed(Artifact)}`; Ashnod's
-    /// Altar — `Sacrifice{Typed(Creature)}`; Phyrexian Tower).
-    Sacrifices,
+/// An engine-authored nonland-mana announcement for the Priority preflight.
+/// Its frozen selection can cross into the reducer facade only through the
+/// engine-only conversion capability.
+pub(in crate::game) struct PriorityNonlandManaAnnouncement {
+    selection: ManaSourceSelection,
+}
+
+impl PriorityNonlandManaAnnouncement {
+    fn new(selection: ManaSourceSelection) -> Self {
+        Self { selection }
+    }
+
+    pub(in crate::game) fn selection(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> &ManaSourceSelection {
+        &self.selection
+    }
+}
+
+/// The provider's complete, family-partitioned mana announcements. The
+/// partition is intentionally opaque: only the Priority facade can consume it
+/// through its internal access capability.
+pub(in crate::game) struct PriorityManaAnnouncements {
+    land_taps: Vec<PriorityLandManaAnnouncement>,
+    nonland_activations: Vec<PriorityNonlandManaAnnouncement>,
+}
+
+/// An engine-authored undo announcement for a land tapped for mana in the
+/// current Priority window. The tracked object identity stays provider-owned
+/// until the Priority facade reconstructs the reducer primer.
+pub(in crate::game) struct PriorityUntapLandAnnouncement {
+    object_id: ObjectId,
+}
+
+impl PriorityUntapLandAnnouncement {
+    fn new(object_id: ObjectId) -> Self {
+        Self { object_id }
+    }
+
+    pub(in crate::game) fn object_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.object_id
+    }
+}
+
+impl PriorityManaAnnouncements {
+    pub(in crate::game) fn into_partitioned(
+        self,
+    ) -> (
+        Vec<PriorityLandManaAnnouncement>,
+        Vec<PriorityNonlandManaAnnouncement>,
+    ) {
+        (self.land_taps, self.nonland_activations)
+    }
+}
+
+/// Classifies a source using its current characteristics, matching the
+/// reducer's Priority mana-action partition.
+pub(crate) fn priority_mana_route(
+    state: &GameState,
+    selection: &ManaSourceSelection,
+) -> Option<PriorityManaRoute> {
+    let object = state.objects.get(&selection.source.object_id)?;
+    if object.card_types.core_types.contains(&CoreType::Land) {
+        Some(PriorityManaRoute::LandTap)
+    } else {
+        Some(PriorityManaRoute::NonlandActivation)
+    }
+}
+
+/// Enumerates the mana provider's complete finite Priority announcements for
+/// the authenticated Priority holder. The normal reducer remains responsible
+/// for validating the frozen selection when the announcement is replayed.
+pub(in crate::game) fn priority_mana_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> PriorityManaAnnouncements {
+    let mut land_taps = Vec::new();
+    let mut nonland_activations = Vec::new();
+    for selection in activatable_mana_source_selections(state, principal.semantic_holder()) {
+        match priority_mana_route(state, &selection) {
+            Some(PriorityManaRoute::LandTap) => {
+                land_taps.push(PriorityLandManaAnnouncement::new(selection));
+            }
+            Some(PriorityManaRoute::NonlandActivation) => {
+                nonland_activations.push(PriorityNonlandManaAnnouncement::new(selection));
+            }
+            None => {}
+        }
+    }
+    PriorityManaAnnouncements {
+        land_taps,
+        nonland_activations,
+    }
+}
+
+/// Enumerates the current holder's existing mana-undo eligibility. The normal
+/// reducer remains authoritative for tracked membership and current object
+/// validity when the announcement is replayed on a clone.
+pub(in crate::game) fn priority_untap_land_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityUntapLandAnnouncement> {
+    state
+        .lands_tapped_for_mana
+        .get(&principal.semantic_holder())
+        .into_iter()
+        .flatten()
+        .copied()
+        .map(PriorityUntapLandAnnouncement::new)
+        .collect()
 }
 
 impl ManaSourcePenalty {
@@ -232,10 +340,36 @@ pub struct ManaSourceOption {
     /// rejected after production.
     pub restrictions: Vec<ManaRestriction>,
     /// Per-aura color overrides for inline `TapsForMana` trigger resolution.
-    /// Each entry maps an aura's `ObjectId` to the `ProductionOverride` the
+    /// Each entry maps an exact live trigger definition to the `ProductionOverride` the
     /// auto-tap resolver should use when that aura's triggered mana ability fires.
     /// Empty for options that carry no aura bonus.
-    pub taps_for_mana_overrides: Vec<(ObjectId, ProductionOverride)>,
+    pub taps_for_mana_overrides: Vec<(TriggerDefinitionRef, ProductionOverride)>,
+}
+
+impl ManaSourceOption {
+    pub fn semantic_selection(&self, state: &GameState) -> Option<ManaSourceSelection> {
+        let source = state.objects.get(&self.object_id)?;
+        Some(ManaSourceSelection {
+            source: crate::types::identifiers::ObjectIncarnationRef::from_object(source),
+            ability_index: self.ability_index,
+            mana_type: self.mana_type,
+            output: ManaSourceOutput::Concrete(self.mana_type),
+            atomic_combination: self.atomic_combination.clone(),
+            restrictions: self.restrictions.clone(),
+            penalty: self.penalty,
+            taps_for_mana: self
+                .taps_for_mana_overrides
+                .iter()
+                .map(
+                    |(definition_ref, production_override)| TapsForManaSelection {
+                        source: definition_ref.source,
+                        occurrence: definition_ref.occurrence.clone(),
+                        production_override: production_override.clone(),
+                    },
+                )
+                .collect(),
+        })
+    }
 }
 
 /// Check whether an ability cost includes a tap component.
@@ -244,6 +378,12 @@ pub struct ManaSourceOption {
 /// cost and every component of a `Composite`. Single walker behind all
 /// component-presence predicates (`has_tap_component`, `has_untap_component`,
 /// `cost_includes_sacrifice`, `cost_includes_loyalty`).
+///
+/// Walks **one `Composite` level only**: a component nested inside a child
+/// `Composite` is not seen. Sound for presence checks, whose `false` merely
+/// declines a fast path, but never sound for an arity bound — for that use
+/// [`count_leaf_components`], which recurses to the same flattened leaf
+/// multiset the payment path actually pays.
 pub(crate) fn cost_has_component(
     cost: &Option<AbilityCost>,
     pred: impl Fn(&AbilityCost) -> bool,
@@ -259,12 +399,958 @@ pub(crate) fn has_tap_component(cost: &Option<AbilityCost>) -> bool {
     cost_has_component(cost, |c| matches!(c, AbilityCost::Tap))
 }
 
+/// Complete primitive actions for mana sources the player can currently activate.
+/// Shared by human interaction authority and AI enumeration so legality cannot drift.
+pub fn activatable_mana_actions_for_player(state: &GameState, player: PlayerId) -> Vec<GameAction> {
+    let aura_sources = taps_for_mana_trigger_sources(state);
+    let mana_activation_gates = mana_abilities::ManaActivationGates::compute(state);
+    let mut actions = Vec::new();
+    for &object_id in &state.battlefield {
+        let Some(object) = state.objects.get(&object_id) else {
+            continue;
+        };
+        if object.controller != player {
+            continue;
+        }
+
+        let mut handled_indices = std::collections::HashSet::new();
+        if object.card_types.core_types.contains(&CoreType::Land) {
+            let options = activatable_land_mana_options_indexed_gated(
+                state,
+                object_id,
+                player,
+                &aura_sources,
+                &mana_activation_gates,
+            );
+            for option in options {
+                if let Some(ability_index) = option.ability_index {
+                    handled_indices.insert(ability_index);
+                }
+                if let Some(selection) = option.semantic_selection(state) {
+                    actions.push(GameAction::TapLandForMana { selection });
+                }
+            }
+        }
+
+        for (ability_index, ability) in object.abilities.iter().enumerate() {
+            if handled_indices.contains(&ability_index)
+                || ability.kind != AbilityKind::Activated
+                || !mana_abilities::is_mana_ability(ability)
+            {
+                continue;
+            }
+            if has_tap_component(&ability.cost)
+                && (object.tapped || restrictions::summoning_sick_for_tap_ability(state, object))
+            {
+                continue;
+            }
+            if activation_condition_satisfied(state, player, object_id, ability_index, ability)
+                && mana_abilities::can_activate_mana_ability_now_gated(
+                    state,
+                    player,
+                    object_id,
+                    ability_index,
+                    ability,
+                    &mana_activation_gates,
+                )
+            {
+                // Interactive costs (for example, "Sacrifice an artifact")
+                // deliberately remain the ordinary activation action during a
+                // normal ManaPayment window. Its established cost resolver is
+                // the authority for the subsequent PayCost choice.
+                actions.push(GameAction::ActivateAbility {
+                    source_id: object_id,
+                    ability_index,
+                });
+            }
+        }
+    }
+    actions
+}
+
+/// The `TapLandForMana` rows [`activatable_mana_actions_for_player`] emits for
+/// one land, without sweeping the rest of the battlefield.
+///
+/// A land-tap action names its source, so validating one only needs that
+/// source's rows. Re-running the board-wide sweep made every simulated land tap
+/// pay the readiness simulation of every other costed mana source the player
+/// controls (filter lands, Vivid lands), which dominated legality probing on
+/// boards with several of them.
+fn activatable_land_mana_actions_for_object(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    aura_sources: &[ObjectId],
+    mana_activation_gates: &mana_abilities::ManaActivationGates,
+) -> Vec<GameAction> {
+    let is_controlled_land = state.battlefield.contains(&object_id)
+        && state.objects.get(&object_id).is_some_and(|object| {
+            object.controller == player && object.card_types.core_types.contains(&CoreType::Land)
+        });
+    if !is_controlled_land {
+        return Vec::new();
+    }
+    activatable_land_mana_options_indexed_gated(
+        state,
+        object_id,
+        player,
+        aura_sources,
+        mana_activation_gates,
+    )
+    .into_iter()
+    .filter_map(|option| option.semantic_selection(state))
+    .map(|selection| GameAction::TapLandForMana { selection })
+    .collect()
+}
+
+/// CR 605.3a: Complete semantic capabilities for mana activation, across lands
+/// and nonlands. This is intentionally separate from `GameAction` generation:
+/// callers can freeze these engine-authored candidates in an interaction and
+/// later require an exact fresh match before activation.
+pub fn activatable_mana_source_selections(
+    state: &GameState,
+    player: PlayerId,
+) -> Vec<ManaSourceSelection> {
+    let aura_sources = taps_for_mana_trigger_sources(state);
+    let gates = mana_abilities::ManaActivationGates::compute(state);
+    let mut selections = Vec::new();
+
+    for &object_id in &state.battlefield {
+        let Some(object) = state.objects.get(&object_id) else {
+            continue;
+        };
+        if object.controller != player {
+            continue;
+        }
+
+        let options = current_mana_source_options(state, player, object_id, &aura_sources, &gates);
+        for option in options {
+            let Some(selection) = manual_selection_for_option(state, &option) else {
+                continue;
+            };
+            if !selections.contains(&selection) {
+                selections.push(selection);
+            }
+        }
+    }
+    selections.sort_by(|left, right| left.cmp_stable(right));
+    selections
+}
+
+/// CR 605.3a: Return the source rows a frozen, explicit mana selection may
+/// name. Auto-tap rows stay the base because they preserve land fallback and
+/// tap-trigger metadata; then append every other currently legal activated
+/// mana ability. Unlike the automatic planner, this includes interactive costs
+/// such as "Sacrifice an artifact", because the selection is explicit and the
+/// normal `PayCost` flow still resolves that cost after activation.
+fn current_mana_source_options(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    aura_sources: &[ObjectId],
+    gates: &mana_abilities::ManaActivationGates,
+) -> Vec<ManaSourceOption> {
+    let Some(object) = state.objects.get(&object_id) else {
+        return Vec::new();
+    };
+    if object.zone != Zone::Battlefield || object.controller != player {
+        return Vec::new();
+    }
+
+    let mut options = if object.card_types.core_types.contains(&CoreType::Land) {
+        activatable_land_mana_options_indexed_gated(state, object_id, player, aura_sources, gates)
+    } else {
+        auto_tap_mana_options(state, object_id, player)
+    };
+
+    for (ability_index, ability) in object.abilities.iter().enumerate() {
+        if options
+            .iter()
+            .any(|option| option.ability_index == Some(ability_index))
+            || ability.kind != AbilityKind::Activated
+            || !mana_abilities::is_mana_ability(ability)
+            || !mana_abilities::can_activate_mana_ability_now_gated(
+                state,
+                player,
+                object_id,
+                ability_index,
+                ability,
+                gates,
+            )
+            || !activation_condition_satisfied(state, player, object_id, ability_index, ability)
+        {
+            continue;
+        }
+
+        let penalty = object_mana_ability_penalty(state, object_id, ability);
+        let source_could_produce_two_or_more_colors =
+            source_could_produce_two_or_more_colors(state, object_id, player);
+        for row in emit_source_rows(
+            state,
+            player,
+            object_id,
+            ability_index,
+            ability,
+            ManaPayabilityMode::Current,
+        ) {
+            let option = ManaSourceOption {
+                object_id,
+                ability_index: Some(ability_index),
+                mana_type: row.mana_type,
+                source_could_produce_two_or_more_colors,
+                penalty,
+                atomic_combination: row.atomic_combination,
+                restrictions: row.restrictions,
+                taps_for_mana_overrides: Vec::new(),
+            };
+            if !options.contains(&option) {
+                options.push(option);
+            }
+        }
+    }
+
+    options
+}
+
+fn manual_selection_for_option(
+    state: &GameState,
+    option: &ManaSourceOption,
+) -> Option<ManaSourceSelection> {
+    let mut selection = option.semantic_selection(state)?;
+    let deferred_quantity = option.ability_index.and_then(|ability_index| {
+        let produced = state
+            .objects
+            .get(&option.object_id)
+            .and_then(|object| object.abilities.get(ability_index))
+            .and_then(|ability| match &*ability.effect {
+                Effect::Mana { produced, .. } => Some(produced),
+                _ => None,
+            })?;
+        let count = match produced {
+            ManaProduction::AnyOneColor { count, .. }
+            | ManaProduction::AnyCombination { count, .. }
+            | ManaProduction::AnyOneColorAmongPermanents { count, .. }
+            | ManaProduction::OpponentLandColors { count }
+            | ManaProduction::AnyTypeProduceableBy { count, .. }
+            | ManaProduction::AnyCombinationOfObjectColors { count, .. }
+            | ManaProduction::AnyInCommandersColorIdentity { count, .. } => Some(count),
+            ManaProduction::ChoiceAmongExiledColors { .. } => {
+                return Some(ManaSourceQuantity::Fixed(1));
+            }
+            ManaProduction::Fixed { .. }
+            | ManaProduction::Colorless { .. }
+            | ManaProduction::Mixed { .. }
+            | ManaProduction::ChosenColor { .. }
+            | ManaProduction::NotedType { .. }
+            | ManaProduction::ChoiceAmongCombinations { .. }
+            | ManaProduction::DistinctColorsAmongPermanents { .. }
+            | ManaProduction::TriggerEventManaType => None,
+        }?;
+        Some(match count {
+            QuantityExpr::Fixed { value } => ManaSourceQuantity::Fixed((*value).max(0) as u32),
+            QuantityExpr::Ref { .. }
+            | QuantityExpr::DivideRounded { .. }
+            | QuantityExpr::Offset { .. }
+            | QuantityExpr::ClampMin { .. }
+            | QuantityExpr::Multiply { .. }
+            | QuantityExpr::Sum { .. }
+            | QuantityExpr::UpTo { .. }
+            | QuantityExpr::Power { .. }
+            | QuantityExpr::Difference { .. }
+            | QuantityExpr::Max { .. } => ManaSourceQuantity::Variable,
+        })
+    });
+    if let Some(quantity) = deferred_quantity {
+        // The planner emits one concrete row per color, but a manual activation
+        // must retain the source capability and let the normal mana-choice
+        // resolver ask for its color. The colorless marker is intentionally
+        // inert while `output` is deferred and canonicalizes all planner rows.
+        selection.mana_type = ManaType::Colorless;
+        selection.output = ManaSourceOutput::DeferredColorChoice { quantity };
+    }
+    Some(selection)
+}
+
+/// Resolve an exact generic semantic source selection from fresh candidates.
+/// A deferred flexible output legitimately corresponds to several concrete
+/// planner rows; they all name the same object/ability capability and therefore
+/// collapse to one canonical manual selection above.
+pub(crate) fn live_mana_source_option_for_selection(
+    state: &GameState,
+    player: PlayerId,
+    selection: &ManaSourceSelection,
+) -> Result<ManaSourceOption, EngineError> {
+    if !activatable_mana_source_selections(state, player).contains(selection) {
+        return Err(EngineError::ActionNotAllowed(
+            "Mana source selection is stale or no longer legal".to_string(),
+        ));
+    }
+
+    let aura_sources = taps_for_mana_trigger_sources(state);
+    let gates = mana_abilities::ManaActivationGates::compute(state);
+    let object_id = selection.source.object_id;
+    let options = current_mana_source_options(state, player, object_id, &aura_sources, &gates);
+    let mut matches = options
+        .into_iter()
+        .filter(|option| manual_selection_for_option(state, option).as_ref() == Some(selection));
+    let option = matches.next().ok_or_else(|| {
+        EngineError::ActionNotAllowed(
+            "Mana source selection is stale or no longer legal".to_string(),
+        )
+    })?;
+    if matches.any(|other| other.ability_index != option.ability_index) {
+        return Err(EngineError::InvalidAction(
+            "Mana source selection ambiguously matches multiple live capabilities".to_string(),
+        ));
+    }
+    Ok(option)
+}
+
+/// Re-enumerate the live land-mana rows and resolve one exact semantic
+/// selection to its current engine-owned option. Zero matches means the
+/// submitted choice is stale or illegal; multiple matches mean the selector
+/// omitted a semantic discriminator and must fail closed.
+pub(crate) fn live_land_mana_option_for_selection(
+    state: &GameState,
+    player: PlayerId,
+    selection: &ManaSourceSelection,
+) -> Result<ManaSourceOption, EngineError> {
+    let object_id = selection.source.object_id;
+    let aura_sources = taps_for_mana_trigger_sources(state);
+    let gates = mana_abilities::ManaActivationGates::compute(state);
+    let mut matches = activatable_land_mana_options_indexed_gated(
+        state,
+        object_id,
+        player,
+        &aura_sources,
+        &gates,
+    )
+    .into_iter()
+    .filter(|option| option.semantic_selection(state).as_ref() == Some(selection));
+    let option = matches.next().ok_or_else(|| {
+        EngineError::ActionNotAllowed(
+            "Mana source selection is stale or no longer legal".to_string(),
+        )
+    })?;
+    if matches.next().is_some() {
+        return Err(EngineError::InvalidAction(
+            "Mana source selection ambiguously matches multiple live options".to_string(),
+        ));
+    }
+    Ok(option)
+}
+
+/// Resolve the exact output of an already revalidated land-mana option without
+/// mutating game state. This mirrors activation's resolved-ability and
+/// `ProductionOverride` path rather than reading planner metadata such as
+/// `atomic_combination`.
+///
+/// CR 605.1b + CR 605.3b: Coupled `TapsForMana` triggered mana abilities are
+/// distinct immediate resolutions. Their own live effects and restrictions are
+/// appended after the base activated ability's output.
+pub(crate) fn live_mana_output_for_option(
+    state: &GameState,
+    player: PlayerId,
+    option: &ManaSourceOption,
+) -> Vec<LiveManaOutputUnit> {
+    let mut output = live_base_mana_output(state, player, option);
+    for (trigger_ref, production_override) in &option.taps_for_mana_overrides {
+        output.extend(live_taps_for_mana_output(
+            state,
+            trigger_ref,
+            production_override,
+        ));
+    }
+    output
+}
+
+fn live_base_mana_output(
+    state: &GameState,
+    player: PlayerId,
+    option: &ManaSourceOption,
+) -> Vec<LiveManaOutputUnit> {
+    let Some(ability_index) = option.ability_index else {
+        return vec![LiveManaOutputUnit {
+            mana_type: option.mana_type,
+            restrictions: option.restrictions.clone(),
+        }];
+    };
+    let Some(ability_def) = state
+        .objects
+        .get(&option.object_id)
+        .and_then(|object| object.abilities.get(ability_index))
+    else {
+        return Vec::new();
+    };
+    let ability =
+        resolved_mana_ability_for_live_output(state, option.object_id, player, ability_def);
+    let Effect::Mana {
+        produced,
+        restrictions,
+        ..
+    } = &ability.effect
+    else {
+        return Vec::new();
+    };
+    let production_override =
+        super::casting_costs::production_override_for_option(ability_def, option);
+    live_mana_output_units(
+        state,
+        &ability,
+        produced,
+        restrictions,
+        production_override.as_ref(),
+        option.object_id,
+    )
+}
+
+fn live_taps_for_mana_output(
+    state: &GameState,
+    trigger_ref: &TriggerDefinitionRef,
+    production_override: &ProductionOverride,
+) -> Vec<LiveManaOutputUnit> {
+    let Some(source) = state.objects.get(&trigger_ref.source.object_id) else {
+        return Vec::new();
+    };
+    if crate::types::identifiers::ObjectIncarnationRef::from_object(source) != trigger_ref.source {
+        return Vec::new();
+    }
+    let Some(active) = super::functioning_abilities::active_trigger_definitions(state, source)
+        .find(|active| active.definition_ref == *trigger_ref)
+    else {
+        return Vec::new();
+    };
+    let source_context = trigger_source_context_for_latch(state, source);
+    let ability = super::triggers::build_triggered_ability_from_context(
+        state,
+        active.definition,
+        &source_context,
+        Some(trigger_ref),
+    );
+    let ability = mana_abilities::apply_condition_instead_mana_swap(state, &ability);
+    let Effect::Mana {
+        produced,
+        restrictions,
+        ..
+    } = &ability.effect
+    else {
+        return Vec::new();
+    };
+    live_mana_output_units(
+        state,
+        &ability,
+        produced,
+        restrictions,
+        Some(production_override),
+        ability.source_id,
+    )
+}
+
+/// The live label is one list, so a yield read from the paid object shows the
+/// largest candidate's yield, the same one the capacity reads.
+fn resolved_mana_ability_for_live_output(
+    state: &GameState,
+    source_id: ObjectId,
+    player: PlayerId,
+    ability_def: &AbilityDefinition,
+) -> ResolvedAbility {
+    let ability = match &*ability_def.effect {
+        Effect::Mana { produced, .. } => {
+            largest_sizing_resolution(state, produced, ability_def, source_id, player)
+                .map(|(resolved, _)| resolved)
+        }
+        _ => None,
+    }
+    .unwrap_or_else(|| {
+        super::ability_utils::build_resolved_from_def(ability_def, source_id, player)
+    });
+    mana_abilities::apply_condition_instead_mana_swap(state, &ability)
+}
+
+/// CR 608.2h + CR 118.3: The resolutions a mana ability is sized by before it
+/// is activated: one per object its cost could be paid with, each bound as the
+/// cost-paid object its yield may read, or the single unbound resolution when
+/// the cost chooses no object.
+fn sizing_resolutions(
+    state: &GameState,
+    ability: &AbilityDefinition,
+    object_id: ObjectId,
+    controller: PlayerId,
+) -> Vec<ResolvedAbility> {
+    let resolved = super::ability_utils::build_resolved_from_def(ability, object_id, controller);
+    let Some(candidates) =
+        mana_abilities::cost_paid_object_candidates(state, controller, object_id, ability)
+    else {
+        return vec![resolved];
+    };
+    candidates
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .map(|obj| {
+            let mut bound = resolved.clone();
+            bound.set_cost_paid_object_recursive(CostPaidObjectSnapshot::capture(
+                obj,
+                obj.snapshot_for_mana_spent(),
+            ));
+            bound
+        })
+        .collect()
+}
+
+/// The sizing resolution that adds the most mana, with that amount. An
+/// any-one-color amount that reads the color chosen for it is sized by its
+/// best color (`planned_gross_mana`).
+fn largest_sizing_resolution(
+    state: &GameState,
+    produced: &ManaProduction,
+    ability: &AbilityDefinition,
+    object_id: ObjectId,
+    controller: PlayerId,
+) -> Option<(ResolvedAbility, u32)> {
+    sizing_resolutions(state, ability, object_id, controller)
+        .into_iter()
+        .map(|resolved| {
+            let gross = planned_gross_mana(produced, state, &resolved);
+            (resolved, gross)
+        })
+        .max_by_key(|(_, gross)| *gross)
+}
+
+fn live_mana_output_units(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    produced: &ManaProduction,
+    restrictions: &[ManaSpendRestriction],
+    production_override: Option<&ProductionOverride>,
+    restriction_source_id: ObjectId,
+) -> Vec<LiveManaOutputUnit> {
+    let mana_types = match production_override {
+        Some(ProductionOverride::SingleColor(color)) => {
+            // Match activation's override semantics: resolve the production
+            // count through the effect, then replace every produced unit's
+            // type with the selected color.
+            let mut count_state = state.clone();
+            if matches!(produced, ManaProduction::ChosenColor { .. }) {
+                let Some(color) = mana_type_to_color(*color) else {
+                    return Vec::new();
+                };
+                count_state.last_named_choice =
+                    Some(crate::types::ability::ChoiceValue::Color(color));
+            }
+            // CR 608.2d: an any-one-color amount reads the selected color.
+            let produced = match mana_type_to_color(*color) {
+                Some(chosen) => super::effects::mana::bind_any_one_color_choice(produced, chosen),
+                None => std::borrow::Cow::Borrowed(produced),
+            };
+            let count = super::effects::mana::resolve_mana_types_for_ability(
+                &produced,
+                &count_state,
+                ability,
+            )
+            .len();
+            vec![*color; count]
+        }
+        Some(ProductionOverride::Combination(types)) => types.clone(),
+        None => super::effects::mana::resolve_mana_types_for_ability(produced, state, ability),
+    };
+    let restrictions =
+        super::effects::mana::resolve_restrictions(restrictions, state, restriction_source_id);
+    mana_types
+        .into_iter()
+        .map(|mana_type| LiveManaOutputUnit {
+            mana_type,
+            restrictions: restrictions.clone(),
+        })
+        .collect()
+}
+
+/// Pure action-boundary validation for semantic land-mana submissions. It is
+/// deliberately called before interaction rebinding or transient-state cleanup
+/// so a hostile stale/ambiguous payload leaves the complete game state intact.
+/// `authenticated_actor` is the submitting connection, not the seat whose mana
+/// sources are being activated: CR 723.5a lets a controller spend only the
+/// controlled player's resources, so the seat comes from `state.waiting_for`
+/// and only the right to submit for it is checked here.
+pub(crate) fn preflight_tap_land_action(
+    state: &GameState,
+    authenticated_actor: PlayerId,
+    action: &GameAction,
+) -> Result<(), EngineError> {
+    if !matches!(action, GameAction::TapLandForMana { .. }) {
+        return Ok(());
+    }
+    let waiting_player = match &state.waiting_for {
+        WaitingFor::Priority { player }
+        | WaitingFor::ManaPayment { player, .. }
+        | WaitingFor::ManaAbilityManaPayment { player, .. }
+        | WaitingFor::UnlessPayment { player, .. } => *player,
+        _ => {
+            return Err(EngineError::ActionNotAllowed(
+                "Land mana can only be activated at priority or during a mana payment".to_string(),
+            ));
+        }
+    };
+    // CR 723.5 + CR 723.5a: a turn controller makes the waiting player's
+    // choices, but activates that player's mana sources and spends only that
+    // player's resources.
+    if turn_control::authorized_submitter_for_player(state, waiting_player) != authenticated_actor {
+        return Err(EngineError::WrongPlayer);
+    }
+    let GameAction::TapLandForMana { selection } = action else {
+        unreachable!("guarded by the TapLandForMana match above");
+    };
+    let matches = activatable_land_mana_actions_for_object(
+        state,
+        waiting_player,
+        selection.source.object_id,
+        &taps_for_mana_trigger_sources(state),
+        &mana_abilities::ManaActivationGates::compute(state),
+    )
+    .into_iter()
+    .filter(|candidate| candidate == action)
+    .count();
+    match matches {
+        1 => Ok(()),
+        0 => Err(EngineError::ActionNotAllowed(
+            "Mana source selection is stale or no longer legal".to_string(),
+        )),
+        _ => Err(EngineError::InvalidAction(
+            "Mana source selection ambiguously matches multiple live actions".to_string(),
+        )),
+    }
+}
+
+/// Activate one already-revalidated live land-mana option.
+///
+/// This is the single manual-activation authority for indexed printed mana
+/// abilities and subtype/Aura-derived fallback rows. It owns the exact
+/// production override, triggered-mana override provenance, tap/cost payment,
+/// mana production, and undo bookkeeping.
+pub(crate) fn activate_mana_source_option(
+    state: &mut GameState,
+    player: PlayerId,
+    option: &ManaSourceOption,
+    events: &mut Vec<GameEvent>,
+    resume: ManaAbilityResume,
+) -> Result<WaitingFor, EngineError> {
+    activate_mana_source_option_with_output(
+        state,
+        player,
+        option,
+        ManaSourceOutput::Concrete(option.mana_type),
+        events,
+        resume,
+    )
+}
+
+/// Activate a live source using the preserved output provenance. Deferred
+/// flexible outputs deliberately pass no production override, so the existing
+/// ManaChoice flow remains the single authority for the eventual color choice.
+pub(crate) fn activate_mana_source_option_with_output(
+    state: &mut GameState,
+    player: PlayerId,
+    option: &ManaSourceOption,
+    output: ManaSourceOutput,
+    events: &mut Vec<GameEvent>,
+    resume: ManaAbilityResume,
+) -> Result<WaitingFor, EngineError> {
+    for (trigger_ref, production_override) in &option.taps_for_mana_overrides {
+        state
+            .pending_taps_for_mana_overrides
+            .insert(trigger_ref.clone(), production_override.clone());
+    }
+
+    let waiting_for = if let Some(ability_index) = option.ability_index {
+        let ability = state
+            .objects
+            .get(&option.object_id)
+            .and_then(|object| object.abilities.get(ability_index))
+            .cloned()
+            .ok_or_else(|| {
+                EngineError::ActionNotAllowed(
+                    "Selected mana ability is no longer available".to_string(),
+                )
+            })?;
+        let production_override = match output {
+            ManaSourceOutput::Concrete(_) => {
+                super::casting_costs::production_override_for_option(&ability, option)
+            }
+            ManaSourceOutput::DeferredColorChoice { .. } => None,
+        };
+        mana_abilities::activate_mana_ability(
+            state,
+            option.object_id,
+            player,
+            ability_index,
+            &ability,
+            events,
+            resume,
+            production_override,
+        )?
+    } else {
+        let tapped = super::object_state::resolve_and_apply_object_edit(
+            state,
+            option.object_id,
+            crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
+            true,
+        )
+        .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+        debug_assert!(tapped, "preflighted land tap must transition status");
+        events.push(GameEvent::permanent_tapped(state, option.object_id, None));
+        // CR 305.6 + CR 605.3: tapping a basic land for mana activates its
+        // intrinsic mana ability; observe its triggers at that boundary.
+        let activation_event = super::casting_targets::emit_ability_activated(
+            state,
+            player,
+            option.object_id,
+            crate::types::events::ActivatedAbilityKind::Mana,
+            None,
+            crate::types::zones::Zone::Battlefield,
+            events,
+        );
+        super::triggers::collect_activation_event_at_boundary(state, events, activation_event)
+            .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+        // The atomic combination is planning metadata: Aura-trigger bonuses are
+        // produced by their own TapsForMana abilities after this single source
+        // event. Producing the combination here would add those bonuses twice.
+        let produced = vec![option.mana_type];
+        for mana_type in &produced {
+            mana_payment::produce_mana_with_attributes(
+                state,
+                option.object_id,
+                *mana_type,
+                player,
+                true,
+                &option.restrictions,
+                &[],
+                None,
+                events,
+            );
+        }
+        events.push(GameEvent::TappedForMana {
+            player_id: player,
+            source_id: option.object_id,
+            produced,
+            tap_state: ManaTapState::FromTap,
+        });
+        events.push(GameEvent::ManaAbilityProduced {
+            player_id: player,
+            source_id: option.object_id,
+            produced: vec![option.mana_type],
+            trigger_state: crate::types::events::ManaAbilityTriggerState::Pending,
+        });
+        mana_abilities::resume_waiting_for(player, resume)
+    };
+
+    if option.penalty.is_undoable() {
+        record_undoable_mana_tap(state, player, option.object_id, events);
+    }
+    Ok(waiting_for)
+}
+
+/// CR 605.3b: the single authority for offering an undo of a mana tap
+/// (`UntapLandForMana`). Undo is an engine convenience, not a rules action, so
+/// it is offered only when it can reverse everything the tap did: the mana and
+/// the tap itself. It is recorded only for an activation that completed in
+/// `events` and whose boundary observation bound nothing
+/// (`ActivationObservers::Unbound`). An activation still paused mid-cost (a
+/// replacement choice) has not been observed yet, so it is never recorded;
+/// one an activation trigger observed (CR 603.10) queued an ability or spent
+/// a "triggers only once each turn" limit, which undo cannot reverse. Callers
+/// decide the penalty axis (`ManaSourcePenalty::is_undoable`) first.
+pub(crate) fn record_undoable_mana_tap(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    events: &[GameEvent],
+) {
+    let completed_unobserved = events.iter().any(|event| {
+        matches!(
+            event,
+            GameEvent::AbilityActivated {
+                player_id,
+                source_id: activated,
+                kind: crate::types::events::ActivatedAbilityKind::Mana,
+                trigger_state: crate::types::events::ActivationTriggerState::CollectedAtActivation {
+                    observers: crate::types::events::ActivationObservers::Unbound,
+                },
+                ..
+            } if *player_id == player && *activated == source_id
+        )
+    });
+    if !completed_unobserved {
+        return;
+    }
+    state
+        .lands_tapped_for_mana
+        .entry(player)
+        .or_default()
+        .push(source_id);
+}
+
+/// CR 605.3b: withdraw any undo recorded for `player`'s tap of `source_id` once
+/// observing its activation bound a trigger.
+pub(crate) fn revoke_undoable_mana_tap(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+) {
+    if let Some(tapped) = state.lands_tapped_for_mana.get_mut(&player) {
+        tapped.retain(|tapped_id| *tapped_id != source_id);
+    }
+}
+
+/// CR 605.3a-b: Revalidate and activate a generic mana capability. The caller
+/// supplies its resume because this entry point is shared by priority and a
+/// spell's mana-payment interaction; it never translates back into
+/// `ActivateAbility`, preserving the frozen selection identity.
+pub(crate) fn activate_mana_source_selection(
+    state: &mut GameState,
+    player: PlayerId,
+    selection: &ManaSourceSelection,
+    events: &mut Vec<GameEvent>,
+    resume: ManaAbilityResume,
+) -> Result<WaitingFor, EngineError> {
+    let option = live_mana_source_option_for_selection(state, player, selection)?;
+    activate_mana_source_option_with_output(
+        state,
+        player,
+        &option,
+        selection.output,
+        events,
+        resume,
+    )
+}
+
 /// CR 107.6 + CR 302.6: True when the cost includes the untap symbol ({Q}).
 /// Like {T}, a {Q} cost on a creature is gated by summoning sickness (CR 302.6
 /// names both symbols) and requires the source to currently be tapped. Matches a
 /// bare `Untap` cost and one nested inside a `Composite` (Pili-Pala: `{2}, {Q}`).
 pub(crate) fn has_untap_component(cost: &Option<AbilityCost>) -> bool {
     cost_has_component(cost, |c| matches!(c, AbilityCost::Untap))
+}
+
+/// CR 605.3a + CR 701.21: True when this whole cost tree pays by sacrificing
+/// only the ability's own source (`TargetFilter::SelfRef`, exactly one
+/// permanent) with **no** other player choice anywhere in the tree — Gold's
+/// bare "Sacrifice this token" and Treasure's `{T}, Sacrifice this artifact`.
+/// Such an activation is exactly as deterministic as a `{T}` cost, so auto-tap
+/// may select it the same way.
+///
+/// The predicate validates the **entire** cost, not a single component: it
+/// reuses the deny-by-default full-tree authority
+/// [`mana_abilities::cost_component_choice_free`] (`Tap` + single-token
+/// self-sacrifice + `Composite`s built solely from those) and additionally
+/// requires that a self-sacrifice component actually be present. A composite
+/// that merely *contains* a self-sacrifice beside a choice-bearing sibling —
+/// Lion's Eye Diamond's `Composite[Discard{Chosen}, Sacrifice(SelfRef,1)]` —
+/// fails the whole-tree check and is correctly rejected, so its `Discard`
+/// prompt is never bypassed. It stays off the auto-tap path and remains
+/// reachable only through
+/// `has_activatable_player_choice_mana_ability_for_payment`'s manual-payment flow.
+///
+/// The tree is additionally ARITY-BOUNDED: exactly one self-sacrifice leaf and
+/// at most one `{T}` leaf, counted over the FLATTENED tree, with no nested
+/// `Composite`. A multi-consuming-leaf tree is choice-free yet unpayable,
+/// because the payment path pays leaves one at a time against the already
+/// mutated source: a second self-sacrifice leaf finds the source no longer on
+/// the battlefield (CR 701.21a) and a second `{T}` leaf finds it already tapped
+/// (CR 118.3), so each errors. Without the bound this predicate would answer
+/// `true` where the legality simulation answers `false` — an unsafe flip, since
+/// callers use it to skip that simulation.
+pub(crate) fn has_unambiguous_self_sacrifice_component(cost: &Option<AbilityCost>) -> bool {
+    cost.as_ref().is_some_and(|inner| {
+        // Whole-tree invariant first (shared authority): rejects any interactive
+        // sibling such as LED's `Discard`, so only `Tap` and single-token
+        // self-sacrifice leaves survive to be counted below.
+        mana_abilities::cost_component_choice_free(inner)
+            // Keep the leaf multiset visible to the one-level walkers that gate
+            // this activation (see `cost_tree_is_flat`).
+            && cost_tree_is_flat(inner)
+            // CR 701.21a: sacrificing moves the permanent from the battlefield,
+            // so a second self-sacrifice leaf has nothing left to move. Requiring
+            // a component to be PRESENT also keeps a pure `{T}` cost from being
+            // misclassified as self-sacrifice.
+            && count_leaf_components(inner, &|leaf| {
+                matches!(
+                    leaf,
+                    AbilityCost::Sacrifice(SacrificeCost {
+                        target: TargetFilter::SelfRef,
+                        requirement: SacrificeRequirement::Count { count: 1 },
+                    })
+                )
+            }) == 1
+            // CR 118.3: a permanent that's already tapped can't be tapped to pay
+            // a cost, so a second `{T}` leaf errors the same way.
+            && count_leaf_components(inner, &|leaf| matches!(leaf, AbilityCost::Tap)) <= 1
+    })
+}
+
+/// Number of FLATTENED LEAF components of `cost` satisfying `pred`.
+///
+/// Unlike [`cost_has_component`] — presence, one `Composite` level — this walker
+/// recurses to the leaves, so it counts the same multiset the payment path pays:
+/// `mana_abilities::append_mana_ability_cost_components` flattens nested
+/// `Composite`s identically, then pays one leaf at a time. Every arity bound must
+/// use this walker; a one-level count reports `1` for
+/// `Composite[Composite[Tap, Sacrifice], Sacrifice]`, where the payer pays two
+/// sacrifices. `OneOf` stays opaque — only one of its branches is ever paid, so
+/// its contents are not part of the flattened multiset.
+fn count_leaf_components(cost: &AbilityCost, pred: &impl Fn(&AbilityCost) -> bool) -> usize {
+    match cost {
+        AbilityCost::Composite { costs } => costs
+            .iter()
+            .map(|cost| count_leaf_components(cost, pred))
+            .sum(),
+        leaf => usize::from(pred(leaf)),
+    }
+}
+
+/// True when every leaf of `cost` is visible at the top level: a non-`Composite`
+/// cost, or a `Composite` with no `Composite` child.
+///
+/// The gates that surround an unambiguous self-sacrifice activation read the cost
+/// tree with the ONE-LEVEL [`cost_has_component`] walker:
+/// `mana_abilities::mana_ability_ready_without_simulation_gated` gates its tapped,
+/// `object_cant_tap` and summoning-sickness checks on [`has_tap_component`]
+/// (CR 106.12 + CR 302.6), and [`object_has_tapless_self_sacrifice_mana_ability`]
+/// reads `!has_tap_component`. A nested
+/// `Composite[Composite[Tap, Sacrifice(SelfRef, 1)]]` hides its `{T}` from both,
+/// so an already-tapped source would clear readiness while the payment path —
+/// which does flatten — still errors on that `Tap` leaf (CR 118.3). Requiring a
+/// flat tree keeps this predicate aligned with every walker that gates it, rather
+/// than depending on those walkers to be changed in lockstep.
+fn cost_tree_is_flat(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::Composite { costs } => !costs
+            .iter()
+            .any(|cost| matches!(cost, AbilityCost::Composite { .. })),
+        _ => true,
+    }
+}
+
+/// CR 605.3a + CR 106.12 + CR 302.6: True when `obj` has an activated mana
+/// ability that pays purely by sacrificing its own source with **no** `{T}`
+/// component (Gold's "Sacrifice this token: Add one mana of any color."). Such
+/// an ability is unaffected by the untapped/summoning-sickness gate, so a
+/// *tapped* or summoning-sick source can still pay it. Auto-tap source
+/// discovery uses this to decide whether the tapped/summoning-sick object-level
+/// prefilter may be skipped for that source.
+///
+/// A source whose only self-sacrifice mana ability *also* carries `{T}`
+/// (Treasure's `{T}, Sacrifice this artifact`) is deliberately excluded: once
+/// tapped it genuinely cannot activate, so it must stay behind the object-level
+/// tapped prefilter — skipping it would let the tapped source re-enter the
+/// per-ability payability scan and break the auto-tap linearity guarantee.
+pub(crate) fn object_has_tapless_self_sacrifice_mana_ability(
+    obj: &crate::game::game_object::GameObject,
+) -> bool {
+    obj.abilities.iter().any(|ability| {
+        ability.kind == AbilityKind::Activated
+            && mana_abilities::is_mana_ability(ability)
+            && has_unambiguous_self_sacrifice_component(&ability.cost)
+            && !has_tap_component(&ability.cost)
+    })
 }
 
 /// CR 605.3a + CR 106.12 + CR 107.6: True when paying this mana-ability cost is
@@ -457,6 +1543,122 @@ pub(crate) fn mana_ability_penalty(ability: &AbilityDefinition) -> ManaSourcePen
     ManaSourcePenalty::None
 }
 
+/// CR 603.2e + CR 701.26: Controller-harm amount from a self-referential
+/// `TriggerMode::Taps` sibling trigger on `object_id` — City of Brass prints
+/// its self-damage as a *separate* "Whenever this land becomes tapped, it
+/// deals 1 damage to you" triggered ability (fires on ANY tap, not only a mana
+/// activation), rather than folding the damage into the mana ability's own
+/// resolution chain the way painlands do (Adarkar Wastes: "{T}: Add {W} or
+/// {U}. This land deals 1 damage to you." is ONE ability). Tarnished Citadel
+/// likewise has a mana penalty, but its colored mana ability embeds the damage
+/// in its own chain. `mana_ability_penalty` only walks a mana ability's own
+/// chain, so it never sees City of Brass's sibling trigger.
+///
+/// Returns `Some(amount)` when at least one such trigger is found (summed the
+/// same way `chain_harms_controller_amount` sums a single chain), `None` when
+/// the object carries no self-referential harmful `Taps` trigger.
+fn object_self_tap_harm_amount(state: &GameState, object_id: ObjectId) -> Option<Option<u16>> {
+    let obj = state.objects.get(&object_id)?;
+    let source_context = trigger_source_context_for_latch(state, obj);
+    let mut harm_amounts = obj
+        .trigger_definitions
+        .iter_all()
+        .map(|entry| entry.definition())
+        .filter(|trigger| trigger.mode == TriggerMode::Taps)
+        .filter(|trigger| {
+            trigger.valid_card.as_ref().is_none_or(|filter| {
+                super::trigger_matchers::target_filter_matches_object(
+                    state,
+                    object_id,
+                    filter,
+                    &source_context,
+                )
+            })
+        })
+        .filter_map(|trigger| trigger.execute.as_deref())
+        .filter_map(chain_harms_controller_amount)
+        .peekable();
+    harm_amounts.peek()?;
+    Some(harm_amounts.fold(Some(0_u16), fold_amount))
+}
+
+/// CR 605.3b: Single classification authority for a mana-source OBJECT's full
+/// penalty axis — [`mana_ability_penalty`]'s ability-chain classification
+/// merged with any self-referential `Taps` sibling trigger that harms the
+/// controller ([`object_self_tap_harm_amount`]). This is the version every
+/// real consumer (auto-tap sort, the priority-meaningful gate,
+/// `UntapLandForMana` undoability) must call instead of `mana_ability_penalty`
+/// directly, so a City-of-Brass-shaped card can never be misclassified as
+/// `None` just because its damage lives on a sibling trigger instead of the
+/// mana ability's own chain.
+///
+/// A `Sacrifices`/`PaysLifeOnActivation` classification from the ability's own
+/// chain is already worse than or equal to anything a sibling `Taps` trigger
+/// could add, so those short-circuit unchanged. Otherwise, a sibling harm
+/// amount folds into (or replaces) `DealsDamageOnResolution`.
+pub(crate) fn object_mana_ability_penalty(
+    state: &GameState,
+    object_id: ObjectId,
+    ability: &AbilityDefinition,
+) -> ManaSourcePenalty {
+    let own = mana_ability_penalty(ability);
+    if !has_tap_component(&ability.cost) {
+        return own;
+    }
+    if matches!(
+        own,
+        ManaSourcePenalty::Sacrifices | ManaSourcePenalty::PaysLifeOnActivation { .. }
+    ) {
+        return own;
+    }
+    match object_self_tap_harm_amount(state, object_id) {
+        Some(sibling_amount) => ManaSourcePenalty::DealsDamageOnResolution {
+            fixed_amount: match own {
+                ManaSourcePenalty::DealsDamageOnResolution { fixed_amount } => {
+                    fold_amount(fixed_amount, sibling_amount)
+                }
+                _ => sibling_amount,
+            },
+        },
+        None => own,
+    }
+}
+
+/// CR 118.1 + CR 605.3b: True when activating this mana-source row costs or does
+/// more than tapping its source for mana. That is a classified penalty
+/// ([`ManaSourcePenalty`]: damage, life, an irreversible rider, a sacrifice), or
+/// any cost component other than `{T}`: a mana sub-cost (filter lands),
+/// exert (CR 701.43a), sacrifice (CR 701.21a), life, energy, counters, tapping
+/// other permanents, and every future cost kind. Deny-by-default: only `{T}`
+/// counts as free, so an unclassified cost is a drawback.
+///
+/// The basic-land intrinsic row (`ability_index: None`, CR 305.6) is free. A row
+/// whose ability no longer exists is treated as a drawback, so it can never
+/// stand in as a source's drawback-free alternative.
+///
+/// Auto-pay uses this to prefer a source's drawback-free row when a plan built
+/// from such rows pays the whole cost (see `casting_costs::choose_auto_tap_plan`).
+pub(crate) fn mana_source_option_has_drawback(
+    state: &GameState,
+    option: &ManaSourceOption,
+) -> bool {
+    if option.penalty != ManaSourcePenalty::None {
+        return true;
+    }
+    let Some(ability_index) = option.ability_index else {
+        return false;
+    };
+    state
+        .objects
+        .get(&option.object_id)
+        .and_then(|object| object.abilities.get(ability_index))
+        .is_none_or(|ability| {
+            ability.cost.as_ref().is_some_and(|cost| {
+                count_leaf_components(cost, &|leaf| !matches!(leaf, AbilityCost::Tap)) > 0
+            })
+        })
+}
+
 /// CR 119.3 (life) / CR 120.3 (damage → life loss): The benefit twin of
 /// [`effect_controller_harm_amount`]. Returns `true` iff a single `Effect`
 /// favors the player who caused the trigger (the tapper): opponent-scoped
@@ -465,13 +1667,14 @@ pub(crate) fn mana_ability_penalty(ability: &AbilityDefinition) -> ManaSourcePen
 ///
 /// Exact AST shapes (verified against `types/ability.rs`): opponent scope is
 /// `TargetFilter::Typed(TypedFilter { controller: Some(ControllerRef::Opponent),
-/// .. })` — there is NO bare `TargetFilter::Opponent` variant (cf.
-/// `player_matches_filter`). `DamageEachPlayer { player_filter: Opponent }` is
-/// Zhur-Taa Druid's live shape. `GainLife.player` is a `TargetFilter` that
-/// serde-defaults to `Controller` (never `None` in the AST). Everything else —
-/// self / triggering-player scope, `Unimplemented`, `GenericEffect`, and every
-/// unmodeled shape — falls through the documented default arm to `false`
-/// (default-pass). Broadening beyond CR 119 / CR 120 is a deliberate follow-up.
+/// .. })`; the bare `TargetFilter::Opponent` variant identifies an announcing
+/// player for opponent-choice target slots and is intentionally not a damage
+/// scope. `DamageEachPlayer { player_filter: Opponent }` is Zhur-Taa Druid's live
+/// shape. `GainLife.player` is a `TargetFilter` that serde-defaults to
+/// `Controller` (never `None` in the AST). Everything else — self /
+/// triggering-player scope, `Unimplemented`, `GenericEffect`, and every unmodeled
+/// shape — falls through the documented default arm to `false` (default-pass).
+/// Broadening beyond CR 119 / CR 120 is a deliberate follow-up.
 fn effect_benefits_trigger_controller(effect: &Effect) -> bool {
     matches!(
         effect,
@@ -522,7 +1725,7 @@ pub(crate) fn trigger_chain_benefits_controller(trigger: &TriggerDefinition) -> 
 }
 
 /// CR 605.1b (+ CR 603.3): True when `trigger` is a *non-mana* tap-triggered
-/// ability — mode `TapsForMana` or `ManaAdded` whose `execute` chain contains
+/// ability — mode `TapsForMana`, `ManaAbilityProduced`, or `ManaAdded` whose `execute` chain contains
 /// any effect other than mana production.
 ///
 /// Such a trigger FAILS CR 605.1b's mana-ability criteria (it does not "add mana
@@ -536,7 +1739,7 @@ pub(crate) fn trigger_chain_benefits_controller(trigger: &TriggerDefinition) -> 
 pub(crate) fn is_non_mana_tap_trigger(trigger: &TriggerDefinition) -> bool {
     matches!(
         trigger.mode,
-        TriggerMode::TapsForMana | TriggerMode::ManaAdded
+        TriggerMode::TapsForMana | TriggerMode::ManaAbilityProduced | TriggerMode::ManaAdded
     ) && trigger.execute.as_deref().is_some_and(|execute| {
         !matches!(*execute.effect, Effect::Mana { .. }) || chain_has_non_mana_effect(execute)
     })
@@ -558,7 +1761,8 @@ pub(crate) fn beneficial_non_mana_tap_trigger_sources(
         .filter(|object_id| {
             state.objects.get(object_id).is_some_and(|obj| {
                 obj.controller == player
-                    && obj.trigger_definitions.iter_all().any(|trigger| {
+                    && obj.trigger_definitions.iter_all().any(|entry| {
+                        let trigger = entry.definition();
                         is_non_mana_tap_trigger(trigger)
                             && trigger_chain_benefits_controller(trigger)
                     })
@@ -577,7 +1781,15 @@ pub fn activatable_land_mana_options(
     object_id: ObjectId,
     controller: PlayerId,
 ) -> Vec<ManaSourceOption> {
-    land_mana_options(state, object_id, controller, true, true, None, None)
+    land_mana_options(
+        state,
+        object_id,
+        controller,
+        true,
+        ManaPayabilityMode::Current,
+        None,
+        None,
+    )
 }
 
 pub(crate) fn activatable_land_mana_options_indexed_gated(
@@ -592,7 +1804,7 @@ pub(crate) fn activatable_land_mana_options_indexed_gated(
         object_id,
         controller,
         true,
-        true,
+        ManaPayabilityMode::Current,
         Some(aura_sources),
         Some(gates),
     )
@@ -602,20 +1814,31 @@ pub(crate) fn activatable_land_mana_options_indexed_gated(
 /// precomputes the TapsForMana trigger-source list once
 /// (`taps_for_mana_trigger_sources`) and threads it through each land, avoiding
 /// a per-land full-battlefield scan. Byte-identical to a per-land form.
+#[cfg(test)]
 pub(crate) fn auto_tap_land_mana_options_indexed(
     state: &GameState,
     object_id: ObjectId,
     controller: PlayerId,
     aura_sources: &[ObjectId],
 ) -> Vec<ManaSourceOption> {
+    auto_tap_land_mana_options_indexed_gated(state, object_id, controller, aura_sources, None)
+}
+
+pub(crate) fn auto_tap_land_mana_options_indexed_gated(
+    state: &GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+    aura_sources: &[ObjectId],
+    gates: Option<&mana_abilities::ManaActivationGates>,
+) -> Vec<ManaSourceOption> {
     land_mana_options(
         state,
         object_id,
         controller,
         true,
-        false,
+        ManaPayabilityMode::Planning,
         Some(aura_sources),
-        None,
+        gates,
     )
 }
 
@@ -720,6 +1943,20 @@ pub fn display_land_mana_pips(
                     }
                 }
             },
+            // CR 106.1b + CR 106.5: Engine-set noted type (Jeweled Amulet class).
+            // Unreachable in practice today — no printed land has this
+            // mechanic — but display the noted type when present, mirroring
+            // `ChoiceAmongExiledColors`'s "compute, push if non-empty" shape.
+            ManaProduction::NotedType { .. } => {
+                if let Some(mana_type) = super::effects::mana::noted_mana_type_for(state, object_id)
+                {
+                    if let Some(color) = mana_type_to_color(mana_type) {
+                        push(&mut pips, ManaPip::Color(color));
+                    } else {
+                        push(&mut pips, ManaPip::Colorless);
+                    }
+                }
+            }
             // CR 106.7: Dynamically computed from opponent lands.
             ManaProduction::OpponentLandColors { .. } => {
                 let colors: Vec<ManaColor> = opponent_land_color_options(state, controller)
@@ -883,7 +2120,14 @@ pub fn activatable_mana_options(
     if restrictions::summoning_sick_for_tap_ability(state, obj) {
         return Vec::new();
     }
-    scan_mana_abilities(state, obj, object_id, controller, true, None)
+    scan_mana_abilities(
+        state,
+        obj,
+        object_id,
+        controller,
+        ManaPayabilityMode::Current,
+        None,
+    )
 }
 
 pub(crate) fn auto_tap_mana_options(
@@ -891,16 +2135,45 @@ pub(crate) fn auto_tap_mana_options(
     object_id: ObjectId,
     controller: PlayerId,
 ) -> Vec<ManaSourceOption> {
+    auto_tap_mana_options_gated(state, object_id, controller, None)
+}
+
+pub(crate) fn auto_tap_mana_options_gated(
+    state: &GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+    gates: Option<&mana_abilities::ManaActivationGates>,
+) -> Vec<ManaSourceOption> {
     let Some(obj) = state.objects.get(&object_id) else {
         return Vec::new();
     };
-    if obj.zone != Zone::Battlefield || obj.controller != controller || obj.tapped {
+    if obj.zone != Zone::Battlefield || obj.controller != controller {
         return Vec::new();
     }
-    if restrictions::summoning_sick_for_tap_ability(state, obj) {
+    // CR 106.12 + CR 302.6: The tapped / summoning-sickness prefilter is only
+    // valid for a `{T}` cost. A source whose sole payable mana ability is an
+    // unambiguous self-sacrifice (Gold's "Sacrifice this token: Add one mana of
+    // any color.") can pay even while tapped or summoning-sick, so we must not
+    // discard it at the object level. When such an ability is present we fall
+    // through to `scan_mana_abilities`; the per-ability `{T}` gate in
+    // `is_active_tap_mana_ability` still rejects any tap-cost ability of a
+    // tapped/summoning-sick source, so no `{T}` source leaks through.
+    if obj.tapped && !object_has_tapless_self_sacrifice_mana_ability(obj) {
         return Vec::new();
     }
-    scan_mana_abilities(state, obj, object_id, controller, false, None)
+    if restrictions::summoning_sick_for_tap_ability(state, obj)
+        && !object_has_tapless_self_sacrifice_mana_ability(obj)
+    {
+        return Vec::new();
+    }
+    scan_mana_abilities(
+        state,
+        obj,
+        object_id,
+        controller,
+        ManaPayabilityMode::Planning,
+        gates,
+    )
 }
 
 /// CR 107.1b + CR 601.2f: Maximum *net* mana a single battlefield object can
@@ -931,16 +2204,21 @@ pub fn max_mana_yield(state: &GameState, object_id: ObjectId, controller: Player
         .iter()
         .enumerate()
         .filter(|(idx, ability)| {
-            is_active_tap_mana_ability(state, object_id, controller, *idx, ability, true, None)
+            is_active_tap_mana_ability(
+                state,
+                object_id,
+                controller,
+                *idx,
+                ability,
+                ManaPayabilityMode::Current,
+                None,
+            )
         })
         .filter_map(|(_, ability)| match &*ability.effect {
             Effect::Mana { produced, .. } => {
-                let resolved =
-                    super::ability_utils::build_resolved_from_def(ability, object_id, controller);
-                let gross = super::effects::mana::resolve_mana_types_for_ability(
-                    produced, state, &resolved,
-                )
-                .len() as u32;
+                let gross =
+                    largest_sizing_resolution(state, produced, ability, object_id, controller)
+                        .map_or(0, |(_, gross)| gross);
                 // CR 605.3b: Net the mana paid to activate this ability —
                 // gross output overstates what a filter land actually adds.
                 let activation_cost = mana_abilities::mana_sub_cost_of(&ability.cost)
@@ -976,7 +2254,7 @@ pub fn max_mana_yield(state: &GameState, object_id: ObjectId, controller: Player
 /// CR 117.1d + CR 601.2g: Maximum net mana this permanent could contribute via
 /// **any** mana ability the controller could currently activate, including
 /// non-tap-cost mana abilities (Sacrifice — KCI, Phyrexian Altar, Ashnod's
-/// Altar; Discard — Lion's Eye Diamond; Pay Life; etc.).
+/// Altar; unrestricted discard costs; Pay Life; etc.).
 ///
 /// Unlike [`max_mana_yield`], this is NOT restricted to abilities that include
 /// `{T}` in their cost. It exists so the castability gate
@@ -986,7 +2264,7 @@ pub fn max_mana_yield(state: &GameState, object_id: ObjectId, controller: Player
 /// **manually** during cost payment?" — not "could auto-tap alone cover this?".
 ///
 /// This is a read-only feasibility scan. Auto-payment must continue to use
-/// [`max_mana_yield`] / [`is_active_tap_mana_ability`] because the auto-tap
+/// [`is_active_tap_mana_ability`] because the auto-tap
 /// simulator can't auto-sacrifice or auto-discard.
 //
 // CR 117.1d: A player may activate a mana ability whenever a rule or effect
@@ -995,11 +2273,19 @@ pub fn max_mana_yield(state: &GameState, object_id: ObjectId, controller: Player
 // activate mana abilities before paying. Affordability must reflect what the
 // player COULD pay manually, not only what the engine could auto-tap.
 fn mana_ability_allowed_for_payment(
+    ability: &AbilityDefinition,
     restrictions: &[ManaSpendRestriction],
     state: &GameState,
     object_id: ObjectId,
     payment_context: Option<&PaymentContext<'_>>,
 ) -> bool {
+    // CR 304.5 + CR 605.1: Mana classification does not override printed timing limits.
+    if ability
+        .activation_restrictions
+        .contains(&ActivationRestriction::AsInstant)
+    {
+        return false;
+    }
     let Some(ctx) = payment_context else {
         return true;
     };
@@ -1008,11 +2294,56 @@ fn mana_ability_allowed_for_payment(
         .all(|restriction| restriction.allows(ctx))
 }
 
+/// Which payment estimate a mana capacity serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapacityUse {
+    /// Castability: colored shards are assigned first, and a color chosen on
+    /// activation is charged for what that color adds.
+    Castability,
+    /// The {X} ceiling sums capacities with no per-color accounting, so a
+    /// source whose amount depends on the color it is activated for (Nyx Lotus
+    /// with unequal devotion) is left out: the ceiling fails closed.
+    XCeiling,
+}
+
+/// CR 107.3 + CR 601.2f: One permanent's mana capacity toward the largest {X}
+/// the controller can announce (see [`CapacityUse::XCeiling`]).
+pub(crate) fn x_ceiling_mana_capacity(
+    state: &GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+    payment_context: Option<&PaymentContext<'_>>,
+) -> u32 {
+    mana_capacity(
+        state,
+        object_id,
+        controller,
+        payment_context,
+        CapacityUse::XCeiling,
+    )
+}
+
 pub(crate) fn feasible_mana_capacity(
     state: &GameState,
     object_id: ObjectId,
     controller: PlayerId,
     payment_context: Option<&PaymentContext<'_>>,
+) -> u32 {
+    mana_capacity(
+        state,
+        object_id,
+        controller,
+        payment_context,
+        CapacityUse::Castability,
+    )
+}
+
+fn mana_capacity(
+    state: &GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+    payment_context: Option<&PaymentContext<'_>>,
+    capacity_use: CapacityUse,
 ) -> u32 {
     let Some(obj) = state.objects.get(&object_id) else {
         return 0;
@@ -1021,91 +2352,122 @@ pub(crate) fn feasible_mana_capacity(
         return 0;
     }
 
-    let explicit_max = obj
-        .abilities
+    obj.abilities
         .iter()
         .enumerate()
         .filter(|(idx, ability)| {
-            // CR 605.1a: Must be an activated mana ability.
-            if ability.kind != AbilityKind::Activated || !mana_abilities::is_mana_ability(ability) {
-                return false;
-            }
-            // CR 605.3a + CR 117.1d: The engine-authoritative "is the cost
-            // currently payable?" check covers sacrifice supply
-            // (`find_eligible_sacrifice_targets`), discard-hand availability,
-            // life total, tap eligibility, and summoning sickness via the
-            // shared `is_payable_for_mana_ability` + activation simulation.
-            // We delegate to it rather than re-implementing the cost gate.
-            if !mana_abilities::can_activate_mana_ability_now(
-                state, controller, object_id, *idx, ability,
-            ) {
-                return false;
-            }
-            // CR 604: Static activation restrictions ("only during your
-            // upkeep", etc.) must hold — mirrors `is_active_tap_mana_ability`.
-            if !activation_condition_satisfied(state, controller, object_id, *idx, ability) {
-                return false;
-            }
-            // CR 106.6: Restricted mana only counts toward this spell when
-            // the restriction permits it (issue #2011: Eldrazi Temple).
-            match &*ability.effect {
-                Effect::Mana { restrictions, .. } => mana_ability_allowed_for_payment(
-                    restrictions,
+            is_payment_mana_ability(ability)
+                && mana_ability_usable_for_payment(
                     state,
+                    controller,
                     object_id,
+                    *idx,
+                    ability,
                     payment_context,
-                ),
-                _ => false,
-            }
-        })
-        .filter_map(|(_, ability)| match &*ability.effect {
-            Effect::Mana { produced, .. } => {
-                let resolved =
-                    super::ability_utils::build_resolved_from_def(ability, object_id, controller);
-                let gross = super::effects::mana::resolve_mana_types_for_ability(
-                    produced, state, &resolved,
                 )
-                .len() as u32;
-                // CR 605.3b: Net the mana paid to activate. Non-mana cost
-                // components (Sacrifice / Discard / PayLife / Exile) have no
-                // mana sub-cost, so `mana_sub_cost_of` returns `None` and the
-                // net equals the gross (e.g., KCI activation cost is one
-                // sacrificed artifact, no mana — full 2 colorless yield).
-                //
-                // Caveat: collapsing mana sub-cost to a single `mana_value`
-                // assumes the sub-cost is paid from the SAME color domain as
-                // the produced mana (filter-land case: pay {1} or any color,
-                // produce {U/W}). For exotic abilities whose mana sub-cost is
-                // a different color than what they produce — e.g. a
-                // hypothetical `{T}, Pay {U}: Add {2}{R}` — this net of 2 is
-                // pessimistic-but-safe in one direction (we never claim
-                // capacity we can't produce) but over-states feasibility in
-                // the other (the {U} sub-cost has to come from another
-                // source, which this scan doesn't model). Such cards are
-                // vanishingly rare in real Magic; if one is added the
-                // sub-cost color domain should be threaded through here
-                // rather than collapsed to `mana_value`.
-                let activation_cost = mana_abilities::mana_sub_cost_of(&ability.cost)
-                    .map_or(0, |cost| cost.mana_value());
-                Some(gross.saturating_sub(activation_cost))
-            }
-            _ => None,
         })
-        .max();
+        .filter_map(|(_, ability)| {
+            usable_mana_ability_net(state, object_id, controller, ability, capacity_use)
+        })
+        .max()
+        .unwrap_or(0)
+}
 
-    match explicit_max {
-        Some(amount) => amount,
-        // CR 305.1: Subtype-only basic-land fallback (same as `max_mana_yield`).
-        None if !activatable_mana_options(state, object_id, controller).is_empty() => 1,
-        None => 0,
+/// CR 605.1a: An activated mana ability.
+fn is_payment_mana_ability(ability: &AbilityDefinition) -> bool {
+    ability.kind == AbilityKind::Activated && mana_abilities::is_mana_ability(ability)
+}
+
+/// Whether one activated mana ability can be activated now and its mana can
+/// pay for this spell. The single readiness authority for capacity and
+/// profile planning, so a planner that needs both evaluates it once.
+fn mana_ability_usable_for_payment(
+    state: &GameState,
+    controller: PlayerId,
+    object_id: ObjectId,
+    idx: usize,
+    ability: &AbilityDefinition,
+    payment_context: Option<&PaymentContext<'_>>,
+) -> bool {
+    // CR 605.3a + CR 117.1d: The engine-authoritative "is the cost
+    // currently payable?" check covers sacrifice supply
+    // (`find_eligible_sacrifice_targets`), discard-hand availability,
+    // life total, tap eligibility, and summoning sickness via the
+    // shared `is_payable_for_mana_ability` + activation simulation.
+    // We delegate to it rather than re-implementing the cost gate.
+    if !mana_abilities::can_activate_mana_ability_now(state, controller, object_id, idx, ability) {
+        return false;
+    }
+    // CR 604: Static activation restrictions ("only during your
+    // upkeep", etc.) must hold — mirrors `is_active_tap_mana_ability`.
+    if !activation_condition_satisfied(state, controller, object_id, idx, ability) {
+        return false;
+    }
+    // CR 106.6: Restricted mana only counts toward this spell when
+    // the restriction permits it (issue #2011: Eldrazi Temple).
+    match &*ability.effect {
+        Effect::Mana { restrictions, .. } => mana_ability_allowed_for_payment(
+            ability,
+            restrictions,
+            state,
+            object_id,
+            payment_context,
+        ),
+        _ => false,
     }
 }
 
+/// CR 605.3b: Net mana one usable activation contributes to planned capacity.
+fn usable_mana_ability_net(
+    state: &GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+    ability: &AbilityDefinition,
+    capacity_use: CapacityUse,
+) -> Option<u32> {
+    let Effect::Mana { produced, .. } = &*ability.effect else {
+        return None;
+    };
+    let sizing = largest_sizing_resolution(state, produced, ability, object_id, controller);
+    if capacity_use == CapacityUse::XCeiling
+        && sizing.as_ref().is_some_and(|(resolved, _)| {
+            activation_amount_depends_on_color(state, produced, resolved)
+        })
+    {
+        return None;
+    }
+    let gross = sizing.map_or(0, |(_, gross)| gross);
+    // CR 605.3b: Net the mana paid to activate. Non-mana cost
+    // components (Sacrifice / Discard / PayLife / Exile) have no
+    // mana sub-cost, so `mana_sub_cost_of` returns `None` and the
+    // net equals the gross (e.g., KCI activation cost is one
+    // sacrificed artifact, no mana — full 2 colorless yield).
+    //
+    // Caveat: collapsing mana sub-cost to a single `mana_value`
+    // assumes the sub-cost is paid from the SAME color domain as
+    // the produced mana (filter-land case: pay {1} or any color,
+    // produce {U/W}). For exotic abilities whose mana sub-cost is
+    // a different color than what they produce — e.g. a
+    // hypothetical `{T}, Pay {U}: Add {2}{R}` — this net of 2 is
+    // pessimistic-but-safe in one direction (we never claim
+    // capacity we can't produce) but over-states feasibility in
+    // the other (the {U} sub-cost has to come from another
+    // source, which this scan doesn't model). Such cards are
+    // vanishingly rare in real Magic; if one is added the
+    // sub-cost color domain should be threaded through here
+    // rather than collapsed to `mana_value`.
+    let activation_cost =
+        mana_abilities::mana_sub_cost_of(&ability.cost).map_or(0, |cost| cost.mana_value());
+    Some(gross.saturating_sub(activation_cost))
+}
+
 /// CR 117.1d + CR 601.2g: True when cost payment can involve a currently
-/// activatable non-tap mana ability that auto-tap cannot choose for the player
-/// (Treasure/Spawn/KCI-style sacrifice mana, Lion's Eye Diamond discard mana,
-/// pay-life mana abilities, etc.).
-pub(crate) fn has_activatable_non_tap_mana_ability_for_payment(
+/// activatable mana ability that auto-tap cannot activate for the player: a
+/// non-tap ability (Treasure/Spawn/KCI-style sacrifice mana, unrestricted
+/// discard mana, pay-life mana abilities, etc.), or a `{T}` ability whose cost
+/// asks the player to choose an object (Phyrexian Tower's sacrifice, Holdout
+/// Settlement's tapped creature).
+pub(crate) fn has_activatable_player_choice_mana_ability_for_payment(
     state: &GameState,
     controller: PlayerId,
     exclude: Option<ObjectId>,
@@ -1125,7 +2487,17 @@ pub(crate) fn has_activatable_non_tap_mana_ability_for_payment(
             if ability.kind != AbilityKind::Activated || !mana_abilities::is_mana_ability(ability) {
                 return false;
             }
-            if has_tap_component(&ability.cost) {
+            // Choice-free tap-cost and unambiguous self-sacrifice abilities
+            // (Sol Ring, Gold, Treasure) are already covered by
+            // `is_active_tap_mana_ability` on the auto-tap path; a tap cost that
+            // chooses an object (CR 605.3a) belongs here with the ambiguous
+            // non-tap costs (KCI's "Sacrifice an artifact", discard, pay-life).
+            if (has_tap_component(&ability.cost)
+                && !mana_abilities::cost_requires_object_choice(
+                    state, controller, object_id, ability,
+                ))
+                || has_unambiguous_self_sacrifice_component(&ability.cost)
+            {
                 return false;
             }
             if !mana_abilities::can_activate_mana_ability_now(
@@ -1138,6 +2510,7 @@ pub(crate) fn has_activatable_non_tap_mana_ability_for_payment(
             }
             match &*ability.effect {
                 Effect::Mana { restrictions, .. } => mana_ability_allowed_for_payment(
+                    ability,
                     restrictions,
                     state,
                     object_id,
@@ -1151,18 +2524,52 @@ pub(crate) fn has_activatable_non_tap_mana_ability_for_payment(
 
 /// CR 117.1d + CR 601.2g: One activation's producible mana shape for the
 /// castability gate's colored-shard coverage check (issue #583 / #1234).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ActivatableManaProfileKind {
     Exact(Vec<ManaType>),
-    AnyOneColor { count: u32, options: Vec<ManaType> },
-    AnyCombination { count: u32, options: Vec<ManaType> },
+    /// CR 106.1: one color is chosen per activation; each option carries the
+    /// amount that choice adds (equal for "three mana of any one color",
+    /// per color for "equal to your devotion to that color").
+    AnyOneColor {
+        options: Vec<(ManaType, u32)>,
+    },
+    AnyCombination {
+        count: u32,
+        options: Vec<ManaType>,
+    },
     CombinationChoices(Vec<Vec<ManaType>>),
+}
+
+impl ActivatableManaProfileKind {
+    /// `count` mana of any one of `options`.
+    fn any_one_color(count: u32, options: Vec<ManaType>) -> Self {
+        Self::AnyOneColor {
+            options: options
+                .into_iter()
+                .map(|mana_type| (mana_type, count))
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 struct ActivatableManaProfile {
     object_id: ObjectId,
+    /// The object's planned mana capacity (`feasible_mana_capacity`), which
+    /// the generic-mana sum counts for it. A shard assignment that uses an
+    /// activation producing less than this is charged the difference.
+    capacity: u32,
     kind: ActivatableManaProfileKind,
+}
+
+/// One way to spend an activation on colored shards.
+struct ProfileApplication {
+    /// The shards it leaves for other sources.
+    remaining: Vec<Vec<ManaType>>,
+    /// Units of its output assigned to shards.
+    assigned: u32,
+    /// Its total output; units not assigned to shards stay available for generic.
+    output: u32,
 }
 
 fn resolved_production_count(
@@ -1171,6 +2578,43 @@ fn resolved_production_count(
     resolved: &crate::types::ability::ResolvedAbility,
 ) -> u32 {
     super::effects::mana::resolve_mana_types_for_ability(produced, state, resolved).len() as u32
+}
+
+/// CR 106.1 + CR 605.3b + CR 608.2d: Gross mana one activation could add, for
+/// capacity planning. An any-one-color amount that reads the color chosen for
+/// it is sized by its best color.
+fn planned_gross_mana(
+    produced: &ManaProduction,
+    state: &GameState,
+    resolved: &crate::types::ability::ResolvedAbility,
+) -> u32 {
+    if super::effects::mana::any_one_color_count_reads_choice(produced) {
+        return super::effects::mana::any_one_color_outputs(state, produced, resolved)
+            .first()
+            .map_or(0, |(_, count)| *count as u32);
+    }
+    resolved_production_count(produced, state, resolved)
+}
+
+/// CR 106.1 + CR 608.2d: Whether this ability's amount differs by the color
+/// chosen for it (including colors that would add none), i.e. Nyx Lotus with
+/// unequal devotion but not Astral Cornucopia.
+fn activation_amount_depends_on_color(
+    state: &GameState,
+    produced: &ManaProduction,
+    resolved: &ResolvedAbility,
+) -> bool {
+    let ManaProduction::AnyOneColor { color_options, .. } = produced else {
+        return false;
+    };
+    if !super::effects::mana::any_one_color_count_reads_choice(produced) {
+        return false;
+    }
+    let outputs = super::effects::mana::any_one_color_outputs(state, produced, resolved);
+    let Some(&(_, first)) = outputs.first() else {
+        return false;
+    };
+    outputs.len() != color_options.len() || outputs.iter().any(|(_, amount)| *amount != first)
 }
 
 fn profile_kind_from_production(
@@ -1190,10 +2634,26 @@ fn profile_kind_from_production(
             ))
         }
         ManaProduction::AnyOneColor { color_options, .. } => {
-            Some(ActivatableManaProfileKind::AnyOneColor {
-                count: resolved_production_count(produced, state, resolved),
-                options: color_options.iter().map(mana_color_to_type).collect(),
-            })
+            // CR 106.1 + CR 608.2d: an amount that reads the color chosen for
+            // it gives each color its own amount (Nykthos's devotion to that
+            // color).
+            if super::effects::mana::any_one_color_count_reads_choice(produced) {
+                let outputs =
+                    super::effects::mana::any_one_color_outputs(state, produced, resolved);
+                if outputs.is_empty() {
+                    return None;
+                }
+                return Some(ActivatableManaProfileKind::AnyOneColor {
+                    options: outputs
+                        .into_iter()
+                        .map(|(mana_type, count)| (mana_type, count as u32))
+                        .collect(),
+                });
+            }
+            Some(ActivatableManaProfileKind::any_one_color(
+                resolved_production_count(produced, state, resolved),
+                color_options.iter().map(mana_color_to_type).collect(),
+            ))
         }
         ManaProduction::AnyCombination { color_options, .. } => {
             Some(ActivatableManaProfileKind::AnyCombination {
@@ -1212,7 +2672,7 @@ fn profile_kind_from_production(
             if count <= 1 && options.len() == 1 {
                 Some(ActivatableManaProfileKind::Exact(options))
             } else {
-                Some(ActivatableManaProfileKind::AnyOneColor { count, options })
+                Some(ActivatableManaProfileKind::any_one_color(count, options))
             }
         }
         ManaProduction::OpponentLandColors { .. }
@@ -1224,10 +2684,10 @@ fn profile_kind_from_production(
             if options.is_empty() {
                 return None;
             }
-            Some(ActivatableManaProfileKind::AnyOneColor {
-                count: resolved_production_count(produced, state, resolved),
+            Some(ActivatableManaProfileKind::any_one_color(
+                resolved_production_count(produced, state, resolved),
                 options,
-            })
+            ))
         }
         ManaProduction::DistinctColorsAmongPermanents { .. } => {
             let types =
@@ -1269,38 +2729,145 @@ fn activatable_mana_profiles_for_object(
         return Vec::new();
     }
 
-    obj.abilities
+    // CR 601.2g: A tap mana ability that itself needs mana (such as a filter
+    // land) must stay with the exact auto-tap payment probe. A standalone
+    // profile cannot represent the mana it consumes to activate, and would let
+    // that mana cover the spell as well. Plain tap sources remain here so they
+    // can combine with a manual-choice mana ability during the same
+    // cost-payment step. Such abilities still count toward the object's
+    // capacity (the same total `feasible_mana_capacity` reports).
+    let (profiled, capacity_only): (Vec<_>, Vec<_>) = obj
+        .abilities
         .iter()
         .enumerate()
-        .filter_map(|(idx, ability)| {
-            if ability.kind != AbilityKind::Activated || !mana_abilities::is_mana_ability(ability) {
-                return None;
+        .filter(|(_, ability)| is_payment_mana_ability(ability))
+        .partition(|(_, ability)| {
+            !(has_tap_component(&ability.cost)
+                && mana_abilities::mana_sub_cost_of(&ability.cost).is_some())
+        });
+
+    let mut capacity = 0;
+    let mut kinds: Vec<ActivatableManaProfileKind> = Vec::new();
+    for (idx, ability) in profiled {
+        if !mana_ability_usable_for_payment(
+            state,
+            controller,
+            object_id,
+            idx,
+            ability,
+            payment_context,
+        ) {
+            continue;
+        }
+        let Effect::Mana { produced, .. } = &*ability.effect else {
+            continue;
+        };
+        if let Some(net) = usable_mana_ability_net(
+            state,
+            object_id,
+            controller,
+            ability,
+            CapacityUse::Castability,
+        ) {
+            capacity = capacity.max(net);
+        }
+        // Candidates whose yields match are one profile, since the shard
+        // backtracker branches on every profile.
+        let mut ability_kinds: Vec<ActivatableManaProfileKind> = Vec::new();
+        for kind in sizing_resolutions(state, ability, object_id, controller)
+            .iter()
+            .filter_map(|resolved| {
+                profile_kind_from_production(state, object_id, controller, produced, resolved)
+                    .and_then(|kind| profile_kind_allowed_for_context(kind, payment_context))
+            })
+        {
+            if !ability_kinds.contains(&kind) {
+                ability_kinds.push(kind);
             }
-            if !mana_abilities::can_activate_mana_ability_now(
-                state, controller, object_id, idx, ability,
+        }
+        kinds.extend(ability_kinds);
+    }
+    if kinds.is_empty() {
+        return Vec::new();
+    }
+    for (idx, ability) in capacity_only {
+        if mana_ability_usable_for_payment(
+            state,
+            controller,
+            object_id,
+            idx,
+            ability,
+            payment_context,
+        ) {
+            if let Some(net) = usable_mana_ability_net(
+                state,
+                object_id,
+                controller,
+                ability,
+                CapacityUse::Castability,
             ) {
-                return None;
+                capacity = capacity.max(net);
             }
-            if !activation_condition_satisfied(state, controller, object_id, idx, ability) {
-                return None;
-            }
-            let Effect::Mana {
-                produced,
-                restrictions,
-                ..
-            } = &*ability.effect
-            else {
-                return None;
-            };
-            if !mana_ability_allowed_for_payment(restrictions, state, object_id, payment_context) {
-                return None;
-            }
-            let resolved =
-                super::ability_utils::build_resolved_from_def(ability, object_id, controller);
-            profile_kind_from_production(state, object_id, controller, produced, &resolved)
-                .map(|kind| ActivatableManaProfile { object_id, kind })
+        }
+    }
+    kinds
+        .into_iter()
+        .map(|kind| ActivatableManaProfile {
+            object_id,
+            capacity,
+            kind,
         })
         .collect()
+}
+
+/// CR 106.6: An activation's mana-color rider constrains actual produced mana,
+/// not merely each unit's spend restriction. Keep feasibility profiles aligned
+/// with auto-tap's concrete source-option gate.
+fn profile_kind_allowed_for_context(
+    kind: ActivatableManaProfileKind,
+    payment_context: Option<&PaymentContext<'_>>,
+) -> Option<ActivatableManaProfileKind> {
+    let Some(ctx) = payment_context else {
+        return Some(kind);
+    };
+    match kind {
+        ActivatableManaProfileKind::Exact(types) => {
+            let types: Vec<_> = types
+                .into_iter()
+                .filter(|mana_type| ctx.permits_actual_mana_type(*mana_type))
+                .collect();
+            (!types.is_empty()).then_some(ActivatableManaProfileKind::Exact(types))
+        }
+        ActivatableManaProfileKind::AnyOneColor { options } => {
+            let options: Vec<_> = options
+                .into_iter()
+                .filter(|(mana_type, _)| ctx.permits_actual_mana_type(*mana_type))
+                .collect();
+            (!options.is_empty()).then_some(ActivatableManaProfileKind::AnyOneColor { options })
+        }
+        ActivatableManaProfileKind::AnyCombination { count, options } => {
+            let options: Vec<_> = options
+                .into_iter()
+                .filter(|mana_type| ctx.permits_actual_mana_type(*mana_type))
+                .collect();
+            (!options.is_empty())
+                .then_some(ActivatableManaProfileKind::AnyCombination { count, options })
+        }
+        ActivatableManaProfileKind::CombinationChoices(options) => {
+            let options: Vec<_> = options
+                .into_iter()
+                .map(|combination| {
+                    combination
+                        .iter()
+                        .copied()
+                        .filter(|mana_type| ctx.permits_actual_mana_type(*mana_type))
+                        .collect::<Vec<_>>()
+                })
+                .filter(|combination| !combination.is_empty())
+                .collect();
+            (!options.is_empty()).then_some(ActivatableManaProfileKind::CombinationChoices(options))
+        }
+    }
 }
 
 fn collect_activatable_mana_profiles(
@@ -1337,108 +2904,205 @@ fn shard_payment_options(shard: ManaCostShard) -> Option<Vec<ManaType>> {
 
 fn group_profiles_by_object(
     profiles: Vec<ActivatableManaProfile>,
-) -> Vec<(ObjectId, Vec<ActivatableManaProfileKind>)> {
-    use std::collections::HashMap;
-    let mut grouped: HashMap<ObjectId, Vec<ActivatableManaProfileKind>> = HashMap::new();
+) -> Vec<(ObjectId, u32, Vec<ActivatableManaProfileKind>)> {
+    // Issue #4878: BTreeMap (not HashMap) so the grouped Vec below is
+    // ObjectId-sorted and deterministic across processes, rather than
+    // following per-process HashMap iteration order.
+    use std::collections::BTreeMap;
+    let mut grouped: BTreeMap<ObjectId, (u32, Vec<ActivatableManaProfileKind>)> = BTreeMap::new();
     for profile in profiles {
-        grouped
+        let entry = grouped
             .entry(profile.object_id)
-            .or_default()
-            .push(profile.kind);
+            .or_insert_with(|| (profile.capacity, Vec::new()));
+        entry.1.push(profile.kind);
     }
-    grouped.into_iter().collect()
+    grouped
+        .into_iter()
+        .map(|(object_id, (capacity, kinds))| (object_id, capacity, kinds))
+        .collect()
 }
 
-fn apply_profile_kind(
+/// CR 106.1 + CR 601.2g: The colored shards one activation can cover, with the
+/// units it places there, leaving later sources the remainder; an application
+/// placing none is the caller's skip.
+fn profile_applications(
     profile: &ActivatableManaProfileKind,
     requirements: &[Vec<ManaType>],
-) -> Option<(Vec<Vec<ManaType>>, u32)> {
-    match profile {
+) -> Vec<ProfileApplication> {
+    // Interchangeable units beyond the shard count can only be surplus.
+    let placeable = |count: &u32| (*count as usize).min(requirements.len());
+    // Each unit list is one way to activate, with the mana that activation adds.
+    let unit_lists: Vec<(Vec<&[ManaType]>, u32)> = match profile {
         ActivatableManaProfileKind::Exact(types) => {
-            let mut remaining = requirements.to_vec();
-            for mana_type in types {
-                let pos = remaining.iter().position(|opts| opts.contains(mana_type))?;
-                remaining.remove(pos);
-            }
-            Some((remaining, types.len() as u32))
+            vec![(
+                types.iter().map(std::slice::from_ref).collect(),
+                types.len() as u32,
+            )]
         }
-        ActivatableManaProfileKind::AnyOneColor { count, options } => {
-            options.iter().find_map(|&color| {
-                combination_assign(*count, std::slice::from_ref(&color), requirements)
-            })
-        }
+        ActivatableManaProfileKind::AnyOneColor { options } => options
+            .iter()
+            .map(|(color, count)| (vec![std::slice::from_ref(color); placeable(count)], *count))
+            .collect(),
         ActivatableManaProfileKind::AnyCombination { count, options } => {
-            combination_assign(*count, options, requirements)
+            vec![(vec![options.as_slice(); placeable(count)], *count)]
         }
-        ActivatableManaProfileKind::CombinationChoices(choices) => {
-            choices.iter().find_map(|choice| {
-                apply_profile_kind(
-                    &ActivatableManaProfileKind::Exact(choice.clone()),
-                    requirements,
+        ActivatableManaProfileKind::CombinationChoices(choices) => choices
+            .iter()
+            .map(|choice| {
+                (
+                    choice.iter().map(std::slice::from_ref).collect(),
+                    choice.len() as u32,
                 )
             })
-        }
+            .collect(),
+    };
+    let mut applications = Vec::new();
+    for (units, output) in &unit_lists {
+        let mut placements = Vec::new();
+        place_units(units, requirements.to_vec(), 0, 0, &mut placements);
+        applications.extend(
+            placements
+                .into_iter()
+                .filter(|(_, assigned)| *assigned > 0)
+                .map(|(remaining, assigned)| ProfileApplication {
+                    remaining,
+                    assigned,
+                    output: *output,
+                }),
+        );
     }
+    applications
 }
 
-fn assign_profiles_to_requirements(
-    objects: &[(ObjectId, Vec<ActivatableManaProfileKind>)],
-    object_index: usize,
+/// CR 106.4 + CR 107.4b: Each unit takes a remaining shard one of its types
+/// pays; a unit no remaining shard takes is surplus that still pays generic
+/// mana, so only placed units are consumed.
+fn place_units(
+    units: &[&[ManaType]],
     requirements: Vec<Vec<ManaType>>,
-) -> Option<u32> {
-    if requirements.is_empty() {
-        return Some(0);
-    }
-    if object_index >= objects.len() {
-        return None;
-    }
-    if let Some(consumed) =
-        assign_profiles_to_requirements(objects, object_index + 1, requirements.clone())
-    {
-        return Some(consumed);
-    }
-    for profile in &objects[object_index].1 {
-        if let Some((remaining, consumed)) = apply_profile_kind(profile, &requirements) {
-            if let Some(rest) =
-                assign_profiles_to_requirements(objects, object_index + 1, remaining)
-            {
-                return Some(consumed + rest);
-            }
+    from: usize,
+    consumed: u32,
+    applications: &mut Vec<(Vec<Vec<ManaType>>, u32)>,
+) {
+    let Some((unit, rest)) = units.split_first().filter(|_| !requirements.is_empty()) else {
+        if !applications
+            .iter()
+            .any(|(remaining, placed)| *placed == consumed && *remaining == requirements)
+        {
+            applications.push((requirements, consumed));
+        }
+        return;
+    };
+    // An identical next unit takes only later shards, so each placement set is
+    // enumerated once rather than once per ordering.
+    let next_from = |index: usize| if rest.first() == Some(unit) { index } else { 0 };
+    let mut placed = false;
+    for (index, payment_options) in requirements.iter().enumerate().skip(from) {
+        if payment_options
+            .iter()
+            .any(|mana_type| unit.contains(mana_type))
+        {
+            placed = true;
+            let mut remaining = requirements.clone();
+            remaining.remove(index);
+            place_units(
+                rest,
+                remaining,
+                next_from(index),
+                consumed + 1,
+                applications,
+            );
         }
     }
-    None
+    if !placed {
+        place_units(rest, requirements, next_from(from), consumed, applications);
+    }
 }
 
-fn combination_assign(
-    count: u32,
-    options: &[ManaType],
-    requirements: &[Vec<ManaType>],
-) -> Option<(Vec<Vec<ManaType>>, u32)> {
-    if requirements.is_empty() {
-        // All shards are covered; any leftover `count` is simply surplus mana
-        // the player never produces (or lets drain). Rejecting over-production
-        // here would falsely mark e.g. a power-3 combination source as unable
-        // to pay a two-shard cost.
-        return Some((Vec::new(), 0));
-    }
-    if count == 0 {
-        return None;
-    }
-    for (index, payment_options) in requirements.iter().enumerate() {
-        for &color in payment_options {
-            if !options.contains(&color) {
-                continue;
-            }
-            let mut next_requirements = requirements.to_vec();
-            next_requirements.remove(index);
-            if let Some((remaining, inner)) =
-                combination_assign(count - 1, options, &next_requirements)
-            {
-                return Some((remaining, 1 + inner));
-            }
+/// CR 117.1d + CR 601.2g + CR 106.4: The cheapest way for the objects to
+/// cover `requirements`, measured as the generic capacity it uses up. Each
+/// covered shard costs one unit; an activation whose output is below the
+/// object's planned capacity (blue from Nyx Lotus when green would add more)
+/// also forgoes the difference, and its unassigned units stay available for
+/// generic.
+///
+/// Each (object index, residual shards) subproblem has one exact minimum, so
+/// it is solved once per invocation: identical profiles reach the same
+/// residuals by many paths.
+struct ResidualShardSearch<'a> {
+    objects: &'a [(ObjectId, u32, Vec<ActivatableManaProfileKind>)],
+    memo: std::collections::HashMap<(usize, Vec<Vec<ManaType>>), Option<u32>>,
+    /// Subproblems actually solved (memo misses).
+    #[cfg(test)]
+    steps: u32,
+}
+
+impl<'a> ResidualShardSearch<'a> {
+    fn new(objects: &'a [(ObjectId, u32, Vec<ActivatableManaProfileKind>)]) -> Self {
+        Self {
+            objects,
+            memo: std::collections::HashMap::new(),
+            #[cfg(test)]
+            steps: 0,
         }
     }
-    None
+
+    fn min_charge(
+        &mut self,
+        object_index: usize,
+        mut requirements: Vec<Vec<ManaType>>,
+    ) -> Option<u32> {
+        if requirements.is_empty() {
+            return Some(0);
+        }
+        if object_index >= self.objects.len() {
+            return None;
+        }
+        // The minimum does not depend on shard order, so equal residuals share
+        // one entry.
+        requirements.sort();
+        let key = (object_index, requirements);
+        if let Some(cached) = self.memo.get(&key) {
+            return *cached;
+        }
+        #[cfg(test)]
+        {
+            self.steps += 1;
+        }
+        let best = self.solve(object_index, &key.1);
+        self.memo.insert(key, best);
+        best
+    }
+
+    fn solve(&mut self, object_index: usize, requirements: &[Vec<ManaType>]) -> Option<u32> {
+        // Every shard costs at least the unit that pays it.
+        let floor = requirements.len() as u32;
+        let mut best = self.min_charge(object_index + 1, requirements.to_vec());
+        if best == Some(floor) {
+            return best;
+        }
+        let objects = self.objects;
+        let (_, capacity, profiles) = &objects[object_index];
+        for profile in profiles {
+            for application in profile_applications(profile, requirements) {
+                let charge = application.assigned + capacity.saturating_sub(application.output);
+                let lower_bound = charge + application.remaining.len() as u32;
+                if best.is_some_and(|best| lower_bound >= best) {
+                    continue;
+                }
+                if let Some(rest) = self.min_charge(object_index + 1, application.remaining) {
+                    let total = charge + rest;
+                    if best.is_none_or(|best| total < best) {
+                        best = Some(total);
+                        if total == floor {
+                            return best;
+                        }
+                    }
+                }
+            }
+        }
+        best
+    }
 }
 
 fn assign_profiles_to_shards(
@@ -1453,16 +3117,18 @@ fn assign_profiles_to_shards(
         return None;
     }
     let grouped = group_profiles_by_object(profiles.to_vec());
-    assign_profiles_to_requirements(&grouped, 0, requirements)
+    ResidualShardSearch::new(&grouped).min_charge(0, requirements)
 }
 
 /// CR 117.1d + CR 601.2g: Whether residual mana shards could be paid by
 /// activating currently legal mana abilities (non-tap sources like Vivi
-/// Ornitier's {0} combination mana, Lion's Eye Diamond, etc.).
+/// Ornitier's {0} combination mana, unrestricted discard mana, etc.).
 ///
-/// Returns `(covered, consumed_pips)` where `consumed_pips` is the total mana
-/// produced by activations used for shard coverage — callers must subtract
-/// this from generic capacity to avoid double-counting one activation.
+/// Returns `(covered, capacity_charge)`: the generic capacity the cheapest
+/// covering assignment uses up (each covered shard, plus any output an
+/// activation forgoes against its object's planned capacity). Callers must
+/// subtract it from the summed `feasible_mana_capacity` to avoid counting one
+/// activation twice or crediting a color that was not chosen.
 pub(crate) fn can_cover_shards_with_activatable_mana(
     state: &GameState,
     player: PlayerId,
@@ -1484,7 +3150,7 @@ fn land_mana_options(
     object_id: ObjectId,
     controller: PlayerId,
     require_untapped: bool,
-    require_current_payability: bool,
+    payability_mode: ManaPayabilityMode,
     // Precomputed TapsForMana trigger-source list for the board-global sweeps;
     // `None` means compute it for this land (single-land / display / test
     // callers). Byte-identical either way — the indexed and full scans visit the
@@ -1511,35 +3177,59 @@ fn land_mana_options(
         return Vec::new();
     }
 
-    let mut options = scan_mana_abilities(
-        state,
-        obj,
-        object_id,
-        controller,
-        require_current_payability,
-        gates,
-    );
+    let mut options =
+        scan_mana_abilities(state, obj, object_id, controller, payability_mode, gates);
 
-    // Legacy fallback for basic-land subtype-only objects (no explicit mana ability).
-    if options.is_empty() {
+    // CR 305.6 + CR 602.5: Legacy fallback for basic-land subtype-only objects that
+    // carry NO EXPLICIT mana ability at all (a nonbasic granted a basic land
+    // type by Urborg/Blood Moon-class effects with no accompanying
+    // `Effect::Mana` grant). This must NOT fire merely because
+    // `scan_mana_abilities` came back empty — it can be empty because a REAL
+    // `Effect::Mana` ability exists but was just filtered out by a legality
+    // gate (CantBeActivated, CantActivateDuring, an unsatisfied activation
+    // condition). Falling back to unconditional subtype-inferred production
+    // in that case would silently defeat the gate that filtered it (issue
+    // #6469: Karn, the Great Creator's "activated abilities of artifacts your
+    // opponents control can't be activated" stopped blocking a Liquimetal-
+    // Coating-turned-artifact land's own {T}: Add mana ability, because the
+    // ability's legitimate absence from `options` was mistaken for "no
+    // ability exists").
+    let has_explicit_mana_ability = obj
+        .abilities
+        .iter()
+        .any(|ability| matches!(*ability.effect, Effect::Mana { .. }));
+    if options.is_empty() && !has_explicit_mana_ability {
         if let Some(mana_type) = obj
             .card_types
             .subtypes
             .iter()
             .find_map(|s| mana_payment::land_subtype_to_mana_type(s))
         {
-            options.push(ManaSourceOption {
-                object_id,
-                ability_index: None,
-                mana_type,
-                source_could_produce_two_or_more_colors: source_could_produce_two_or_more_colors(
-                    state, object_id, controller,
-                ),
-                penalty: ManaSourcePenalty::None,
-                atomic_combination: None,
-                restrictions: Vec::new(),
-                taps_for_mana_overrides: Vec::new(),
+            // CR 305.6 + CR 602.5: the intrinsic "{T}: Add [mana symbol]"
+            // ability this fallback synthesizes is still an activated (mana)
+            // ability — every readiness gate a printed one is checked against
+            // (phased-out, detained, tapped/can't-tap, summoning sickness,
+            // CantBeActivated/CantActivateDuring, static activation
+            // restrictions) must apply to it too, not just the two activation-
+            // prohibition statics.
+            let blocked = mana_type_to_color(mana_type).is_some_and(|color| {
+                mana_abilities::intrinsic_land_mana_ability_blocked(
+                    state, controller, object_id, color, gates,
+                )
             });
+            if !blocked {
+                options.push(ManaSourceOption {
+                    object_id,
+                    ability_index: None,
+                    mana_type,
+                    source_could_produce_two_or_more_colors:
+                        source_could_produce_two_or_more_colors(state, object_id, controller),
+                    penalty: ManaSourcePenalty::None,
+                    atomic_combination: None,
+                    restrictions: Vec::new(),
+                    taps_for_mana_overrides: Vec::new(),
+                });
+            }
         }
     }
 
@@ -1564,12 +3254,13 @@ fn land_mana_options(
         Some(sources) => taps_for_mana_aura_bonus_indexed(state, object_id, controller, sources),
         None => taps_for_mana_aura_bonus(state, object_id, controller),
     };
-    for (aura_id, aura_choices) in aura_bonus {
+    for (trigger_ref, aura_choices) in aura_bonus {
         // aura_choices: [ManaType; N] where N=1 for Fixed, N=5 for any-color.
         // Cross-product: replace each option with N options (one per choice).
         options = options
             .into_iter()
             .flat_map(|opt| {
+                let trigger_ref = trigger_ref.clone();
                 aura_choices.iter().map(move |&bonus| {
                     let mut combined = opt
                         .atomic_combination
@@ -1583,7 +3274,7 @@ fn land_mana_options(
                         .len();
                     // Carry the existing overrides plus this aura's choice.
                     let mut overrides = opt.taps_for_mana_overrides.clone();
-                    overrides.push((aura_id, ProductionOverride::SingleColor(bonus)));
+                    overrides.push((trigger_ref.clone(), ProductionOverride::SingleColor(bonus)));
                     ManaSourceOption {
                         object_id: opt.object_id,
                         ability_index: opt.ability_index,
@@ -1608,58 +3299,77 @@ fn land_mana_options(
 }
 
 /// CR 605.1a + CR 605.3a: Predicate for "this is an activated mana ability
-/// with a `{T}` component that `controller` could currently activate."
+/// with a `{T}` component, or an unambiguous self-sacrifice component, that
+/// `controller` could currently activate." Both shapes require no choice
+/// among candidates to activate, so auto-tap can select either one exactly
+/// as it does a `{T}` cost (Gold's "Sacrifice this token: Add one mana of
+/// any color" sits alongside Treasure's `{T}, Sacrifice this artifact`).
 /// Single authority shared by `scan_mana_abilities` (which builds per-color
-/// `ManaSourceOption` rows) and `max_mana_yield` (which sums total output) so
-/// the two never diverge on which abilities count as mana sources.
+/// `ManaSourceOption` rows) and `max_mana_yield` so the two never diverge on
+/// which abilities count as mana sources.
 fn is_active_tap_mana_ability(
     state: &GameState,
     object_id: ObjectId,
     controller: PlayerId,
     ability_index: usize,
     ability: &AbilityDefinition,
-    require_current_payability: bool,
+    payability_mode: ManaPayabilityMode,
     gates: Option<&mana_abilities::ManaActivationGates>,
 ) -> bool {
     if ability.kind != AbilityKind::Activated || !mana_abilities::is_mana_ability(ability) {
         return false;
     }
-    if require_current_payability {
-        let activatable = match gates {
-            Some(gates) => mana_abilities::can_activate_mana_ability_now_gated(
+    if !has_tap_component(&ability.cost) && !has_unambiguous_self_sacrifice_component(&ability.cost)
+    {
+        return false;
+    }
+    let default_gates;
+    let gates = match gates {
+        Some(gates) => gates,
+        None => {
+            default_gates = mana_abilities::ManaActivationGates::compute(state);
+            &default_gates
+        }
+    };
+    match payability_mode {
+        ManaPayabilityMode::Current => {
+            if !mana_abilities::can_activate_mana_ability_now_gated(
                 state,
                 controller,
                 object_id,
                 ability_index,
                 ability,
                 gates,
-            ),
-            None => mana_abilities::can_activate_mana_ability_now(
+            ) {
+                return false;
+            }
+        }
+        ManaPayabilityMode::Planning => {
+            if !mana_abilities::mana_ability_ready_without_simulation_gated(
                 state,
                 controller,
                 object_id,
                 ability_index,
                 ability,
-            ),
-        };
-        if !activatable {
-            return false;
+                ManaPayabilityMode::Planning,
+                gates,
+            ) {
+                return false;
+            }
         }
-    }
-    if !has_tap_component(&ability.cost) {
-        return false;
     }
     activation_condition_satisfied(state, controller, object_id, ability_index, ability)
 }
 
-/// Scan an object's abilities for activated mana abilities with a tap cost component.
-/// Type-agnostic — works for lands, creatures, artifacts, etc.
+/// Scan an object's abilities for activated mana abilities with a tap cost
+/// component or an unambiguous self-sacrifice component. Type-agnostic —
+/// works for lands, creatures, artifacts, etc.
 fn scan_mana_abilities(
     state: &GameState,
     obj: &crate::game::game_object::GameObject,
     object_id: ObjectId,
     controller: PlayerId,
-    require_current_payability: bool,
+    payability_mode: ManaPayabilityMode,
     gates: Option<&mana_abilities::ManaActivationGates>,
 ) -> Vec<ManaSourceOption> {
     let mut options = Vec::new();
@@ -1670,16 +3380,23 @@ fn scan_mana_abilities(
             controller,
             ability_index,
             ability,
-            require_current_payability,
+            payability_mode,
             gates,
         ) {
             continue;
         }
 
-        let penalty = mana_ability_penalty(ability);
+        let penalty = object_mana_ability_penalty(state, object_id, ability);
         let source_could_produce_two_or_more_colors =
             source_could_produce_two_or_more_colors(state, object_id, controller);
-        for row in emit_source_rows(state, controller, object_id, ability_index, ability) {
+        for row in emit_source_rows(
+            state,
+            controller,
+            object_id,
+            ability_index,
+            ability,
+            payability_mode,
+        ) {
             let option = ManaSourceOption {
                 object_id,
                 ability_index: Some(ability_index),
@@ -1713,6 +3430,7 @@ fn emit_source_rows(
     object_id: ObjectId,
     _ability_index: usize,
     ability: &AbilityDefinition,
+    payability_mode: ManaPayabilityMode,
 ) -> Vec<SourceRow> {
     let Effect::Mana {
         produced,
@@ -1757,6 +3475,40 @@ fn emit_source_rows(
                 atomic_combination: (types.len() > 1).then_some(types),
                 restrictions: concrete_restrictions.clone(),
             }]
+        }
+        // CR 106.1 + CR 608.2d: an amount that reads the color chosen for this
+        // production (Nykthos's devotion to that color) differs per color.
+        // Emit one row per color that would add mana, best first; the
+        // auto-tap replay passes the row's color as the choice.
+        ManaProduction::AnyOneColor { .. }
+            if super::effects::mana::any_one_color_count_reads_choice(produced) =>
+        {
+            let resolved =
+                super::ability_utils::build_resolved_from_def(ability, object_id, controller);
+            super::effects::mana::any_one_color_outputs(state, produced, &resolved)
+                .into_iter()
+                .map(|(mana_type, _)| SourceRow {
+                    mana_type,
+                    atomic_combination: None,
+                    restrictions: concrete_restrictions.clone(),
+                })
+                .collect()
+        }
+        // CR 106.5 + CR 607.2d: a pure chosen-color source whose linked choice
+        // was never made cannot produce mana. Display/preview paths may show
+        // all five colors, but auto-tap must not plan a payment around an
+        // undefined mana type.
+        ManaProduction::ChosenColor {
+            fixed_alternative: None,
+            ..
+        } if payability_mode == ManaPayabilityMode::Planning
+            && state
+                .objects
+                .get(&object_id)
+                .and_then(|obj| obj.chosen_color())
+                .is_none() =>
+        {
+            Vec::new()
         }
         _ => mana_options_from_production(state, controller, object_id, produced)
             .into_iter()
@@ -1855,6 +3607,13 @@ fn mana_options_from_production(
         ManaProduction::ChosenColor {
             fixed_alternative, ..
         } => chosen_color_mana_type_options(state, object_id, *fixed_alternative),
+        // CR 106.1b + CR 106.5: Engine-set noted type (Jeweled Amulet class).
+        // Unreachable in practice today — no printed land has this mechanic.
+        ManaProduction::NotedType { .. } => {
+            super::effects::mana::noted_mana_type_for(state, object_id)
+                .into_iter()
+                .collect()
+        }
         // CR 106.7: Compute colors dynamically from opponent-controlled lands.
         ManaProduction::OpponentLandColors { .. } => opponent_land_color_options(state, controller),
         // CR 106.7 + CR 106.1b: Compute the full type set (incl. Colorless)
@@ -1937,6 +3696,18 @@ fn mana_options_from_production(
         // option set and contributes nothing to mana-source analysis.
         ManaProduction::TriggerEventManaType => Vec::new(),
     }
+}
+
+/// CR 205.4g / CR 106.3 / CR 107.4h: a permanent with the "snow" supertype is a snow
+/// source; mana produced by its abilities is snow mana (spendable for {S}). Reads the
+/// LAYERED (post-CR-613) supertype set on the object, so continuously-granted Snow counts
+/// and continuously-removed Snow does not (CR 205.4b). A missing object / ObjectId(0)
+/// sentinel is not a snow source.
+pub(crate) fn source_is_snow(state: &GameState, source_id: ObjectId) -> bool {
+    state
+        .objects
+        .get(&source_id)
+        .is_some_and(|obj| obj.card_types.supertypes.contains(&Supertype::Snow))
 }
 
 pub(crate) fn source_could_produce_two_or_more_colors(
@@ -2047,10 +3818,10 @@ pub(crate) fn opponent_land_color_options(
             };
             // CR 106.7: Skip both recursive producers. `OpponentLandColors`
             // facing itself yields no mana; `AnyTypeProduceableBy` (Reflecting
-            // Pool class) is excluded because (a) recursing into it would
-            // re-anchor `ControllerRef::You` to the wrong player and (b) the
-            // mutual cycle terminates cleanly only when both sides skip each
-            // other.
+            // Pool class) is excluded so the mutual cycle terminates cleanly
+            // (CR 106.5) when both sides skip each other. This is a cycle-breaking
+            // approximation, not a CR 106.7 requirement: an opponent's Reflecting
+            // Pool could legally produce what that opponent's other lands produce.
             if matches!(
                 produced,
                 ManaProduction::OpponentLandColors { .. }
@@ -2058,7 +3829,13 @@ pub(crate) fn opponent_land_color_options(
             ) {
                 continue;
             }
-            for mana_type in mana_options_from_production(state, controller, *object_id, produced) {
+            // CR 106.7 + CR 109.5: "Could produce" asks what the land's own ability
+            // would produce, and "you"/"your" on that land means its controller, so
+            // evaluate it as the opponent who controls the land (Command Tower reads
+            // that opponent's commander), not as the activator surveying it.
+            for mana_type in
+                mana_options_from_production(state, obj.controller, *object_id, produced)
+            {
                 if !options.contains(&mana_type) {
                     options.push(mana_type);
                 }
@@ -2119,10 +3896,10 @@ pub(crate) fn opponent_land_color_options(
 /// or `{G}` as the bonus color.  `max_mana_yield` just takes `.len()` on the
 /// outer vec (one bonus unit per aura regardless of color count).
 ///
-/// Reuses `taps_for_mana_card_matches` — the same predicate the trigger
-/// resolver uses — so planning and firing cannot drift.
-/// Returns `(aura_object_id, color_choices)` per attached TapsForMana aura.
-/// Callers use `aura_object_id` to build `taps_for_mana_overrides` on the
+/// Reuses the card and player matching predicates from the trigger resolver so
+/// planning and firing cannot drift.
+/// Returns `(trigger_definition_ref, color_choices)` per attached TapsForMana trigger.
+/// Callers use `trigger_definition_ref` to build `taps_for_mana_overrides` on the
 /// resulting `ManaSourceOption` so the resolver can thread the chosen color
 /// into the aura's triggered mana ability at inline resolution time.
 /// Battlefield objects carrying at least one `TapsForMana` trigger. The hot
@@ -2140,7 +3917,7 @@ pub(crate) fn taps_for_mana_trigger_sources(state: &GameState) -> Vec<ObjectId> 
             state.objects.get(object_id).is_some_and(|obj| {
                 obj.trigger_definitions
                     .iter_all()
-                    .any(|trigger| trigger.mode == TriggerMode::TapsForMana)
+                    .any(|entry| entry.definition.mode == TriggerMode::TapsForMana)
             })
         })
         .collect()
@@ -2150,7 +3927,7 @@ pub(crate) fn taps_for_mana_aura_bonus(
     state: &GameState,
     land_id: ObjectId,
     controller: PlayerId,
-) -> Vec<(ObjectId, Vec<ManaType>)> {
+) -> Vec<(TriggerDefinitionRef, Vec<ManaType>)> {
     let sources = taps_for_mana_trigger_sources(state);
     taps_for_mana_aura_bonus_indexed(state, land_id, controller, &sources)
 }
@@ -2158,15 +3935,15 @@ pub(crate) fn taps_for_mana_aura_bonus(
 /// Indexed arity of `taps_for_mana_aura_bonus`: iterates only the precomputed
 /// `sources` (trigger-bearing permanents) instead of the whole battlefield.
 /// Byte-identical to the full scan — preserves the `land_id` self-skip, the
-/// per-source `taps_for_mana_card_matches` card-identity authority, and the
-/// deliberate absence of a controller filter (Aura-Theft semantics).
+/// per-source card and player matcher authorities, and the deliberate absence
+/// of a trigger-source controller filter (Aura-Theft semantics).
 pub(crate) fn taps_for_mana_aura_bonus_indexed(
     state: &GameState,
     land_id: ObjectId,
     controller: PlayerId,
     sources: &[ObjectId],
-) -> Vec<(ObjectId, Vec<ManaType>)> {
-    let mut per_aura: Vec<(ObjectId, Vec<ManaType>)> = Vec::new();
+) -> Vec<(TriggerDefinitionRef, Vec<ManaType>)> {
+    let mut per_aura: Vec<(TriggerDefinitionRef, Vec<ManaType>)> = Vec::new();
     for &object_id in sources.iter() {
         // Skip the land itself — we're looking for OTHER permanents whose
         // TapsForMana trigger fires when `land_id` is tapped.
@@ -2176,16 +3953,29 @@ pub(crate) fn taps_for_mana_aura_bonus_indexed(
         let Some(obj) = state.objects.get(&object_id) else {
             continue;
         };
+        let source_context = trigger_source_context_for_latch(state, obj);
         // Intentionally NOT filtering by obj.controller: an opponent can
         // control an aura attached to your land (e.g., via Aura Theft), and
         // the trigger still fires for the tapping player when the land is
         // tapped. `taps_for_mana_card_matches` handles the attachment check.
-        for trigger in obj.trigger_definitions.iter_all() {
+        for active in super::functioning_abilities::active_trigger_definitions(state, obj) {
+            let trigger = active.definition;
             if trigger.mode != TriggerMode::TapsForMana {
                 continue;
             }
             if !super::trigger_matchers::taps_for_mana_card_matches(
-                trigger, state, land_id, object_id,
+                trigger,
+                state,
+                land_id,
+                &source_context,
+            ) {
+                continue;
+            }
+            if !super::trigger_matchers::valid_player_matches(
+                trigger,
+                state,
+                controller,
+                &source_context,
             ) {
                 continue;
             }
@@ -2200,7 +3990,7 @@ pub(crate) fn taps_for_mana_aura_bonus_indexed(
             // `mana_options_from_production` already does this enumeration.
             let choices = mana_options_from_production(state, controller, object_id, produced);
             if !choices.is_empty() {
-                per_aura.push((object_id, choices));
+                per_aura.push((active.definition_ref, choices));
             }
         }
     }
@@ -2234,10 +4024,12 @@ pub(crate) fn aura_taps_for_mana_sources_for_land(
         let Some(obj) = state.objects.get(&object_id) else {
             continue;
         };
+        let source_context = trigger_source_context_for_latch(state, obj);
         if obj.controller != controller {
             continue;
         }
-        for trigger in obj.trigger_definitions.iter_all() {
+        for entry in obj.trigger_definitions.iter_all() {
+            let trigger = entry.definition();
             if trigger.mode != TriggerMode::TapsForMana {
                 continue;
             }
@@ -2247,7 +4039,10 @@ pub(crate) fn aura_taps_for_mana_sources_for_land(
             // self-tapping land case (already refunded by the land's own
             // `source_id`, but kept here for completeness).
             if super::trigger_matchers::taps_for_mana_card_matches(
-                trigger, state, land_id, object_id,
+                trigger,
+                state,
+                land_id,
+                &source_context,
             ) && object_id != land_id
                 && !sources.contains(&object_id)
             {
@@ -2327,7 +4122,12 @@ pub(crate) fn produceable_mana_types_by_filter(
                 continue;
             }
             obj_had_explicit_ability = true;
-            for mana_type in mana_options_from_production(state, controller, *object_id, produced) {
+            // CR 106.7 + CR 109.5: `controller` scopes which lands are surveyed;
+            // each surveyed land's ability is evaluated for its own controller,
+            // which differs whenever the filter admits another player's lands.
+            for mana_type in
+                mana_options_from_production(state, obj.controller, *object_id, produced)
+            {
                 if !options.contains(&mana_type) {
                     options.push(mana_type);
                 }
@@ -2383,6 +4183,31 @@ mod tests {
     };
     use crate::types::identifiers::CardId;
 
+    /// CR 106.1 + CR 601.2g: Twenty identical Nyx Lotus profiles (G3/U1)
+    /// against ten {U} shards reach each (object, residual) subproblem by many
+    /// paths. Each is solved once, and the minimum charge is unchanged: every
+    /// blue activation costs its unit plus the two green it forgoes.
+    #[test]
+    fn residual_shard_search_solves_each_subproblem_once() {
+        const OBJECTS: usize = 20;
+        const SHARDS: usize = 10;
+        let lotus = ActivatableManaProfileKind::AnyOneColor {
+            options: vec![(ManaType::Green, 3), (ManaType::Blue, 1)],
+        };
+        let objects: Vec<_> = (0..OBJECTS)
+            .map(|index| (ObjectId(index as u64 + 1), 3, vec![lotus.clone()]))
+            .collect();
+        let mut search = ResidualShardSearch::new(&objects);
+        let charge = search.min_charge(0, vec![vec![ManaType::Blue]; SHARDS]);
+        assert_eq!(charge, Some(SHARDS as u32 * 3));
+        let subproblems = ((OBJECTS + 1) * (SHARDS + 1)) as u32;
+        assert!(
+            search.steps <= subproblems,
+            "solved {} subproblems, at most {subproblems} distinct exist",
+            search.steps
+        );
+    }
+
     fn verge_ability(color: ManaColor) -> AbilityDefinition {
         AbilityDefinition::new(
             AbilityKind::Activated,
@@ -2398,6 +4223,33 @@ mod tests {
             },
         )
         .cost(AbilityCost::Tap)
+    }
+
+    #[test]
+    fn instant_only_land_cannot_supply_payment_capacity() {
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority { player: controller };
+        let land = create_object(
+            &mut state,
+            CardId(901),
+            controller,
+            "Restricted Forest".to_string(),
+            Zone::Battlefield,
+        );
+        let object = state.objects.get_mut(&land).unwrap();
+        object.card_types.core_types.push(CoreType::Land);
+        Arc::make_mut(&mut object.abilities).push(
+            verge_ability(ManaColor::Green)
+                .activation_restrictions(vec![ActivationRestriction::AsInstant]),
+        );
+
+        assert!(!activatable_mana_options(&state, land, controller).is_empty());
+        assert_eq!(feasible_mana_capacity(&state, land, controller, None), 0);
+
+        Arc::make_mut(&mut state.objects.get_mut(&land).unwrap().abilities)
+            .push(verge_ability(ManaColor::Blue));
+        assert_eq!(feasible_mana_capacity(&state, land, controller, None), 1);
     }
 
     use crate::game::test_fixtures::brushland_colored_ability;
@@ -3043,6 +4895,355 @@ mod tests {
         assert_eq!(options.len(), 5);
     }
 
+    /// Regression for #6157/#6230: the auto-tap eligibility predicate must
+    /// classify a cost by validating the **whole** cost tree, not by matching a
+    /// single component. Lion's Eye Diamond activates with
+    /// `Composite[Discard{ selection: Chosen }, Sacrifice(SelfRef, 1)]`
+    /// (see `mana_abilities.rs` LED build) and exposes a
+    /// `WaitingFor::PayCost { kind: Discard }` prompt; auto-tap must not bypass
+    /// that discard choice. Before the fix, `cost_has_component`'s `any` match
+    /// on the self-sacrifice component wrongly classified LED as unambiguous
+    /// self-sacrifice, letting the auto-tap gate (`mana_sources.rs:1820`) and
+    /// the manual-payment exclusion (`mana_sources.rs:1281`) auto-select it.
+    /// Reusing `mana_abilities::cost_component_choice_free` (deny-by-default,
+    /// full-tree) rejects LED's `Discard` sibling while keeping Gold (bare
+    /// self-sacrifice) and Treasure (`{T}` + self-sacrifice) eligible.
+    #[test]
+    fn led_shaped_discard_sacrifice_stays_off_auto_tap() {
+        use crate::types::ability::{CardSelectionMode, DiscardSelfScope, TargetFilter};
+
+        let self_sac = || AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1));
+
+        // Gold: bare "Sacrifice this token" — no player choice → auto-tap eligible.
+        let gold = Some(self_sac());
+        assert!(
+            has_unambiguous_self_sacrifice_component(&gold),
+            "Gold's bare self-sacrifice must remain auto-tap eligible"
+        );
+
+        // Treasure: "{T}, Sacrifice this artifact" — Tap is choice-free → eligible.
+        let treasure = Some(AbilityCost::Composite {
+            costs: vec![AbilityCost::Tap, self_sac()],
+        });
+        assert!(
+            has_unambiguous_self_sacrifice_component(&treasure),
+            "Treasure's {{T}} + self-sacrifice must remain auto-tap eligible"
+        );
+
+        // Lion's Eye Diamond: "Discard your hand, Sacrifice Lion's Eye Diamond".
+        // The `Discard` sibling requires a player choice, so the whole cost is
+        // NOT unambiguous — it must stay on the manual-payment path and keep its
+        // discard prompt. This is the shape that was misclassified before the fix.
+        let led = Some(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    filter: None,
+                    selection: CardSelectionMode::Chosen,
+                    self_scope: DiscardSelfScope::FromHand,
+                },
+                self_sac(),
+            ],
+        });
+        assert!(
+            !has_unambiguous_self_sacrifice_component(&led),
+            "LED-shaped composite (Discard + self-sacrifice) must NOT be auto-tap \
+             eligible — its discard choice must not be bypassed"
+        );
+
+        // The same LED shape with the components reordered is still rejected: the
+        // whole-tree check does not depend on component position.
+        let led_reordered = Some(AbilityCost::Composite {
+            costs: vec![
+                self_sac(),
+                AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    filter: None,
+                    selection: CardSelectionMode::Chosen,
+                    self_scope: DiscardSelfScope::FromHand,
+                },
+            ],
+        });
+        assert!(
+            !has_unambiguous_self_sacrifice_component(&led_reordered),
+            "component order must not affect the whole-tree choice-free check"
+        );
+    }
+
+    /// Adjacent-shape hostiles for `has_unambiguous_self_sacrifice_component`,
+    /// which is also the classifier the mana-display legality fast path
+    /// (`mana_abilities::legality_simulation_is_redundant`) composes. Covers only
+    /// what `led_shaped_discard_sacrifice_stays_off_auto_tap` above does not —
+    /// that test already pins Gold, Treasure, LED and LED-reordered.
+    ///
+    /// The point of the negative rows is that **none of them needs a guard**: the
+    /// literal `SelfRef` / `Count { count: 1 }` struct pattern excludes every one
+    /// of them by construction. In particular `SacrificeRequirement::Aggregate`
+    /// (Phyrexian Dreadnought class) cannot match `Count { count: 1 }`, so it can
+    /// never reach a fast path — pinned here so a later "simplification" of the
+    /// pattern into a wildcard is caught.
+    #[test]
+    fn self_sacrifice_classifier_excludes_hostile_shapes() {
+        use crate::types::ability::{
+            Comparator, SacrificeAggregateStat, SacrificeRequirement, TargetFilter, TypedFilter,
+        };
+
+        // Positive controls first: without these, every `!` below could pass on a
+        // classifier that returns `false` unconditionally.
+        assert!(
+            has_unambiguous_self_sacrifice_component(&Some(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Tap,
+                    AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+                ],
+            })),
+            "positive control: Treasure's {{T}} + single self-sacrifice is accepted"
+        );
+        assert!(
+            has_unambiguous_self_sacrifice_component(&Some(AbilityCost::Sacrifice(
+                SacrificeCost::count(TargetFilter::SelfRef, 1)
+            ))),
+            "positive control: Gold's bare single self-sacrifice is accepted"
+        );
+
+        // CR 701.21: sacrificing TWO of this permanent is not the deterministic
+        // single-self shape — `Count { count: 2 }` does not match `Count { count: 1 }`.
+        assert!(
+            !has_unambiguous_self_sacrifice_component(&Some(AbilityCost::Sacrifice(
+                SacrificeCost::count(TargetFilter::SelfRef, 2)
+            ))),
+            "Count {{ count: 2 }} is excluded by construction"
+        );
+
+        // CR 701.21: an aggregate requirement (Phyrexian Dreadnought class) needs a
+        // player-chosen SET of permanents — excluded by construction, no guard.
+        assert!(
+            !has_unambiguous_self_sacrifice_component(&Some(AbilityCost::Sacrifice(
+                SacrificeCost::new(
+                    TargetFilter::SelfRef,
+                    SacrificeRequirement::Aggregate {
+                        stat: SacrificeAggregateStat::TotalPower,
+                        comparator: Comparator::GE,
+                        value: 12,
+                    },
+                )
+            ))),
+            "SacrificeRequirement::Aggregate is excluded by construction"
+        );
+
+        // A non-self target (Phyrexian Altar class) may have no legal victim, so
+        // its payability is NOT decided by the cost's shape.
+        assert!(
+            !has_unambiguous_self_sacrifice_component(&Some(AbilityCost::Sacrifice(
+                SacrificeCost::count(TargetFilter::Typed(TypedFilter::creature()), 1)
+            ))),
+            "a non-self Sacrifice target is not an unambiguous self-sacrifice"
+        );
+
+        // A pure {T} cost is choice-free but carries NO self-sacrifice component,
+        // so this predicate must not claim it.
+        assert!(
+            !has_unambiguous_self_sacrifice_component(&Some(AbilityCost::Composite {
+                costs: vec![AbilityCost::Tap],
+            })),
+            "a {{T}}-only cost has no self-sacrifice component to classify"
+        );
+
+        // The degenerate empty Composite is vacuously choice-free, but requiring a
+        // self-sacrifice component to be PRESENT rejects it — which is why this
+        // predicate needs no `{T}`/`{Q}` anchor of its own.
+        assert!(
+            !has_unambiguous_self_sacrifice_component(&Some(AbilityCost::Composite {
+                costs: vec![],
+            })),
+            "the degenerate empty Composite is rejected because a self-sacrifice \
+             component is required to be present"
+        );
+    }
+
+    /// CR 118.3 + CR 701.21a: the classifier's LEAF-ARITY bound. A cost tree can
+    /// be choice-free and still unpayable, because the payment path pays leaves
+    /// one at a time against the already-mutated source: a second
+    /// `Sacrifice(SelfRef, 1)` leaf finds the source no longer on the battlefield
+    /// and a second `{T}` leaf finds it already tapped, so `activate_mana_ability`
+    /// errors and the legality simulation answers `false`. Unbounded, the
+    /// classifier answers `true` for these shapes and
+    /// `mana_abilities::legality_simulation_is_redundant` would skip the
+    /// simulation and FLIP the answer — the one direction the fast path may never
+    /// take.
+    ///
+    /// The census runs over the FLATTENED tree, but the nested rows below do NOT
+    /// prove that: `cost_tree_is_flat` rejects them first, so they would still
+    /// pass on a one-level census. The flattening itself is pinned directly on the
+    /// walker, in `leaf_component_census_counts_the_flattened_tree`.
+    #[test]
+    fn self_sacrifice_classifier_bounds_leaf_arity() {
+        use crate::types::ability::TargetFilter;
+
+        let self_sac = || AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1));
+
+        // Positive controls first: without them every `!` below would pass on a
+        // classifier that returns `false` unconditionally, and these two shapes
+        // are precisely what the fast path exists to keep.
+        assert!(
+            has_unambiguous_self_sacrifice_component(&Some(AbilityCost::Composite {
+                costs: vec![AbilityCost::Tap, self_sac()],
+            })),
+            "positive control: Treasure's single {{T}} + single self-sacrifice stays eligible"
+        );
+        assert!(
+            has_unambiguous_self_sacrifice_component(&Some(self_sac())),
+            "positive control: Gold's bare single self-sacrifice stays eligible"
+        );
+
+        // CR 701.21a: the second self-sacrifice leaf has nothing left to move from
+        // the battlefield, so `sacrifice_permanent` errors and the simulation says
+        // `false`.
+        assert!(
+            !has_unambiguous_self_sacrifice_component(&Some(AbilityCost::Composite {
+                costs: vec![self_sac(), self_sac()],
+            })),
+            "two self-sacrifice leaves are not unambiguously payable"
+        );
+
+        // CR 118.3: the second {T} leaf finds the source already tapped, so
+        // `tap_source` errors and the simulation says `false`.
+        assert!(
+            !has_unambiguous_self_sacrifice_component(&Some(AbilityCost::Composite {
+                costs: vec![AbilityCost::Tap, AbilityCost::Tap, self_sac()],
+            })),
+            "two {{T}} leaves are not unambiguously payable"
+        );
+
+        // Both hostile axes in one tree.
+        assert!(
+            !has_unambiguous_self_sacrifice_component(&Some(AbilityCost::Composite {
+                costs: vec![AbilityCost::Tap, self_sac(), self_sac()],
+            })),
+            "a {{T}} beside two self-sacrifice leaves is not unambiguously payable"
+        );
+
+        // Two self-sacrifice leaves again, this time split across a nested
+        // `Composite`: the payer flattens this to [Tap, Sac, Sac] and pays three
+        // leaves. Rejected by `cost_tree_is_flat` before the census runs — the
+        // census's own flattening is pinned directly in
+        // `leaf_component_census_counts_the_flattened_tree`, since this clause
+        // would mask an undercount here.
+        assert!(
+            !has_unambiguous_self_sacrifice_component(&Some(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Composite {
+                        costs: vec![AbilityCost::Tap, self_sac()],
+                    },
+                    self_sac(),
+                ],
+            })),
+            "a nested Composite's self-sacrifice leaf must be counted: the arity \
+             census walks the flattened tree, not one Composite level"
+        );
+
+        // NESTING GUARD: flattened this is the payable [Tap, Sac], but the {T} is
+        // invisible to the one-level `has_tap_component` that gates readiness's
+        // tapped / summoning-sickness checks (CR 106.12 + CR 302.6), so a TAPPED
+        // source would clear readiness while the payment path still errors on the
+        // Tap leaf (CR 118.3). Rejected so this predicate never outruns the
+        // walkers that gate it.
+        assert!(
+            !has_unambiguous_self_sacrifice_component(&Some(AbilityCost::Composite {
+                costs: vec![AbilityCost::Composite {
+                    costs: vec![AbilityCost::Tap, self_sac()],
+                }],
+            })),
+            "a nested cost tree is rejected: its leaves are invisible to the \
+             one-level walkers that gate this activation"
+        );
+
+        // Order is NOT an axis of this bound, and the arity census did not make it
+        // one: sacrificing before tapping still classifies. The payment path
+        // tolerates it — after the sacrifice the object stays in `state.objects`
+        // with `zone = Graveyard`, and neither `tap_source` (which reads only
+        // `tapped`) nor `tap_permanent_for_cost` has a zone guard — so the fast
+        // path and the simulation agree. Pinned as a no-regression row, not as an
+        // endorsement of the shape.
+        assert!(
+            has_unambiguous_self_sacrifice_component(&Some(AbilityCost::Composite {
+                costs: vec![self_sac(), AbilityCost::Tap],
+            })),
+            "the leaf-arity bound is order-blind: one leaf of each still classifies"
+        );
+    }
+
+    /// `count_leaf_components` must report the multiset the PAYMENT path actually
+    /// pays: `mana_abilities::append_mana_ability_cost_components` flattens nested
+    /// `Composite`s before paying one leaf at a time, so a census that walked a
+    /// single level (as [`cost_has_component`] does) reports `1` where the payer
+    /// pays `2` — and an arity bound built on it would re-admit the very shapes
+    /// `self_sacrifice_classifier_bounds_leaf_arity` rejects.
+    ///
+    /// Pinned on the building block rather than through the classifier because the
+    /// classifier rejects nested trees on a separate clause (`cost_tree_is_flat`),
+    /// which would mask an undercount here.
+    #[test]
+    fn leaf_component_census_counts_the_flattened_tree() {
+        use crate::types::ability::{SacrificeRequirement, TargetFilter};
+
+        let self_sac = || AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1));
+        let is_self_sac = |cost: &AbilityCost| {
+            matches!(
+                cost,
+                AbilityCost::Sacrifice(SacrificeCost {
+                    target: TargetFilter::SelfRef,
+                    requirement: SacrificeRequirement::Count { count: 1 },
+                })
+            )
+        };
+        let is_tap = |cost: &AbilityCost| matches!(cost, AbilityCost::Tap);
+
+        // A bare leaf is its own multiset.
+        assert_eq!(
+            count_leaf_components(&self_sac(), &is_self_sac),
+            1,
+            "a bare self-sacrifice cost is one self-sacrifice leaf"
+        );
+
+        // Flat control: here a one-level census and a flattened census agree, so
+        // the nested rows below are what discriminate between them.
+        let flat = AbilityCost::Composite {
+            costs: vec![AbilityCost::Tap, self_sac()],
+        };
+        assert_eq!(
+            count_leaf_components(&flat, &is_self_sac),
+            1,
+            "control: Treasure's flat tree has one self-sacrifice leaf"
+        );
+        assert_eq!(
+            count_leaf_components(&flat, &is_tap),
+            1,
+            "control: Treasure's flat tree has one {{T}} leaf"
+        );
+
+        // The discriminating rows: the payer flattens this to [Tap, Sac, Sac].
+        let nested = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Composite {
+                    costs: vec![AbilityCost::Tap, self_sac()],
+                },
+                self_sac(),
+            ],
+        };
+        assert_eq!(
+            count_leaf_components(&nested, &is_self_sac),
+            2,
+            "a nested self-sacrifice leaf must be counted: a one-level census \
+             reports 1 here, which is the undercount that re-admits the defect"
+        );
+        assert_eq!(
+            count_leaf_components(&nested, &is_tap),
+            1,
+            "a nested {{T}} leaf must be counted: a one-level census reports 0 here"
+        );
+    }
+
     #[test]
     fn life_payment_mana_source_marks_controller_harm() {
         let mut state = GameState::new_two_player(42);
@@ -3265,6 +5466,161 @@ mod tests {
         assert!(
             penalty.priority_amount() > fixed_max.priority_amount(),
             "unknown amount (None) must sort strictly worse than any known amount (conservative worst)"
+        );
+    }
+
+    /// Issue #5912: City of Brass prints its self-damage as a *separate*
+    /// "Whenever this land becomes tapped, it deals 1 damage to you" trigger
+    /// (`TriggerMode::Taps`, `valid_card: SelfRef`), NOT folded into the
+    /// `{T}: Add one mana of any color.` ability's own resolution chain like a
+    /// painland. `mana_ability_penalty` only walks the ability's own chain, so
+    /// it misclassifies this shape as `None` (byte-identical to a basic land) —
+    /// this is the reach-guard proving the gap exists before the fix.
+    #[test]
+    fn city_of_brass_ability_alone_misclassifies_as_none() {
+        let ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    color_options: ManaColor::ALL.to_vec(),
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Tap);
+
+        assert_eq!(
+            mana_ability_penalty(&ability),
+            ManaSourcePenalty::None,
+            "the ability's own chain is pure Effect::Mana with no embedded damage"
+        );
+    }
+
+    /// Issue #5912: [`object_mana_ability_penalty`] must see past the ability
+    /// chain and classify a City-of-Brass-shaped object (mana ability + sibling
+    /// self-referential `Taps` damage trigger) as `DealsDamageOnResolution`, so
+    /// auto-tap sorts it worse than a truly free source (Island) for the same
+    /// generic-mana slot.
+    #[test]
+    fn object_mana_ability_penalty_sees_city_of_brass_self_tap_damage_trigger() {
+        let mut state = GameState::new_two_player(42);
+        let city_of_brass = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "City of Brass".to_string(),
+            Zone::Battlefield,
+        );
+        let ability_index;
+        {
+            let obj = state.objects.get_mut(&city_of_brass).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            let ability = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::AnyOneColor {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        color_options: ManaColor::ALL.to_vec(),
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap);
+            ability_index = obj.abilities.len();
+            Arc::make_mut(&mut obj.abilities).push(ability);
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::Taps)
+                    .valid_card(TargetFilter::SelfRef)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::DealDamage {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                            damage_source: None,
+                            excess: None,
+                        },
+                    )),
+            );
+        }
+
+        let ability = state.objects.get(&city_of_brass).unwrap().abilities[ability_index].clone();
+        let penalty = object_mana_ability_penalty(&state, city_of_brass, &ability);
+        assert_eq!(
+            penalty,
+            ManaSourcePenalty::DealsDamageOnResolution {
+                fixed_amount: Some(1)
+            },
+            "the sibling self-tap damage trigger must be folded into the classification"
+        );
+        assert!(
+            penalty.priority_amount() > ManaSourcePenalty::None.priority_amount(),
+            "must sort strictly worse than a truly free source (Island) in the same tier_byte"
+        );
+    }
+
+    /// A sibling `Taps` trigger fires only when the selected mana ability taps
+    /// its source. A no-cost mana ability on the same City-of-Brass-shaped
+    /// object must retain its own penalty classification rather than borrowing
+    /// damage from an event it cannot cause.
+    #[test]
+    fn object_mana_ability_penalty_ignores_self_tap_trigger_for_no_tap_ability() {
+        let mut state = GameState::new_two_player(42);
+        let city_of_brass = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "City of Brass".to_string(),
+            Zone::Battlefield,
+        );
+        let ability_index;
+        {
+            let obj = state.objects.get_mut(&city_of_brass).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            let ability = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::AnyOneColor {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        color_options: ManaColor::ALL.to_vec(),
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            );
+            ability_index = obj.abilities.len();
+            Arc::make_mut(&mut obj.abilities).push(ability);
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::Taps)
+                    .valid_card(TargetFilter::SelfRef)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::DealDamage {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                            damage_source: None,
+                            excess: None,
+                        },
+                    )),
+            );
+        }
+
+        let ability = state.objects.get(&city_of_brass).unwrap().abilities[ability_index].clone();
+        assert_eq!(
+            object_mana_ability_penalty(&state, city_of_brass, &ability),
+            ManaSourcePenalty::None,
+            "a no-tap mana ability cannot fire the sibling Taps trigger"
         );
     }
 
@@ -3668,7 +6024,7 @@ mod tests {
         obj.card_types.subtypes.push("Aura".to_string());
         obj.attached_to = Some(land_id.into());
         obj.entered_battlefield_turn = Some(1);
-        obj.trigger_definitions.push(
+        obj.push_printed_trigger(
             TriggerDefinition::new(TriggerMode::TapsForMana)
                 .execute(AbilityDefinition::new(
                     AbilityKind::Database,
@@ -3861,7 +6217,10 @@ mod tests {
         assert!(!opt.source_could_produce_two_or_more_colors);
         // Resolver override: Wild Growth's trigger must produce Green.
         assert_eq!(opt.taps_for_mana_overrides.len(), 1);
-        assert_eq!(opt.taps_for_mana_overrides[0].0, wild_growth);
+        assert_eq!(
+            opt.taps_for_mana_overrides[0].0.source.object_id,
+            wild_growth
+        );
         assert_eq!(
             opt.taps_for_mana_overrides[0].1,
             ProductionOverride::SingleColor(ManaType::Green),
@@ -3962,7 +6321,7 @@ mod tests {
         obj.card_types.subtypes.push("Aura".to_string());
         obj.attached_to = Some(land_id.into());
         obj.entered_battlefield_turn = Some(1);
-        obj.trigger_definitions.push(
+        obj.push_printed_trigger(
             TriggerDefinition::new(TriggerMode::TapsForMana)
                 .execute(AbilityDefinition::new(
                     AbilityKind::Database,
@@ -3981,6 +6340,137 @@ mod tests {
                 .valid_card(TargetFilter::AttachedTo),
         );
         aura
+    }
+
+    fn subtype_forest_with_priority(state: &mut GameState) -> ObjectId {
+        let forest = create_object(
+            state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        let object = state.objects.get_mut(&forest).unwrap();
+        object.card_types.core_types.push(CoreType::Land);
+        object.card_types.subtypes.push("Forest".to_string());
+        object.entered_battlefield_turn = Some(1);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        forest
+    }
+
+    #[test]
+    fn priority_mana_route_uses_current_source_characteristics() {
+        let mut state = GameState::new_two_player(42);
+        let forest = subtype_forest_with_priority(&mut state);
+        let artifact = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Mana Rock".to_string(),
+            Zone::Battlefield,
+        );
+        let artifact_object = state.objects.get_mut(&artifact).unwrap();
+        artifact_object
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        Arc::make_mut(&mut artifact_object.abilities).push(verge_ability(ManaColor::Green));
+
+        let selections = activatable_mana_source_selections(&state, PlayerId(0));
+        let forest_selection = selections
+            .iter()
+            .find(|selection| selection.source.object_id == forest)
+            .expect("Forest fallback supplies a mana selection");
+        let artifact_selection = selections
+            .iter()
+            .find(|selection| selection.source.object_id == artifact)
+            .expect("mana artifact supplies a mana selection");
+
+        assert_eq!(
+            priority_mana_route(&state, forest_selection),
+            Some(PriorityManaRoute::LandTap)
+        );
+        assert_eq!(
+            priority_mana_route(&state, artifact_selection),
+            Some(PriorityManaRoute::NonlandActivation)
+        );
+
+        state
+            .objects
+            .get_mut(&forest)
+            .expect("Forest remains a live object")
+            .card_types
+            .core_types
+            .clear();
+        assert_eq!(
+            priority_mana_route(&state, forest_selection),
+            Some(PriorityManaRoute::NonlandActivation),
+            "the route follows current characteristics; the clone reducer later rejects a stale selection"
+        );
+    }
+
+    #[test]
+    fn manual_fallback_land_action_produces_wild_growth_bonus_once() {
+        let mut state = GameState::new_two_player(42);
+        let forest = subtype_forest_with_priority(&mut state);
+        attach_taps_for_mana_aura(&mut state, forest, PlayerId(0), ManaColor::Green);
+        let action = activatable_mana_actions_for_player(&state, PlayerId(0))
+            .into_iter()
+            .find(|action| matches!(action, GameAction::TapLandForMana { .. }))
+            .expect("the engine exposes the subtype fallback plus Wild Growth selection");
+
+        let result = crate::game::engine::apply(&mut state, PlayerId(0), action)
+            .expect("the engine-authored manual mana action resolves");
+
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 2);
+        let tapped_for_mana: Vec<_> = result
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::TappedForMana { produced, .. } => Some(produced),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tapped_for_mana.len(), 1);
+        assert_eq!(tapped_for_mana[0].as_slice(), &[ManaType::Green]);
+    }
+
+    #[test]
+    fn manual_fallback_land_action_uses_selected_fertile_ground_color_once() {
+        let mut state = GameState::new_two_player(42);
+        let forest = subtype_forest_with_priority(&mut state);
+        attach_any_color_aura(&mut state, forest, PlayerId(0));
+        let action = activatable_mana_actions_for_player(&state, PlayerId(0))
+            .into_iter()
+            .find(|action| {
+                matches!(
+                    action,
+                    GameAction::TapLandForMana { selection }
+                        if selection.taps_for_mana.iter().any(|trigger| {
+                            trigger.production_override
+                                == ProductionOverride::SingleColor(ManaType::Red)
+                        })
+                )
+            })
+            .expect("the engine exposes the selected red Fertile Ground override");
+
+        let result = crate::game::engine::apply(&mut state, PlayerId(0), action)
+            .expect("the engine-authored any-color manual mana action resolves");
+
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 1);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 1);
+        assert_eq!(state.players[0].mana_pool.total(), 2);
+        assert_eq!(
+            result
+                .events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::TappedForMana { .. }))
+                .count(),
+            1
+        );
     }
 
     /// Issue #4265 / Fertile Ground regression: `taps_for_mana_aura_bonus`
@@ -4067,7 +6557,10 @@ mod tests {
             assert_eq!(combo.len(), 2, "two-element combination: land + aura");
             // Resolver override: one entry pointing to Fertile Ground.
             assert_eq!(opt.taps_for_mana_overrides.len(), 1);
-            assert_eq!(opt.taps_for_mana_overrides[0].0, fertile_ground);
+            assert_eq!(
+                opt.taps_for_mana_overrides[0].0.source.object_id,
+                fertile_ground
+            );
             // Override matches the bonus color for this option.
             assert_eq!(
                 opt.taps_for_mana_overrides[0].1,
@@ -4223,6 +6716,7 @@ mod tests {
                 static_abilities: vec![],
                 duration: None,
                 target: None,
+                end_cost: None,
             }
         ));
     }
@@ -4353,5 +6847,220 @@ mod tests {
 
         let sources = beneficial_non_mana_tap_trigger_sources(&state, PlayerId(0));
         assert_eq!(sources, vec![dork], "only P0's controlled source is listed");
+    }
+
+    /// CR 205.4b + CR 205.4g: `source_is_snow` reads the LAYERED (post-CR-613)
+    /// supertype set, not the printed base set. A permanent whose Snow supertype
+    /// was continuously granted (base lacks it, layered set contains it) is a
+    /// snow source. This is the discriminating fixture for "reads layered, not
+    /// base": a `base_card_types`-reading implementation would return `false`.
+    #[test]
+    fn source_is_snow_reads_layered_not_base_supertypes() {
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(910),
+            PlayerId(0),
+            "Continuously-Snowed Land".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        // Printed (base) supertypes deliberately LACK Snow ...
+        obj.base_card_types = obj.card_types.clone();
+        // ... while the layered result (post-CR-613 continuous grant) HAS Snow.
+        obj.card_types.supertypes.push(Supertype::Snow);
+
+        // Non-vacuity guard: the base set must genuinely lack Snow, so a
+        // base-reading implementation would fail this test.
+        assert!(
+            !obj.base_card_types.supertypes.contains(&Supertype::Snow),
+            "fixture invalid: base supertypes must NOT contain Snow for this to \
+             discriminate layered vs. base reads",
+        );
+        assert!(
+            source_is_snow(&state, id),
+            "a permanent continuously granted the Snow supertype is a snow source \
+             (CR 205.4g); source_is_snow must read the layered supertype set",
+        );
+    }
+
+    /// A missing object / `ObjectId(0)` sentinel is not a snow source.
+    #[test]
+    fn source_is_snow_false_for_missing_object() {
+        let state = GameState::new_two_player(42);
+        assert!(
+            !source_is_snow(&state, ObjectId(0)),
+            "the ObjectId(0) sentinel (and any absent object) is not a snow source",
+        );
+    }
+}
+
+#[cfg(test)]
+mod paid_object_label_tests {
+    use super::*;
+    use crate::game::scenario::{GameRunner, GameScenario, P0};
+    use crate::game::scenario_db::GameScenarioDbExt;
+    use crate::types::ability::ChosenAttribute;
+    use crate::types::mana::ManaCost;
+
+    /// `member` on P0's battlefield with `others` placed there before it.
+    fn board(member: &str, others: &[&str]) -> (GameRunner, ObjectId) {
+        let db = crate::test_support::shared_card_db();
+        let mut scenario = GameScenario::new();
+        for name in others {
+            scenario.add_real_card(P0, name, Zone::Battlefield, db);
+        }
+        let id = scenario.add_real_card(P0, member, Zone::Battlefield, db);
+        (scenario.build(), id)
+    }
+
+    /// The produced-mana label of each of `member`'s mana actions, with
+    /// `others` placed on the battlefield before it.
+    fn labels(member: &str, others: &[&str]) -> Vec<Vec<ManaType>> {
+        let (runner, id) = board(member, others);
+        option_labels(&runner, id)
+    }
+
+    fn option_labels(runner: &GameRunner, id: ObjectId) -> Vec<Vec<ManaType>> {
+        let state = runner.state();
+        let gates = mana_abilities::ManaActivationGates::compute(state);
+        let auras = taps_for_mana_trigger_sources(state);
+        current_mana_source_options(state, P0, id, &auras, &gates)
+            .iter()
+            .map(|option| {
+                live_mana_output_for_option(state, P0, option)
+                    .into_iter()
+                    .map(|unit| unit.mana_type)
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Reviewer probe B, selected output (#8443 m1, M1-02): Nyx Lotus beside
+    /// devotion G3 / U1 offers a green row labelled GGG and a blue row labelled
+    /// U. Each label reads devotion to its own row's color (CR 700.5 +
+    /// CR 608.2d), not an unrelated blue stored on the Lotus, which is left
+    /// unchanged.
+    #[test]
+    fn color_dependent_amount_labels_each_row_with_its_own_color() {
+        for stored in [None, Some(ManaColor::Blue)] {
+            let mut scenario = GameScenario::new();
+            let lotus = scenario
+                .add_artifact_from_oracle(
+                    P0,
+                    "Nyx Lotus",
+                    "{T}: Choose a color. Add an amount of mana of that color equal to your devotion to that color.",
+                )
+                .id();
+            scenario
+                .add_creature(P0, "Leatherback Baloth", 4, 5)
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Green; 3],
+                    generic: 0,
+                });
+            scenario
+                .add_creature(P0, "Merfolk of the Pearl Trident", 1, 1)
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue],
+                    generic: 0,
+                });
+            let mut runner = scenario.build();
+            if let Some(color) = stored {
+                runner
+                    .state_mut()
+                    .objects
+                    .get_mut(&lotus)
+                    .unwrap()
+                    .chosen_attributes
+                    .push(ChosenAttribute::Color(color));
+            }
+            assert!(matches!(
+                &*runner.state().objects[&lotus].abilities[0].effect,
+                Effect::Mana {
+                    produced: ManaProduction::AnyOneColor { .. },
+                    ..
+                }
+            ));
+            assert_eq!(
+                option_labels(&runner, lotus),
+                vec![vec![ManaType::Green; 3], vec![ManaType::Blue]],
+                "{stored:?}"
+            );
+            assert_eq!(runner.state().objects[&lotus].chosen_color(), stored);
+        }
+    }
+
+    /// CR 608.2h: Priest of Yawgmoth ("{T}, Sacrifice an artifact: Add an
+    /// amount of {B} equal to the sacrificed artifact's mana value.") labels its
+    /// action with the largest yield its sacrifice could pay for: Ashnod's
+    /// Altar's {B}{B}{B}, not the earlier Memnite's nothing.
+    #[test]
+    fn paid_object_yield_labels_the_largest_candidate() {
+        assert_eq!(
+            labels("Priest of Yawgmoth", &["Ashnod's Altar"]),
+            vec![vec![ManaType::Black; 3]]
+        );
+        assert_eq!(
+            labels("Priest of Yawgmoth", &["Memnite", "Ashnod's Altar"]),
+            vec![vec![ManaType::Black; 3]]
+        );
+    }
+
+    /// CR 608.2h: Priest of Yawgmoth's yield is the mana value of the artifact
+    /// its cost sacrifices: 3 beside Ashnod's Altar (mana cost {3}), 0 beside
+    /// only a Memnite (mana cost {0}).
+    #[test]
+    fn max_mana_yield_reads_the_sacrificed_artifacts_mana_value() {
+        let yielded = |others: &[&str]| {
+            let (runner, priest) = board("Priest of Yawgmoth", others);
+            max_mana_yield(runner.state(), priest, P0)
+        };
+        assert_eq!(yielded(&["Ashnod's Altar"]), 3);
+        assert_eq!(yielded(&["Memnite"]), 0);
+    }
+
+    /// The castability profiles of `member`, with `others` placed on the
+    /// battlefield before it.
+    fn profiles(member: &str, others: &[&str]) -> Vec<ActivatableManaProfileKind> {
+        let (runner, id) = board(member, others);
+        activatable_mana_profiles_for_object(runner.state(), id, P0, None)
+            .into_iter()
+            .map(|profile| profile.kind)
+            .collect()
+    }
+
+    /// Phyrexian Altar ("Sacrifice a creature: Add one mana of any color.")
+    /// yields the same mana whichever creature it sacrifices, so twenty
+    /// victims are one profile for the shard backtracker.
+    #[test]
+    fn paid_object_independent_yield_is_one_profile() {
+        assert_eq!(profiles("Phyrexian Altar", &["Grizzly Bears"; 20]).len(), 1);
+    }
+
+    /// CR 608.2h: Food Chain's yield reads the exiled creature's mana value, so
+    /// Grizzly Bears (a yield of 3) and Hill Giant (a yield of 5) stay distinct profiles.
+    #[test]
+    fn paid_object_dependent_yields_stay_distinct_profiles() {
+        let kinds = profiles("Food Chain", &["Grizzly Bears", "Hill Giant"]);
+        assert_eq!(kinds.len(), 2, "{kinds:?}");
+        let counts: Vec<u32> = kinds
+            .iter()
+            .map(|kind| match kind {
+                ActivatableManaProfileKind::AnyOneColor { options } => options[0].1,
+                other => panic!("unexpected profile {other:?}"),
+            })
+            .collect();
+        assert_eq!(counts, vec![3, 5]);
+    }
+
+    /// CR 608.2h: Food Chain ("Exile a creature you control: Add X mana of any
+    /// one color, where X is 1 plus the exiled creature's mana value.") labels
+    /// each color with 1 plus Grizzly Bears' mana value.
+    #[test]
+    fn exiled_creature_yield_labels_each_color() {
+        let labels = labels("Food Chain", &["Grizzly Bears"]);
+        assert_eq!(labels.len(), 5, "{labels:?}");
+        assert!(labels.iter().all(|label| label.len() == 3), "{labels:?}");
     }
 }

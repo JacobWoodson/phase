@@ -1,6 +1,4 @@
-use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
-};
+use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
@@ -33,16 +31,9 @@ pub fn resolve(
     // CR 109.5 / CR 113.6: "you" in an effect text resolves to the ability's
     // controller. Cards with `target: Controller` (the printed default) read
     // their grantee directly off `ability.controller`; targeted variants
-    // resolve from the first player target.
-    let player = match target {
-        TargetFilter::Controller | TargetFilter::SelfRef => ability.controller,
-        _ => {
-            if let Some(TargetRef::Player(pid)) = ability.targets.first() {
-                *pid
-            } else {
-                ability.controller
-            }
-        }
+    // resolve through the one player-reference authority.
+    let Some(player) = super::resolve_player_for_context_ref(state, ability, target) else {
+        return Ok(());
     };
 
     let amount = crate::game::quantity::resolve_quantity(
@@ -64,6 +55,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::GrantExtraLoyaltyActivations,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -72,12 +64,19 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{AbilityKind, QuantityExpr, SpellContext, SubAbilityLink};
+    use crate::types::ability::{
+        AbilityKind, QuantityExpr, SiblingCondition, SpellContext, SubAbilityLink, TargetFilter,
+    };
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
 
     fn make_ability(amount: QuantityExpr, controller: PlayerId) -> ResolvedAbility {
         ResolvedAbility {
+            declares_chosen_group: None,
+            reads_chosen_group: None,
+            declares_return_result: None,
+            reads_return_result: None,
+            detached_remainder: crate::types::ability::DetachedRemainder::NoProducer,
             effect: Effect::GrantExtraLoyaltyActivations {
                 amount,
                 target: TargetFilter::Controller,
@@ -87,8 +86,18 @@ mod tests {
             scoped_player: None,
             target_chooser: None,
             source_id: ObjectId(1),
+            cast_occurrence: None,
             source_incarnation: None,
-            source_card_id: None,
+            trigger_source: None,
+            trigger_definition_ref: None,
+            delayed_origin: None,
+            force_block_attacker: None,
+            target_incarnations: Vec::new(),
+            target_pins: Vec::new(),
+            legacy_selected_target_incarnations: Vec::new(),
+            illegal_target_slots: Vec::new(),
+            unjudged_target_slots: Vec::new(),
+            illegal_local_target_slots: Vec::new(),
             targets: vec![],
             kind: AbilityKind::Activated,
             sub_ability: None,
@@ -98,35 +107,46 @@ mod tests {
             context: SpellContext::default(),
             optional_targeting: false,
             optional: false,
+            optional_player: None,
             optional_for: None,
             multi_target: None,
             target_constraints: Vec::new(),
             target_choice_timing: crate::types::ability::TargetChoiceTiming::Stack,
             description: None,
+            selected_mode_labels: Vec::new(),
+            modal_instruction_ordinal: None,
             player_scope: None,
             starting_with: None,
             chosen_x: None,
             cost_paid_object: None,
+            noted_mana_payment: None,
+            cost_paid_objects: Vec::new(),
             effect_context_object: None,
             amassed_army_object: None,
             ability_index: None,
             may_trigger_origin: None,
             repeat_for: None,
             min_x_value: 0,
+            announced_x: None,
             cant_be_copied: false,
+            illegal_targets_disposition: Default::default(),
             copy_count_status: crate::types::ability::CopyCountStatus::Pending,
             forward_result: false,
             unless_pay: None,
             distribution: None,
+            distribute: None,
             target_selection_mode: crate::types::ability::TargetSelectionMode::Chosen,
             chosen_players: Vec::new(),
             repeat_until: None,
             replacement_applied: Default::default(),
             sub_link: SubAbilityLink::ContinuationStep,
+            target_reads: Default::default(),
+            sibling_condition: SiblingCondition::Dependent,
             modal: None,
             mode_abilities: vec![],
-            dig_found_nothing_for_parent_target: false,
-            choose_from_zone_found_nothing_for_parent_target: false,
+            parent_target_missing_reason: None,
+            activation_cost_reduction: None,
+            activation_record: None,
         }
     }
 

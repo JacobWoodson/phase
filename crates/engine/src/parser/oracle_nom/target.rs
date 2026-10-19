@@ -5,26 +5,47 @@
 
 use nom::branch::alt;
 use nom::bytes::complete::tag;
-use nom::character::complete::space1;
-use nom::combinator::{map, not, opt, value};
+use nom::character::complete::{satisfy, space1};
+use nom::combinator::{all_consuming, eof, map, map_opt, not, opt, peek, success, value, verify};
+use nom::multi::separated_list1;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
+use super::bridge::nom_on_lower;
 use super::error::{oracle_err, OracleError, OracleResult};
 use super::primitives::parse_color;
 use crate::parser::oracle_util::{parse_subtype, GRANTING_SELF_PLACEHOLDER, OUTLAW_SUBTYPES};
 use crate::types::ability::{
-    Comparator, ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter,
+    Comparator, ControllerRef, FilterProp, StackAbilityKind, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
 
+/// Parse the Oracle prefixes that declare a target slot.
+///
+/// Keeps callers that distinguish stack-time targeting from resolution-time
+/// selection aligned on the full grammatical family rather than checking only
+/// the literal `"target "` sibling.
+pub fn parse_declared_target_prefix(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((tag("another target "), tag("other target "), tag("target "))),
+    )
+    .parse(input)
+}
+
 /// Parse a type phrase into a `TargetFilter`.
 ///
 /// Handles: optional "non" prefix, optional supertype, optional color prefix,
-/// core type(s) joined by " or ", and optional controller suffix. This is the
-/// nom equivalent of `oracle_target::parse_type_phrase`.
+/// core type(s) joined by " or ", and optional controller suffix.
+///
+/// Not a drop-in for `crate::parser::oracle_target::parse_type_phrase_folding`,
+/// which reads the same grammatical slot with a wider grammar and an infallible
+/// return. The measured differences are tabulated on the private
+/// `TypePhraseGrammar` enum in `oracle_nom/quantity.rs`, which selects between
+/// the two as an explicit typed parameter; this reader is its `Strict` arm, and
+/// reports an unrecognized phrase as `Err`.
 pub fn parse_type_phrase(input: &str) -> OracleResult<'_, TargetFilter> {
     // Optional "non" prefix (consumed separately from type negation)
     let (rest, non_prefix) = opt(parse_non_prefix).parse(input)?;
@@ -87,8 +108,54 @@ pub fn parse_type_phrase(input: &str) -> OracleResult<'_, TargetFilter> {
     Ok((rest, filter))
 }
 
+/// Parse a demonstrative that names the attacking object of a trigger event.
+///
+/// This intentionally accepts only creature-compatible type phrases: "that
+/// creature" and "that Wolf" can refer to an attacker, while "that artifact"
+/// cannot be silently treated as the event attacker. Callers still own the
+/// surrounding trigger-context gate; this combinator owns the typed noun phrase
+/// and its required separator before the following grammar production.
+pub fn parse_demonstrative_attacker_referent(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (rest, _) = tag("that ").parse(input)?;
+    let (rest, filter) = parse_type_phrase(rest)?;
+    if !target_filter_can_name_attacker(&filter) {
+        return Err(oracle_err(input));
+    }
+    let (rest, _) = space1.parse(rest)?;
+    Ok((rest, filter))
+}
+
+/// CR 506.3: an attacking object must be a creature. A printed creature
+/// subtype ("Wolf") is creature-compatible even when the noun phrase omits
+/// the word "creature".
+fn target_filter_can_name_attacker(filter: &TargetFilter) -> bool {
+    let TargetFilter::Typed(typed) = filter else {
+        return false;
+    };
+    typed.type_filters.iter().any(type_filter_can_name_attacker)
+}
+
+fn type_filter_can_name_attacker(filter: &TypeFilter) -> bool {
+    match filter {
+        TypeFilter::Creature | TypeFilter::Subtype(_) => true,
+        TypeFilter::AnyOf(filters) => filters.iter().any(type_filter_can_name_attacker),
+        TypeFilter::Land
+        | TypeFilter::Artifact
+        | TypeFilter::Enchantment
+        | TypeFilter::Instant
+        | TypeFilter::Sorcery
+        | TypeFilter::Planeswalker
+        | TypeFilter::Battle
+        | TypeFilter::Kindred
+        | TypeFilter::Permanent
+        | TypeFilter::Card
+        | TypeFilter::Any
+        | TypeFilter::Non(_) => false,
+    }
+}
+
 /// Parse a "non" prefix: "non" or "non-" followed by implicit word boundary.
-fn parse_non_prefix(input: &str) -> OracleResult<'_, &str> {
+pub(crate) fn parse_non_prefix(input: &str) -> OracleResult<'_, &str> {
     alt((tag("non-"), tag("non"))).parse(input)
 }
 
@@ -154,26 +221,330 @@ fn parse_color_prefix(input: &str) -> OracleResult<'_, ManaColor> {
     Ok((rest, c))
 }
 
-/// Parse a controller suffix: "you control", "an opponent controls",
-/// "target player controls".
-///
-/// CR 109.4 + CR 115.1: "target player controls" generates a filter referencing
-/// a chosen player target; the enclosing ability must surface a companion
-/// TargetFilter::Player slot so the player is selected as part of target
-/// declaration.
-pub fn parse_controller_suffix(input: &str) -> OracleResult<'_, ControllerRef> {
+/// Tense of a controller phrase's verb.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ControllerTense {
+    /// "controls" / "control": names current control.
+    Present,
+    /// "controlled": a look-back at past control.
+    Past,
+}
+
+/// A player pronoun or demonstrative whose referent was introduced earlier in
+/// the ability. The grammar never resolves it; `bind_controller_phrase`
+/// (`oracle_ir/context.rs`) does, from the parse context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlayerAnaphor {
+    /// "that player".
+    ThatPlayer,
+    /// "they".
+    They,
+    /// "its controller" / "their controller".
+    ItsController,
+}
+
+/// Who a controller phrase names: a player the phrase itself identifies, or an
+/// anaphor that must be bound against the parse context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ControllerSubject {
+    Direct(ControllerRef),
+    Anaphoric(PlayerAnaphor),
+}
+
+/// The clause shape the grammar matched: the subject's grammatical number for
+/// an active clause, else the negated or passive construction. Several phrases
+/// share one `ControllerRef` ("an opponent controls", "your opponents control"
+/// and "you don't control" are all `Opponent`), so a projection that admits
+/// only some of them keys on this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ControllerForm {
+    Singular,
+    Plural,
+    Negated,
+    Passive,
+}
+
+/// A parsed controller phrase: "you control", "that player controlled",
+/// "controlled by that player", "its controller controls", ….
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ControllerPhrase {
+    pub subject: ControllerSubject,
+    pub form: ControllerForm,
+    pub tense: ControllerTense,
+}
+
+/// " controls" / " controlled" after a singular subject.
+fn controller_verb_singular(input: &str) -> OracleResult<'_, ControllerTense> {
+    preceded(
+        tag(" control"),
+        alt((
+            value(ControllerTense::Present, tag("s")),
+            value(ControllerTense::Past, tag("led")),
+        )),
+    )
+    .parse(input)
+}
+
+/// " control" / " controlled" after a plural subject.
+fn controller_verb_plural(input: &str) -> OracleResult<'_, ControllerTense> {
+    preceded(
+        tag(" control"),
+        alt((
+            value(ControllerTense::Past, tag("led")),
+            value(ControllerTense::Present, success(())),
+        )),
+    )
+    .parse(input)
+}
+
+fn singular_controller_subject(input: &str) -> OracleResult<'_, ControllerSubject> {
     alt((
-        value(ControllerRef::You, tag("you control")),
-        value(ControllerRef::Opponent, tag("an opponent controls")),
-        value(ControllerRef::Opponent, tag("your opponents control")),
-        value(ControllerRef::TargetPlayer, tag("target player controls")),
-        // CR 109.4 + CR 102.2 / CR 102.3: opponent-constrained target-player scope.
         value(
-            ControllerRef::TargetOpponent,
-            tag("target opponent controls"),
+            ControllerSubject::Direct(ControllerRef::Opponent),
+            tag("an opponent"),
+        ),
+        // CR 109.4 + CR 115.1: "target player controls" names the player chosen
+        // as a target of the enclosing ability; the consumer surfaces a
+        // companion `TargetFilter::Player` slot (`collect_target_slots` in
+        // `game/ability_utils.rs`). "target opponent" is the opponent-constrained
+        // form (CR 102.2 / CR 102.3).
+        preceded(
+            tag("target "),
+            alt((
+                value(
+                    ControllerSubject::Direct(ControllerRef::TargetPlayer),
+                    tag("player"),
+                ),
+                value(
+                    ControllerSubject::Direct(ControllerRef::TargetOpponent),
+                    tag("opponent"),
+                ),
+            )),
+        ),
+        // CR 508.5 / CR 508.5a: the defending player the attacking creature is
+        // attacking, resolved per attacker by
+        // `combat::defending_player_for_attacker`.
+        value(
+            ControllerSubject::Direct(ControllerRef::DefendingPlayer),
+            tag("defending player"),
+        ),
+        // CR 303.4b + CR 702.5a: the player the source Aura is attached to
+        // (the Curse cycle).
+        value(
+            ControllerSubject::Direct(ControllerRef::EnchantedPlayer),
+            tag("enchanted player"),
+        ),
+        preceded(
+            tag("the "),
+            alt((
+                // CR 102.1: the turn player.
+                value(
+                    ControllerSubject::Direct(ControllerRef::ActivePlayer),
+                    tag("active player"),
+                ),
+                value(
+                    ControllerSubject::Direct(ControllerRef::SourceChosenPlayer),
+                    tag("chosen player"),
+                ),
+            )),
+        ),
+        value(
+            ControllerSubject::Anaphoric(PlayerAnaphor::ThatPlayer),
+            tag("that player"),
+        ),
+        value(
+            ControllerSubject::Anaphoric(PlayerAnaphor::ItsController),
+            terminated(alt((tag("its"), tag("their"))), tag(" controller")),
         ),
     ))
     .parse(input)
+}
+
+fn plural_controller_subject(input: &str) -> OracleResult<'_, ControllerSubject> {
+    alt((
+        // Before "you": "you" is a prefix of "your".
+        value(
+            ControllerSubject::Direct(ControllerRef::Opponent),
+            tag("your opponents"),
+        ),
+        value(ControllerSubject::Direct(ControllerRef::You), tag("you")),
+        value(
+            ControllerSubject::Anaphoric(PlayerAnaphor::They),
+            tag("they"),
+        ),
+    ))
+    .parse(input)
+}
+
+/// The single grammar for a phrase naming an object's controller, direct or
+/// anaphoric, present or past. It recognizes; it never binds an anaphor (see
+/// `bind_controller_phrase` in `oracle_ir/context.rs`). Each reader admits the
+/// subset it can resolve by projecting this result (`map_opt` / `verify`).
+///
+/// CR 608.2c: "that player", "they" and "its controller" refer back to a player
+/// introduced earlier in the ability, so they are returned as anaphors.
+/// CR 608.2i: a past-tense "controlled" is a look-back at past control, and the
+/// trailing word boundary keeps a present-tense arm from consuming its prefix.
+/// "controlled by that player" names current control, so it is present tense.
+pub(crate) fn parse_controller_phrase(input: &str) -> OracleResult<'_, ControllerPhrase> {
+    terminated(
+        alt((
+            // "you don't control": every player other than you. `Opponent` is
+            // evaluated as "not the source's controller" (game/filter.rs), which
+            // covers it outside team play.
+            value(
+                ControllerPhrase {
+                    subject: ControllerSubject::Direct(ControllerRef::Opponent),
+                    form: ControllerForm::Negated,
+                    tense: ControllerTense::Present,
+                },
+                tag("you don't control"),
+            ),
+            value(
+                ControllerPhrase {
+                    subject: ControllerSubject::Anaphoric(PlayerAnaphor::ThatPlayer),
+                    form: ControllerForm::Passive,
+                    tense: ControllerTense::Present,
+                },
+                preceded(tag("controlled by "), tag("that player")),
+            ),
+            map(
+                (plural_controller_subject, controller_verb_plural),
+                |(subject, tense)| ControllerPhrase {
+                    subject,
+                    form: ControllerForm::Plural,
+                    tense,
+                },
+            ),
+            map(
+                (singular_controller_subject, controller_verb_singular),
+                |(subject, tense)| ControllerPhrase {
+                    subject,
+                    form: ControllerForm::Singular,
+                    tense,
+                },
+            ),
+        )),
+        not(satisfy(char::is_alphanumeric)),
+    )
+    .parse(input)
+}
+
+impl ControllerPhrase {
+    /// "you control".
+    pub(crate) const YOU_CONTROL: Self = Self {
+        subject: ControllerSubject::Direct(ControllerRef::You),
+        form: ControllerForm::Plural,
+        tense: ControllerTense::Present,
+    };
+    /// "they control".
+    pub(crate) const THEY_CONTROL: Self = Self {
+        subject: ControllerSubject::Anaphoric(PlayerAnaphor::They),
+        form: ControllerForm::Plural,
+        tense: ControllerTense::Present,
+    };
+    /// "that player controls".
+    pub(crate) const THAT_PLAYER_CONTROLS: Self = Self {
+        subject: ControllerSubject::Anaphoric(PlayerAnaphor::ThatPlayer),
+        form: ControllerForm::Singular,
+        tense: ControllerTense::Present,
+    };
+    /// "controlled by that player".
+    pub(crate) const CONTROLLED_BY_THAT_PLAYER: Self = Self {
+        subject: ControllerSubject::Anaphoric(PlayerAnaphor::ThatPlayer),
+        form: ControllerForm::Passive,
+        tense: ControllerTense::Present,
+    };
+    /// "the chosen player controls".
+    pub(crate) const THE_CHOSEN_PLAYER_CONTROLS: Self = Self {
+        subject: ControllerSubject::Direct(ControllerRef::SourceChosenPlayer),
+        form: ControllerForm::Singular,
+        tense: ControllerTense::Present,
+    };
+}
+
+/// Recognize-only projection of [`parse_controller_phrase`] for a structural-marker
+/// site: consumes a controller phrase that is one of `admitted` and binds nothing,
+/// because the enclosing construct, not the phrase, fixes whose objects are meant.
+pub(crate) fn controller_phrase_among<'a>(
+    admitted: &'static [ControllerPhrase],
+) -> impl Parser<&'a str, Output = (), Error = OracleError<'a>> {
+    value(
+        (),
+        verify(parse_controller_phrase, move |phrase: &ControllerPhrase| {
+            admitted.contains(phrase)
+        }),
+    )
+}
+
+/// [`controller_phrase_among`] for a structural-marker site that reads
+/// original-case text (a `tag_no_case` construct). The lowercase grammar runs
+/// through the mixed-case bridge [`nom_on_lower`], and the remainder is mapped
+/// back onto the original-case input.
+pub(crate) fn controller_phrase_among_mixed_case<'a>(
+    admitted: &'static [ControllerPhrase],
+) -> impl Parser<&'a str, Output = (), Error = OracleError<'a>> {
+    move |input: &'a str| {
+        // ASCII lowercasing keeps byte offsets aligned with `input`.
+        let lower = input.to_ascii_lowercase();
+        nom_on_lower(input, &lower, |i| {
+            controller_phrase_among(admitted).parse(i)
+        })
+        .map(|((), rest)| (rest, ()))
+        .ok_or_else(|| oracle_err(input))
+    }
+}
+
+/// Parse a present-tense direct controller suffix for a type phrase: "you
+/// control", "an opponent controls", "you don't control", "target player
+/// controls", "defending player controls", ….
+///
+/// Anaphors are declined: they need the parse context to bind, which this
+/// context-free combinator does not have.
+pub fn parse_controller_suffix(input: &str) -> OracleResult<'_, ControllerRef> {
+    map_opt(parse_controller_phrase, |phrase| match phrase {
+        ControllerPhrase {
+            subject: ControllerSubject::Direct(controller),
+            tense: ControllerTense::Present,
+            ..
+        } => admits_type_phrase_controller(&controller).then_some(controller),
+        ControllerPhrase {
+            subject: ControllerSubject::Direct(_),
+            tense: ControllerTense::Past,
+            ..
+        }
+        | ControllerPhrase {
+            subject: ControllerSubject::Anaphoric(_),
+            ..
+        } => None,
+    })
+    .parse(input)
+}
+
+/// The direct controllers a type phrase's present-tense controller suffix
+/// admits.
+pub(crate) fn admits_type_phrase_controller(controller: &ControllerRef) -> bool {
+    match controller {
+        ControllerRef::You
+        | ControllerRef::Opponent
+        | ControllerRef::TargetPlayer
+        | ControllerRef::TargetOpponent
+        | ControllerRef::DefendingPlayer
+        | ControllerRef::EnchantedPlayer
+        | ControllerRef::ActivePlayer => true,
+        // Whether a source's "choose a player" populates the chosen player is
+        // not established for the cards that would read it here.
+        ControllerRef::SourceChosenPlayer => false,
+        // The grammar never yields these as a direct subject.
+        ControllerRef::ScopedPlayer
+        | ControllerRef::ParentTargetController
+        | ControllerRef::EventTargetController
+        | ControllerRef::ParentTargetOwner
+        | ControllerRef::ChosenPlayer { .. }
+        | ControllerRef::TriggeringPlayer
+        | ControllerRef::SpecificPlayer { .. }
+        | ControllerRef::DeclaredPlayer { .. } => false,
+    }
 }
 
 /// Parse a list of type filters joined by " or ".
@@ -222,6 +593,11 @@ pub fn parse_type_filter_word(input: &str) -> OracleResult<'_, TypeFilter> {
         // entry, so the plural must be an explicit head-noun word here.
         ("battles", TypeFilter::Battle),
         ("battle", TypeFilter::Battle),
+        // CR 308: Kindred card type (and legacy Tribal terminology).
+        ("kindreds", TypeFilter::Kindred),
+        ("kindred", TypeFilter::Kindred),
+        ("tribals", TypeFilter::Kindred),
+        ("tribal", TypeFilter::Kindred),
         ("permanents", TypeFilter::Permanent),
         ("permanent", TypeFilter::Permanent),
         ("cards", TypeFilter::Card),
@@ -325,7 +701,11 @@ pub fn parse_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
 /// [`parse_self_reference`] (effect-target channel) and
 /// [`parse_cost_self_reference`] (cost channel).
 pub fn parse_granting_object_ref(input: &str) -> OracleResult<'_, TargetFilter> {
-    value(TargetFilter::GrantingObject, tag(GRANTING_SELF_PLACEHOLDER)).parse(input)
+    value(
+        TargetFilter::GrantingObject { bound: None },
+        tag(GRANTING_SELF_PLACEHOLDER),
+    )
+    .parse(input)
 }
 
 /// CR 201.5 / CR 201.5a: Shared self-reference combinator for *cost* positions
@@ -373,7 +753,7 @@ fn parse_itself_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
 
 /// Parse an event context reference from Oracle text.
 ///
-/// CR 506.2 + CR 603.7c: "that attacking player" — the player who declared
+/// CR 506.2: "that attacking player" — the player who declared
 /// attackers in the triggering `AttackersDeclared` event (Ellie, Brick Master;
 /// Breena, the Demagogue).
 pub fn parse_attacking_player_event_ref(input: &str) -> OracleResult<'_, TargetFilter> {
@@ -421,7 +801,7 @@ pub fn parse_event_context_ref(input: &str) -> OracleResult<'_, TargetFilter> {
         // CR 506.3d: "defending player" / "the defending player"
         value(TargetFilter::DefendingPlayer, tag("the defending player")),
         value(TargetFilter::DefendingPlayer, tag("defending player")),
-        // CR 603.7c + CR 109.4: "the attacking player" on a DamageReceived
+        // CR 506.2 + CR 109.4: "the attacking player" on a DamageReceived
         // trigger — the controller of the creature that dealt combat damage
         // (Contested Game Ball). Distinct from "that attacking player" (an
         // attack-declared referent → TriggeringPlayer): the wanted player here
@@ -505,38 +885,123 @@ pub fn parse_stack_object_target(input: &str) -> OracleResult<'_, TargetFilter> 
     .parse(input)
 }
 
-/// Parse a single ability-kind leg of a stack-object phrase.
+/// Parse the ability-kind spelling axis of a stack-object phrase.
 ///
-/// CR 113.3b/113.3c: activated and triggered abilities are distinct stack
-/// objects; a lone "triggered ability" or "activated ability" leg narrows
-/// `kind`, while combined phrases accept both.
-fn parse_ability_kind_leg(input: &str) -> OracleResult<'_, TargetFilter> {
+/// CR 113.3b / CR 113.3c: activated and triggered abilities are the two kinds
+/// of ability that exist as objects on the stack. A lone "triggered ability" /
+/// "activated ability" spelling narrows the legal set to that one kind
+/// (CR 115.1: the target is chosen from the set the effect's text defines);
+/// a combined spelling accepts both, which is `None`.
+///
+/// SINGLE AUTHORITY for this axis. Every consumer delegates here:
+///   * `parse_ability_kind_leg` — counter / disjunction
+///   * `oracle_effect::imperative::parse_copy_stack_ability_target` — copy,
+///     composed with the controller axis
+///   * `oracle_static::static_helpers::parse_it_targets_that_targets_spell_filter`
+///     — cost condition, composed with an article prefix
+///   * `oracle_static::static_helpers::is_nested_stack_target_condition` — the
+///     structural gate guarding that cost condition
+///
+/// The change-targets path does NOT call this directly — it delegates to
+/// [`parse_stack_object_target`] (the whole grammar) so it can compose ability
+/// legs with spell legs.
+///
+/// Do NOT re-spell these tags at a call site. Three call sites previously kept
+/// private, divergent lists and silently dropped the narrowing, so every
+/// "copy target triggered ability you control" card could illegally copy an
+/// ACTIVATED ability and Reroute could illegally retarget a TRIGGERED one.
+///
+/// Do NOT add a bare "ability" arm here. This combinator feeds
+/// `parse_ability_kind_leg` → `parse_ability_spell_disjunction`, where a
+/// kindless leg would over-match any phrase containing the word "ability" and
+/// would start stealing the canonical "spell or ability" shape. The one place
+/// that needs the bare article form ("it targets an ability that targets …")
+/// keeps a LOCAL literal for it (`oracle_static/static_helpers.rs`).
+///
+/// `alt` ORDER IS LOAD-BEARING. The invariant the correctness argument relies
+/// on is: EVERY COMBINED SPELLING PRECEDES EVERY BARE SPELLING. Ordering the
+/// arms by descending tag length is the mechanical rule that guarantees it
+/// (same discipline as the list connectors in
+/// `parse_ability_spell_disjunction`). It matters because this combinator has
+/// ANCHORED callers with no disjunction driver behind them to merge a partial
+/// match: on "activated ability or triggered ability you control", a bare-first
+/// ordering would consume only "activated ability", strand " or triggered
+/// ability you control", and drop the phrase.
+pub fn parse_ability_kind(input: &str) -> OracleResult<'_, Option<StackAbilityKind>> {
     alt((
-        map(tag("triggered ability"), |_| TargetFilter::StackAbility {
-            controller: None,
-            tag: None,
-            kind: Some(crate::types::ability::StackAbilityKind::Triggered),
-        }),
-        map(tag("activated ability"), |_| TargetFilter::StackAbility {
-            controller: None,
-            tag: None,
-            kind: Some(crate::types::ability::StackAbilityKind::Activated),
-        }),
-        map(
-            alt((
-                tag("activated ability, triggered ability"),
-                tag("activated or triggered ability"),
-                tag("triggered or activated ability"),
-                tag("triggered ability or activated ability"),
-                tag("activated ability or triggered ability"),
-            )),
-            |_| TargetFilter::StackAbility {
-                controller: None,
-                tag: None,
-                kind: None,
-            },
-        ),
+        // Combined spellings — both kinds legal. Keep this before the single
+        // kind arm so anchored callers consume the full phrase.
+        value(None, parse_combined_ability_kind),
+        // Single-kind spellings — narrowing.
+        map(parse_ability_kind_phrase, Some),
     ))
+    .parse(input)
+}
+
+/// Parse one ability-kind word without its shared `ability` noun.
+fn parse_ability_kind_word(input: &str) -> OracleResult<'_, StackAbilityKind> {
+    alt((
+        value(StackAbilityKind::Triggered, tag("triggered")),
+        value(StackAbilityKind::Activated, tag("activated")),
+    ))
+    .parse(input)
+}
+
+/// Parse one complete ability-kind phrase such as "triggered ability".
+fn parse_ability_kind_phrase(input: &str) -> OracleResult<'_, StackAbilityKind> {
+    terminated(parse_ability_kind_word, tag(" ability")).parse(input)
+}
+
+/// Parse the two independent combined-kind grammar axes: kind order and
+/// connector/noun placement. Either order names both kinds, so the caller
+/// receives `None` for an unrestricted stack-ability kind.
+fn parse_combined_ability_kind(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        parse_distinct_ability_kind_phrases,
+        parse_distinct_ability_kind_words_with_shared_noun,
+    ))
+    .parse(input)
+}
+
+/// Parse `activated ability, triggered ability` (or either supported
+/// connector) while rejecting a duplicated kind that would incorrectly widen
+/// a one-kind phrase.
+fn parse_distinct_ability_kind_phrases(input: &str) -> OracleResult<'_, ()> {
+    let (rest, first) = parse_ability_kind_phrase(input)?;
+    let (rest, _) = alt((tag(" or "), tag(", "))).parse(rest)?;
+    let (rest, second) = parse_ability_kind_phrase(rest)?;
+    if first == second {
+        Err(oracle_err(input))
+    } else {
+        Ok((rest, ()))
+    }
+}
+
+/// Parse `activated or triggered ability` with its final noun shared across
+/// both kind words, again requiring that the two kinds differ.
+fn parse_distinct_ability_kind_words_with_shared_noun(input: &str) -> OracleResult<'_, ()> {
+    let (rest, first) = parse_ability_kind_word(input)?;
+    let (rest, _) = tag(" or ").parse(rest)?;
+    let (rest, second) = parse_ability_kind_word(rest)?;
+    let (rest, _) = tag(" ability").parse(rest)?;
+    if first == second {
+        Err(oracle_err(input))
+    } else {
+        Ok((rest, ()))
+    }
+}
+
+/// Parse a single ability-kind leg of a stack-object phrase as a filter.
+///
+/// CR 113.3b/113.3c: thin `map` over [`parse_ability_kind`] — the leg
+/// contributes only the kind axis; `controller` and `tag` are supplied by the
+/// enclosing phrase, not by the leg.
+fn parse_ability_kind_leg(input: &str) -> OracleResult<'_, TargetFilter> {
+    map(parse_ability_kind, |kind| TargetFilter::StackAbility {
+        controller: None,
+        tag: None,
+        kind,
+    })
     .parse(input)
 }
 
@@ -774,9 +1239,180 @@ fn build_type_filter(
     })
 }
 
+/// CR 607.2d + CR 608.2c: Parse the object-axis chosen-value reader "the chosen
+/// &lt;battlefield object noun&gt;" into [`TargetFilter::ChosenCard`] — the shared reader
+/// atom for the trigger-subject arm (`oracle_trigger`), the exclusion-list item
+/// (`oracle_effect/subject.rs`), and the chain reader scan
+/// ([`chain_text_mentions_chosen_object`]) that gates the durability reconcile.
+///
+/// Only SINGULAR battlefield-object nouns are accepted. The word-boundary peek
+/// refuses the plural forms ("the chosen creatures"), the possessive
+/// ("the chosen creature's"), and every non-battlefield-or-player axis
+/// ("the chosen card"/"player"/"color"/"name") — those are other CR 607.2d
+/// choice axes (choice types, players, labels) read through other typed
+/// carriers, never a remembered battlefield object.
+///
+/// Input must already be lowercase (the caller's chunk/subject text is).
+pub fn parse_chosen_object_reference(input: &str) -> OracleResult<'_, TargetFilter> {
+    value(
+        TargetFilter::ChosenCard,
+        preceded(
+            tag("the chosen "),
+            terminated(
+                alt((
+                    // Longest-first to keep the boundary peek meaningful.
+                    tag("nonland permanent"),
+                    tag("artifact"),
+                    tag("creature"),
+                    tag("enchantment"),
+                    tag("land"),
+                    tag("permanent"),
+                    tag("planeswalker"),
+                )),
+                peek(alt((
+                    value((), eof),
+                    value(
+                        (),
+                        satisfy(|c| !c.is_alphanumeric() && c != '\'' && c != '\u{2019}'),
+                    ),
+                ))),
+            ),
+        ),
+    )
+    .parse(input)
+}
+
+/// CR 607.2d: Word-boundary scan for any "the chosen &lt;battlefield object&gt;" reader
+/// in an already-lowercase text. Tries [`parse_chosen_object_reference`] at every
+/// word boundary via the shared [`super::primitives::scan_at_word_boundaries`]
+/// primitive, so a phrase that merely CONTAINS the words (a longer noun phrase,
+/// a possessive, a plural) does not count — the same scanning discipline as
+/// `scan_timing_restrictions`/`scan_for_phase`.
+///
+/// This is the single reader-scan authority shared by Gate A (the parse-time
+/// chain gate in `imperative.rs`) and Gate B (the assembly-time IR-fragment
+/// gate), so the two consideration sets can never drift.
+pub(crate) fn chain_text_mentions_chosen_object(input_lower: &str) -> bool {
+    super::primitives::scan_at_word_boundaries(input_lower, parse_chosen_object_reference).is_some()
+}
+
+/// CR 608.2c: One item of an "other than ‹ref› and ‹ref›" exclusion list on a
+/// bare-plural subject. `Source` is the ability's own object ("~"), excludable
+/// via [`FilterProp::Another`]; `ChosenObject` is the remembered CR 607.2d
+/// object, excludable via [`TargetFilter::Not`] over [`TargetFilter::ChosenCard`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObjectExclusion {
+    Source,
+    ChosenObject,
+}
+
+/// CR 608.2c: Parse a complete "‹ref› and ‹ref›" exclusion list. Each item is
+/// either a self-reference (the `~` normalization of the source's own name, the
+/// same atom [`parse_self_reference`] provides for every other channel) or the
+/// chosen-object reader ([`parse_chosen_object_reference`]). `all_consuming` +
+/// `separated_list1` is deliberate: a list with any unparsed item
+/// ("enchanted creature", "those that attacked this turn") is refused whole, so
+/// the caller's existing single-referent path keeps charge of every form it
+/// already consumes. CR 201.5a: a granter reference is not the source, so a list
+/// naming it is refused.
+pub(crate) fn parse_object_exclusion_list(input: &str) -> OracleResult<'_, Vec<ObjectExclusion>> {
+    all_consuming(separated_list1(
+        tag(" and "),
+        alt((
+            preceded(
+                not(parse_granting_object_ref),
+                map(parse_self_reference, |_| ObjectExclusion::Source),
+            ),
+            map(parse_chosen_object_reference, |_| {
+                ObjectExclusion::ChosenObject
+            }),
+        )),
+    ))
+    .parse(input)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each constant is the grammar's reading of its phrase, and the
+    /// recognize-only projection admits exactly its slice: a phrase sharing the
+    /// subject in a different form or tense is declined.
+    #[test]
+    fn controller_phrase_constants_and_marker() {
+        for (text, constant) in [
+            ("you control", ControllerPhrase::YOU_CONTROL),
+            ("they control", ControllerPhrase::THEY_CONTROL),
+            (
+                "that player controls",
+                ControllerPhrase::THAT_PLAYER_CONTROLS,
+            ),
+            (
+                "controlled by that player",
+                ControllerPhrase::CONTROLLED_BY_THAT_PLAYER,
+            ),
+            (
+                "the chosen player controls",
+                ControllerPhrase::THE_CHOSEN_PLAYER_CONTROLS,
+            ),
+        ] {
+            assert_eq!(
+                parse_controller_phrase(text).ok(),
+                Some(("", constant)),
+                "{text:?}"
+            );
+        }
+
+        let mut they_control = controller_phrase_among(&[ControllerPhrase::THEY_CONTROL]);
+        assert_eq!(they_control.parse("they control").ok(), Some(("", ())));
+        for declined in [
+            "that player controls",
+            "controlled by that player",
+            "they controlled",
+        ] {
+            assert!(they_control.parse(declined).is_err(), "{declined:?}");
+        }
+    }
+
+    /// The mixed-case projection admits the same phrases as the lowercase one
+    /// in any casing, and returns the remainder in the input's original case.
+    #[test]
+    fn controller_phrase_among_mixed_case_bridges_original_case() {
+        let mut they_control =
+            controller_phrase_among_mixed_case(&[ControllerPhrase::THEY_CONTROL]);
+        for text in [
+            "they control Into",
+            "They Control Into",
+            "THEY CONTROL Into",
+        ] {
+            assert_eq!(
+                they_control.parse(text).ok(),
+                Some((" Into", ())),
+                "{text:?}"
+            );
+        }
+        for declined in [
+            "That Player Controls",
+            "Controlled By That Player",
+            "They Controlled",
+        ] {
+            assert!(they_control.parse(declined).is_err(), "{declined:?}");
+        }
+    }
+
+    #[test]
+    fn object_exclusion_list_refuses_a_granter_reference() {
+        assert!(parse_object_exclusion_list(&format!(
+            "{GRANTING_SELF_PLACEHOLDER} and the chosen creature"
+        ))
+        .is_err());
+        assert_eq!(
+            parse_object_exclusion_list("~ and the chosen creature")
+                .unwrap()
+                .1,
+            vec![ObjectExclusion::Source, ObjectExclusion::ChosenObject]
+        );
+    }
 
     #[test]
     fn test_parse_type_phrase_creature() {
@@ -820,26 +1456,198 @@ mod tests {
         assert_eq!(rest2, "");
     }
 
-    // No-regression guard: the "defending player controls" controller scope is
-    // added only to the high-level `oracle_nom::filter::parse_zone_controller`
-    // path (the bug-card path), NOT to this nom combinator consumed by
-    // `parse_type_phrase`. Folding it in here would change the remainder handed
-    // to the five remainder-coupled `parse_type_phrase` callers. This test
-    // documents that deliberate divergence (it also does not match
-    // "you don't control") so a future edit to this combinator is a conscious
-    // choice, not an accident.
+    /// The type-phrase suffix is the direct, present-tense projection of
+    /// `parse_controller_phrase`: it admits the direct present phrases, declines
+    /// every anaphor (no context to bind it) and the chosen player, and stops at
+    /// a word boundary so a past-tense look-back is not half-consumed.
     #[test]
-    fn test_parse_controller_suffix_excludes_defending_player_and_negated() {
-        assert!(
-            parse_controller_suffix("defending player controls").is_err(),
-            "nom parse_controller_suffix must NOT match 'defending player controls' \
-             (handled by parse_zone_controller on the bug-card path)"
-        );
-        assert!(
-            parse_controller_suffix("you don't control").is_err(),
-            "nom parse_controller_suffix must NOT match 'you don't control' \
-             (pre-existing deliberate divergence from parse_zone_controller)"
-        );
+    fn parse_controller_suffix_is_the_direct_present_projection() {
+        // Positive guard: the projection is reached and keeps the remainder.
+        let (rest, c) = parse_controller_suffix("you control stuff").unwrap();
+        assert_eq!(c, ControllerRef::You);
+        assert_eq!(rest, " stuff");
+
+        // CR 608.2i: a past-tense look-back is not a present-tense "you control".
+        assert!(parse_controller_suffix("you controlled").is_err());
+
+        for (text, expected, expected_rest) in [
+            ("you don't control", ControllerRef::Opponent, ""),
+            (
+                "defending player controls",
+                ControllerRef::DefendingPlayer,
+                "",
+            ),
+            (
+                "defending player controls and ",
+                ControllerRef::DefendingPlayer,
+                " and ",
+            ),
+            (
+                "enchanted player controls",
+                ControllerRef::EnchantedPlayer,
+                "",
+            ),
+            (
+                "the active player controls",
+                ControllerRef::ActivePlayer,
+                "",
+            ),
+            ("your opponents control", ControllerRef::Opponent, ""),
+            ("target player controls", ControllerRef::TargetPlayer, ""),
+            (
+                "target opponent controls",
+                ControllerRef::TargetOpponent,
+                "",
+            ),
+        ] {
+            let (rest, c) = parse_controller_suffix(text)
+                .unwrap_or_else(|e| panic!("{text:?} should project: {e:?}"));
+            assert_eq!(c, expected, "{text:?}");
+            assert_eq!(rest, expected_rest, "{text:?}");
+        }
+
+        for declined in [
+            "that player controls",
+            "they control",
+            "its controller controls",
+            "the chosen player controls",
+        ] {
+            assert!(
+                parse_controller_suffix(declined).is_err(),
+                "{declined:?} must be declined by the type-phrase projection"
+            );
+        }
+    }
+
+    #[test]
+    fn controller_phrase_table() {
+        use ControllerForm::{Negated, Passive, Plural, Singular};
+        use ControllerTense::{Past, Present};
+        let direct = |c: ControllerRef, form, tense| ControllerPhrase {
+            subject: ControllerSubject::Direct(c),
+            form,
+            tense,
+        };
+        let anaphor = |a: PlayerAnaphor, form, tense| ControllerPhrase {
+            subject: ControllerSubject::Anaphoric(a),
+            form,
+            tense,
+        };
+        let rows = [
+            ("you control", direct(ControllerRef::You, Plural, Present)),
+            (
+                "you don't control",
+                direct(ControllerRef::Opponent, Negated, Present),
+            ),
+            (
+                "your opponents control",
+                direct(ControllerRef::Opponent, Plural, Present),
+            ),
+            (
+                "an opponent controls",
+                direct(ControllerRef::Opponent, Singular, Present),
+            ),
+            (
+                "target player controls",
+                direct(ControllerRef::TargetPlayer, Singular, Present),
+            ),
+            (
+                "target opponent controls",
+                direct(ControllerRef::TargetOpponent, Singular, Present),
+            ),
+            (
+                "defending player controls",
+                direct(ControllerRef::DefendingPlayer, Singular, Present),
+            ),
+            (
+                "enchanted player controls",
+                direct(ControllerRef::EnchantedPlayer, Singular, Present),
+            ),
+            (
+                "the active player controls",
+                direct(ControllerRef::ActivePlayer, Singular, Present),
+            ),
+            (
+                "the chosen player controls",
+                direct(ControllerRef::SourceChosenPlayer, Singular, Present),
+            ),
+            ("you controlled", direct(ControllerRef::You, Plural, Past)),
+            (
+                "an opponent controlled",
+                direct(ControllerRef::Opponent, Singular, Past),
+            ),
+            (
+                "your opponents controlled",
+                direct(ControllerRef::Opponent, Plural, Past),
+            ),
+            (
+                "the active player controlled",
+                direct(ControllerRef::ActivePlayer, Singular, Past),
+            ),
+            (
+                "target player controlled",
+                direct(ControllerRef::TargetPlayer, Singular, Past),
+            ),
+            (
+                "that player controls",
+                anaphor(PlayerAnaphor::ThatPlayer, Singular, Present),
+            ),
+            (
+                "they control",
+                anaphor(PlayerAnaphor::They, Plural, Present),
+            ),
+            (
+                "that player controlled",
+                anaphor(PlayerAnaphor::ThatPlayer, Singular, Past),
+            ),
+            (
+                "they controlled",
+                anaphor(PlayerAnaphor::They, Plural, Past),
+            ),
+            (
+                "controlled by that player",
+                anaphor(PlayerAnaphor::ThatPlayer, Passive, Present),
+            ),
+            (
+                "its controller controls",
+                anaphor(PlayerAnaphor::ItsController, Singular, Present),
+            ),
+            (
+                "their controller controls",
+                anaphor(PlayerAnaphor::ItsController, Singular, Present),
+            ),
+        ];
+        for (text, expected) in rows {
+            let (rest, phrase) = parse_controller_phrase(text)
+                .unwrap_or_else(|e| panic!("{text:?} should parse: {e:?}"));
+            assert_eq!(phrase, expected, "{text:?}");
+            assert_eq!(rest, "", "{text:?}");
+        }
+
+        // Remainder is preserved after the word boundary.
+        let (rest, _) = parse_controller_phrase("you control stuff").unwrap();
+        assert_eq!(rest, " stuff");
+        let (rest, _) = parse_controller_phrase("that player controls,").unwrap();
+        assert_eq!(rest, ",");
+
+        // "you controlled" is never read as present tense.
+        let (_, phrase) = parse_controller_phrase("you controlled").unwrap();
+        assert_eq!(phrase.tense, Past);
+
+        for rejected in [
+            // Not a controller verb form.
+            "you controlling",
+            // Subject-verb agreement.
+            "they controls",
+            "that player control",
+            // Not a recognized subject.
+            "your opponent controls",
+        ] {
+            assert!(
+                parse_controller_phrase(rejected).is_err(),
+                "{rejected:?} must not parse"
+            );
+        }
     }
 
     #[test]
@@ -1027,7 +1835,7 @@ mod tests {
         assert_eq!(rest6, " gains");
         assert_eq!(f6, TargetFilter::DefendingPlayer);
 
-        // CR 506.2 + CR 603.7c: attack-trigger actor anaphor (Ellie, Breena).
+        // CR 506.2: attack-trigger actor anaphor (Ellie, Breena).
         let (rest7, f7) = parse_event_context_ref("that attacking player creates").unwrap();
         assert_eq!(rest7, " creates");
         assert_eq!(f7, TargetFilter::TriggeringPlayer);
@@ -1235,24 +2043,29 @@ mod tests {
 
     #[test]
     fn test_stack_object_three_way_disjunction() {
-        // Louisoix's Sacrifice — the full three-way disjunction.
-        let (rest, filter) =
-            parse_stack_object_target("activated ability, triggered ability, or noncreature spell")
-                .unwrap();
-        assert_eq!(rest, "");
-        assert_eq!(
-            filter,
-            TargetFilter::Or {
-                filters: vec![
-                    TargetFilter::StackAbility {
-                        controller: None,
-                        tag: None,
-                        kind: None,
-                    },
-                    noncreature_spell_leg(),
-                ],
-            }
-        );
+        // The full three-way disjunction accepts either ordering of the two
+        // ability kinds before continuing through the spell-leg driver.
+        for phrase in [
+            "activated ability, triggered ability, or noncreature spell",
+            "triggered ability, activated ability, or noncreature spell",
+        ] {
+            let (rest, filter) = parse_stack_object_target(phrase).unwrap();
+            assert_eq!(rest, "", "must consume every stack-object leg: {phrase}");
+            assert_eq!(
+                filter,
+                TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::StackAbility {
+                            controller: None,
+                            tag: None,
+                            kind: None,
+                        },
+                        noncreature_spell_leg(),
+                    ],
+                },
+                "both ability-kind orders name the same legal set: {phrase}"
+            );
+        }
     }
 
     #[test]
@@ -1473,6 +2286,18 @@ mod tests {
                 .count(),
             1,
             "both ability spellings must fold to exactly one StackAbility: {filters:?}"
+        );
+    }
+
+    #[test]
+    fn demonstrative_attacker_referent_is_typed_and_creature_compatible() {
+        let (rest, wolf) = parse_demonstrative_attacker_referent("that Wolf this combat if able")
+            .expect("creature subtype can name an attacker");
+        assert_eq!(rest, "this combat if able");
+        assert!(matches!(wolf, TargetFilter::Typed(_)));
+        assert!(
+            parse_demonstrative_attacker_referent("that artifact this combat if able").is_err(),
+            "a noncreature noun cannot become an event attacker"
         );
     }
 }

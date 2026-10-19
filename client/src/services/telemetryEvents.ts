@@ -28,16 +28,28 @@ export function coarseRoute(pathname?: string): string {
   return segment ? `/${segment}` : "/";
 }
 
+/** A SpiderMonkey (Firefox) / JavaScriptCore (Safari) stack frame:
+ *  `fn@url:line:col`, `@url:line:col` (anonymous), or `fn@[native code]`. */
+const AT_SIGN_FRAME = /@(?:\[native code\]|.+:\d+:\d+)$/;
+
+/** The first frame of `stack` (the throw site). V8 frames (`at fn (url:1:2)`)
+ *  are tried first because only V8 prefixes the stack with a `Name: message`
+ *  header, and a message containing `url:1:2` after an `@` would otherwise read
+ *  as an at-sign frame. Firefox/Safari stacks have no header. */
+function topStackFrame(stack: string): string | undefined {
+  const lines = stack.split("\n").map((line) => line.trim());
+  return lines.find((line) => line.startsWith("at ")) ?? lines.find((line) => AT_SIGN_FRAME.test(line));
+}
+
 /** Extract the reportable shape of a thrown value. `top_frame` is the first
- *  stack line (the throw site); the full stack is intentionally NOT sent. */
+ *  stack frame (the throw site); the full stack is intentionally NOT sent. */
 function errorFields(
   err: unknown,
   message: string | undefined,
   source: "boundary" | "window" | "unhandledrejection",
 ): Record<string, unknown> {
   const error = err instanceof Error ? err : undefined;
-  const stack = error?.stack ?? "";
-  const topFrame = stack.split("\n").find((line) => line.trim().startsWith("at"))?.trim();
+  const topFrame = topStackFrame(error?.stack ?? "");
   return {
     name: error?.name ?? "Error",
     message: error?.message ?? message ?? String(err),
@@ -104,8 +116,9 @@ function installStuckDecisionTracking(): void {
  * Emit `game_end` once per game when the state's `waiting_for` first becomes
  * `GameOver`. Deduped by `gameId` (multiplayer emits one per participating
  * client — counts are per-client sessions, not per game). `spectate` mode is
- * skipped entirely. Every payload value is an engine-provided field forwarded
- * verbatim; `winner_kind` uses the client-owned `aiSeatIds` binding.
+ * skipped entirely. Engine-provided payload values are forwarded verbatim;
+ * `winner_kind`, `engine_mode`, and `native_fallback_reason` use client-owned
+ * store bindings.
  */
 function installGameEndTracking(): void {
   let lastEmittedGameId: string | null = null;
@@ -114,7 +127,14 @@ function installGameEndTracking(): void {
     (s) => s.waitingFor,
     (waitingFor) => {
       if (!waitingFor || waitingFor.type !== "GameOver") return;
-      const { gameId, gameMode, gameState, aiSeatIds } = useGameStore.getState();
+      const {
+        gameId,
+        gameMode,
+        gameState,
+        aiSeatIds,
+        engineMode,
+        nativeEngineFallbackReason,
+      } = useGameStore.getState();
       if (gameMode === "spectate") return;
       if (gameId === null || gameId === lastEmittedGameId) return;
       lastEmittedGameId = gameId;
@@ -138,6 +158,8 @@ function installGameEndTracking(): void {
         game_mode: gameMode,
         unimplemented_oracle_ids: (gameState?.unimplemented_oracle_ids ?? []).slice(0, 20),
         pending_trigger_abandons: (gameState?.pending_trigger_abandons ?? []).slice(0, 20),
+        engine_mode: engineMode,
+        native_fallback_reason: nativeEngineFallbackReason,
       });
       // Flush promptly so a game_end isn't stranded if the user leaves the
       // results screen before the batch timer fires.
@@ -165,15 +187,24 @@ function installGameStartTracking(): void {
     (s) => s.gameState,
     (gameState) => {
       if (!gameState) return;
-      const { gameId, gameMode, aiSeatIds } = useGameStore.getState();
+      const {
+        gameId,
+        gameMode,
+        aiSeatIds,
+        engineMode,
+        nativeEngineFallbackReason,
+      } = useGameStore.getState();
       if (gameMode === "spectate") return;
       if (gameId === null || gameId === lastEmittedGameId) return;
       lastEmittedGameId = gameId;
 
       trackEvent("game_start", {
         game_mode: gameMode,
+        format: gameState.format_config?.format,
         player_count: gameState.players.length,
         ai_count: aiSeatIds.length,
+        engine_mode: engineMode,
+        native_fallback_reason: nativeEngineFallbackReason,
       });
     },
   );

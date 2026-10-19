@@ -3,6 +3,7 @@ use crate::types::format::GameFormat;
 use crate::types::format::TurnStructure;
 use crate::types::game_state::GameState;
 use crate::types::player::PlayerId;
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct TeamId(pub u8);
@@ -177,15 +178,26 @@ pub(crate) fn team_id(state: &GameState, player: PlayerId) -> TeamId {
     }
 }
 
+/// Which seats an APNAP or team walk admits. Live rules walks admit only
+/// players still in the game (CR 800.4a); `IncludingDeparted` exists for
+/// restore-time reconstruction of a population fixed before players left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SeatAdmission {
+    Living,
+    IncludingDeparted,
+}
+
+impl SeatAdmission {
+    fn admits(self, state: &GameState, player: PlayerId) -> bool {
+        match self {
+            SeatAdmission::Living => super::players::is_alive(state, player),
+            SeatAdmission::IncludingDeparted => true,
+        }
+    }
+}
+
 pub(crate) fn team_members(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
-    // The living members of `player`'s side (see [`sides`], the grouping
-    // authority). A player with no side (shouldn't happen) has no teammates.
-    side_of(state, player)
-        .map(|side| side.seats)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|&id| super::players::is_alive(state, id))
-        .collect()
+    team_members_admitting(state, player, SeatAdmission::Living)
 }
 
 /// Whether `player`'s side takes a single shared team turn (CR 805) rather than
@@ -199,6 +211,24 @@ pub(crate) fn team_members(state: &GameState, player: PlayerId) -> Vec<PlayerId>
 /// so the answer matches the old whole-format predicate.
 pub(crate) fn side_takes_shared_turn(state: &GameState, player: PlayerId) -> bool {
     side_of(state, player).is_some_and(|s| s.turn_structure == TurnStructure::SharedTeamTurns)
+}
+
+fn team_members_admitting(
+    state: &GameState,
+    player: PlayerId,
+    admission: SeatAdmission,
+) -> Vec<PlayerId> {
+    // The admitted members of `player`'s side (see [`sides`], the grouping
+    // authority). A player with no side (shouldn't happen) has no teammates.
+    // Per-side rather than whole-format, so a mixed game (Horde: one shared
+    // survivor side plus one individual side per Horde seat) groups each seat
+    // with its own side.
+    side_of(state, player)
+        .map(|side| side.seats)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|&id| admission.admits(state, id))
+        .collect()
 }
 
 pub(crate) fn teammates(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
@@ -228,21 +258,11 @@ pub(crate) fn archenemy(state: &GameState) -> Option<PlayerId> {
     }
 }
 
-/// CR 810.4 / CR 810.8 / CR 810.9 / CR 810.10: Whether the game contains ANY side
-/// that shares life, poison, and team loss (Two-Headed Giant, or a Horde game's
-/// survivor side). Whole-game predicate used to pick the team-loss WIN algorithm
-/// (`elimination`); the per-PLAYER question "does THIS player's side pool life"
-/// is [`side_shares_life`], which is what all resource aggregation goes through.
-///
-/// Default Archenemy stays FALSE: it uses shared turns (CR 805) but its heroes do
-/// NOT share life (CR 904.5, each hero at their own 20). Future Emperor teams also
-/// stay FALSE (CR 809.7: teams do not share resources) — their format simply isn't
-/// in this match.
-pub(crate) fn has_shared_life_resources(state: &GameState) -> bool {
-    matches!(
-        state.format_config.format,
-        GameFormat::TwoHeadedGiant | GameFormat::Horde
-    )
+/// CR 810.4 / CR 810.8 / CR 810.9 / CR 810.10: Two-Headed Giant shares life,
+/// poison, and team loss. Default Archenemy uses shared turns (CR 805) but not
+/// these shared-resource rules.
+pub(crate) fn has_two_headed_giant_shared_resources(state: &GameState) -> bool {
+    matches!(state.format_config.format, GameFormat::TwoHeadedGiant)
 }
 
 /// CR 810.4 / CR 810.8 / CR 810.9 / CR 810.10: Whether `player`'s SIDE pools life,
@@ -305,17 +325,43 @@ pub(crate) fn apnap_choice_groups_from(
     state: &GameState,
     start_player: PlayerId,
 ) -> Vec<Vec<PlayerId>> {
+    apnap_choice_groups_admitting(state, start_player, SeatAdmission::Living)
+}
+
+fn apnap_choice_groups_admitting(
+    state: &GameState,
+    start_player: PlayerId,
+    admission: SeatAdmission,
+) -> Vec<Vec<PlayerId>> {
     let seat_order = &state.seat_order;
     let len = seat_order.len();
     if len == 0 {
         return Vec::new();
     }
 
-    // CR 101.4 + CR 103.1: APNAP follows the current turn-order direction. Per
-    // side: a shared-team side chooses as ONE group (its living members), deduped
-    // so it appears once; an individual-turn seat is its own group. For today's
-    // uniform formats this reduces to the old two-branch behavior (all-individual
-    // → one group per seat; all-shared → one group per team).
+    // CR 101.4 + CR 103.1: APNAP follows the current turn-order direction. The
+    // all-individual case returns early (one group per admitted seat); below, a
+    // shared-team side chooses as ONE group (its admitted members), deduped so
+    // it appears once, while an individual-turn seat in a mixed game (Horde:
+    // each Horde seat alongside the shared survivor side) is its own group.
+    if !state.format_config.topology().has_shared_team_turns() {
+        let start_idx = seat_order
+            .iter()
+            .position(|&id| id == start_player)
+            .unwrap_or(0);
+        return (0..len)
+            .filter_map(|offset| {
+                // CR 101.4 + CR 103.1: APNAP follows the current turn-order direction.
+                let idx =
+                    super::players::turn_order_index(start_idx, offset, len, state.turn_direction);
+                let candidate = seat_order[idx];
+                admission
+                    .admits(state, candidate)
+                    .then_some(vec![candidate])
+            })
+            .collect();
+    }
+
     let start_idx = seat_order
         .iter()
         .position(|&id| id == start_player)
@@ -325,14 +371,14 @@ pub(crate) fn apnap_choice_groups_from(
     for offset in 0..len {
         let idx = super::players::turn_order_index(start_idx, offset, len, state.turn_direction);
         let candidate = seat_order[idx];
-        if !super::players::is_alive(state, candidate) {
+        if !admission.admits(state, candidate) {
             continue;
         }
         if side_takes_shared_turn(state, candidate) {
             // Dedup the shared side by its stable side key so it contributes one
             // group at its first-appearing member's position.
             if seen_shared.insert(team_dedup_key(state, candidate)) {
-                groups.push(team_members(state, candidate));
+                groups.push(team_members_admitting(state, candidate, admission));
             }
         } else {
             groups.push(vec![candidate]);
@@ -343,6 +389,20 @@ pub(crate) fn apnap_choice_groups_from(
 
 pub(crate) fn apnap_order_from(state: &GameState, start_player: PlayerId) -> Vec<PlayerId> {
     apnap_choice_groups_from(state, start_player)
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+/// APNAP order from `start_player` over the given seat admission, following
+/// the current turn-order direction (CR 101.4 + CR 103.1) and, under the
+/// shared team turns option, team order (CR 805.6).
+pub(crate) fn apnap_order_admitting(
+    state: &GameState,
+    start_player: PlayerId,
+    admission: SeatAdmission,
+) -> Vec<PlayerId> {
+    apnap_choice_groups_admitting(state, start_player, admission)
         .into_iter()
         .flatten()
         .collect()
@@ -412,6 +472,26 @@ pub(crate) fn priority_pass_representative(state: &GameState, player: PlayerId) 
     // `normalize_shared_turn_recipient` already returns `player` unchanged when
     // their side takes individual turns, so this is correct per-side.
     normalize_shared_turn_recipient(state, player)
+}
+
+/// Canonicalize a set of semantic priority seats to their currently living
+/// representatives (CR 117.6 + CR 805.5b).
+///
+/// Resolution sessions store representatives, never incidental teammate seats.
+/// Reusing this at construction and at each live priority beat makes a changed
+/// team topology observable before an automated pass can consume a stack entry.
+pub(crate) fn canonical_priority_representatives<I>(
+    state: &GameState,
+    players: I,
+) -> BTreeSet<PlayerId>
+where
+    I: IntoIterator<Item = PlayerId>,
+{
+    players
+        .into_iter()
+        .map(|player| priority_pass_representative(state, player))
+        .filter(|&player| super::players::is_alive(state, player))
+        .collect()
 }
 
 /// CR 805.4: In shared-team-turn formats, each team takes turns rather than
@@ -511,6 +591,11 @@ mod tests {
         assert_eq!(
             priority_pass_participants(&state),
             vec![PlayerId(1), PlayerId(2)]
+        );
+        assert_eq!(
+            canonical_priority_representatives(&state, [PlayerId(0), PlayerId(1)]),
+            [PlayerId(1)].into_iter().collect(),
+            "a frozen session re-canonicalizes an eliminated teammate to its living team seat"
         );
     }
 

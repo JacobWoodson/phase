@@ -23,8 +23,10 @@ expression: "&lowered"
         },
         "rest_destination": null,
         "reveal": false,
-        "enter_tapped": false
+        "enter_tapped": false,
+        "enters_attacking": false
       },
+      "declares_chosen_group": 2147483648,
       "cost": {
         "type": "Loyalty",
         "amount": 2
@@ -200,6 +202,9 @@ expression: "&lowered"
           "destination": "Library",
           "target": {
             "type": "ParentTargetController"
+          },
+          "library_shuffle": {
+            "type": "TerminalShuffle"
           }
         },
         "cost": null,

@@ -21,7 +21,7 @@ use engine::game::zones::create_object;
 use engine::types::card::CardFace;
 use engine::types::card_type::{CoreType, Supertype};
 use engine::types::events::GameEvent;
-use engine::types::format::{ChallengeDeck, FormatConfig, SurvivorDeckFormat};
+use engine::types::format::{ChallengeDeck, DeckSizeRule, FormatConfig, SurvivorDeckFormat};
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::phase::Phase;
@@ -512,7 +512,7 @@ fn commander_format_horde_wires_survivor_commanders() {
         "CR 903.10a commander-damage SBA is active for survivors"
     );
     assert!(config.uses_commander);
-    assert_eq!(config.deck_size, 100);
+    assert_eq!(config.deck_size, DeckSizeRule::Exactly(100));
 
     // Seat 0 = Horde, seat 1 = survivor. The loader maps `payload.opponent`
     // to seat 1, so the survivor's EDH deck (99 basics + a commander) goes there.

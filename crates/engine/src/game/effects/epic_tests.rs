@@ -82,7 +82,7 @@ fn epic_spell_on_stack(state: &mut GameState, card: u64, is_token: bool) -> Obje
         controller: PlayerId(0),
         kind: StackEntryKind::Spell {
             card_id: CardId(card),
-            ability: Some(snapshot(id)),
+            ability: Some(Box::new(snapshot(id))),
             casting_variant: CastingVariant::default(),
             actual_mana_spent: 0,
         },
@@ -353,7 +353,7 @@ fn targeted_epic_retarget_completion_resolves_as_epic_copy() {
         GameEvent::EffectResolved {
             kind: EffectKind::EpicCopy,
             source_id,
-        } if *source_id == proto
+        ..} if *source_id == proto
     )));
     assert!(!result.events.iter().any(|event| matches!(
         event,
@@ -370,18 +370,30 @@ fn legacy_copy_retarget_completion_uses_copy_as_default_source() {
     // those states are generic copy choices whose completion source is the copy.
     let mut state = GameState::new_two_player(42);
     let copy_id = epic_spell_on_stack(&mut state, 7, true);
+    // The copy holds the target its legacy prompt records.
+    if let Some(ability) = state.stack.back_mut().and_then(|entry| entry.ability_mut()) {
+        *ability = targeted_snapshot(copy_id);
+    }
 
     state.waiting_for = WaitingFor::CopyRetarget {
         player: PlayerId(0),
+        controller: None,
         copy_id,
         target_slots: vec![crate::types::game_state::CopyTargetSlot {
             current: Some(crate::types::ability::TargetRef::Player(PlayerId(1))),
             legal_alternatives: Vec::new(),
+            address: None,
+            can_keep: false,
+            can_decline: false,
         }],
         effect_kind: EffectKind::CopySpell,
         effect_source_id: None,
         current_slot: 0,
         paradigm_remaining_offers: None,
+        mode: None,
+        picks: None,
+        can_keep_rest: false,
+        announcer_election: None,
     };
 
     let result = apply(&mut state, PlayerId(0), GameAction::KeepAllCopyTargets)
@@ -392,7 +404,7 @@ fn legacy_copy_retarget_completion_uses_copy_as_default_source() {
         GameEvent::EffectResolved {
             kind: EffectKind::CopySpell,
             source_id,
-        } if *source_id == copy_id
+        ..} if *source_id == copy_id
     )));
 }
 

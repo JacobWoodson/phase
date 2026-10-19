@@ -28,27 +28,33 @@ use nom::Parser;
 
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChoiceType, ContinuousModification, ControllerRef, Duration,
-    Effect, PlayerFilter, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter,
-    TargetSelectionMode, TieResolution, VoteSubject, VoteTally, VoteVisibility, VoterScope,
+    Effect, PlayerFilter, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter, TieResolution,
+    VoteSubject, VoteTally, VoteVisibility, VoterScope,
 };
 use crate::types::keywords::Keyword;
 use crate::types::zones::{EtbTapState, Zone};
 
 use super::oracle_effect::{parse_effect_chain_with_context, strip_trailing_duration};
 use super::oracle_ir::context::ParseContext;
-use super::oracle_keyword::parse_keyword_from_oracle;
+use super::oracle_ir::trigger::VoteIr;
+use super::oracle_keyword::parse_granted_keyword_fragment;
 use super::oracle_target::parse_target;
 use super::oracle_util::SELF_REF_TYPE_PHRASES;
 
-/// Detect and parse the entire Council's-dilemma vote block. Returns a single
-/// `AbilityDefinition` whose `effect` is `Effect::Vote` populated with the
-/// per-choice sub-effects, or `None` if the input doesn't match the pattern.
+/// Detect and parse the entire Council's-dilemma vote block into typed trigger
+/// IR. The vote's per-choice sub-effects remain independently lowered payloads;
+/// the root ballot and optional pre-ballot random choice stay typed until
+/// trigger lowering.
 ///
 /// The input is the trigger/effect *body* text — i.e., what comes after
 /// "Whenever ~ enters or deals combat damage to a player, ". The "starting
 /// with you, " prefix is consumed here (kept inside this module so chain-level
 /// stripping in `parse_effect_chain_ir` doesn't interfere).
-pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityDefinition> {
+pub(crate) fn parse_vote_block_ir(
+    text: &str,
+    kind: AbilityKind,
+    ctx: &ParseContext,
+) -> Option<VoteIr> {
     // Case-insensitive nom tags (`tag_no_case`) match directly against the
     // original-case input, so the entire vote-detection pipeline operates on
     // `text` without an upfront `to_lowercase()` allocation. On the failure
@@ -100,6 +106,7 @@ pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityD
                 voter_scope,
                 visibility,
             )
+            .map(|vote| vote.with_source(text).with_context(ctx))
         }
     };
     // CR 701.38a: Will-of-the-council threshold votes. Shape:
@@ -120,7 +127,7 @@ pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityD
         voter_scope,
         visibility,
     ) {
-        return Some(def);
+        return Some(def.with_source(text).with_context(ctx));
     }
     // CR 701.38a: "...or tied for most votes" all-tied outcome over named
     // choices (Council Guardian: "This creature gains protection from each
@@ -134,7 +141,7 @@ pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityD
         voter_scope,
         visibility,
     ) {
-        return Some(def);
+        return Some(def.with_source(text).with_context(ctx));
     }
     // Phase 3: per-choice clauses. Three shapes covered, dispatched by scope:
     //   * "For each <choice> vote, <effect>."                     (Tivit / classic)
@@ -184,15 +191,21 @@ pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityD
         let (rest, idx, mut parsed, voted_for) = if is_controller_labels {
             let (rest, (choice, effect_text, who_chose)) = parse_each_class_clause(walk, &choices)?;
             let idx = choices.iter().position(|c| c == &choice)?;
-            let parsed =
-                parse_effect_chain_with_context(effect_text, kind, &mut ParseContext::default());
+            let parsed = parse_per_choice_body(
+                effect_text,
+                kind,
+                who_chose.then_some(ControllerRef::ScopedPlayer),
+            );
             (rest, idx, parsed, who_chose)
         } else if let Some((rest, (choice, effect_text, who_chose))) =
             parse_for_each_vote_clause(walk, &choices)
         {
             let idx = choices.iter().position(|c| c == &choice)?;
-            let parsed =
-                parse_effect_chain_with_context(effect_text, kind, &mut ParseContext::default());
+            let parsed = parse_per_choice_body(
+                effect_text,
+                kind,
+                who_chose.then_some(ControllerRef::ScopedPlayer),
+            );
             (rest, idx, parsed, who_chose)
         } else if let Some((rest, idx, parsed_def, setup)) =
             parse_vote_for_each_suffix_clause(walk, &choices, kind)
@@ -217,20 +230,32 @@ pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityD
             // the body per vote.
             let (rest, choice, head, multiplier) = parse_aggregate_tally_clause(walk, &choices)?;
             let idx = choices.iter().position(|c| c == &choice)?;
-            let mut parsed =
-                parse_effect_chain_with_context(head, kind, &mut ParseContext::default());
-            // CR 608.2c: bind the tally count into the parsed effect's count
-            // slot. A tally body whose effect exposes no bindable count slot
-            // (GAP 2 strict-failure) must NOT silently mis-parse with a wrong
-            // count — `?` falls through by returning None so dispatch can try
-            // another shape or emit a diagnostic, rather than producing an
-            // effect with the wrong (placeholder) count.
-            *parsed.effect.count_expr_mut()? = QuantityExpr::Ref {
+            let tally = QuantityExpr::Ref {
                 qty: QuantityRef::VoteCount {
                     choice_index: idx as u32,
                 },
             }
             .scaled_by(multiplier);
+            // CR 701.38a + CR 608.2c: the head lost its "equal to … votes"
+            // binder to the strip above, so stage the tally as the caller-bound
+            // count the head's count position reads ("You create a number of
+            // Treasure tokens").
+            let mut parsed = parse_effect_chain_with_context(
+                head,
+                kind,
+                &mut ParseContext {
+                    caller_bound_count: Some(tally.clone()),
+                    ..Default::default()
+                },
+            );
+            // CR 608.2c: bind the tally count into the parsed effect's count
+            // slot (the put-counter count position does not read the staged
+            // count). A tally body whose effect exposes no bindable count slot
+            // (GAP 2 strict-failure) must NOT silently mis-parse with a wrong
+            // count — `?` falls through by returning None so dispatch can try
+            // another shape or emit a diagnostic, rather than producing an
+            // effect with the wrong (placeholder) count.
+            *parsed.effect.count_expr_mut()? = tally;
             (rest, idx, parsed, false)
         };
         if slots[idx].is_some() {
@@ -257,18 +282,18 @@ pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityD
     let per_choice_effect: Vec<Box<AbilityDefinition>> =
         slots.into_iter().collect::<Option<Vec<_>>>()?;
 
-    let vote_def = AbilityDefinition::new(
-        kind,
-        Effect::Vote {
-            choices,
-            per_choice_effect,
-            starting_with,
-            voter_scope,
-            tally_mode: VoteTally::PerVote,
-            subject: VoteSubject::Named,
-            visibility,
-        },
-    );
+    let vote = Effect::Vote {
+        choices,
+        per_choice_effect,
+        starting_with,
+        voter_scope,
+        tally_mode: VoteTally::PerVote,
+        subject: VoteSubject::Named,
+        visibility,
+    };
+    // CR 701.38 + CR 608.2d: retain the ballot and its optional random setup
+    // as typed trigger IR. The setup becomes the root only during lowering;
+    // the trigger body itself never needs a pre-lowered AbilityDefinition.
     match pre_vote_choose {
         // CR 608.2d + CR 102.2: the card chooses the opponent unconditionally
         // ("Then choose an opponent at random"), even with a zero tally, so the
@@ -279,18 +304,19 @@ pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityD
         // (CR 608.2c). The random pick is independent of the tally, so choosing
         // before vs. after the ballot is outcome-equivalent.
         Some(choice_type) => Some(
-            AbilityDefinition::new(
-                kind,
-                Effect::Choose {
-                    choice_type,
-                    persist: true,
-                    selection: TargetSelectionMode::Random,
-                },
-            )
-            .sub_ability(vote_def),
+            VoteIr::new(vote, Some(choice_type))
+                .with_source(text)
+                .with_context(ctx),
         ),
-        None => Some(vote_def),
+        None => Some(VoteIr::new(vote, None).with_source(text).with_context(ctx)),
     }
+}
+
+/// Compatibility entry point for non-trigger callers that still consume a
+/// lowered definition. Trigger parsing uses [`parse_vote_block_ir`] so its root
+/// goes through the ordinary trigger effect-chain arm.
+pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityDefinition> {
+    parse_vote_block_ir(text, kind, &ParseContext::default()).map(|vote| vote.into_ability(kind))
 }
 
 /// CR 701.38a: Parse the Will-of-the-council threshold-clause body that
@@ -325,7 +351,7 @@ fn parse_threshold_vote_clauses(
     starting_with: ControllerRef,
     voter_scope: VoterScope,
     visibility: VoteVisibility,
-) -> Option<AbilityDefinition> {
+) -> Option<VoteIr> {
     // Per-choice effect slots, parallel to `choices`, plus the discovered
     // tie-breaker index. Each named clause binds to its choice's slot; unlisted
     // choices stay `None` and are filled with `Effect::NoOp` below.
@@ -380,8 +406,7 @@ fn parse_threshold_vote_clauses(
         .map(|slot| slot.unwrap_or_else(|| Box::new(AbilityDefinition::new(kind, Effect::NoOp))))
         .collect();
 
-    Some(AbilityDefinition::new(
-        kind,
+    Some(VoteIr::new(
         Effect::Vote {
             choices: choices.to_vec(),
             per_choice_effect,
@@ -393,6 +418,7 @@ fn parse_threshold_vote_clauses(
             subject: VoteSubject::Named,
             visibility,
         },
+        None,
     ))
 }
 
@@ -409,7 +435,7 @@ fn parse_threshold_vote_clauses(
 /// "with the most votes [or tied for most votes]" suffix. For each named choice
 /// the `each <characteristic>` distributor is substituted with that choice and
 /// the per-choice effect is built via the standard keyword building block
-/// (`parse_keyword_from_oracle`), wrapped in a continuous self-grant.
+/// (`parse_granted_keyword_fragment`), wrapped in a continuous self-grant.
 ///
 /// CR 611.2a: the grant has no stated duration, so it lasts until the end of the
 /// game (`Duration::Permanent`) — NOT the `UntilEndOfTurn` keyword-grant default.
@@ -424,7 +450,7 @@ fn parse_all_tied_vote_clause(
     starting_with: ControllerRef,
     voter_scope: VoterScope,
     visibility: VoteVisibility,
-) -> Option<AbilityDefinition> {
+) -> Option<VoteIr> {
     let (sentence, _rest) = read_sentence(input);
     // Locate the "with the most votes [or tied for most votes]" suffix; `head`
     // is the grant template preceding it.
@@ -450,7 +476,7 @@ fn parse_all_tied_vote_clause(
     let mut per_choice_effect: Vec<Box<AbilityDefinition>> = Vec::with_capacity(choices.len());
     for choice in choices {
         let phrase = substitute_each_noun(keyword_template, choice)?;
-        let keyword = parse_keyword_from_oracle(&phrase.to_lowercase())?;
+        let keyword = parse_granted_keyword_fragment(&phrase.to_lowercase())?;
         per_choice_effect.push(Box::new(build_self_keyword_grant(
             kind,
             keyword,
@@ -459,8 +485,7 @@ fn parse_all_tied_vote_clause(
         )));
     }
 
-    Some(AbilityDefinition::new(
-        kind,
+    Some(VoteIr::new(
         Effect::Vote {
             choices: choices.to_vec(),
             per_choice_effect,
@@ -472,6 +497,7 @@ fn parse_all_tied_vote_clause(
             subject: VoteSubject::Named,
             visibility,
         },
+        None,
     ))
 }
 
@@ -493,7 +519,7 @@ fn parse_object_vote_block(
     starting_with: ControllerRef,
     voter_scope: VoterScope,
     visibility: VoteVisibility,
-) -> Option<AbilityDefinition> {
+) -> Option<VoteIr> {
     // Strip a leading article so `parse_target` sees the bare descriptor.
     let candidate_phrase = strip_leading_article(choice_text.trim());
     let (candidate_filter, rest) = parse_target(candidate_phrase);
@@ -538,8 +564,7 @@ fn parse_object_vote_block(
     };
     let outcome_template = Box::new(AbilityDefinition::new(kind, exile));
 
-    Some(AbilityDefinition::new(
-        kind,
+    Some(VoteIr::new(
         Effect::Vote {
             choices: Vec::new(),
             per_choice_effect: Vec::new(),
@@ -554,6 +579,7 @@ fn parse_object_vote_block(
             },
             visibility,
         },
+        None,
     ))
 }
 
@@ -746,6 +772,7 @@ fn build_self_keyword_grant(
             // CR 611.2b's "for as long as …" case).
             duration: Some(explicit_duration.unwrap_or(Duration::Permanent)),
             target: None,
+            end_cost: None,
         },
     )
 }
@@ -1065,6 +1092,28 @@ fn read_effect_until_each_class<'a>(input: &'a str, choices: &[String]) -> (&'a 
     (head_no_period.trim(), tail.trim_start())
 }
 
+/// CR 608.2c: a per-choice body that fans out over the players who chose its
+/// option (`PlayerFilter::VotedFor`, run once per such player by the
+/// `player_scope` driver) is parsed with the iterated player as its
+/// third-person antecedent, so "that player", "they control" and a "they" that
+/// acts as a player name that player; a "they" that a continuous modification
+/// affects right after a clause acting on an object set ("Untap those creatures
+/// and they gain haste") names that set (`subject.rs` · `resolve_they_pronoun`).
+/// A body that does not fan out (`None`) parses on a default context.
+fn parse_per_choice_body(
+    text: &str,
+    kind: AbilityKind,
+    scope: Option<ControllerRef>,
+) -> AbilityDefinition {
+    let mut ctx = ParseContext::default();
+    match scope {
+        Some(scope) => ctx.with_player_scope(scope, |ctx| {
+            parse_effect_chain_with_context(text, kind, ctx)
+        }),
+        None => parse_effect_chain_with_context(text, kind, &mut ctx),
+    }
+}
+
 /// Parse the "who chose" sub-shape of a `for each ...` clause:
 ///
 ///   `"<player-noun> who chose <choice>, "`
@@ -1201,10 +1250,13 @@ fn parse_vote_for_each_suffix_clause<'a>(
         opt(tag_no_case("then ")),
         alt((
             value(
-                ChoiceType::Opponent { restriction: None },
+                ChoiceType::opponent(),
                 tag_no_case("choose an opponent at random"),
             ),
-            value(ChoiceType::Player, tag_no_case("choose a player at random")),
+            value(
+                ChoiceType::player(),
+                tag_no_case("choose a player at random"),
+            ),
         )),
         tag(". "),
     ))
@@ -1789,9 +1841,33 @@ mod tests {
         }
     }
 
+    /// The coordinated set `AnyOf[Controller, TargetPlayer]` behind a
+    /// `TargetOnly { opponent }` head — the declared player target.
+    fn assert_targeted_coordinated_body(parsed: &AbilityDefinition) -> &AbilityDefinition {
+        assert_eq!(
+            *parsed.effect,
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent)
+                ),
+            },
+            "the head declares the targeted opponent"
+        );
+        let body = parsed.sub_ability.as_deref().expect("the coordinated body");
+        assert_eq!(
+            body.player_scope,
+            Some(PlayerFilter::AnyOf {
+                filters: vec![PlayerFilter::Controller, PlayerFilter::TargetPlayer],
+            }),
+            "exactly the caster and the targeted opponent act"
+        );
+        assert!(body.sub_ability.is_none(), "one body link, not two halves");
+        body
+    }
+
     /// "you and target opponent each create a Treasure token" — the chosen
-    /// opponent must be surfaced as a real player target, not collapsed into a
-    /// single token effect with `owner: Any`.
+    /// opponent is a real player target (the `TargetOnly` head), and one token
+    /// effect is created per seat, owned by the seat (CR 111.2).
     #[test]
     fn parser_distributes_you_and_target_opponent_each_create_token() {
         let parsed = parse_effect_chain_with_context(
@@ -1799,29 +1875,16 @@ mod tests {
             AbilityKind::Spell,
             &mut ParseContext::default(),
         );
-        match *parsed.effect {
-            Effect::Token { ref owner, .. } => {
-                assert_eq!(*owner, TargetFilter::OriginalController);
-            }
-            other => panic!("expected Token for first half, got {:?}", other),
-        }
-        let sub = parsed
-            .sub_ability
-            .expect("expected second-half sub_ability");
-        match *sub.effect {
-            Effect::Token { ref owner, .. } => {
-                assert_eq!(
-                    *owner,
-                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
-                );
-            }
-            other => panic!("expected Token for second half, got {:?}", other),
+        let body = assert_targeted_coordinated_body(&parsed);
+        match &*body.effect {
+            Effect::Token { owner, .. } => assert_eq!(*owner, TargetFilter::ScopedPlayer),
+            other => panic!("expected the body to create a Token, got {other:?}"),
         }
     }
 
     /// Fall of the First Civilization chapter I: "you and target opponent each
-    /// draw two cards" — both halves distribute; the opponent half keeps a real
-    /// opponent-scoped target slot (not a context ref).
+    /// draw two cards" — the opponent keeps a real opponent-scoped target slot
+    /// (the `TargetOnly` head), and each seat draws two for itself.
     #[test]
     fn parser_distributes_you_and_target_opponent_each_draw_two() {
         let parsed = parse_effect_chain_with_context(
@@ -1829,36 +1892,14 @@ mod tests {
             AbilityKind::Spell,
             &mut ParseContext::default(),
         );
-        match *parsed.effect {
+        let body = assert_targeted_coordinated_body(&parsed);
+        assert_eq!(
+            *body.effect,
             Effect::Draw {
-                ref target, count, ..
-            } => {
-                assert_eq!(*target, TargetFilter::OriginalController);
-                assert_eq!(count, QuantityExpr::Fixed { value: 2 });
+                target: TargetFilter::ScopedPlayer,
+                count: QuantityExpr::Fixed { value: 2 },
             }
-            other => panic!(
-                "expected Draw {{ target: OriginalController, count: 2 }} for first half, got {:?}",
-                other
-            ),
-        }
-        let sub = parsed
-            .sub_ability
-            .expect("expected second-half sub_ability");
-        match *sub.effect {
-            Effect::Draw {
-                ref target, count, ..
-            } => {
-                assert_eq!(
-                    *target,
-                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
-                );
-                assert_eq!(count, QuantityExpr::Fixed { value: 2 });
-            }
-            other => panic!(
-                "expected Draw {{ target: Player, count: 2 }} for second half, got {:?}",
-                other
-            ),
-        }
+        );
     }
 
     /// Issue #3667 — the opponent half must surface a real player target slot.
@@ -2038,6 +2079,170 @@ mod tests {
             }
             other => panic!("expected Vote, got {:?}", other),
         }
+    }
+
+    /// CR 608.2c: a fan-out per-choice body runs once per player who chose its
+    /// option, so its "they" names that player (`ScopedPlayer`). Regna's
+    /// Sanction, verbatim: both bodies' "creature(s) they control" bind to the
+    /// iterated player. A classic per-ballot body ("For each <choice> vote, …")
+    /// does not fan out over voters and is not seeded.
+    #[test]
+    fn fan_out_vote_bodies_bind_they_to_the_iterated_player() {
+        let text = "For each player, choose friend or foe. Each friend puts a +1/+1 counter on each creature they control. Each foe chooses one untapped creature they control, then taps the rest.";
+        let def = parse_vote_block(text, AbilityKind::Spell).expect("vote block parses");
+        let Effect::Vote {
+            ref per_choice_effect,
+            ..
+        } = *def.effect
+        else {
+            panic!("expected Vote, got {:?}", def.effect);
+        };
+        let Effect::PutCounterAll {
+            target: TargetFilter::Typed(ref friend),
+            ..
+        } = *per_choice_effect[0].effect
+        else {
+            panic!(
+                "expected the friend body's PutCounterAll, got {:?}",
+                per_choice_effect[0].effect
+            );
+        };
+        let Effect::TargetOnly {
+            target: TargetFilter::Typed(ref foe),
+        } = *per_choice_effect[1].effect
+        else {
+            panic!(
+                "expected the foe body's chosen-creature TargetOnly, got {:?}",
+                per_choice_effect[1].effect
+            );
+        };
+        assert_eq!(friend.controller, Some(ControllerRef::ScopedPlayer));
+        assert_eq!(foe.controller, Some(ControllerRef::ScopedPlayer));
+
+        let classic = "starting with you, each player votes for grace or guilt. For each grace vote, put a +1/+1 counter on each creature they control. For each guilt vote, investigate.";
+        let def = parse_vote_block(classic, AbilityKind::Spell).expect("vote block parses");
+        let Effect::Vote {
+            ref per_choice_effect,
+            ..
+        } = *def.effect
+        else {
+            panic!("expected Vote, got {:?}", def.effect);
+        };
+        assert!(per_choice_effect[0].player_scope.is_none());
+        let Effect::PutCounterAll {
+            target: TargetFilter::Typed(ref grace),
+            ..
+        } = *per_choice_effect[0].effect
+        else {
+            panic!(
+                "reach-guard: expected the grace body's PutCounterAll, got {:?}",
+                per_choice_effect[0].effect
+            );
+        };
+        assert!(
+            grace.controller.is_some(),
+            "reach-guard: the classic body's \"they control\" must bind a controller, got {grace:?}"
+        );
+        assert_ne!(grace.controller, Some(ControllerRef::ScopedPlayer));
+    }
+
+    /// Seize the Spotlight's Oracle text, verbatim.
+    const SEIZE_THE_SPOTLIGHT: &str = "Each opponent chooses fame or fortune. For each player who chose fame, gain control of a creature that player controls until end of turn. Untap those creatures and they gain haste until end of turn. For each player who chose fortune, you draw a card and create a Treasure token.";
+
+    /// The fame body of a Seize-shaped vote: its `player_scope`, its head, and
+    /// the node after the head ("Untap those creatures").
+    fn fame_body(text: &str) -> AbilityDefinition {
+        let def = parse_vote_block(text, AbilityKind::Spell).expect("vote block parses");
+        let Effect::Vote {
+            mut per_choice_effect,
+            ..
+        } = *def.effect
+        else {
+            panic!("expected Vote, got {:?}", def.effect);
+        };
+        let fame = per_choice_effect.swap_remove(0);
+        assert_eq!(
+            fame.player_scope,
+            Some(PlayerFilter::VotedFor { choice_index: 0 }),
+            "reach-guard: the fame body fans out over the players who chose it"
+        );
+        let untap = fame
+            .sub_ability
+            .as_deref()
+            .expect("reach-guard: the fame body continues past its head");
+        assert!(
+            matches!(
+                *untap.effect,
+                Effect::SetTapState {
+                    target: TargetFilter::TrackedSet { .. },
+                    ..
+                }
+            ),
+            "reach-guard: \"Untap those creatures\" acts on the tracked set, got {:?}",
+            untap.effect
+        );
+        *fame
+    }
+
+    /// CR 608.2c + CR 611.2c: in a fan-out body, "they" right after "Untap those
+    /// creatures" is the affected object of the haste grant, so it names those
+    /// creatures (`ParentTarget`), not the iterated player.
+    #[test]
+    fn fan_out_continuous_grant_they_keeps_its_object_antecedent() {
+        let fame = fame_body(SEIZE_THE_SPOTLIGHT);
+        let Effect::GainControl {
+            target: TargetFilter::Typed(ref stolen),
+        } = *fame.effect
+        else {
+            panic!("reach-guard: expected GainControl, got {:?}", fame.effect);
+        };
+        assert_eq!(
+            stolen.controller,
+            Some(ControllerRef::ScopedPlayer),
+            "reach-guard: the per-choice seed reached the body"
+        );
+        let grant = fame
+            .sub_ability
+            .as_deref()
+            .and_then(|untap| untap.sub_ability.as_deref())
+            .expect("the haste grant follows the untap");
+        let Effect::GenericEffect {
+            ref static_abilities,
+            ..
+        } = *grant.effect
+        else {
+            panic!("expected the haste GenericEffect, got {:?}", grant.effect);
+        };
+        let haste = &static_abilities[0];
+        assert!(haste
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste
+            }));
+        assert_ne!(haste.affected, Some(TargetFilter::ScopedPlayer));
+        assert_eq!(haste.affected, Some(TargetFilter::ParentTarget));
+    }
+
+    /// CR 608.2c: under the same seed and right after the same object-set clause,
+    /// a "they" that acts as a player still names the iterated player.
+    #[test]
+    fn fan_out_player_action_they_after_an_object_set_names_the_player() {
+        let fame = fame_body(
+            "Each opponent chooses fame or fortune. For each player who chose fame, gain control of a creature that player controls until end of turn. Untap those creatures, then they draw a card. For each player who chose fortune, you create a Treasure token.",
+        );
+        let draw = fame
+            .sub_ability
+            .as_deref()
+            .and_then(|untap| untap.sub_ability.as_deref())
+            .expect("reach-guard: the draw follows the untap");
+        assert!(
+            draw.sub_ability.is_none(),
+            "reach-guard: the draw ends the body"
+        );
+        let Effect::Draw { ref target, .. } = *draw.effect else {
+            panic!("reach-guard: expected Draw, got {:?}", draw.effect);
+        };
+        assert_eq!(*target, TargetFilter::ScopedPlayer);
     }
 
     /// Rejects single-class openers — every friend-or-foe card prints two
@@ -2388,7 +2593,10 @@ mod tests {
         assert_eq!(rest, "");
         assert!(matches!(
             setup,
-            Some(ChoiceType::Opponent { restriction: None })
+            Some(ChoiceType::Opponent {
+                restriction: None,
+                ..
+            })
         ));
         match &*def.effect {
             Effect::DealDamage { amount, target, .. } => {

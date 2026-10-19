@@ -98,6 +98,10 @@ fn set_etb_event(state: &mut GameState, entering: ObjectId) {
             mana_value: 0,
             controller: PlayerId(0),
             owner: PlayerId(0),
+            arrival: engine::types::game_state::ArrivalIdentity {
+                owner: PlayerId(0),
+                controller: PlayerId(0),
+            },
             from_zone: Some(Zone::Hand),
             cast_from_zone: None,
             played_from_zone: None,
@@ -107,10 +111,12 @@ fn set_etb_event(state: &mut GameState, entering: ObjectId) {
             is_token: false,
             combat_status: Default::default(),
             trigger_definitions: Vec::new(),
+            trigger_source_context: None,
             co_departed: Vec::new(),
             attached_to: None,
             entered_incarnation: None,
             turn_zone_change_index: 0,
+            recorded_turn_number: 0,
             is_suspected: false,
         }),
     });
@@ -225,6 +231,7 @@ fn lki_fallback_resolves_source_power_after_zone_change() {
             counters: HashMap::new(),
             tapped: false,
             is_suspected: false,
+            attachments: Vec::new(),
         },
     );
     set_etb_event(&mut state, dead_id);

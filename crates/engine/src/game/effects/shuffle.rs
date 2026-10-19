@@ -1,6 +1,9 @@
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter};
-use crate::types::events::{GameEvent, PlayerActionKind};
+use crate::types::ability::{
+    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+};
+use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::game_state::RandomDraw;
 
 /// CR 701.24a: Shuffle — randomize the cards in a library.
 pub fn resolve(
@@ -38,26 +41,61 @@ pub fn resolve(
             rng,
             ..
         } = state;
-        if let Some(set) = tracked_object_sets.get_mut(&id) {
-            set.shuffle(rng);
+        let pile = tracked_object_sets.get_mut(&id).map(|set| {
+            set.shuffle(rng.draw(RandomDraw::Placement));
+            set.clone()
+        });
+        if let Some(pile) = pile {
+            crate::game::exile_links::reset_look_latches(state, &pile);
         }
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Shuffle,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
 
-    let target_player = if matches!(shuffle_target, TargetFilter::Owner) {
+    let target_player = match &shuffle_target {
         // CR 400.3: "its owner's library" resolves to the owner of source_id.
-        state
+        TargetFilter::Owner => state
             .objects
             .get(&ability.source_id)
             .map(|obj| obj.owner)
-            .unwrap_or(ability.controller)
-    } else {
-        super::resolve_player_for_context_ref(state, ability, &shuffle_target)
+            .unwrap_or(ability.controller),
+        // CR 608.2b: a slot that was an illegal target names no player, so no library is shuffled.
+        TargetFilter::ParentTargetSlot { index } => {
+            match crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, *index)
+            {
+                Some(TargetRef::Player(player)) => player,
+                Some(TargetRef::Object(_)) => {
+                    let Some(player) =
+                        super::resolve_player_for_context_ref(state, ability, &shuffle_target)
+                    else {
+                        return Ok(());
+                    };
+                    player
+                }
+                None => return Ok(()),
+            }
+        }
+        // CR 608.2b: a declared player whose target was illegal names no library.
+        _ => match super::resolve_player_for_context_ref(state, ability, &shuffle_target) {
+            Some(player) => player,
+            None => return Ok(()),
+        },
     };
+
+    // CR 701.24a: the target player must exist before any shuffle logic runs.
+    // Validate first, unconditionally, so an unknown player is rejected even
+    // when a broad "Can't shuffle" static would otherwise suppress the shuffle.
+    if !state
+        .players
+        .iter()
+        .any(|player| player.id == target_player)
+    {
+        return Err(EffectError::PlayerNotFound);
+    }
 
     // CR 701.24: "Can't shuffle" suppresses library shuffling. Per CR 701.24d,
     // if a player would shuffle their library and can't, they don't shuffle.
@@ -65,29 +103,18 @@ pub fn resolve(
     let suppressed =
         crate::game::static_abilities::player_has_static_other(state, target_player, "CantShuffle");
 
-    if !suppressed {
-        let GameState { players, rng, .. } = state;
-        let player = players
-            .iter_mut()
-            .find(|p| p.id == target_player)
-            .ok_or(EffectError::PlayerNotFound)?;
-
-        // CR 701.24a: Randomize cards so that no player knows their order.
-        crate::util::im_ext::shuffle_vector(&mut player.library, rng);
-    }
-
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Shuffle,
         source_id: ability.source_id,
+        subject: None,
     });
 
-    // CR 701.24a: Emit player-action event so trigger matchers (e.g.
-    // Cosi's Trickster: "Whenever an opponent shuffles their library")
-    // can filter by the identity of the shuffling player.
-    events.push(GameEvent::PlayerPerformedAction {
-        player_id: target_player,
-        action: PlayerActionKind::ShuffledLibrary,
-    });
+    if !suppressed {
+        // CR 701.24a: Keep the pre-existing EffectResolved → ShuffledLibrary
+        // event order while the shared resolved-command authority owns the
+        // semantic library permutation and entropy receipt.
+        crate::game::effects::change_zone::shuffle_library(state, target_player, events);
+    }
 
     Ok(())
 }
@@ -137,6 +164,12 @@ mod tests {
                 ..
             }
         )));
+        assert!(state.resolved_rules_journal.entries().iter().any(|entry| {
+            matches!(
+                entry.command.as_ref(),
+                Some(crate::types::resolved_commands::ResolvedRulesCommand::LibraryShuffle(_))
+            )
+        }));
     }
 
     #[test]
@@ -420,7 +453,7 @@ mod tests {
         );
         assert_eq!(
             resolved_player,
-            PlayerId(1),
+            Some(PlayerId(1)),
             "Visions's shuffle must resolve to the targeted opponent, not the caster (filter was {shuffle_filter:?})"
         );
 

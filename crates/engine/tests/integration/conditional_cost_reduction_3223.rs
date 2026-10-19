@@ -144,9 +144,10 @@ This ability costs {4} less to activate if an opponent controls four or more non
 
 #[test]
 fn thaumaton_torpedo_cost_reduction_carries_spacecraft_attacker_condition() {
-    // #3223 follow-up: this gap is now filled by PR #3950, which models the
-    // "if you attacked with a <filter> this turn" gate as a filtered
-    // `YouAttackedWithAtLeast { count: 1, filter: Some(Spacecraft) }` condition.
+    // #3223 follow-up: this gap is now filled by PR #3950; the shared grammar
+    // models the "if you attacked with a <filter> this turn" gate as a typed
+    // `QuantityComparison` over a filtered `AttackedThisTurn` count (GE 1,
+    // Spacecraft filter).
     let card = "Thaumaton Torpedo";
     let oracle = "{6}, {T}, Sacrifice this artifact: Destroy target nonland permanent. \
 This ability costs {3} less to activate if you attacked with a Spacecraft this turn.";
@@ -182,13 +183,26 @@ fn assert_cost_reduction_stays_gapped(oracle: &str, card: &str) {
 }
 
 #[test]
-fn a_sewer_crocodile_cost_reduction_stays_gapped() {
-    // Unmodeled condition: "if there are five or more mana values among cards in
-    // your graveyard."
+fn a_sewer_crocodile_cost_reduction_carries_graveyard_mana_value_condition() {
+    // Promoted out of the coverage-honesty negatives: "if there are five or
+    // more mana values among cards in your graveyard" (the SNC graveyard-
+    // mana-value-diversity family — Aven Heartstabber, Snooping Newsie,
+    // Syndicate Infiltrator, Graveyard Shift, and their Alchemy variants) is
+    // now modeled as `StaticCondition`/`ParsedCondition::QuantityComparison`
+    // over `QuantityRef::ObjectCountDistinct[ManaValue]` in the controller's
+    // graveyard, GE 5 (CR 202.3 mana value). This card's cost-reduction
+    // condition reuses the identical
+    // shared-grammar leaf, so the previously-loud gap is now captured.
     let card = "A-Sewer Crocodile";
     let oracle = "{3}{U}: Sewer Crocodile can't be blocked this turn. \
 This ability costs {3} less to activate if there are five or more mana values among cards in your graveyard.";
-    assert_cost_reduction_stays_gapped(oracle, card);
+    let ability = ability_with_cost_reduction(oracle, card);
+    let reduction = find_cost_reduction(&ability).unwrap();
+    assert_flat_conditional(reduction, 3, card);
+    assert!(
+        !has_surviving_cost_reduction_gap(&ability),
+        "{card}: no Unimplemented 'less to activate' node should survive"
+    );
 }
 
 #[test]

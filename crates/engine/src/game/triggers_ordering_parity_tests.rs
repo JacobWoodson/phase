@@ -132,6 +132,11 @@ const CATEGORY_1_ROWS: &[&str] = &[
 /// Grouped by class; each entry carries its one-line safety argument (§7 ledger
 /// source of truth).
 const DOCUMENTED_OVER_PROMPT: &[&str] = &[
+    // Adaptive Training Post: its source-local charge-counter intervening-if
+    // and the corresponding TriggeringSource counter write are disjoint for
+    // same-event sibling triggers, so they commute. The conservative prompt
+    // remains fail-closed until that per-source proof is structural.
+    "adaptive training post",
     // ---- L8-held: a self-scoped write can flip a sibling's re-checked
     // intervening-if (CR 603.4), but the flip is monotone/self-limiting, so
     // identical siblings still commute semantically. The L8 idempotence recognizer
@@ -139,6 +144,13 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // the conservative prompt is fail-closed = rules-correct). ----
     // end-step ZoneChangeCountThisTurn read × self-Sacrifice — self-limiting.
     "chorale of the void",
+    // Upkeep ObjectCount(Creature, Battlefield) >= 4 intervening-if × DestroyAll +
+    // self-Sacrifice (AST measured). The first copy's board sweep drives the census
+    // to 0, so the sibling's CR 603.4 re-check is false: it is removed from the stack,
+    // does nothing, and is NOT sacrificed. The write is monotone (the census only
+    // falls) and self-limiting, so identical siblings commute up to relabeling — either
+    // order sweeps the board and sacrifices exactly one of the two copies.
+    "planar collapse",
     // Mill membership write × ZoneCardCount(gy, Creature) self-transform threshold —
     // monotone graveyard growth.
     "deathbonnet sprout",
@@ -158,6 +170,10 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     "mirror-sigil sergeant",
     // GraveyardSize read × self-return-from-graveyard — self-limiting threshold.
     "persistent marshstalker",
+    // ObjectCount(creature card in your graveyard) == 1 intervening-if read ×
+    // optional self-return-from-graveyard — self-limiting (second copy breaks the
+    // gate; issue #5983 fixture regen surfaced this card in the sweep corpus).
+    "nether spirit",
     // Control(another nonland) read × self-Sacrifice — self-limiting.
     "reclusive wight",
     // Not(SourceIsTapped) read × untap-ALL write — idempotent.
@@ -199,6 +215,92 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // MISaligned copies go to a different graveyard and are correctly prompted by
     // the same conflict — see the impl-report soundness note.)
     "skyfisher spider",
+    // ---- unprofiled-effect commute, batch: the effect node has no RW profile, so
+    // the fail-closed `RwProfile::conservative()` catch-all prompts ----
+    // dies-batch optional PutOnTopOrBottom{SelfRef, chooser: Controller} (AST
+    // measured): each co-departing copy moves ONLY its own graveyard card (CR 603.6c
+    // first-zone check) to its OWN owner's library, so the members' writes are
+    // disjoint — owner-misaligned copies route to different libraries entirely, and
+    // same-owner copies contend only for the top/bottom slot, where identical
+    // same-name cards commute up to relabeling. The "may" and the top-or-bottom pick
+    // are resolution-time choices (CR 603.5) made by the batch's one controller in
+    // either order: production ordering groups are partitioned per-controller
+    // (`trigger_order_controller` / `begin_trigger_ordering`, triggers.rs; CR 603.3b
+    // — each player orders only the triggers THEY control, cross-controller
+    // placement being APNAP-fixed, not chosen), the premise the §5 batch rows model
+    // as `ControllerUniformity::Uniform` — single-controller BY CONSTRUCTION, not an
+    // artifact of the Phase+OnlyDuringYourTurn privacy predicate (same-event S2
+    // only). The prompt is conservative: `PutOnTopOrBottom` is unprofiled — it
+    // lands in `RwProfile::conservative()` (maximal reads/writes + fail-closed
+    // `reads_member_bound`), refusing batch-T1 and tripping the feed rows, so no
+    // in-scope recognizer proves the self-scoped move context-free (Valakut
+    // Exploration misparse-fix fixture regen surfaced this card in the sweep
+    // corpus; same adjudication as the #7031 branch).
+    "arashin sovereign",
+    // ---- commander-census read × token-creation write (CR 903.3d) ----
+    // "At the beginning of your upkeep, if you control a commander, create a token
+    // that's a copy of this creature." The CR 603.4 intervening-if is a LIVE
+    // battlefield census (`TriggerCondition::ControlsCommander` ⇒
+    // `commander_control_read`, ability_rw.rs), and each member WRITES battlefield
+    // membership by minting a token — a structural `SetMembership` read × creation
+    // feed, so `profiles_conflict` prompts.
+    //
+    // CONSERVATIVE: the created object is a token copy of Biowaste Blob, which is
+    // never a commander — CR 903.3's own example is exactly this ("A permanent
+    // that's copying a commander … is not a commander"), because the designation
+    // is an attribute of the CARD rather than a characteristic, and CR 707.2's
+    // copiable values are only the printed characteristics. So no member's write
+    // can flip another member's gate, and the two creations commute up to
+    // relabeling. Proving
+    // that needs "this creation cannot produce a commander", which no context-free
+    // recognizer in scope can see: the read's census is `Census::Any` (a commander
+    // may be any permanent type, CR 903.3), so the census/zone/controller
+    // disjointness rows all overlap. Fail-closed prompt, never an under-prompt.
+    //
+    // The alternative — declaring the commander gate read-free — is exactly the
+    // unsound classification this ledger row exists to avoid: a sibling that
+    // MOVES, steals or phases out a real commander genuinely flips the gate.
+    //
+    // CONSUMPTION: this row is gated like every other one — the exact-set
+    // `DOCUMENTED_OVER_PROMPT` assertion runs BEFORE the STRICT PROOF-GATE (see
+    // `ordering_parity_sweep`), so an unrelated red gate can no longer leave a
+    // newly-added row unverified. That ordering was introduced with this row for
+    // exactly that reason: at the time it landed the sweep was red on 18
+    // unexplained same-event over-prompts (`hidden *` / `opal *` / `veiled *` /
+    // `lurking skirge` / `impending disaster` / `veil of birds`) and the
+    // completeness assertion downstream of the gate never executed. Those 18 are
+    // CORPUS DRIFT, not this change: every one carries
+    // `TriggerCondition::SourceMatchesFilter` or no trigger condition, ZERO carry
+    // `ControlsCommander` (checked against the full export), and this change's
+    // classification edits are confined to the `ControlsCommander` arms of
+    // `rw_trigger_condition` / `rw_static_condition` / `rw_ability_condition` and
+    // `scan_*_condition`. They must land as their own corpus-drift rows, NOT
+    // folded in here. The `over_prompt_hit members` line printed above the
+    // assertion names the consumed set directly, so the next maintainer need not
+    // re-derive it.
+    "biowaste blob",
+    // ---- dynamic P/T read of frozen or per-source objects (CR 603.10a) ----
+    // Token P/T = total power of the co-departed batch: a frozen LKI read no sibling's
+    // token creation changes, so the copies' tokens are identical in either order.
+    "the skullspore nexus",
+    // -X/-X where X is the mana value of the card THIS source exiled: each member reads
+    // its own exile pile and writes only to it, so the members commute.
+    "cemetery desecrator",
+    // Each member adds one slime counter, then creates a token whose P/T is a CDA (CR 604.3a)
+    // reading the counter total, so either order ends with the same counters and tokens.
+    "gutter grime",
+    // Combat-begin "any opponent may tap an untapped creature they control; if
+    // they do, tap this creature and create a 1/1 Fish" (AST measured). Each
+    // member taps only ITSELF (disjoint self-write) and creates a Fish the
+    // Kraken's controller owns, so no sibling's product feeds another's
+    // "creature they [opponent] control" choice; the opponent's tapped pool is
+    // monotone (tapped stays tapped) and the intervening-if reads only
+    // self-tappedness, which no sibling writes. Identical siblings commute up
+    // to relabeling — either order ends with the same Fish count and tapped
+    // sets. Only visible post-#9830 — the scoped-player parse binds "they
+    // control" to the acting opponent; the pre-regen fixture carried
+    // controller You, which the discriminator auto-ordered.
+    "reservoir kraken",
 ];
 
 /// Batch-depth GENUINE order-dependence (kept SEPARATE from the same-event
@@ -213,6 +315,18 @@ const BATCH_GENUINE_ROWS: &[&str] = &[
     // final state differs by order (CR 603.3b intended prompt). Runtime pin:
     // b2_dotd_member_bound_pin (reads_member_bound refuses batch-T1).
     "day of the dragons",
+    // LTB (self_ref): Discard{count: HandSize{Controller}} → sub Draw{count:
+    // Intensity{Source}} gated on EffectOutcome(OptionalEffectPerformed) (AST
+    // measured). Each co-departing Hellion draws off ITS OWN intensity but discards
+    // the SHARED hand, so the second trigger discards the cards the first one just
+    // drew: with intensities a != b the final hand (b vs a cards), the graveyard, and
+    // the library differ by order — the members are not identical functions (intensity
+    // is per-source mutable state), so the commutation proof genuinely fails. The new
+    // prompt is the CR 603.3b choice the legacy serde walk wrongly auto-ordered
+    // (CR 603.5: each copy's "may" is chosen on resolution). Only visible post-#5721/
+    // #5719 — the Draw was Unimplemented until the quantity channel bound Intensity,
+    // and the sweep skips Unimplemented-bearing triggers.
+    "great desert hellion",
 ];
 
 /// R3 HIGH-1 (PR #5072 review): SAME-EVENT GENUINE member-bound order-dependence —
@@ -740,6 +854,46 @@ fn ordering_parity_sweep() {
         se_event_object_class.len(),
         se_event_object_class
     );
+    // CONSUMED `DOCUMENTED_OVER_PROMPT` membership, emitted as evidence for the same
+    // reason the two class memberships above are: it names exactly which ledger rows
+    // the corpus hit on this run. `over_prompt_hit` is a subset of
+    // `DOCUMENTED_OVER_PROMPT` by construction (both insertion sites are inside a
+    // `DOCUMENTED_OVER_PROMPT.contains(..)` arm), so this line plus the const is a
+    // complete consumption proof on its own. Evidence only — the exact-set assertion
+    // immediately below is the gate.
+    eprintln!(
+        "over_prompt_hit members ({}/{}): {:?}",
+        over_prompt_hit.len(),
+        DOCUMENTED_OVER_PROMPT.len(),
+        over_prompt_hit
+    );
+
+    // LEDGER COMPLETENESS, adjudicated BEFORE the STRICT PROOF-GATE below (full-DB
+    // only — the committed fixture lacks these cards). Every allowlist entry MUST be
+    // consumed: an unhit entry is stale bookkeeping (the card cleared — remove it —
+    // or its name drifted).
+    //
+    // Ordering is load-bearing, not cosmetic. The strict gate panics on ANY
+    // unexplained decision diff, including pure corpus drift that has nothing to do
+    // with the ledger; while it is red, a `DOCUMENTED_OVER_PROMPT` row added by
+    // ordinary card work would never be checked at all, so a stale or mis-keyed row
+    // could ride along unverified and only surface later, attributed to whoever
+    // cleared the unrelated drift. Checking consumption first makes every ledger row
+    // gated on every full-DB run. The gate's own diff count is carried in this
+    // message so a simultaneous drift is never hidden by an earlier panic.
+    if full_db {
+        let expected_over_prompt: BTreeSet<String> = DOCUMENTED_OVER_PROMPT
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            over_prompt_hit,
+            expected_over_prompt,
+            "DOCUMENTED_OVER_PROMPT stale/unhit entries ({} unexplained decision diff(s) \
+             also pending at the STRICT PROOF-GATE below)",
+            unexplained.len()
+        );
+    }
 
     assert!(
         unexplained.is_empty(),
@@ -802,14 +956,9 @@ fn ordering_parity_sweep() {
         // Ledger completeness (full-DB only — the committed fixture lacks these
         // cards). Every allowlist entry MUST be consumed: an unhit entry is stale
         // bookkeeping (the card cleared — remove it — or its name drifted).
-        let expected_over_prompt: BTreeSet<String> = DOCUMENTED_OVER_PROMPT
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(
-            over_prompt_hit, expected_over_prompt,
-            "DOCUMENTED_OVER_PROMPT stale/unhit entries"
-        );
+        // `DOCUMENTED_OVER_PROMPT`'s exact-set assertion is deliberately NOT here:
+        // it runs ABOVE the STRICT PROOF-GATE (see the comment there) so unrelated
+        // corpus drift cannot leave a newly-added over-prompt row unverified.
         let expected_batch_genuine: BTreeSet<String> =
             BATCH_GENUINE_ROWS.iter().map(|s| s.to_string()).collect();
         assert_eq!(
@@ -914,7 +1063,7 @@ fn ctx(
         source_id: ObjectId(source),
         controller: PlayerId(0),
         condition,
-        ability,
+        ability: Box::new(ability),
         timestamp: 0,
         target_constraints: Vec::new(),
         distribute: None,
@@ -925,6 +1074,7 @@ fn ctx(
         may_trigger_origin: None,
         subject_match_count: None,
         die_result,
+        provenance: None,
     })
 }
 
@@ -1215,6 +1365,79 @@ fn n_d_intervening_if_case_a_prompts() {
     );
 }
 
+/// N-D2: the commander intervening-`if` is a LIVE BOARD CENSUS (CR 903.3d), so a
+/// sibling copy whose resolution writes battlefield membership FEEDS it and the
+/// group must PROMPT (CR 603.3b). Biowaste Blob's exact shape ("At the beginning of
+/// your upkeep, if you control a commander, create a token that's a copy of this
+/// creature") — the card the full-DB sweep's `DOCUMENTED_OVER_PROMPT` row names.
+///
+/// `game::commander::controls_any_commander` / `controls_own_commander` scan
+/// `state.battlefield` for `is_commander && controller [&& owner] &&
+/// is_phased_in`. Only the designation and owner conjuncts are frozen card
+/// attributes (CR 903.3); membership, control and CR 702.26b phased-in status are
+/// all sibling-mutable, so the gate is NOT read-free.
+///
+/// BOTH `CommanderOwnership` arms are driven. Biowaste Blob's printed gate is
+/// "if you control **a** commander" ⇒ `Any` (verified against
+/// `data/mtgjson/AtomicCards.json`), which is the arm the paired
+/// `DOCUMENTED_OVER_PROMPT` ledger row actually exercises; `Own` is the arm every
+/// card in the pool that says "your commander" (Fight for the Throne) produces.
+/// `commander_control_read` is shared by both, so a regression on either arm
+/// alone must red here.
+///
+/// REVERT-TO-RED: classify `TriggerCondition::ControlsCommander` as
+/// `RwProfile::empty()` again (its pre-fix profile) and BOTH gated groups
+/// auto-order — CR 603.3b sibling-ordering silently reopened.
+///
+/// The second group per arm is the discrimination proof and pins that the prompt
+/// is the GATE's read, not the ability: the byte-identical ability with NO
+/// condition still auto-orders. (Both groups are source-DEPENDENT —
+/// `CopyTokenOf{SelfRef}` — so neither takes the T1 `source_independent` fast
+/// path, which is what makes the feed row observable at all.)
+#[test]
+fn n_d2_commander_intervening_if_is_fed_by_a_sibling_membership_write() {
+    let state = empty_state();
+    let copy_self = || Effect::CopyTokenOf {
+        target: TargetFilter::SelfRef,
+        owner: TargetFilter::Controller,
+        source_filter: None,
+        enters_attacking: false,
+        tapped: false,
+        count: qfix(1),
+        extra_keywords: vec![],
+        additional_modifications: vec![],
+    };
+    let ev = shared_etb_event();
+
+    for ownership in [
+        // CR 903.3d "a commander" — Biowaste Blob, the `DOCUMENTED_OVER_PROMPT` row.
+        crate::types::ability::CommanderOwnership::Any,
+        // CR 903.3 + CR 109.5 "your commander" — Fight for the Throne.
+        crate::types::ability::CommanderOwnership::Own,
+    ] {
+        let gate = TriggerCondition::ControlsCommander { ownership };
+        let gated = vec![
+            ctx(10, ra(copy_self()), Some(gate.clone()), ev.clone(), None),
+            ctx(11, ra(copy_self()), Some(gate), ev.clone(), None),
+        ];
+        assert!(
+            !group_is_order_independent(&state, &gated),
+            "CR 903.3d + CR 603.3b: the commander census the CR 603.4 gate reads is fed by \
+             a sibling's battlefield-membership write ⇒ prompt (ownership = {ownership:?})"
+        );
+    }
+
+    let ungated = vec![
+        ctx(10, ra(copy_self()), None, ev.clone(), None),
+        ctx(11, ra(copy_self()), None, ev, None),
+    ];
+    assert!(
+        group_is_order_independent(&state, &ungated),
+        "discrimination: the SAME ability with no intervening-if auto-orders, so the \
+         prompts above are the commander gate's board read and nothing else"
+    );
+}
+
 /// N-F: die_result conjunct unit pin (CR 706.2 + CR 603.12). Two otherwise-
 /// identical no-input source-independent triggers off one event with DIFFERENT
 /// stamped die results are NOT the same state transformation ⇒ not order-
@@ -1376,7 +1599,7 @@ fn ctx_c(
         source_id: ObjectId(source),
         controller: PlayerId(controller),
         condition,
-        ability,
+        ability: Box::new(ability),
         timestamp: 0,
         target_constraints: Vec::new(),
         distribute: None,
@@ -1387,7 +1610,30 @@ fn ctx_c(
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        provenance: None,
     })
+}
+
+/// Mirrors a collected trigger: ordering inputs own the exact source observed
+/// when it fired, rather than consulting the storage slot again at ordering.
+fn ctx_c_from_observed_source(
+    state: &GameState,
+    source: u64,
+    controller: u8,
+    mut ability: ResolvedAbility,
+    condition: Option<TriggerCondition>,
+    event: Option<GameEvent>,
+) -> PendingTriggerContext {
+    let source_id = ObjectId(source);
+    let source_context = trigger_source_context_for_latch(
+        state,
+        state
+            .objects
+            .get(&source_id)
+            .expect("ordering fixture installs its source"),
+    );
+    ability.set_trigger_source_recursive(source_context);
+    ctx_c(source, controller, ability, condition, event)
 }
 
 fn creatures_of(cr: ControllerRef) -> TargetFilter {
@@ -1497,8 +1743,22 @@ fn s1_defense_membership_ctrl_span() {
 
     let pos_cond = || obj_count_cmp(creatures_of(ControllerRef::Opponent), Comparator::GE, 3);
     let pos = vec![
-        ctx_c(10, 0, defense_ability(), Some(pos_cond()), ev.clone()),
-        ctx_c(11, 0, defense_ability(), Some(pos_cond()), ev.clone()),
+        ctx_c_from_observed_source(
+            &state,
+            10,
+            0,
+            defense_ability(),
+            Some(pos_cond()),
+            ev.clone(),
+        ),
+        ctx_c_from_observed_source(
+            &state,
+            11,
+            0,
+            defense_ability(),
+            Some(pos_cond()),
+            ev.clone(),
+        ),
     ];
     assert!(
         group_is_order_independent(&state, &pos),
@@ -1507,8 +1767,15 @@ fn s1_defense_membership_ctrl_span() {
 
     let neg_cond = || obj_count_cmp(creatures_of(ControllerRef::You), Comparator::GE, 3);
     let neg = vec![
-        ctx_c(10, 0, defense_ability(), Some(neg_cond()), ev.clone()),
-        ctx_c(11, 0, defense_ability(), Some(neg_cond()), ev),
+        ctx_c_from_observed_source(
+            &state,
+            10,
+            0,
+            defense_ability(),
+            Some(neg_cond()),
+            ev.clone(),
+        ),
+        ctx_c_from_observed_source(&state, 11, 0, defense_ability(), Some(neg_cond()), ev),
     ];
     assert!(
         !group_is_order_independent(&state, &neg),
@@ -1537,8 +1804,22 @@ fn s2_rekindled_player_hand_span() {
         )
     };
     let pos = vec![
-        ctx_c(10, 0, ra(bounce_self()), Some(pos_cond()), ev.clone()),
-        ctx_c(11, 0, ra(bounce_self()), Some(pos_cond()), ev.clone()),
+        ctx_c_from_observed_source(
+            &state,
+            10,
+            0,
+            ra(bounce_self()),
+            Some(pos_cond()),
+            ev.clone(),
+        ),
+        ctx_c_from_observed_source(
+            &state,
+            11,
+            0,
+            ra(bounce_self()),
+            Some(pos_cond()),
+            ev.clone(),
+        ),
     ];
     assert!(
         group_is_order_independent(&state, &pos),
@@ -1547,8 +1828,15 @@ fn s2_rekindled_player_hand_span() {
 
     let neg_cond = || handsize_cmp(PlayerScope::Controller, Comparator::EQ, 0);
     let neg = vec![
-        ctx_c(10, 0, ra(bounce_self()), Some(neg_cond()), ev.clone()),
-        ctx_c(11, 0, ra(bounce_self()), Some(neg_cond()), ev),
+        ctx_c_from_observed_source(
+            &state,
+            10,
+            0,
+            ra(bounce_self()),
+            Some(neg_cond()),
+            ev.clone(),
+        ),
+        ctx_c_from_observed_source(&state, 11, 0, ra(bounce_self()), Some(neg_cond()), ev),
     ];
     assert!(
         !group_is_order_independent(&state, &neg),
@@ -1583,14 +1871,22 @@ fn s3_brink_fused_discard_span() {
         player: PlayerScope::ScopedPlayer,
     });
     let pos = vec![
-        ctx_c(
+        ctx_c_from_observed_source(
+            &state,
             10,
             0,
             brink_ability(fused.clone()),
             Some(cond()),
             ev.clone(),
         ),
-        ctx_c(11, 0, brink_ability(fused), Some(cond()), ev.clone()),
+        ctx_c_from_observed_source(
+            &state,
+            11,
+            0,
+            brink_ability(fused),
+            Some(cond()),
+            ev.clone(),
+        ),
     ];
     assert!(
         group_is_order_independent(&state, &pos),
@@ -1603,14 +1899,15 @@ fn s3_brink_fused_discard_span() {
         },
     });
     let neg = vec![
-        ctx_c(
+        ctx_c_from_observed_source(
+            &state,
             10,
             0,
             brink_ability(unfused.clone()),
             Some(cond()),
             ev.clone(),
         ),
-        ctx_c(11, 0, brink_ability(unfused), Some(cond()), ev),
+        ctx_c_from_observed_source(&state, 11, 0, brink_ability(unfused), Some(cond()), ev),
     ];
     assert!(
         !group_is_order_independent(&state, &neg),
@@ -1642,8 +1939,8 @@ fn s4_gate_is_load_bearing() {
     };
 
     let mixed = vec![
-        ctx_c(10, 0, ra(bounce_self()), Some(cond()), ev.clone()),
-        ctx_c(11, 1, ra(bounce_self()), Some(cond()), ev.clone()),
+        ctx_c_from_observed_source(&state, 10, 0, ra(bounce_self()), Some(cond()), ev.clone()),
+        ctx_c_from_observed_source(&state, 11, 1, ra(bounce_self()), Some(cond()), ev.clone()),
     ];
     assert!(
         !group_is_order_independent(&state, &mixed),
@@ -1654,8 +1951,8 @@ fn s4_gate_is_load_bearing() {
     // controller — the sole change that makes the group controller-private.
     install_source(&mut state, 11, 0, 0);
     let uniform = vec![
-        ctx_c(10, 0, ra(bounce_self()), Some(cond()), ev.clone()),
-        ctx_c(11, 0, ra(bounce_self()), Some(cond()), ev),
+        ctx_c_from_observed_source(&state, 10, 0, ra(bounce_self()), Some(cond()), ev.clone()),
+        ctx_c_from_observed_source(&state, 11, 0, ra(bounce_self()), Some(cond()), ev),
     ];
     assert!(
         group_is_order_independent(&state, &uniform),
@@ -1686,8 +1983,8 @@ fn s5_multiplayer_three_players() {
     };
 
     let mixed = vec![
-        ctx_c(10, 0, ra(bounce_self()), Some(cond()), ev.clone()),
-        ctx_c(11, 1, ra(bounce_self()), Some(cond()), ev.clone()),
+        ctx_c_from_observed_source(&state, 10, 0, ra(bounce_self()), Some(cond()), ev.clone()),
+        ctx_c_from_observed_source(&state, 11, 1, ra(bounce_self()), Some(cond()), ev.clone()),
     ];
     assert!(
         !group_is_order_independent(&state, &mixed),
@@ -1695,8 +1992,8 @@ fn s5_multiplayer_three_players() {
     );
 
     let both_p0 = vec![
-        ctx_c(10, 0, ra(bounce_self()), Some(cond()), ev.clone()),
-        ctx_c(12, 0, ra(bounce_self()), Some(cond()), ev),
+        ctx_c_from_observed_source(&state, 10, 0, ra(bounce_self()), Some(cond()), ev.clone()),
+        ctx_c_from_observed_source(&state, 12, 0, ra(bounce_self()), Some(cond()), ev),
     ];
     assert!(
         group_is_order_independent(&state, &both_p0),
@@ -1728,8 +2025,8 @@ fn s6_owner_alignment() {
     };
 
     let donated = vec![
-        ctx_c(10, 0, ra(bounce_self()), Some(cond()), ev.clone()),
-        ctx_c(11, 0, ra(bounce_self()), Some(cond()), ev.clone()),
+        ctx_c_from_observed_source(&state, 10, 0, ra(bounce_self()), Some(cond()), ev.clone()),
+        ctx_c_from_observed_source(&state, 11, 0, ra(bounce_self()), Some(cond()), ev.clone()),
     ];
     assert!(
         !group_is_order_independent(&state, &donated),
@@ -1738,8 +2035,8 @@ fn s6_owner_alignment() {
 
     install_source(&mut state, 11, 0, 0); // now owner == controller == P0
     let aligned = vec![
-        ctx_c(10, 0, ra(bounce_self()), Some(cond()), ev.clone()),
-        ctx_c(11, 0, ra(bounce_self()), Some(cond()), ev),
+        ctx_c_from_observed_source(&state, 10, 0, ra(bounce_self()), Some(cond()), ev.clone()),
+        ctx_c_from_observed_source(&state, 11, 0, ra(bounce_self()), Some(cond()), ev),
     ];
     assert!(
         group_is_order_independent(&state, &aligned),
@@ -1810,7 +2107,7 @@ fn choose_opponent_then_draw() -> ResolvedAbility {
         target: TargetFilter::Controller,
     });
     ra(Effect::Choose {
-        choice_type: ChoiceType::Opponent { restriction: None },
+        choice_type: ChoiceType::opponent(),
         persist: false,
         selection: TargetSelectionMode::default(),
     })

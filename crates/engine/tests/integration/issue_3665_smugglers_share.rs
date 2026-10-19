@@ -58,7 +58,7 @@ fn record_opponent_land_entry(runner: &mut GameRunner, object_id: u64) {
     runner
         .state_mut()
         .battlefield_entries_this_turn
-        .push(BattlefieldEntryRecord {
+        .push_back(BattlefieldEntryRecord {
             object_id: ObjectId(object_id),
             name: format!("Land {object_id}"),
             core_types: vec![CoreType::Land],
@@ -84,9 +84,10 @@ fn smugglers_share_from_oracle_text_parses_dynamic_draw_count() {
         .trigger_definitions
         .as_slice()
         .iter()
-        .find(|t| t.phase == Some(Phase::End))
+        .find(|t| t.definition.phase == Some(Phase::End))
         .expect("parsed end-step trigger");
     let execute = trigger
+        .definition
         .execute
         .as_ref()
         .expect("end-step trigger must have execute ability");

@@ -47,7 +47,9 @@ use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{EtbTapState, ProposedEvent, TokenCharacteristics, TokenSpec};
+use crate::types::proposed_event::{
+    EtbTapState, ProposedEvent, TokenCharacteristics, TokenHostRequest, TokenSpec,
+};
 use crate::types::zones::Zone;
 use std::collections::HashSet;
 
@@ -215,9 +217,20 @@ pub(crate) fn mill_from_loss(
         // the card, so only graft onto what actually entered.
         if state.battlefield.contains(&id) {
             if let Some(obj) = state.objects.get_mut(&id) {
+                // Synthetic graft: `Unmaterialized` occurrence (the production
+                // pattern for non-printed triggers — see token grafts).
                 obj.trigger_definitions
-                    .push(horde_legendary_phase_out_trigger());
+                    .push(crate::types::ability::TriggerEntry::new(
+                        crate::types::ability::TriggerDefinitionOccurrenceRef::Unmaterialized,
+                        horde_legendary_phase_out_trigger(),
+                    ));
             }
+            // CR 603.2: the graft lands outside the ETB pipeline, after the
+            // move's layer flush already rebuilt the derived trigger index —
+            // without a reindex the new trigger is invisible to candidate
+            // collection and silently never fires (caught by
+            // `PHASE_TRIGGER_INDEX_AUDIT`, never by the matcher).
+            crate::game::trigger_index::reindex_object_triggers(state, id);
         }
     }
 }
@@ -584,6 +597,7 @@ fn amass_revealed_army(
         Effect::Amass {
             subtype: subtype.to_string(),
             count: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
         },
         Vec::new(),
         card_id,
@@ -633,6 +647,7 @@ fn reveal_library_token(
         display_name: obj.name.clone(),
         power: obj.power,
         toughness: obj.toughness,
+        loyalty: obj.loyalty,
         core_types: obj.card_types.core_types.clone(),
         subtypes: obj.card_types.subtypes.clone(),
         supertypes: obj.card_types.supertypes.clone(),
@@ -654,7 +669,7 @@ fn reveal_library_token(
         // `enters_attacking` references it, so its removal leaves nothing dangling.
         source_id: card_id,
         controller: horde,
-        attach_to: None,
+        attach_to: TokenHostRequest::NotRequested,
     };
     let proposed = ProposedEvent::CreateToken {
         owner: horde,
@@ -737,6 +752,8 @@ fn free_cast_ability(card_id: ObjectId, horde: PlayerId) -> ResolvedAbility {
             duration: None,
             driver: CastFromZoneDriver::DuringResolution,
             mana_spend_permission: None,
+            additional_cost: None,
+            cast_cost_modifier: None,
         },
         vec![TargetRef::Object(card_id)],
         card_id,
@@ -972,8 +989,8 @@ mod tests {
             .as_slice()
             .iter()
             .filter(|t| {
-                t.mode == crate::types::triggers::TriggerMode::ChangesZone
-                    && t.destination == Some(Zone::Graveyard)
+                t.definition.mode == crate::types::triggers::TriggerMode::ChangesZone
+                    && t.definition.destination == Some(Zone::Graveyard)
             })
             .collect();
         assert_eq!(
@@ -1468,7 +1485,6 @@ mod tests {
                 .find(|p| p.id == horde)
                 .unwrap()
                 .mana_pool
-                .mana
                 .is_empty(),
             "the post-combat rule must grant the Horde infinite mana (a filled pool)"
         );
@@ -1481,7 +1497,6 @@ mod tests {
                 .find(|p| p.id == horde2)
                 .unwrap()
                 .mana_pool
-                .mana
                 .is_empty(),
             "a basic-rule Horde must not be granted infinite mana"
         );

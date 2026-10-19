@@ -1,0 +1,207 @@
+import { describe, expect, it } from "vitest";
+
+import { gameObjectFactory } from "../gameObjectFactory.ts";
+import {
+  castOfferWaitingForFactory,
+  gameStateFactory,
+  opponentMayChoiceWaitingForFactory,
+  optionalEffectChoiceWaitingForFactory,
+  resolutionOptionalPaymentWaitingForFactory,
+  targetSelectionWaitingForFactory,
+  waitingForFactory,
+} from "../gameStateFactory.ts";
+
+describe("gameObjectFactory convenience methods", () => {
+  it("composes card type, supertype, zone, and state methods", () => {
+    const object = gameObjectFactory
+      .creature(3, 4)
+      .legendary()
+      .inHand()
+      .named("Sigarda")
+      .withId(7)
+      .build();
+
+    expect(object.card_types.core_types).toEqual(["Creature"]);
+    expect(object.card_types.supertypes).toEqual(["Legendary"]);
+    expect(object.power).toBe(3);
+    expect(object.toughness).toBe(4);
+    expect(object.base_power).toBe(3);
+    expect(object.base_toughness).toBe(4);
+    expect(object.zone).toBe("Hand");
+    expect(object.entered_battlefield_turn).toBeNull();
+    expect(object.name).toBe("Sigarda");
+    expect(object.id).toBe(7);
+    expect(object.card_id).toBe(7);
+  });
+
+  it("auto-increments ids so unlabeled builds never collide", () => {
+    const first = gameObjectFactory.build();
+    const second = gameObjectFactory.build();
+
+    expect(first.id).not.toBe(second.id);
+    expect(first.card_id).toBe(first.id);
+  });
+
+  it("builds a commander in the command zone", () => {
+    const commander = gameObjectFactory.commander().build();
+
+    expect(commander.zone).toBe("Command");
+    expect(commander.is_commander).toBe(true);
+    expect(commander.commander_tax).toBe(0);
+    expect(commander.card_types.supertypes).toEqual(["Legendary"]);
+    expect(commander.card_types.core_types).toEqual(["Creature"]);
+  });
+});
+
+describe("waitingForFactory", () => {
+  it("defaults to Priority", () => {
+    expect(waitingForFactory.build()).toEqual({
+      type: "Priority",
+      data: { player: 0 },
+    });
+  });
+
+  it("switches variants without leaking keys from the default variant", () => {
+    const waitingFor = waitingForFactory.assistPayment().build();
+
+    // AssistPayment data must not inherit `player` from the Priority default.
+    expect(waitingFor).toEqual({
+      type: "AssistPayment",
+      data: { caster: 1, chosen: 0, max_generic: 0 },
+    });
+  });
+
+  it("applies data overrides onto variant defaults", () => {
+    const waitingFor = waitingForFactory.targetSelection({ player: 1 }).build();
+
+    expect(waitingFor).toMatchObject({
+      type: "TargetSelection",
+      data: expect.objectContaining({ player: 1 }),
+    });
+  });
+
+  it("merges data overrides without discarding variant defaults", () => {
+    const waitingFor = targetSelectionWaitingForFactory.forPlayer(1).build();
+
+    expect(waitingFor).toMatchObject({
+      type: "TargetSelection",
+      data: {
+        player: 1,
+        pending_cast: { object_id: 1, card_id: 1 },
+        target_slots: [{ legal_targets: [], optional: false }],
+      },
+    });
+  });
+
+  it("preserves original indices in resolution optional payment choices", () => {
+    const waitingFor = resolutionOptionalPaymentWaitingForFactory
+      .forPlayer(1)
+      .withData({ costs: [{ index: 2, cost: { type: "Mana", cost: { type: "Cost", shards: [], generic: 2 } } }] })
+      .build();
+    expect(waitingFor.data).toMatchObject({ player: 1, source_id: 1 });
+    expect(waitingFor.data.costs.map((option) => option.index)).toEqual([2]);
+  });
+
+  it("exposes CastOffer's domain fields through chainable factory methods", () => {
+    const waitingFor = castOfferWaitingForFactory.forPlayer(1).adventure(157).build();
+
+    expect(waitingFor).toEqual({
+      type: "CastOffer",
+      data: {
+        player: 1,
+        kind: {
+          type: "Adventure",
+          object_id: 157,
+          card_id: 157,
+          payment_mode: { type: "Auto" },
+        },
+      },
+    });
+  });
+
+  it("switches to ManaSourceSelection without leaking Priority-only keys", () => {
+    const waitingFor = waitingForFactory.manaSourceSelection().build();
+
+    expect(waitingFor.type).toBe("ManaSourceSelection");
+    expect(waitingFor).toEqual({
+      type: "ManaSourceSelection",
+      data: { player: 0, options: [] },
+    });
+  });
+
+  it("builds both optional-effect sibling prompts through the shared hierarchy", () => {
+    expect(
+      optionalEffectChoiceWaitingForFactory
+        .forPlayer(1)
+        .withData({ source_id: 100, decision_subject_id: 44 })
+        .build(),
+    ).toMatchObject({
+      type: "OptionalEffectChoice",
+      data: { player: 1, source_id: 100, decision_subject_id: 44 },
+    });
+    expect(
+      opponentMayChoiceWaitingForFactory
+        .forPlayer(1)
+        .withData({ source_id: 100, decision_subject_id: 44, remaining: [2] })
+        .build(),
+    ).toEqual({
+      type: "OpponentMayChoice",
+      data: {
+        player: 1,
+        source_id: 100,
+        decision_subject_id: 44,
+        description: undefined,
+        remaining: [2],
+      },
+    });
+  });
+});
+
+describe("gameStateFactory convenience methods", () => {
+  it("replaces waiting_for exactly via variant methods", () => {
+    const state = gameStateFactory.manaPayment(1).build();
+
+    expect(state.waiting_for).toEqual({
+      type: "ManaPayment",
+      data: { player: 1 },
+    });
+  });
+
+  it("derives objects map, battlefield, and next_object_id from withObjects", () => {
+    const bear = gameObjectFactory.creature().onBattlefield().withId(3).build();
+    const bolt = gameObjectFactory.instant().inHand().withId(9).build();
+
+    const state = gameStateFactory.withObjects(bear, bolt).build();
+
+    expect(state.objects).toEqual({ "3": bear, "9": bolt });
+    expect(state.battlefield).toEqual([3]);
+    expect(state.next_object_id).toBe(10);
+  });
+
+  it("derives seat_order from withPlayers", () => {
+    const state = gameStateFactory.withPlayers(0, 1, { id: 2, life: 12 }).build();
+
+    expect(state.players).toHaveLength(3);
+    expect(state.players[2].life).toBe(12);
+    expect(state.seat_order).toEqual([0, 1, 2]);
+  });
+
+  it("delegates optional-effect siblings through GameStateFactory", () => {
+    expect(
+      gameStateFactory
+        .optionalEffectChoice({ source_id: 100, decision_subject_id: 44 })
+        .build().waiting_for,
+    ).toMatchObject({
+      type: "OptionalEffectChoice",
+      data: { source_id: 100, decision_subject_id: 44 },
+    });
+    expect(
+      gameStateFactory
+        .opponentMayChoice({ source_id: 100, decision_subject_id: 44 })
+        .build().waiting_for,
+    ).toMatchObject({
+      type: "OpponentMayChoice",
+      data: { source_id: 100, decision_subject_id: 44 },
+    });
+  });
+});

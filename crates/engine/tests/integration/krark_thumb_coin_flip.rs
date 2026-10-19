@@ -22,14 +22,14 @@ use engine::types::ability::{Effect, QuantityExpr, ReplacementPlayerScope};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::CastPaymentMode;
+use engine::types::game_state::GameRng;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::proposed_event::ProposedEvent;
 use engine::types::replacements::ReplacementEvent;
-use rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
+use engine::types::resolution::{ResolutionStateWire, RESOLUTION_STATE_WIRE_VERSION};
 use std::collections::HashSet;
 
 /// Krark's Thumb printed Oracle text — byte-identical to card-data.json.
@@ -105,6 +105,10 @@ fn applier_doubles_controllers_flip() {
         }
         other => panic!("expected Execute(CoinFlip {{ count: 2 }}), got {other:?}"),
     }
+    assert!(
+        !runner.state().has_post_replacement_drain(),
+        "Krark's inline count replacement must not leave a dead post-replacement drain"
+    );
 }
 
 /// CR 614.1a: Krark is controller-scoped (B2). With Krark under P0, a flip by P1
@@ -201,7 +205,7 @@ fn setup_single_flip(seed: u64) -> (engine::game::scenario::GameRunner, ObjectId
         },
     );
     let mut runner = scenario.build();
-    runner.state_mut().rng = ChaCha20Rng::seed_from_u64(seed);
+    runner.state_mut().rng = GameRng::seed_from_u64(seed);
     (runner, spell)
 }
 
@@ -253,6 +257,26 @@ fn keeping_a_flip_emits_exactly_one_coin_flipped_and_returns_to_priority() {
         other => panic!("expected CoinFlipKeepChoice, got {other:?}"),
     };
 
+    assert!(
+        runner.state().active_coin_flip_frame().is_some(),
+        "the typed coin-flip frame owns the real keep prompt"
+    );
+    let current =
+        serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone()))
+            .expect("real coin-flip prompt serializes through the current wire");
+    assert_eq!(
+        current["resolution_state_version"],
+        RESOLUTION_STATE_WIRE_VERSION
+    );
+    assert!(current.get("pending_coin_flip").is_none());
+    let restored: ResolutionStateWire =
+        serde_json::from_value(current).expect("current coin-flip prompt round-trips");
+    *runner.state_mut() = restored.into_game_state();
+    assert!(
+        runner.state().active_coin_flip_frame().is_some(),
+        "the current round-trip preserves the prompt-owning coin-flip frame"
+    );
+
     // Keep the first flip. (`act` dispatches as the current acting player, P0.)
     let _ = player;
     let keep_index = 0usize;
@@ -284,8 +308,8 @@ fn keeping_a_flip_emits_exactly_one_coin_flipped_and_returns_to_priority() {
         runner.state().waiting_for
     );
     assert!(
-        runner.state().pending_coin_flip.is_none(),
-        "no pending coin flip remains after completion"
+        runner.state().active_coin_flip_frame().is_none(),
+        "no coin-flip frame remains after completion"
     );
 }
 
@@ -307,7 +331,7 @@ fn flip_coins_three_with_krark_prompts_three_times() {
         },
     );
     let mut runner = scenario.build();
-    runner.state_mut().rng = ChaCha20Rng::seed_from_u64(7);
+    runner.state_mut().rng = GameRng::seed_from_u64(7);
 
     let mut result = cast_and_resolve(&mut runner, spell);
 
@@ -367,7 +391,7 @@ fn flip_until_lose_with_krark_resolves_via_per_flip_keep_choices() {
         },
     );
     let mut runner = scenario.build();
-    runner.state_mut().rng = ChaCha20Rng::seed_from_u64(3);
+    runner.state_mut().rng = GameRng::seed_from_u64(3);
 
     let mut result = cast_and_resolve(&mut runner, spell);
 
@@ -406,5 +430,5 @@ fn flip_until_lose_with_krark_resolves_via_per_flip_keep_choices() {
         "engine returns to Priority after until-lose completes; got {:?}",
         runner.state().waiting_for
     );
-    assert!(runner.state().pending_coin_flip.is_none());
+    assert!(runner.state().active_coin_flip_frame().is_none());
 }

@@ -28,6 +28,7 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
+use engine::types::game_state::GameRng;
 use engine::types::game_state::{
     CastingVariant, GameState, StackEntry, StackEntryKind, WaitingFor,
 };
@@ -36,8 +37,6 @@ use engine::types::mana::ManaCost;
 use engine::types::player::PlayerId;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
-use rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 
 const BREECHES: &str = "Menace\nWhenever you cast your second spell each turn, you may sacrifice an artifact. If you do, flip a coin. When you win the flip, copy that spell. You may choose new targets for the copy. When you lose the flip, Breeches deals damage equal to that spell's mana value to any target.";
 
@@ -247,7 +246,7 @@ fn krark_inline_flip_branches_still_fold() {
 /// `seed`; seed 0 wins, seed 1 loses (mirrors flip_coin.rs's seed convention).
 fn setup_breeches_runtime(seed: u64) -> (GameState, ObjectId, ObjectId) {
     let mut state = GameState::new_two_player(seed);
-    state.rng = ChaCha20Rng::seed_from_u64(seed);
+    state.rng = GameRng::seed_from_u64(seed);
     state.active_player = PlayerId(0);
     state.priority_player = PlayerId(0);
 
@@ -304,6 +303,7 @@ fn setup_breeches_runtime(seed: u64) -> (GameState, ObjectId, ObjectId) {
         controller: PlayerId(0),
         object_id: spell,
         card_id: CardId(3),
+        cast_mana_value: None,
     });
 
     let parsed = parse_breeches();
@@ -315,26 +315,9 @@ fn setup_breeches_runtime(seed: u64) -> (GameState, ObjectId, ObjectId) {
 
     let trigger_event = state.current_trigger_event.clone();
     let mut events = Vec::new();
-    push_pending_trigger_to_stack(
-        &mut state,
-        PendingTrigger {
-            source_id: breeches,
-            controller: PlayerId(0),
-            condition: None,
-            ability,
-            timestamp: 0,
-            target_constraints: Vec::new(),
-            distribute: None,
-            trigger_event,
-            modal: None,
-            mode_abilities: vec![],
-            description: None,
-            may_trigger_origin: None,
-            subject_match_count: None,
-            die_result: None,
-        },
-        &mut events,
-    );
+    let mut pending = PendingTrigger::ordinary(breeches, PlayerId(0), None, Box::new(ability), 0);
+    pending.trigger_event = trigger_event;
+    push_pending_trigger_to_stack(&mut state, pending, &mut events);
 
     (state, spell, breeches)
 }
@@ -620,13 +603,13 @@ fn nonmatching_reflexive_coin_flip_trigger_is_discarded_not_left_pending() {
         // the general reflexive-discard rule keys on this lifetime.
         lifetime: engine::types::ability::DelayedTriggerLifetime::Reflexive,
     };
-    state.delayed_triggers.push(DelayedTrigger {
+    state.delayed_triggers.push(DelayedTrigger::new(
         condition,
-        ability: build_resolved_from_def(&won_inner, source, PlayerId(0)),
-        controller: PlayerId(0),
-        source_id: source,
-        one_shot: true,
-    });
+        Box::new(build_resolved_from_def(&won_inner, source, PlayerId(0))),
+        PlayerId(0),
+        source,
+        true,
+    ));
 
     let life_before = state.players[0].life;
 

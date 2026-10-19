@@ -15,6 +15,38 @@ pub fn is_alive(state: &GameState, player: PlayerId) -> bool {
         .any(|p| p.id == player && !p.is_eliminated)
 }
 
+/// May this seat be CHOSEN AT ALL — whether the choice is a target (CR 115.1) or not
+/// (CR 115.10a)? The EXISTENCE half only.
+///
+/// CR 800.4: "multiplayer games can continue after one or more players have left the
+/// game" — a departed seat is no longer one of CR 102.1's "people in the game", so it is
+/// not choosable by anything.
+///
+/// CR 702.26b as an explicit MIRROR, never as authority: 702.26b is PERMANENT phasing
+/// ("a phased-out permanent is treated as though it does not exist"); the engine's
+/// PLAYER-level phased-out flag mirrors that wording. The MIRROR label is load-bearing —
+/// 702.26b is not a rule about players and must not be read as one.
+///
+/// NOTE the CR set deliberately does NOT include CR 800.4a: that rule governs a departed
+/// player's OBJECTS, control effects and priority — not the legality of a choice.
+///
+/// TARGETED choices need MORE than this: see [`crate::game::targeting::player_is_legal_target`],
+/// which adds the targeting-only exclusions. CR 115.10a is the boundary — a seat that is
+/// merely *chosen* (CR 701.34a proliferate, CR 701.30b clash, CR 702.132a assist) is not a
+/// target, so those exclusions must NOT be applied here. Applying them would refuse a
+/// legal choice, which is exactly the over-veto class this split exists to prevent.
+///
+/// This is the choke point for the CHOICE-ENUMERATION class: every seam that materializes
+/// a list of seats offered to a player to pick from routes through this function (directly
+/// or through [`choosable_opponents`]), so the enumerating sides cannot drift apart.
+pub fn player_exists_for_choice(state: &GameState, player: PlayerId) -> bool {
+    is_alive(state, player)
+        && !state
+            .players
+            .iter()
+            .any(|p| p.id == player && p.is_phased_out())
+}
+
 /// CR 607.2d / CR 607.2m (by analogy): true iff `player`'s durable per-player
 /// `chosen_attributes` records a `ChosenAttribute::Label` equal to `label`
 /// (case-insensitive). Single authority consulted by every "player who last
@@ -166,6 +198,27 @@ pub fn opponents(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
         .collect()
 }
 
+/// CR 115.10a: the opponents of `player` that may be CHOSEN — [`opponents`] narrowed by
+/// [`player_exists_for_choice`].
+///
+/// Opponent-hood itself is whatever [`opponents`] says (CR 102.2 in a two-player game,
+/// CR 102.3 in a game between teams; a free-for-all has no single defining rule and the
+/// engine's authority is `topology::is_opponent`). This function adds no relation — only
+/// the existence conjunct.
+///
+/// This is a SIBLING of [`opponents`], never a conjunct pushed INTO it. `opponents` is the
+/// seat-RELATION authority, consumed across the whole engine by combat, targeting,
+/// visibility and replacement — each governed by its own CR section — so widening it
+/// would silently change every one of them. Same two-layer split as
+/// [`crate::game::targeting::player_is_legal_target`] vs [`player_exists_for_choice`]: the
+/// CHOICE seam gets the conjunct, the RELATION seam does not.
+pub fn choosable_opponents(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
+    opponents(state, player)
+        .into_iter()
+        .filter(|&id| player_exists_for_choice(state, id))
+        .collect()
+}
+
 /// CR 102.2 / CR 102.3: Whether `other` is an opponent of `player`.
 pub fn is_opponent(state: &GameState, player: PlayerId, other: PlayerId) -> bool {
     super::topology::is_opponent(state, player, other)
@@ -241,13 +294,23 @@ pub fn apnap_order_from(
     // compile error here rather than a silent fall-back to APNAP.
     let start_player = match starting_with {
         Some(ControllerRef::You) => controller,
+        // CR 101.4 + CR 109.4: a resolution-time snapshot names the anchor
+        // outright, so it anchors AT that id. Folding it into the default arm
+        // below would silently order from the active player whenever the
+        // snapshotted player is not the active one — the exact case the variant
+        // exists to represent. Unlike its dynamic siblings there is nothing to
+        // resolve and no context to be missing, so there is no reason to fail
+        // closed here.
+        Some(ControllerRef::SpecificPlayer { id }) => id,
         None
         | Some(
             ControllerRef::Opponent
             | ControllerRef::ScopedPlayer
             | ControllerRef::TargetPlayer
             | ControllerRef::TargetOpponent
+            | ControllerRef::DeclaredPlayer { .. }
             | ControllerRef::ParentTargetController
+            | ControllerRef::EventTargetController
             | ControllerRef::ParentTargetOwner
             | ControllerRef::DefendingPlayer
             | ControllerRef::SourceChosenPlayer
@@ -272,7 +335,9 @@ pub fn apnap_order_from(
 /// CR 603.10a + CR 607.2a: Return the cards linked as "exiled with" `source_id`.
 /// Leaves-the-battlefield triggers prefer the trigger event's zone-change snapshot
 /// because `TrackedBySource` links are pruned immediately on battlefield exit per
-/// CR 400.7. Outside that look-back path, fall back to the live exile-link store.
+/// CR 400.7. Outside that look-back path, fall back to the exile-link store's
+/// links of the incarnation this read is made for. The final linked-exile LKI
+/// fallback is incarnation-bounded the same way (CR 400.7).
 pub fn linked_exile_cards_for_source(
     state: &GameState,
     source_id: ObjectId,
@@ -289,46 +354,26 @@ pub fn linked_exile_cards_for_source(
         }
     }
 
-    let live: Vec<LinkedExileSnapshot> = state
-        .exile_links
-        .iter()
-        .filter(|link| link.source_id == source_id)
-        .filter_map(|link| {
-            state.objects.get(&link.exiled_id).and_then(|obj| {
-                (obj.zone == Zone::Exile).then(|| LinkedExileSnapshot {
-                    exiled_id: link.exiled_id,
-                    owner: obj.owner,
-                    // CR 202.3d + CR 709.4b: the exiled card is off the stack, so
-                    // a split card records its combined mana value.
-                    mana_value: obj.effective_mana_value(),
-                })
+    // CR 113.7a + CR 400.7: an ability of an older incarnation reads only that
+    // incarnation's cards, never the pile of the object that replaced it.
+    let reader = crate::game::exile_links::linked_exile_incarnation(state, source_id);
+    let linked: Vec<LinkedExileSnapshot> =
+        crate::game::exile_links::links_for_reader(state, source_id, reader)
+            .filter_map(|link| {
+                crate::game::exile_links::exiled_card_snapshot(state, link.exiled_id)
             })
-        })
-        .collect();
-    if !live.is_empty() {
-        return live;
+            .collect();
+    if !linked.is_empty() {
+        return linked;
     }
 
-    // CR 607.2b + CR 603.10e: The live links are gone (the source left the
-    // battlefield — e.g. sacrificed as its own ability's cost). Fall back to the
-    // persisted linked-exile LKI, filtered to cards STILL in exile so stale
-    // entries (cards that later left exile) contribute nothing.
-    state
-        .linked_exile_lki
-        .get(&source_id)
-        .map(|snapshots| {
-            snapshots
-                .iter()
-                .filter(|snap| {
-                    state
-                        .objects
-                        .get(&snap.exiled_id)
-                        .is_some_and(|obj| obj.zone == Zone::Exile)
-                })
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default()
+    // CR 607.2a + CR 607.2b + CR 113.7a: The reader has no links (the source left
+    // the battlefield, e.g. sacrificed as its own ability's cost, or the reader is
+    // a departed incarnation whose tracked links were pruned or never made). Fall
+    // back to the linked-exile LKI, again only to the reader's piles.
+    crate::game::exile_links::lki_snapshots_for_reader(state, source_id, reader)
+        .cloned()
+        .collect()
 }
 
 /// CR 406.6 + CR 607.1: Returns true if `player` owns at least one card currently
@@ -411,8 +456,45 @@ pub fn team_poison_total(state: &GameState, player: PlayerId) -> u32 {
 
 #[cfg(test)]
 mod tests {
+
+    /// CR 101.4 + CR 109.4: a snapshotted anchor orders from ITS OWN player, not
+    /// from the active player.
+    ///
+    /// The fixture deliberately makes the snapshotted player NON-ACTIVE — that is
+    /// the only configuration in which the bug is visible, since folding
+    /// `SpecificPlayer` into the default arm returns the active player and a
+    /// same-player fixture would pass either way.
+    #[test]
+    fn specific_player_anchor_orders_from_the_snapshotted_player() {
+        let mut state = make_state(3, FormatConfig::free_for_all());
+        state.active_player = PlayerId(0);
+
+        let anchored = apnap_order_from(
+            &state,
+            Some(ControllerRef::SpecificPlayer { id: PlayerId(2) }),
+            PlayerId(0),
+        );
+        assert_eq!(
+            anchored.first(),
+            Some(&PlayerId(2)),
+            "the snapshotted (non-active) player anchors the order"
+        );
+
+        // Paired guard: the default anchor really is the active player, so the
+        // assertion above is not passing for an unrelated reason.
+        let default_anchored = apnap_order_from(&state, None, PlayerId(0));
+        assert_eq!(
+            default_anchored.first(),
+            Some(&PlayerId(0)),
+            "with no anchor the order still starts at the active player"
+        );
+    }
     use super::*;
+    use crate::game::zones::{create_object, move_to_zone};
+    use crate::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
     use crate::types::format::FormatConfig;
+    use crate::types::game_state::{LinkedExileLki, StackEntry, StackEntryKind};
+    use crate::types::identifiers::CardId;
 
     fn make_state(player_count: u8, config: FormatConfig) -> GameState {
         GameState::new(config, player_count, 0)
@@ -963,5 +1045,196 @@ mod tests {
             aggregate_over_teams(&state, empty, AggregateFunction::Sum),
             0
         );
+    }
+
+    // --- linked-exile LKI incarnation bounds (CR 400.7 + CR 113.7a) ---
+
+    /// The incarnation the source had when it left the battlefield.
+    const DEPARTED: u64 = 4;
+
+    fn departure(departed: u64, card: ObjectId) -> LinkedExileLki {
+        LinkedExileLki {
+            departed,
+            successor: departed + 1,
+            snapshot: vec![LinkedExileSnapshot {
+                exiled_id: card,
+                owner: PlayerId(1),
+                mana_value: 0,
+                // `departed_pile` makes the card directly in exile.
+                incarnation: 0,
+            }],
+        }
+    }
+
+    /// Source `S` with no live links, a card in exile, and one departure entry
+    /// `{DEPARTED, DEPARTED + 1, [card]}`. `live` is S's current incarnation;
+    /// `None` removes S from the game.
+    fn departed_pile(live: Option<u64>) -> (GameState, ObjectId, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Graveyard,
+        );
+        let card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Exiled Card".into(),
+            Zone::Exile,
+        );
+        match live {
+            Some(incarnation) => {
+                state.objects.get_mut(&source).unwrap().incarnation = incarnation;
+            }
+            None => {
+                state.objects.remove(&source);
+            }
+        }
+        state
+            .linked_exile_lki
+            .insert(source, vec![departure(DEPARTED, card)]);
+        (state, source, card)
+    }
+
+    /// An activated ability of `source`, put on the stack while `source` had
+    /// incarnation `stamp`, is resolving.
+    fn resolving_ability_of(state: &mut GameState, source: ObjectId, stamp: u64) {
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.source_incarnation = Some(stamp);
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(900),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(ability),
+            },
+        });
+    }
+
+    fn linked_ids(state: &GameState, source: ObjectId) -> Vec<ObjectId> {
+        linked_exile_cards_for_source(state, source)
+            .iter()
+            .map(|snapshot| snapshot.exiled_id)
+            .collect()
+    }
+
+    /// CR 113.7a + CR 400.7: a departure entry admits exactly the object that
+    /// left and the object it became.
+    #[test]
+    fn linked_exile_lki_admits_only_its_departure_incarnations() {
+        let lki = LinkedExileLki {
+            departed: 4,
+            successor: 5,
+            snapshot: Vec::new(),
+        };
+        assert!(lki.admits(4));
+        assert!(lki.admits(5));
+        assert!(!lki.admits(3));
+        assert!(!lki.admits(6));
+    }
+
+    /// CR 400.7: the object the source became still reads the pile; a later
+    /// object under the same id does not.
+    #[test]
+    fn linked_exile_lki_is_not_read_by_a_later_incarnation() {
+        let (state, source, card) = departed_pile(Some(DEPARTED + 1));
+        assert_eq!(linked_ids(&state, source), vec![card]);
+
+        let (state, source, _) = departed_pile(Some(DEPARTED + 2));
+        assert!(linked_ids(&state, source).is_empty());
+    }
+
+    /// CR 113.7a + CR 607.2a: an ability of the departed object, resolving after
+    /// its source came back, reads the departed object's pile; an ability of the
+    /// returned object, or of another source, does not.
+    #[test]
+    fn linked_exile_lki_is_read_by_a_resolving_ability_of_the_departed_object() {
+        let (mut state, source, card) = departed_pile(Some(DEPARTED + 2));
+        resolving_ability_of(&mut state, source, DEPARTED);
+        assert_eq!(linked_ids(&state, source), vec![card]);
+
+        resolving_ability_of(&mut state, source, DEPARTED + 2);
+        assert!(linked_ids(&state, source).is_empty());
+
+        let other = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Other Source".into(),
+            Zone::Battlefield,
+        );
+        resolving_ability_of(&mut state, other, DEPARTED);
+        assert!(
+            linked_ids(&state, source).is_empty(),
+            "another source's ability reads for the live object"
+        );
+    }
+
+    /// A source that no longer exists (a token) left once, so its only
+    /// departure entry is read.
+    #[test]
+    fn linked_exile_lki_is_read_when_the_source_no_longer_exists() {
+        let (state, source, card) = departed_pile(None);
+        assert_eq!(linked_ids(&state, source), vec![card]);
+    }
+
+    /// CR 113.7a + CR 400.7: two departures of one id in one step keep two
+    /// entries, and each is read only for its own incarnations.
+    #[test]
+    fn linked_exile_lki_keeps_each_departure_for_its_own_incarnation() {
+        let (mut state, source, first) = departed_pile(Some(DEPARTED + 4));
+        let second = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Second Exiled Card".into(),
+            Zone::Exile,
+        );
+        state
+            .linked_exile_lki
+            .get_mut(&source)
+            .unwrap()
+            .push(departure(DEPARTED + 2, second));
+
+        resolving_ability_of(&mut state, source, DEPARTED);
+        assert_eq!(linked_ids(&state, source), vec![first]);
+        resolving_ability_of(&mut state, source, DEPARTED + 2);
+        assert_eq!(linked_ids(&state, source), vec![second]);
+    }
+
+    /// CR 607.2a + CR 400.7: a pile member that leaves exile is not read, and it
+    /// is still not read once it is exiled again, because the card in exile is
+    /// a new object. Checked for a source that no longer exists and for the
+    /// object the source became.
+    #[test]
+    fn linked_exile_lki_drops_a_member_that_left_exile_and_was_exiled_again() {
+        for live in [None, Some(DEPARTED + 1)] {
+            let (mut state, source, card) = departed_pile(live);
+            assert_eq!(
+                linked_ids(&state, source),
+                vec![card],
+                "positive control: the member is read while it stays in exile"
+            );
+            let mut events = Vec::new();
+            move_to_zone(&mut state, card, Zone::Graveyard, &mut events);
+            assert!(linked_ids(&state, source).is_empty(), "it left exile");
+            move_to_zone(&mut state, card, Zone::Exile, &mut events);
+            assert!(
+                linked_ids(&state, source).is_empty(),
+                "CR 400.7: the card exiled again is a new object, not the member"
+            );
+        }
     }
 }

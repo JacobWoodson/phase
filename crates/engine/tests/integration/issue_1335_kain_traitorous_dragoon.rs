@@ -150,12 +150,12 @@ fn kain_object_carries_parsed_combat_damage_trigger() {
     let triggers: Vec<_> = obj.trigger_definitions.iter_unchecked().collect();
     assert_eq!(triggers.len(), 1, "object should carry one trigger");
     let trig = triggers[0];
-    assert_eq!(trig.mode, TriggerMode::DamageDone);
+    assert_eq!(trig.definition.mode, TriggerMode::DamageDone);
     assert!(
-        trig.execute.is_some(),
+        trig.definition.execute.is_some(),
         "object trigger must have executable effect chain"
     );
-    let execute = trig.execute.as_ref().unwrap();
+    let execute = trig.definition.execute.as_ref().unwrap();
     assert!(
         matches!(execute.effect.as_ref(), Effect::GiveControl { .. }),
         "runtime trigger root must be GiveControl, got {:?}",
@@ -209,6 +209,7 @@ fn kain_resolve_chain_transfers_control_from_damage_dealt_event() {
         amount: 2,
         is_combat: true,
         excess: 0,
+        source_incarnation: None,
     });
 
     let resolved = build_resolved_from_def(execute, kain, PlayerId(0));
@@ -292,6 +293,7 @@ fn kain_stack_trigger_resolution_transfers_control_and_rewards_attacker() {
         amount: 2,
         is_combat: true,
         excess: 0,
+        source_incarnation: None,
     };
     process_triggers(&mut state, &[event]);
     drain_order_triggers_with_identity(&mut state);
