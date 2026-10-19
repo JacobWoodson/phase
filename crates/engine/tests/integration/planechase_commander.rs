@@ -75,7 +75,7 @@ fn planechase_commander_starts_at_forty_per_seat() {
             .find(|p| p.id == PlayerId(seat))
             .unwrap()
             .life;
-        assert_eq!(life, 40, "seat {seat} starts at 40 (CR 903.8)");
+        assert_eq!(life, 40, "seat {seat} starts at 40 (CR 903.7)");
     }
     assert_eq!(state.format_config.commander_damage_threshold, Some(21));
 }

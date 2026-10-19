@@ -4722,6 +4722,7 @@ mod tests {
                 GameFormat::CommanderDraft,
                 GameFormat::TwoHeadedGiantCommander,
                 GameFormat::ArchenemyCommander,
+                GameFormat::PlanechaseCommander,
             ],
             "evaluate_brawl" => vec![GameFormat::Brawl, GameFormat::HistoricBrawl],
             "evaluate_tiny_leaders" => vec![GameFormat::TinyLeaders],
