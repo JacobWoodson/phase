@@ -135,6 +135,35 @@ export function getVisibleBoardPlayerIds(
   return focusedId == null ? [viewerId] : [viewerId, focusedId];
 }
 
+/** The seat whose container stores the shared `zone`, as published by the engine; null when per-player. */
+export function getSharedPileHolder(
+  gameState: GameState | null | undefined,
+  zone: "graveyard" | "library",
+): PlayerId | null {
+  return gameState?.derived?.shared_piles?.[zone] ?? null;
+}
+
+/** Selects between two engine-provided seats: the shared pile's holder, else `seat`. */
+export function resolvePileSeat(
+  gameState: GameState | null | undefined,
+  zone: "graveyard" | "library",
+  seat: PlayerId,
+): PlayerId {
+  return getSharedPileHolder(gameState, zone) ?? seat;
+}
+
+/** The zone viewer pile a Graveyard/Exile object belongs to; exile stays per-seat. */
+export function getZoneViewerPile(
+  gameState: GameState | null | undefined,
+  obj: Pick<GameObject, "zone" | "owner">,
+): { zone: "graveyard" | "exile"; playerId: PlayerId } | null {
+  if (obj.zone === "Graveyard") {
+    return { zone: "graveyard", playerId: resolvePileSeat(gameState, "graveyard", obj.owner) };
+  }
+  if (obj.zone === "Exile") return { zone: "exile", playerId: obj.owner };
+  return null;
+}
+
 export function getPlayerZoneIds(
   gameState: GameState | null,
   zone: "graveyard" | "exile" | "library",
@@ -142,13 +171,13 @@ export function getPlayerZoneIds(
 ): ObjectId[] {
   if (!gameState) return [];
   if (zone === "graveyard") {
-    return gameState.players[playerId]?.graveyard ?? [];
+    return gameState.players[resolvePileSeat(gameState, "graveyard", playerId)]?.graveyard ?? [];
   }
   if (zone === "library") {
     // library[0] = top of library (engine convention from zones.rs). Returns
     // the full ordered library; the library viewer consumes each object's
     // engine-projected display visibility before rendering it.
-    return gameState.players[playerId]?.library ?? [];
+    return gameState.players[resolvePileSeat(gameState, "library", playerId)]?.library ?? [];
   }
   return gameState.exile.filter((id) => gameState.objects[id]?.owner === playerId);
 }
@@ -264,6 +293,11 @@ export function getWaitingForClickTargetRefs(
       // mixes both. The engine owns which hosts are legal; the client only routes
       // each ref to the surface that can render it.
       return waitingFor.data.legal_targets;
+    case "ChooseTokenHost":
+      // Digital-only Alchemy (no CR entry): a batch boon's "one of them" host
+      // pick. Same cluster shape as ReturnAsAuraTarget — the engine owns which
+      // stamped entrants are still legal; the client only routes each ref.
+      return waitingFor.data.legal_targets;
     default:
       return null;
   }
@@ -321,6 +355,12 @@ export function getWaitingForObjectChoiceIds(
       // the board; player hosts are projected by
       // `getWaitingForPlayerChoiceIds` above, which every seat-rendering
       // surface reads.
+      return waitingFor.data.legal_targets.flatMap((target) =>
+        "Object" in target ? [target.Object] : [],
+      );
+    case "ChooseTokenHost":
+      // Same mixed-axis projection as ReturnAsAuraTarget: object entrants glow
+      // on the board, player hosts on the seats.
       return waitingFor.data.legal_targets.flatMap((target) =>
         "Object" in target ? [target.Object] : [],
       );
@@ -638,6 +678,7 @@ export function getBoardChoiceView(
         },
         response: { type: "SaddleMount", mountId: waitingFor.data.mount_id },
         sourceId: waitingFor.data.mount_id,
+        cancelAction: { type: "CancelCast" },
       };
     case "StationTarget":
       return {
@@ -647,6 +688,7 @@ export function getBoardChoiceView(
         selection: { type: "single", immediate: true },
         response: { type: "ActivateStation", spacecraftId: waitingFor.data.spacecraft_id },
         sourceId: waitingFor.data.spacecraft_id,
+        cancelAction: { type: "CancelCast" },
       };
     case "BlightChoice":
       return {

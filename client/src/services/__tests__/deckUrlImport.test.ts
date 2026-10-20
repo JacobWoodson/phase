@@ -258,6 +258,7 @@ const FORMAT_SHAPES: Record<BuiltInGameFormat, DeckShape> = {
   Momir: "mainOnly",
   Freeform: "constructed",
   FreeformCommander: "commander",
+  Dandan: "mainOnly",
 };
 
 describe("fetchDeckFromUrl — format coverage", () => {
