@@ -85,6 +85,8 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // permission's `enters_with_modifications` becomes a `PendingEntersModifications` object
 // (was a `ContinuousModification` array) and `Effect::AddPendingEntersModifications`
 // carries its `rider` object in place of the required `modifications` array.
+// v154 (after v153, #10006's kind-selected activated grant) adds `PendingCostMoveResume::CounterCostRemovalPayment`
+// (CR 616.1 deferred counter-cost removal) and `ManaAbilityCostCursor.counter_removal` to GameState.
 // v134 adds `GameEvent::AbilityActivated.stack_entry` (the activation's stack object).
 // v147 adds the Eye to Eye / Mouth to Mouth physical contest.
 // v148 adds Timesifter's top-card exile contest (`Effect::ExileTopCardContest`,
@@ -93,6 +95,8 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // carrier (`GameState.resolving_spell_final_part`; `deferred_spell_delivery` removed).
 // v152 adds `ShortcutDecisionSchema.suggested_declaration` and `.leading_aims`, and
 // `ShortcutProposal.leading_aims`.
+// v155 carries each parked ChangeZone member's pre-event entry modifications
+// (`ChangeZoneMemberEntry`, CR 603.6a + CR 614.12) in GameState.
 // Keep the measured base so a future merge cannot collapse independent wire
 // changes onto one number.
 const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
@@ -193,12 +197,17 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 //      and `ShortcutProposal.leading_aims`.
 // +82: v153 adds the optional kind selector to GrantAllActivatedAbilitiesOf
 // and removes the loyalty-grant sibling variant.
+// +83: v154 adds `PendingCostMoveResume::CounterCostRemovalPayment` and
+//      `ManaAbilityCostCursor.counter_removal` to GameState.
+// +84: v155 retypes `PendingChangeZoneIteration.remaining` to `ChangeZoneMemberEntry`
+//      (pre-event entry modifications) and drops the raw gate fields.
 // +86: v157 carries this branch's wire shape, renumbered (coined as v150 here,
 //      as v151 "combined wire" at the bf867d08b merge, then v154 at the
 //      6e686ee71 merge): `CardTypeSetSource::TargetedObjects` plus the
 //      `TrackedSet.filter` member restriction. Main has taken v151 bestow,
-//      v152 shortcut schema and v153 Bolas grant, and v154-156 are claimed by
-//      queued/approved PRs.
+//      v152 shortcut schema, v153 Bolas grant, v154 counter-cost removal
+//      and v155 ChangeZone iteration, and v156 is claimed by a
+//      queued/approved PR.
 const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 86;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
@@ -307,6 +316,8 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +79: wire 133 moves with full-game v151 for populated Bestow payloads.
 // +80: wire 134 moves with full-game v152 for the shortcut suggestion fields.
 // +81: wire 135 moves with full-game v153 for the kind-selected activated grant.
+// +82: wire 136 moves with full-game v154 for the deferred counter-cost removal root.
+// +83: wire 137 moves with full-game v155 for the pre-event ChangeZone member entries.
 // +85: wire 139 moves with full-game v157 for this branch's renumbered wire
 //      (`TargetedObjects` aggregates and the `TrackedSet.filter` member
 //      restriction).

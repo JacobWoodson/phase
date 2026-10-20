@@ -60,19 +60,42 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
-/// 157 â€” This branch's wire shape, renumbered (coined as 150 on this branch
+/// 157 — This branch's wire shape, renumbered (coined as 150 on this branch
 ///      and as 151 "combined wire" at the bf867d08b merge, then 154 at the
 ///      6e686ee71 merge): `CardTypeSetSource` gains `TargetedObjects`
 ///      (`{"type":"TargetedObjects"}`, CR 608.2c + CR 115.1: the resolving
 ///      ability's chosen targets, read by identity for "those cards"
 ///      aggregates) and `TrackedSet` gains a semantics-bearing `filter`
 ///      member restriction (`#[serde(default)]`). Main has taken 151 bestow,
-///      152 shortcut schema and 153 Bolas grant, and 154-156 are claimed by
-///      queued/approved PRs, so the combined candidate moves to this fresh
-///      numeral both dialects refuse. Full-game peers and P2P move in
-///      lockstep (wire 139); no lobby carrier names it.
+///      152 shortcut schema, 153 Bolas grant, 154 counter-cost removal and
+///      155 ChangeZone iteration, and 156 is claimed by a queued/approved
+///      PR, so the combined candidate keeps this fresh numeral both
+///      dialects refuse. Full-game peers and P2P move in lockstep
+///      (wire 139); no lobby carrier names it.
 ///
-/// 153 â€” `ContinuousModification::GrantAllActivatedAbilitiesOf` gains the
+/// 155 — `PendingChangeZoneIteration` members carry their pre-event entry
+///      modifications (CR 603.6a + CR 614.12): `remaining` becomes
+///      `ChangeZoneMemberEntry` records and the raw gate fields are removed; old
+///      peers cannot parse a parked ChangeZone frame. `RESOLUTION_STATE_WIRE_VERSION`
+///      moves from 6 to 7 with it: a v154 peer refuses the version-7 resolution
+///      state. Full-game peers and P2P move in lockstep (wire 137); no lobby
+///      carrier names it.
+///
+/// 154 — `PendingCostMoveResume` gains `CounterCostRemovalPayment`, a
+///      counter-removal cost paused while a replacement choice settles its
+///      current removal (CR 616.1; the settled count is credited to the
+///      activation, CR 118.11), with its `PausedCounterCostRemoval` record
+///      (which carries its `replacement_subtree` boundary);
+///      `ManaAbilityCostCursor` gains the optional `counter_removal` record.
+///      Serialized in `GameState.pending_cost_move_resume`: a v153 peer cannot
+///      parse the new tag. The same version carries the activation-owned
+///      removed-counter count (`SpellContext.cost_removed_counter_amount`,
+///      `ManaAbilityCostCursor.cost_removed_counters`,
+///      `PendingManaAbility.cost_removed_counters`; optional, skipped when
+///      unset), which a v153 peer re-encoding state would drop. Full-game
+///      peers and P2P move in lockstep (wire 136); no lobby carrier names it.
+///
+/// 153 — `ContinuousModification::GrantAllActivatedAbilitiesOf` gains the
 ///      optional kind selector `kind: Option<ActivatedAbilityKind>`, and the
 ///      loyalty-grant sibling variant is removed (Nicol Bolas,
 ///      Dragon-God's loyalty grant is `kind: Some(Loyalty)` on the activated

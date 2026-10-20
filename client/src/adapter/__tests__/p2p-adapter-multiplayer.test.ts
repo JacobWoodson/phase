@@ -5667,14 +5667,14 @@ describe("P2P wire-protocol version gate", () => {
   // Both halves stamp LITERALS. A frame built from WIRE_PROTOCOL_VERSION
   // cannot tell a bumped client from an unbumped one, which is why every
   // other handshake fixture in the suite is useless as an instrument for a
-  // bump. Reverting WIRE_PROTOCOL_VERSION itself (139 â†’ 138) breaks both
+  // bump. Reverting WIRE_PROTOCOL_VERSION itself (139 → 138) breaks both
   // halves' premise: the v138 frame now equals the reverted constant and is
-  // admitted instead of refused â€” this test would fail at that first
-  // assertion ("promise resolved â€¦ instead of rejecting") â€” and the v139
+  // admitted instead of refused — this test would fail at that first
+  // assertion ("promise resolved … instead of rejecting") — and the v139
   // frame no longer equals it and would be refused instead of admitted,
   // though this single synchronous test body never reaches that second
   // assertion once the first has thrown. The admitting half is still the
-  // reach-guard â€” without it "refuses v138" is also satisfied by a client
+  // reach-guard — without it "refuses v138" is also satisfied by a client
   // that refuses everything.
   it("refuses the previous wire protocol (v138) and admits its own (v139)", async () => {
     const refusing = makeGuest();
@@ -5705,7 +5705,7 @@ describe("P2P wire-protocol version gate", () => {
     );
   });
 
-  it.each([136, 137, 138])("refuses old reconnect acknowledgement v%s before adopting populated Bestow state", async (version) => {
+  it.each([134, 135, 136, 137, 138])("refuses old reconnect acknowledgement v%s before adopting populated Bestow state", async (version) => {
     const refusing = makeGuest(new FakeDataConnection(), undefined, "prior-token");
     await refusing.adapter.initialize();
     await refusing.conn.simulateData({ ...setupFrameAt(version), type: "reconnect_ack" });
@@ -5728,7 +5728,7 @@ describe("P2P wire-protocol version gate", () => {
     admitting.adapter.dispose();
   });
 
-  it.each([136, 137, 138])("host rejects previous peers v%s before seat or reconnect adoption", async (version) => {
+  it.each([134, 135, 136, 137, 138])("host rejects previous peers v%s before seat or reconnect adoption", async (version) => {
     const { adapter, emitConnection } = makeHost(2);
     await adapter.initialize();
     const oldJoin = await joinGuest(emitConnection, {

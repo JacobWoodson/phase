@@ -215,15 +215,31 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 157 â€” This branch's wire shape, renumbered (coined as 150 here and as
+ * 157 — This branch's wire shape, renumbered (coined as 150 here and as
  *      151 "combined wire" at the bf867d08b merge, then 154 at the 6e686ee71
  *      merge): CardTypeSetSource TargetedObjects plus the TrackedSet member
- *      filter. Main has taken 151 bestow, 152 shortcut schema and 153 Bolas
- *      grant, and 154-156 are claimed by queued/approved PRs â€” see
+ *      filter. Main has taken 151 bestow, 152 shortcut schema, 153 Bolas
+ *      grant, 154 counter-cost removal and 155 ChangeZone iteration, and
+ *      156 is claimed by a queued/approved PR — see
  *      PROTOCOL_VERSION's own `/// 157` entry in
  *      crates/lobby-broker/src/protocol.rs. Full-game peers and P2P move in
  *      lockstep (wire 139).
- * 153 â€” GrantAllActivatedAbilitiesOf gains the optional kind selector
+ * 155 — PendingChangeZoneIteration members carry their pre-event entry modifications
+ *      (ChangeZoneMemberEntry, CR 603.6a + CR 614.12), and the persisted resolution
+ *      state moves from version 6 to 7 — see PROTOCOL_VERSION's own `/// 155` entry
+ *      in crates/lobby-broker/src/protocol.rs. A v154 peer cannot parse a parked
+ *      ChangeZone frame and refuses the version-7 resolution state. Wire 137 moves
+ *      with it.
+ * 154 — PendingCostMoveResume gains CounterCostRemovalPayment (a counter-removal
+ *       cost paused on a CR 616.1 replacement choice; the activation reads the
+ *       settled count, CR 118.11) and ManaAbilityCostCursor gains
+ *       counter_removal, carried in GameState.pending_cost_move_resume — see
+ *       PROTOCOL_VERSION's own `/// 154` entry in
+ *       crates/lobby-broker/src/protocol.rs. A v153 peer cannot parse the tag;
+ *       the exact-match version check at connect refuses the pairing. Wire 136
+ *       moves with it. PausedCounterCostRemoval carries its replacement_subtree
+ *       boundary.
+ * 153 — GrantAllActivatedAbilitiesOf gains the optional kind selector
  *       (Nicol Bolas, Dragon-God's loyalty grant is kind Loyalty on the
  *       activated authority; the loyalty-grant sibling variant is
  *       removed). A v152 peer drops the defaulted field silently and

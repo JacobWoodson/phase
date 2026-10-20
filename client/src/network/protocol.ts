@@ -106,15 +106,29 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
- *  139 â€” This branch's wire shape, renumbered (coined as 132 here and as
+ *  139 — This branch's wire shape, renumbered (coined as 132 here and as
  *       133 "combined wire" at the bf867d08b merge, then 136 at the 6e686ee71
  *       merge): game_setup and state_update carry GameState whose ability
  *       aggregates may name CardTypeSetSource TargetedObjects (the resolving
  *       ability's chosen targets) with a TrackedSet member filter. Main has
- *       taken 133 bestow, 134 shortcut schema and 135 Bolas grant, and
- *       136-138 are claimed by queued/approved PRs. Bumped in lockstep
+ *       taken 133 bestow, 134 shortcut schema, 135 Bolas grant, 136
+ *       counter-cost removal and 137 ChangeZone iteration, and 138 is
+ *       claimed by a queued/approved PR. Bumped in lockstep
  *       with full-game protocol 157.
- *  135 â€” game_setup and state_update carry GameState, whose activated grants
+ *  137 — game_setup and state_update carry GameState whose parked ChangeZone
+ *       frame stores each remaining member with its pre-event entry
+ *       modifications (CR 603.6a + CR 614.12) and whose resolution state moves
+ *       from version 6 to 7; a v136 peer cannot parse it. Bumped in lockstep
+ *       with full-game protocol 155.
+ *  136 — game_setup and state_update carry GameState whose
+ *       pending_cost_move_resume may hold PendingCostMoveResume
+ *       CounterCostRemovalPayment (a counter-removal cost paused on a CR 616.1
+ *       replacement choice) and whose mana cost cursor may hold
+ *       counter_removal. A v135 peer cannot parse the new tag, so first
+ *       contact rejects the skew. Bumped in lockstep with full-game protocol
+ *       154; PausedCounterCostRemoval carries its replacement_subtree
+ *       boundary.
+ *  135 — game_setup and state_update carry GameState, whose activated grants
  *       carry an optional kind selector (Nicol Bolas, Dragon-God's loyalty
  *       subset). A v134 peer drops the defaulted field silently and
  *       over-grants, so first contact rejects the skew. Bumped in
