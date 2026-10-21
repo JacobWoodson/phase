@@ -302,6 +302,14 @@ function ownershipFixture(path) {
     mkdirSync(dirname(join(path, file)), { recursive: true });
     copyFileSync(join(root, file), join(path, file));
   }
+  // Frozen capability floors are validated against computed versions, so the
+  // staged registry must include the real change records — an empty changes
+  // dir would strand any floor above the baseline. Flat copy: every record is
+  // inert history the tests below never mutate (they only add their own).
+  for (const name of readdirSync(join(root, "protocol/changes"))) {
+    if (name === ".gitkeep") continue;
+    copyFileSync(join(root, "protocol/changes", name), join(path, "protocol/changes", name));
+  }
   generateProtocolVersions(path);
   checker(path);
 }
