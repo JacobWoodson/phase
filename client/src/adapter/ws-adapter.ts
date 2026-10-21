@@ -1,3 +1,4 @@
+import { PROTOCOL_VERSION, LOBBY_PROTOCOL_VERSION, MIN_SUPPORTED_LOBBY_PROTOCOL as MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL } from "../generated/protocol-versions";
 import { initializeLanCapabilities, isLanEndpoint } from "../services/lan";
 import { observeSocketDiagnostics, type SocketDiagnosticObserver } from "../services/socketDiagnostics";
 import { completeSocketDiagnostics, DIAGNOSTIC_HISTORY_LIMIT, type SocketReconnectOutcome } from "../services/troubleshooting";
@@ -212,18 +213,34 @@ export class NativeEngineVersionMismatchError extends Error {
 
 /**
  * Wire-protocol version the client speaks. Must match `PROTOCOL_VERSION` in
- * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
- * adds, removes, renames, or changes the type of a protocol variant field.
+ * `crates/server-core/src/protocol.rs`. Record incompatible changes with
+ * `node scripts/protocol-versions.mjs bump game --reason "description"`.
+ * The entries below are historical introduction versions.
  *
- * 157 — This branch's wire shape, renumbered (coined as 150 here and as
- *      151 "combined wire" at the bf867d08b merge, then 154 at the 6e686ee71
- *      merge): CardTypeSetSource TargetedObjects plus the TrackedSet member
- *      filter. Main has taken 151 bestow, 152 shortcut schema, 153 Bolas
- *      grant, 154 counter-cost removal and 155 ChangeZone iteration, and
- *      156 is claimed by a queued/approved PR — see
- *      PROTOCOL_VERSION's own `/// 157` entry in
- *      crates/lobby-broker/src/protocol.rs. Full-game peers and P2P move in
- *      lockstep (wire 139).
+ * 159 — Coin-flip effects are one Effect::FlipCoins { flips, .. } (the FlipCoin and
+ *       FlipCoinUntilLose tags are no longer written, count moves into flips) and
+ *       the coin-flip resolution frame's kind becomes Exactly or UntilLoss — see
+ *       PROTOCOL_VERSION's own `/// 159` entry in
+ *       crates/lobby-broker/src/protocol.rs. A v158 or older peer reads a multi-flip or
+ *       until-loss run as one flip; the exact-match version check at connect
+ *       refuses the pairing. Wire 141 moves with it.
+ * 157 — ChooseFromZoneConstraint.TotalManaValue extends serialized paused zone
+ *      choices and ability state. Old native readers cannot decode the new tag.
+ *      Wire 139 moves with it.
+ * 156 — StaticCondition, TriggerCondition and AbilityCondition gain
+ *      QuantityQuality { quantity, quality } with the new NumberQuality
+ *      ({"type":"Prime"} / {"type":"Parity","value":"Odd"|"Even"}), carried
+ *      in GameState ability definitions (CR 107.1, CR 603.4) — see
+ *      PROTOCOL_VERSION's own `/// 156` entry in
+ *      crates/lobby-broker/src/protocol.rs. A pre-v156 peer cannot parse the
+ *      tag; the exact-match version check at connect refuses the pairing.
+ *      The same bump adds the optional per-seat `created_tokens` channel (each
+ *      seat's pinned creation result) to the private
+ *      player-scope tail sidecar that `PendingContinuation` carries under its
+ *      existing `player_scope_linked_exile` key (CR 608.2c + CR 608.2f: the
+ *      tokens every seat created, for a paused "each player creates … The
+ *      tokens …" tail); it is serde-defaulted, so a sidecar without it decodes
+ *      as the linked-exile-only sidecar. Wire 138 moves with it.
  * 155 — PendingChangeZoneIteration members carry their pre-event entry modifications
  *      (ChangeZoneMemberEntry, CR 603.6a + CR 614.12), and the persisted resolution
  *      state moves from version 6 to 7 — see PROTOCOL_VERSION's own `/// 155` entry
@@ -246,105 +263,105 @@ export class NativeEngineVersionMismatchError extends Error {
  *       over-grants every activated ability of every other planeswalker,
  *       so the exact-match handshake refuses the pairing. P2P moves in
  *       lockstep (wire 135).
- * 152 â€” ShortcutDecisionSchema gains suggested_declaration and leading_aims, and
+ * 152 — ShortcutDecisionSchema gains suggested_declaration and leading_aims, and
  *      ShortcutProposal gains leading_aims; a v151 peer drops them. Wire 134 moves
  *      with it.
  * 151: Populated GameObject.bestow_form carries the removed creature subtypes
  *      as an object instead of a boolean. Old native readers cannot decode it.
  *      Wire 133 moves with it.
- * 150 â€” The cast-this-way gains rider's serialized payload is reshaped: the
+ * 150 — The cast-this-way gains rider's serialized payload is reshaped: the
  *      ExileWithAltCost permission's enters_with_modifications becomes a
  *      PendingEntersModifications object (was a ContinuousModification array) and
  *      Effect.AddPendingEntersModifications carries its rider object in place of
- *      the required modifications array â€” a v149 server or client cannot parse
+ *      the required modifications array — a v149 server or client cannot parse
  *      either new shape. Full-game peers and P2P move in lockstep (wire 132); see
  *      PROTOCOL_VERSION's own `/// 150` entry in
  *      crates/lobby-broker/src/protocol.rs.
- * 149 â€” The CR 608.2n final part of a spell's resolution is owed on the
+ * 149 — The CR 608.2n final part of a spell's resolution is owed on the
  *      resolution carrier: `GameState::deferred_spell_delivery` (v110) is removed
  *      and `GameState::resolving_spell_final_part` (`{ spell }`) marks an instant
  *      or sorcery whose paused instructions have not finished. A v148 peer drops
  *      the key and would move the spell too early (or leave it on the stack after
  *      a free-cast window). Wire 131 moves with it; no lobby frame names it.
- * 148 â€” Timesifter's top-card exile contest: Effect::ExileTopCardContest and
- *      BatchCompletion::TopCardContestRoundComplete in GameState â€” see
+ * 148 — Timesifter's top-card exile contest: Effect::ExileTopCardContest and
+ *      BatchCompletion::TopCardContestRoundComplete in GameState — see
  *      PROTOCOL_VERSION's own `/// 148` entry in crates/lobby-broker/src/protocol.rs.
  *      A v147 peer cannot parse them. Wire 130 moves with it.
- * 147 â€” Online physical contests: WaitingFor::PhysicalContest, Effect::PhysicalContest,
+ * 147 — Online physical contests: WaitingFor::PhysicalContest, Effect::PhysicalContest,
  *      the two PhysicalContest* GameEvents, ClientMessage::ContestClick and
- *      ServerMessage::ContestProgress â€” see PROTOCOL_VERSION's own `/// 147` entry
+ *      ServerMessage::ContestProgress — see PROTOCOL_VERSION's own `/// 147` entry
  *      in crates/lobby-broker/src/protocol.rs. A v146 peer cannot parse them.
  *      Wire 129 moves with it.
- * 146 â€” ConfirmedPeriod gains counted_by (CR 732.2a: a loop offer counted by
+ * 146 — ConfirmedPeriod gains counted_by (CR 732.2a: a loop offer counted by
  *      replaying its period, with the seats that left in each repetition, a
  *      per_cycle scope stating one repetition, and an optional win_kind with
  *      the count it is decided at) and performance, carried in
- *      WaitingFor::LoopShortcut â€” see PROTOCOL_VERSION's own `/// 146` entry in
+ *      WaitingFor::LoopShortcut — see PROTOCOL_VERSION's own `/// 146` entry in
  *      crates/lobby-broker/src/protocol.rs. Wire 128 moves with it.
- * 145 â€” ParentTargetMissingReason gains SearchLibrary (CR 701.23b), serialized
+ * 145 — ParentTargetMissingReason gains SearchLibrary (CR 701.23b), serialized
  *      on ResolvedAbility.parent_target_missing_reason; a v144 peer cannot
  *      parse the tag. P2P moves in lockstep (wire 127); lobby messages unchanged.
- * 144 â€” One-time boons (#7495): new Effect.CreateBoon / Effect.NoteNumber tags,
+ * 144 — One-time boons (#7495): new Effect.CreateBoon / Effect.NoteNumber tags,
  *       HasBoon conditions, and WaitingFor.ChooseTokenHost; the perpetual P/T
  *       edit retypes power_delta/toughness_delta to required QuantityExpr
  *       power/toughness. A v143 peer cannot parse the new shapes; the
  *       exact-match handshake refuses the pairing. P2P moves in lockstep
  *       (wire 126).
- * 143 â€” GameState.modal_modes_chosen_this_turn / _this_game retype from
+ * 143 — GameState.modal_modes_chosen_this_turn / _this_game retype from
  *      (ObjectId, usize) to (ObjectIncarnationRef, usize) (CR 400.7), so a
- *      non-empty entry [50, 1] is now [{object_id: 50, incarnation: 0}, 1] â€”
+ *      non-empty entry [50, 1] is now [{object_id: 50, incarnation: 0}, 1] —
  *      see PROTOCOL_VERSION's own `/// 143` entry in
  *      crates/lobby-broker/src/protocol.rs. A v142 peer's typed decoder
  *      cannot read the object-shaped key; the exact-match version check at
  *      connect refuses the pairing. Wire 125 moves with it.
- * 142 â€” LinkedExileSnapshot gains incarnation (CR 400.7), carried in
+ * 142 — LinkedExileSnapshot gains incarnation (CR 400.7), carried in
  *      GameState.linked_exile_lki and the trigger and zone-change
- *      linked_exile_snapshot lists â€” see PROTOCOL_VERSION's own `/// 142`
+ *      linked_exile_snapshot lists — see PROTOCOL_VERSION's own `/// 142`
  *      entry in crates/lobby-broker/src/protocol.rs. A v141 peer re-encoding
  *      state drops the key; the exact-match version check at connect refuses
  *      the pairing. Wire 124 moves with it.
- * 141 â€” ExileLinkKind gains CastCost (CR 607.2q: a card exiled to pay a cost
+ * 141 — ExileLinkKind gains CastCost (CR 607.2q: a card exiled to pay a cost
  *      of casting a permanent spell, linked to the permanent it becomes),
- *      carried in GameState.exile_links â€” see PROTOCOL_VERSION's own `/// 141`
+ *      carried in GameState.exile_links — see PROTOCOL_VERSION's own `/// 141`
  *      entry in crates/lobby-broker/src/protocol.rs. A v140 peer cannot parse
  *      the tag; the exact-match version check at connect refuses the pairing.
  *      Wire 123 moves with it.
- * 140 â€” AttackSubject gains EventAttackers (the players a trigger's attack
+ * 140 — AttackSubject gains EventAttackers (the players a trigger's attack
  *      event's attackers attacked), carried in an ability's player_scope
- *      inside GameState â€” see PROTOCOL_VERSION's own `/// 140` entry in
+ *      inside GameState — see PROTOCOL_VERSION's own `/// 140` entry in
  *      crates/lobby-broker/src/protocol.rs. A v139 peer cannot parse the tag;
  *      the exact-match version check at connect refuses the pairing. Wire 122
  *      moves with it.
- * 139 â€” CR 702.122c per-turn crew relation: GameState gains
- *      crew_history_this_turn and FilterProp gains CrewedThisTurn â€” see
+ * 139 — CR 702.122c per-turn crew relation: GameState gains
+ *      crew_history_this_turn and FilterProp gains CrewedThisTurn — see
  *      PROTOCOL_VERSION's own `/// 139` entry in crates/lobby-broker/src/protocol.rs.
  *      A v138 peer cannot parse the new filter tag. Wire 121 moves with it.
- * 134 â€” GameEvent::AbilityActivated gains stack_entry, the stack object a
- *      stack-using activation created, carried in GameState's trigger events â€”
+ * 134 — GameEvent::AbilityActivated gains stack_entry, the stack object a
+ *      stack-using activation created, carried in GameState's trigger events —
  *      see PROTOCOL_VERSION's own `/// 134` entry in
  *      crates/lobby-broker/src/protocol.rs. A v133 peer drops it silently and
  *      resolves an activation trigger's "copy that ability" differently; the
  *      exact-match version check at connect refuses the pairing. Wire 116
  *      moves with it.
- * 133 â€” CR 614.12a pre-entry as-enters choices: NamedChoiceSourceBinding gains
+ * 133 — CR 614.12a pre-entry as-enters choices: NamedChoiceSourceBinding gains
  *      PendingEntry (WaitingFor.NamedChoice.source.binding), and the parked
  *      entry event / PendingReplacement carry the answers and the paused
- *      delivery's boundary â€” see PROTOCOL_VERSION's own `/// 133` entry in
+ *      delivery's boundary — see PROTOCOL_VERSION's own `/// 133` entry in
  *      crates/lobby-broker/src/protocol.rs. A v132 peer cannot parse the new
  *      binding tag. Wire 115 moves with it.
- * 132 â€” `GameObject::exile_from_stack_linked_source` carries the stamping
+ * 132 — `GameObject::exile_from_stack_linked_source` carries the stamping
  *      incarnation (`ObjectIncarnationRef`, CR 400.7); a v131 peer cannot
  *      decode a set rider. Wire 114 moves with it; no lobby frame names it.
- * 131 â€” PlayerFilter gains AnyOf (the union of player sets) and TargetPlayer
+ * 131 — PlayerFilter gains AnyOf (the union of player sets) and TargetPlayer
  *      (the first declared player target), carried in an ability's
- *      player_scope inside GameState â€” see PROTOCOL_VERSION's own `/// 131`
+ *      player_scope inside GameState — see PROTOCOL_VERSION's own `/// 131`
  *      entry in crates/lobby-broker/src/protocol.rs. A v130 peer cannot parse
  *      either tag; the exact-match version check at connect refuses the
  *      pairing. Wire 113 moves with it.
- * 130 â€” `GameState::linked_exile_lki` holds one incarnation-bounded
+ * 130 — `GameState::linked_exile_lki` holds one incarnation-bounded
  *      `LinkedExileLki` per departure (CR 400.7); a v129 peer cannot decode a
  *      non-empty map. Wire 112 moves with it; no lobby frame names it.
- * 129 â€” Loop-shortcut and period-confirmation shapes, one bump over 128:
+ * 129 — Loop-shortcut and period-confirmation shapes, one bump over 128:
  *      ShortcutDecisionSchema replaced max_iterations with the pair
  *      measured_repetition_bound and deliverable_capacity, so
  *      WaitingFor.LoopShortcut publishes the threshold the reduction measured
@@ -359,9 +376,9 @@ export class NativeEngineVersionMismatchError extends Error {
  *      optional delayed_origin; GameState drops the recorded loop-action
  *      sequence; ConfirmedPeriod gains its reach and PeriodicDelta its
  *      cleanup pair. Wire 111 moves with it; no lobby frame names it.
- * 127 â€” FilterProp's attachment-referent siblings (AttachedToSource,
+ * 127 — FilterProp's attachment-referent siblings (AttachedToSource,
  *      AttachedToRecipient, AttachedToPlayer) are one AttachedTo prop with a
- *      tagged `to` referent (Source, Recipient, Player, DeclaredTarget) â€” see
+ *      tagged `to` referent (Source, Recipient, Player, DeclaredTarget) — see
  *      PROTOCOL_VERSION's own `/// 127` entry in
  *      crates/lobby-broker/src/protocol.rs. This client hands server frames to
  *      JSON.parse, so a v126 client would take the new shape with no decode
@@ -375,26 +392,26 @@ export class NativeEngineVersionMismatchError extends Error {
  *      CopyRetarget.announcer_election carries a copy announcement's
  *      announcing-opponent election.
  *      (Reserved as 119 and then 121 while under review; it landed after 126, so 119 stays unused.)
- * 128 â€” TargetFilter gains DeclaredPlayer { group } (CR 608.2c + CR 115.1a), the
+ * 128 — TargetFilter gains DeclaredPlayer { group } (CR 608.2c + CR 115.1a), the
  *      player a later clause names after a declared target player. A v127 peer
  *      cannot deserialize it; the exact-match handshake refuses the pairing.
  *      SpellContext also gains outer_declared_players (CR 603.7a), the players a
  *      delayed ability's creating chain named by group, omitted when empty;
  *      amended in place, not bumped. P2P moves in lockstep (wire 110); lobby
  *      messages are unchanged.
- * 126 â€” `ZoneChangeRecord` gains `arrival` (the owner and controller the
+ * 126 — `ZoneChangeRecord` gains `arrival` (the owner and controller the
  *      destination object holds) inside `GameState` and the resolved-rules
  *      journal's zone-change commands; a v125 peer rejects the journal when the
  *      departure owner differs from the command owner. Wire 108 moves with it;
  *      no lobby frame names it.
- * 125 â€” `MulliganDecisionEntry` and `MulliganDeclaration` (inside
+ * 125 — `MulliganDecisionEntry` and `MulliganDeclaration` (inside
  *      `WaitingFor::MulliganDecision`) gain `free_reveals_taken`. Wire 107
  *      moves with it; no lobby frame names it.
- * 124 â€” the resolved-rules journal admits a land-play `rebound_from`
+ * 124 — the resolved-rules journal admits a land-play `rebound_from`
  *      (Library/Graveyard/Exile -> Battlefield) inside
  *      GameState.resolved_rules_journal; a v123 peer rejects the state. Wire
  *      106 moves with it; no lobby frame names it.
- * 123 â€” FilterProp PrepareSpell ("a prepared spell" cast-trigger qualifier,
+ * 123 — FilterProp PrepareSpell ("a prepared spell" cast-trigger qualifier,
  *      CR 722.3d), scope on Effect BecomePrepared / BecomeUnprepared (mass
  *      "each creature you control becomes prepared", CR 722.3a + CR 115.10a),
  *      prepared_copy_source on SpellCastRecord, and prepare_face on
@@ -403,127 +420,127 @@ export class NativeEngineVersionMismatchError extends Error {
  *      cannot parse the new FilterProp tag and would read a mass scope as a
  *      single-target prepare; the exact-match handshake refuses the pairing.
  *      P2P moves in lockstep (wire 105); lobby messages are unchanged.
- * 122 â€” PermissionGrantee gains TriggeringSourceController (a cast grant bound to the
+ * 122 — PermissionGrantee gains TriggeringSourceController (a cast grant bound to the
  *      controller of the object that caused the trigger, CR 603.2 + CR 109.4),
  *      serialized in the ability definitions of GameState; damage events carry
  *      the source incarnation. A v121 peer cannot deserialize the tag. Wire 104
  *      moves with it; no lobby frame names it.
- * 121 â€” GameState's triggered-ability mana ledger records the actual
+ * 121 — GameState's triggered-ability mana ledger records the actual
  *       receiving player alongside the exact trigger definition. A v120 peer
  *       cannot decode a nonempty pair ledger; the exact-match handshake
  *       refuses it. P2P moves in lockstep (wire 103).
- * 120 â€” CR 601.2a spell announcement: GameObject gains spell_announcement,
+ * 120 — CR 601.2a spell announcement: GameObject gains spell_announcement,
  *      GameState gains next_spell_announcement, and GameEvent BecomesTarget
  *      gains the targeter that announced the target. A v119 peer cannot
  *      deserialize the new state. P2P moves in lockstep to wire 102. (119 is
  *      reserved for the Legends of Jidoor PR.)
- * 118 â€” ManaColorSpent on AbilityCondition and TriggerCondition retypes `color` from a
+ * 118 — ManaColorSpent on AbilityCondition and TriggerCondition retypes `color` from a
  *      bare ManaColor to SpentColor (ColorWord or ManaSymbol), serialized in the ability
  *      and trigger definitions of GameState. A v117 peer cannot deserialize the tagged
  *      color. Wire 100 moves with it; no lobby frame names it.
- * 117 â€” DerivedViews gains `shared_piles`, the seat whose Player container stores a
+ * 117 — DerivedViews gains `shared_piles`, the seat whose Player container stores a
  *      shared library and graveyard, omitted for a per-player format. A v116 peer
  *      drops the key and renders per-seat piles for a state whose other seat's
  *      containers are empty. Wire 99 moves with it; no lobby frame names it.
- * 116 â€” DrawSequenceFrame gains `dealer`, the in-game simultaneous-draw dealer,
+ * 116 — DrawSequenceFrame gains `dealer`, the in-game simultaneous-draw dealer,
  *      serialized in the resolution frames behind RESOLUTION_STATE_WIRE_VERSION 5.
  *      A v115 peer refuses the version-5 resolution state. Wire 98 moves with it;
  *      no lobby frame names it.
- * 115 â€” MulliganChoice gains `FreeReveal` and MulliganDeclaration gains `kind`:
+ * 115 — MulliganChoice gains `FreeReveal` and MulliganDeclaration gains `kind`:
  *      the Dandan free reveal mulligan, a MulliganDecision action payload and a
  *      held declaration in GameState.waiting_for. A v114 peer cannot parse the
  *      choice and would carry out a held free reveal as a regular mulligan.
  *      Wire 97 moves with it; no lobby frame names it.
- * 114 â€” WaitingFor::MulliganDecision gains `declared`, the mulligans recorded
+ * 114 — WaitingFor::MulliganDecision gains `declared`, the mulligans recorded
  *      in a CR 103.5 declare round until every player has declared. It is
  *      serialized in GameState.waiting_for, so a v113 peer would drop it
  *      silently. Wire 96 moves with it; no lobby frame names it.
- * 113 â€” ResolvedZoneChangeCommand gains `rebound_from`, the owner a card had
+ * 113 — ResolvedZoneChangeCommand gains `rebound_from`, the owner a card had
  *      before a Hand entry from a shared zone rebound it to the taker
  *      (CR 108.3 as modified by the Dandan announcement). It is serialized
  *      inside GameState.resolved_rules_journal, so a v112 peer would drop it
  *      silently. Wire 95 moves with it; no lobby frame names it.
- * 112 â€” ContinuousModification gains `SubstituteTextWord` (CR 612.1), serialized
+ * 112 — ContinuousModification gains `SubstituteTextWord` (CR 612.1), serialized
  *      inside GameState's transient continuous effects, so a v111 peer cannot
  *      parse the tag.
- * 111 â€” GameFormat gains `Dandan`. It serializes as its Display string and
+ * 111 — GameFormat gains `Dandan`. It serializes as its Display string and
  *      deserializes through FromStr, so a v110 peer cannot parse a GameState or
  *      a lobby FormatConfig that names it. Wire 93 and lobby 16 move with it;
  *      see PROTOCOL_VERSION in crates/lobby-broker/src/protocol.rs.
- * 110 â€” GameState.deferredSpellDelivery holds a resolving spell's move to
+ * 110 — GameState.deferredSpellDelivery holds a resolving spell's move to
  *       its zone while it is paused on its own free-cast window. Older peers
  *       would leave the spell on the stack in no zone; P2P moves in lockstep
  *       (wire 92).
- * 109 â€” CR 201.5a granter binding: ObjectScope gains GrantingObject and
+ * 109 — CR 201.5a granter binding: ObjectScope gains GrantingObject and
  *      SpecificObject, TargetFilter.GrantingObject gains `bound`, PlayerFilter
  *      gains GrantingObjectCaster, and ability, trigger, static, replacement, spell and
  *      trigger-source contexts gain the `granting_object` stamp. A v108 peer
  *      cannot deserialize the new state. P2P moves in lockstep to wire 91.
- * 108 â€” Serialized IllegalTargetsDisposition.StillResolves preserves a root
+ * 108 — Serialized IllegalTargetsDisposition.StillResolves preserves a root
  *       ability's printed resolution rule when its chosen target becomes
  *       illegal. Older peers would silently apply ordinary non-resolution;
  *       P2P moves in lockstep (wire 90).
- * 107 â€” UntilCondition NextMatches gains count ("until you exile two nonland
- *      cards â€¦" â€” Invasion of Alara, CR 608.2c), the paused exile loop keeps
+ * 107 — UntilCondition NextMatches gains count ("until you exile two nonland
+ *      cards …" — Invasion of Alara, CR 608.2c), the paused exile loop keeps
  *      its hits, ZoneChoiceCandidateSource gains ParentTargets, and
  *      SpellContext gains exile_until_batch. A v106 peer would run a counted
  *      loop as a one-card loop; the exact-match handshake refuses the
  *      pairing. P2P moves in lockstep (wire 89); lobby messages are unchanged.
- * 106 â€” Full-game replacement-choice preferences, exact source/definition
+ * 106 — Full-game replacement-choice preferences, exact source/definition
  *       identities, remembered ordering/optional actions, and prompt
  *       eligibility metadata. P2P moves in lockstep (wire 88); lobby-only
  *       messages are unchanged.
- * 105 â€” Deferred mana-source selections carry a nominal base quantity.
+ * 105 — Deferred mana-source selections carry a nominal base quantity.
  *      Full-game peers must agree on the tagged output shape; P2P moves in
  *      lockstep (wire 87). Lobby-only messages are unchanged.
- * 104 â€” PendingCast gains `delved_cards` and the pending cost-move resume
+ * 104 — PendingCast gains `delved_cards` and the pending cost-move resume
  *      swaps DelveManaPayment for the FinalizeDelvedCast completion: delve
  *      fuel is exiled when the total cost is paid (#9400). A v103 peer
  *      cannot parse the new state; the exact-match handshake refuses the
  *      pairing. P2P moves in lockstep (wire 86); lobby is unchanged.
- * 103 â€” FormatConfig loses `allow_experimental_dungeons`: the per-session
+ * 103 — FormatConfig loses `allow_experimental_dungeons`: the per-session
  *      flag is gone and the Baldur's Gate Wilderness pool is format-derived
  *      (Freeform and Freeform Commander only). A v102 peer would parse the
  *      frame but fail the pool closed; the exact-match handshake refuses the
  *      pairing. P2P moves in lockstep (wire 85); lobby carriers move too
  *      (LOBBY_PROTOCOL_VERSION 15).
- * 102 â€” QuantityRef.SharedCardTypes adds a tagged quantity in serialized
+ * 102 — QuantityRef.SharedCardTypes adds a tagged quantity in serialized
  *      ability definitions and saved state. Keep this version in lockstep
  *      with the server and the preceding mana-activation schema.
- * 101 â€” GameEvent.AbilityActivated's kind gains "Mana" (mana-ability
- *      activations now emit it) and an optional departed_source_lki â€” see
+ * 101 — GameEvent.AbilityActivated's kind gains "Mana" (mana-ability
+ *      activations now emit it) and an optional departed_source_lki — see
  *      PROTOCOL_VERSION's own `/// 101` entry in
  *      crates/lobby-broker/src/protocol.rs. The exact-match version check at
  *      connect refuses a v100 pairing.
- * 100 â€” Effect.AdditionalPhase carries segment, a TurnSegment, in place of
+ * 100 — Effect.AdditionalPhase carries segment, a TurnSegment, in place of
  *      phase, followed_by holds TurnSegments, and recipient, an
- *      ExtraPhaseRecipient, replaces target â€” see PROTOCOL_VERSION's own
+ *      ExtraPhaseRecipient, replaces target — see PROTOCOL_VERSION's own
  *      `/// 100` entry in crates/lobby-broker/src/protocol.rs. This client
  *      hands server frames to JSON.parse, so a v99 client would take the new
  *      shape with no decode error; the exact-match version check at connect
  *      refuses the pairing instead.
- * 99 â€” GraveyardCastPermission gains pool (GraveyardPermissionPool):
- *      AnyGraveyard is "from any graveyard" (CR 404.1 + CR 601.3 â€” The Great
+ * 99 — GraveyardCastPermission gains pool (GraveyardPermissionPool):
+ *      AnyGraveyard is "from any graveyard" (CR 404.1 + CR 601.3 — The Great
  *      Work). A v98 peer would default it to the own graveyard and refuse a
  *      cast the permission allows; the exact-match handshake refuses the
  *      pairing. P2P moves in lockstep (wire 81); lobby messages are unchanged.
- * 98 â€” PerPlayerScope gains Opponents (CR 102.2 + CR 102.3), written inside
+ * 98 — PerPlayerScope gains Opponents (CR 102.2 + CR 102.3), written inside
  *      ZoneOwner as {"Each":"Opponents"}; ZoneOpponentChooserPurpose gains
  *      PerPlayerChoiceOrder (CR 101.4c) and SubstituteChooser (CR 800.4g);
  *      the parked per-player zone-choice frame gains current and nominee. A v97 peer cannot deserialize them; the exact-match handshake
  *      refuses the pairing. P2P moves in lockstep (wire 80); lobby messages
  *      are unchanged.
- * 97 â€” ResolvedAbility.target_reads and AbilityDefinition.target_reads
+ * 97 — ResolvedAbility.target_reads and AbilityDefinition.target_reads
  *      (TargetReadOrigin) are serialized: a ParentAnnouncement instruction
  *      reads the object its immediately preceding instruction announced
  *      (CR 115.1 + CR 608.2c) and announces no target slot of its own. A v96
  *      peer would default the field; the exact-match handshake refuses the
  *      pairing. P2P moves in lockstep (wire 79); lobby messages are unchanged.
- * 96 â€” QuantityRef.NameStickerLetterCount adds a tagged name-sticker statistic
+ * 96 — QuantityRef.NameStickerLetterCount adds a tagged name-sticker statistic
  *      to GameState ability definitions. A v95 peer cannot decode the new tag;
  *      full-game peers and P2P move in lockstep (wire 78). Lobby messages are
  *      unchanged.
- * 95 â€” FilterProp.Unblocked is reshaped to FilterProp.BlockStatus { status:
+ * 95 — FilterProp.Unblocked is reshaped to FilterProp.BlockStatus { status:
  *      AttackerBlockStatus } (Blocked | Unblocked), so "blocked creature"
  *      filters (CR 509.1h: an attacking creature stays blocked for the rest of
  *      combat once blocked) are expressible. The legacy "Unblocked" tag still
@@ -531,16 +548,16 @@ export class NativeEngineVersionMismatchError extends Error {
  *      cannot parse the new "BlockStatus" tag carried in GameState ability
  *      definitions. Full-game peers and P2P move in lockstep (wire 77); lobby
  *      messages are unchanged.
- * 94 â€” SpellContext.creation_lookback_event carries the battlefield departure a
+ * 94 — SpellContext.creation_lookback_event carries the battlefield departure a
  *      phase-delayed triggered ability was created under (CR 603.7 + CR 603.10a
  *      + CR 608.2h), and TriggerSourceContext.mana_cost captures the observed
  *      object's layered mana cost (CR 707.2 + CR 708.2a). A v93 peer would drop
  *      both; the exact-match handshake refuses the pairing. P2P moves in
  *      lockstep (wire 76); lobby messages are unchanged.
- * 93 â€” ReductionProvenance gains SacrificedForCost, the reduction an Emerge
+ * 93 — ReductionProvenance gains SacrificedForCost, the reduction an Emerge
  *      or Offering sacrifice earns before a deferred target declaration. A
  *      v92 peer cannot deserialize it. P2P moves in lockstep to wire 75.
- * 92 â€” ResolvedAbility.parent_target_missing_reason is serialized and
+ * 92 — ResolvedAbility.parent_target_missing_reason is serialized and
  *      ParentTargetMissingReason gains RevealUntil (CR 701.20a + CR 603.12),
  *      the reveal-until whiff verdict read by the new
  *      EffectOutcomeSignal.RevealUntilMatched reflexive guard on resume, plus
@@ -550,101 +567,101 @@ export class NativeEngineVersionMismatchError extends Error {
  *      peer cannot parse the new tags; the exact-match handshake
  *      refuses the pairing. P2P moves in lockstep (wire 74); lobby messages
  *      are unchanged.
- * 91 â€” PendingManaAbility.chosen_counter_count is retyped to the required
+ * 91 — PendingManaAbility.chosen_counter_count is retyped to the required
  *      chosen_counter_counts array (#9207). A v90 peer cannot deserialize
  *      the new state. P2P moves in lockstep to wire 73.
- * 90 â€” FormatConfig gains `allow_experimental_dungeons`, the per-session
+ * 90 — FormatConfig gains `allow_experimental_dungeons`, the per-session
  *      capability flag behind the experimental dungeon pool. A v89 peer
  *      parses a v90 GameState but runs the game without the host's pool;
  *      the exact-match handshake refuses the pairing. P2P moves in lockstep
  *      (wire 72); lobby carriers move too (LOBBY_PROTOCOL_VERSION 13).
- * 89 â€” CR 118.9b graveyard permissions that require a casting method (Sabin,
+ * 89 — CR 118.9b graveyard permissions that require a casting method (Sabin,
  *      Master Monk: "using its blitz ability"): GraveyardCastPermission gains
  *      required_cast_keyword and casting-menu options gain additional_cost. A
  *      v88 peer would drop the method silently and admit a printed-cost cast.
  *      The same bump carries the announced graveyard permission (CR 601.2a-b):
  *      casting-menu options gain authority, ChoosePermanentTypeSlot gains
  *      permission, and the cast's context gains graveyard_permission_latch.
- * 88 â€” WaitingFor.DeclareBlockers gains block_capacities (CR 509.1a +
- *      CR 101.1): each able blocker's block limit, null for any number â€” see
+ * 88 — WaitingFor.DeclareBlockers gains block_capacities (CR 509.1a +
+ *      CR 101.1): each able blocker's block limit, null for any number — see
  *      PROTOCOL_VERSION's own `/// 88` entry in
  *      crates/lobby-broker/src/protocol.rs. This client renders the map
  *      directly as the pile stepper's ceiling; the exact-match version check
  *      at connect refuses a mismatched pairing.
- * 87 â€” WaitingFor.DigRestSplitChoice and Effect.Dig.rest_split_top_count
+ * 87 — WaitingFor.DigRestSplitChoice and Effect.Dig.rest_split_top_count
  *      extend serialized game state for Telling Time-class rest piles. The
  *      exact handshake refuses v86 peers; P2P moves in lockstep (wire 69).
  *      Lobby messages are unchanged.
- * 86 â€” GameEvent gained the tagged Melded variant. Full-game event frames
+ * 86 — GameEvent gained the tagged Melded variant. Full-game event frames
  *      can carry it, so the exact handshake refuses v85 peers. P2P moves in
  *      lockstep (wire 68); lobby messages are unchanged.
- * 85 â€” GameEvent gained the tagged DieRollIgnored { player_id, sides, result }
+ * 85 — GameEvent gained the tagged DieRollIgnored { player_id, sides, result }
  *      display event. StateUpdate carries GameEvent[]; older peers would
  *      accept the connection but omit ignored dice from the roll overlay.
  *      P2P moves in lockstep; lobby messages are unchanged.
- * 84 â€” WaitingFor.ChooseDungeon options (DungeonPreview) gained required
+ * 84 — WaitingFor.ChooseDungeon options (DungeonPreview) gained required
  *      `card`, `rooms`, and `room_count`: the whole dungeon behind each
  *      choice, so the prompt previews each card instead of describing only
  *      its entry room. A PARSE bump like 67, not a capability bump like 24:
  *      none of the fields is serde-optional, so a v83 peer fails
  *      deserialization on a snapshot paused at the dungeon choice, and the
- *      reverse skew throws in render â€” this client reads `card`
+ *      reverse skew throws in render — this client reads `card`
  *      unconditionally to resolve the preview art. Saved games still load
  *      through the choice-preview migration. P2P moves in lockstep; lobby
  *      messages are unchanged.
- * 83 â€” CR 601.2c + CR 602.2b target-gated activation costs (Professor Hojo,
+ * 83 — CR 601.2c + CR 602.2b target-gated activation costs (Professor Hojo,
  *      Kopala): ReduceAbilityCost statics carry targets and frequency,
  *      GameState journals each turn's activations, and the activation cost
  *      carrier holds the target-settlement lock. A v82 peer would drop these
  *      silently and price one activation differently.
- * 82 â€” Added-phase anchoring (CR 500.8â€“500.10): AdditionalPhase.after is an
+ * 82 — Added-phase anchoring (CR 500.8–500.10): AdditionalPhase.after is an
  *      ExtraPhaseAnchor, DelayedTriggerCondition gained AtBeginningOfAddedPhase,
  *      ExtraPhase and extra_phase_resume entries carry a TurnSegment and a
  *      minted id, and steps_started_this_turn replaces the two per-turn step
- *      counters â€” see PROTOCOL_VERSION's own `/// 82` entry in
+ *      counters — see PROTOCOL_VERSION's own `/// 82` entry in
  *      crates/lobby-broker/src/protocol.rs. This client hands server frames to
  *      JSON.parse, so a v81 client would take the new shapes with no decode
  *      error; the exact-match version check at connect refuses the pairing
  *      instead.
- * 81 â€” AlternativeCastChoice.keyword gains { type: "Surge" } in serialized
+ * 81 — AlternativeCastChoice.keyword gains { type: "Surge" } in serialized
  *      GameState (CR 702.117a); an older client's modal cannot render it. The
  *      exact-match version check at connect refuses the pairing.
- * 80 â€” ExileLinkKind.HideawayLookable carries { grant, lookers,
+ * 80 — ExileLinkKind.HideawayLookable carries { grant, lookers,
  *      source_incarnation } in serialized GameState, and
  *      DerivedViews.linked_exile_ids is new and rendered directly. The
  *      exact-match version check at connect refuses the pairing.
- * 78 â€” Duration::UntilEvent (the event-deadline duration) and
+ * 78 — Duration::UntilEvent (the event-deadline duration) and
  *      TransientContinuousEffect's duration_event_source are new in serialized
  *      GameState. This client hands server frames to JSON.parse, so a v77
  *      client would take the new shape with no decode error; the exact-match
  *      version check at connect refuses the pairing instead.
- * 77 â€” Prospective: no GameState or GameAction shape change lands in this
- *      bump. Moved ahead of new GameFormat variants â€” see PROTOCOL_VERSION's
+ * 77 — Prospective: no GameState or GameAction shape change lands in this
+ *      bump. Moved ahead of new GameFormat variants — see PROTOCOL_VERSION's
  *      own `/// 77` entry in
  *      crates/lobby-broker/src/protocol.rs. Full-game sessions stay
  *      exact-match on both ends (MIN_SUPPORTED_SERVER_PROTOCOL below and
  *      MIN_SUPPORTED_PROTOCOL in crates/server-core/src/protocol.rs), so no
  *      older peer ever receives a v77 GameState at all.
- * 73 â€” `CastingVariantChoiceOption` gained required `face`, making a paused
+ * 73 — `CastingVariantChoiceOption` gained required `face`, making a paused
  *      Fuse split-card menu an exact `(variant, face)` tuple. This integrated
  *      state also carries a resolution-owned modal choice's additional cost so
  *      a paid graveyard cast cannot lose it across face election. Old snapshots
  *      cannot safely bind either payload, so full-game peers must refuse skew.
- * 72 â€” `ResolutionCastFacePolicy` replaces the legacy free-cast-window filter,
+ * 72 — `ResolutionCastFacePolicy` replaces the legacy free-cast-window filter,
  *      and `WaitingFor.CastOffer { kind: GraveyardPaidCast }` carries two additive
  *      fields: additional_cost (Ogre Battlecaster's "{R}{R} in addition to its
  *      other costs", CR 601.2b) and installed_triggers (the delayed triggers a
  *      declined offer withdraws). Both are serde-defaulted, so a v71 peer
- *      parses a v72 offer â€” and then pays the offered card at its printed
+ *      parses a v72 offer — and then pays the offered card at its printed
  *      cost alone while the v72 host charges the addition. The offer also
- *      opens for seven more printed cards (the paid "cast target â€¦ card from
+ *      opens for seven more printed cards (the paid "cast target … card from
  *      your graveyard" class, CR 608.2g) that v71 granted a lingering
  *      permission instead. Exact-match refuses the pairing. P2P moves in
  *      lockstep (wire 54); lobby messages are unchanged. See PROTOCOL_VERSION
  *      in crates/lobby-broker/src/protocol.rs for the full entry.
- * 71 â€” DraftKind.Winston and DraftAction::SharedStackDecision are serialized
+ * 71 — DraftKind.Winston and DraftAction::SharedStackDecision are serialized
  *      by draft WebSocket messages. A PARSE bump like 27 and 34, not a
- *      capability bump like 24 â€” but a CONDITIONAL one: neither type carries
+ *      capability bump like 24 — but a CONDITIONAL one: neither type carries
  *      a serde fallback variant, so a v70 peer fails deserialization outright
  *      on "Winston" or on the SharedStackDecision tag, and a v71 peer cannot
  *      round-trip a frame a v70 peer would have to invent. The break runs in
@@ -652,7 +669,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      pod's frames.
  *      DraftDelta::SharedStackDecisionApplied, the two shared-stack
  *      DraftError variants (InvalidSharedStackConfiguration and
- *      SharedStackDecisionRefused â€” a third, SharedStackRequiresHumanSeats,
+ *      SharedStackDecisionRefused — a third, SharedStackRequiresHumanSeats,
  *      existed while this entry was first written and was deleted when
  *      shared-stack pods gained bot seats) and PickStatus.Waiting ride the
  *      same condition.
@@ -661,7 +678,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      DraftPlayerView.distribution are REQUIRED, non-optional fields on
  *      every kind's frames, so a v70 server's view fails to satisfy a v71
  *      client's shape for Premier, Traditional, Sealed and CommanderDraft too
- *      â€” not just Winston. That is what this version gate is for and it
+ *      — not just Winston. That is what this version gate is for and it
  *      already refuses the mismatch. drafted_card_count is a count and never
  *      an identity, and is public in every kind (a pick-and-pass seat's total
  *      follows from the pick number); distribution is a procedure fact
@@ -671,44 +688,44 @@ export class NativeEngineVersionMismatchError extends Error {
  *      DraftPlayerView.{shared_stack, play_first_chooser},
  *      SpectatorDraftView.shared_stack and DraftSession.shared_stack are
  *      additive and serde-optional, which is why their TypeScript mirrors are
- *      declared optional â€” they are listed because 71 carries them, not
+ *      declared optional — they are listed because 71 carries them, not
  *      because they force it. play_first_chooser is ADVISORY: no engine path
  *      enforces it, because game one's starting player still comes from
  *      CR 103.1's contest. Lobby messages are unchanged: draftKind is a
  *      length-bounded string. See PROTOCOL_VERSION in
  *      crates/lobby-broker/src/protocol.rs for the full entry.
- * 70 â€” OutsideGameChoiceSource.BoosterPack replaced set_code with a required
+ * 70 — OutsideGameChoiceSource.BoosterPack replaced set_code with a required
  *      origin: PackOrigin ({ type: "Set", data } or { type: "Cube" }), so an
  *      opened pack's OutsideGameChoice no longer decodes on a v69 peer and a
  *      v69 frame renders no pack origin here. The exact handshake refuses the
  *      pairing. P2P moves in lockstep; lobby messages are unchanged.
- * 69 â€” GameEvent gained the tagged variant ExtraTurnCreated { player_id,
+ * 69 — GameEvent gained the tagged variant ExtraTurnCreated { player_id,
  *      anchor }. Event-bearing full-server frames can now carry that tag, so
  *      the exact handshake must refuse v68 peers that do not share the variant
  *      contract. P2P moves in lockstep; lobby messages are unchanged.
- * 68 â€” PendingManaAbility.chosen_tappers changed from Vec<ObjectId> to
+ * 68 — PendingManaAbility.chosen_tappers changed from Vec<ObjectId> to
  *      Option<Vec<ObjectId>> (#8698), so an ANSWERED zero-tapper selection of
  *      the CR 107.3a X-sentinel form (X=0) is distinguishable from a selection
  *      stage nobody has answered. A PARSE bump like 67: the field carries no
- *      serde default, so the pre-68 unanswered shape â€” which omitted the field
- *      entirely â€” is a missing-field error rather than a silent decode. The
+ *      serde default, so the pre-68 unanswered shape — which omitted the field
+ *      entirely — is a missing-field error rather than a silent decode. The
  *      reverse skew is what made the bump mandatory: Some([]) serializes as
  *      `chosen_tappers: []`, which a v67 build reads through its is_empty()
  *      gate as *unanswered*, re-surfacing the same PayCost prompt forever.
- * 67 â€” DerivedViews.dungeon_rooms entries gained required `card` and `rooms`
+ * 67 — DerivedViews.dungeon_rooms entries gained required `card` and `rooms`
  *      fields, carrying the dungeon card's Scryfall identity and the whole
  *      room graph (each room's edges plus its position on the printed card).
  *      A PARSE bump like 66, not a capability bump like 24: neither field is
  *      serde-optional, so a v66 peer fails deserialization on any snapshot
  *      where a player is venturing rather than degrading silently. The
- *      reverse skew is equally hard â€” this client destructures `card`
+ *      reverse skew is equally hard — this client destructures `card`
  *      unconditionally to resolve the card art, so a v66 host would throw in
  *      render, not merely omit the map panel.
- * 65 â€” DraftMatchStart now announces the exact Full-session identity for the
+ * 65 — DraftMatchStart now announces the exact Full-session identity for the
  *      spawned match. Draft reconnect attaches the authenticated draft seat
  *      to that Full-session lifetime, and Full follow-up frames carry the key
  *      needed to reject stale-generation traffic. Lobby messages are unchanged.
- * 61 â€” Effect.ChooseCounterKind gained domain and chooser (CR 608.2d): the
+ * 61 — Effect.ChooseCounterKind gained domain and chooser (CR 608.2d): the
  *      population a counter-kind choice draws from, and whether the game draws
  *      one at random instead of prompting. Serde-additive, so an older payload
  *      reads as the on-target/controller form; the other direction drops the
@@ -716,43 +733,43 @@ export class NativeEngineVersionMismatchError extends Error {
  *      itself. Abilities ride inside GameObject, so every GameState frame
  *      carries the shape. The full handshake refuses stale peers. Lobby
  *      messages are unchanged.
- * 60 â€” DerivedViews.back_face_spell_costs publishes, for each card the viewer
+ * 60 — DerivedViews.back_face_spell_costs publishes, for each card the viewer
  *      may cast whose player chooses a spell face at cast time (a split card
- *      such as a Room, a spell//spell MDFC â€” CR 709.3 + CR 712.11b), the live
+ *      such as a Room, a spell//spell MDFC — CR 709.3 + CR 712.11b), the live
  *      cost of the OTHER face; spell_costs reports the live face only. The
  *      cost badge renders both faces from this map. Serde-additive, but the
  *      client renders the map directly, so an older server would silently
  *      show a Room's single-face badge again. The full handshake refuses
  *      stale peers. Lobby messages are unchanged.
- * 59 â€” InteractionResponseSpec.shortcut.preview changed from a single optional
+ * 59 — InteractionResponseSpec.shortcut.preview changed from a single optional
  *      InteractionShortcutPreview to an Array<InteractionShortcutPreview>, one
  *      element per offerable count, and each element gained an allocation list
  *      stating the declaration's shape over that element's count. The retype is
- *      the break; the added list is not â€” it is default and skip-if-empty and
+ *      the break; the added list is not — it is default and skip-if-empty and
  *      parses in both directions. A PARSE bump like 23, 36 and 42, not a
  *      capability bump like 24, and asymmetric: a v58 peer always emits the
  *      preview key (null or an object) and neither deserializes into a list, so
- *      v58 â†’ v59 fails on every shortcut offer; v59 â†’ v58 fails only when a
+ *      v58 → v59 fails on every shortcut offer; v59 → v58 fails only when a
  *      preview is actually carried, because an empty list omits the key and a
  *      v58 peer reads that as absent. No shim ships.
  *      MIN_SUPPORTED_SERVER_PROTOCOL below and MIN_SUPPORTED_PROTOCOL in
  *      crates/server-core/src/protocol.rs are each equal to their own
- *      PROTOCOL_VERSION, so the pairing is refused at the handshake â€” which
+ *      PROTOCOL_VERSION, so the pairing is refused at the handshake — which
  *      matters here because this client parses server frames with JSON.parse and
  *      would otherwise read the new shape silently. See PROTOCOL_VERSION in
  *      crates/lobby-broker/src/protocol.rs for the full entry.
- * 58 â€” `DraftPlayerView::commanders_required` publishes the procedure-owned
+ * 58 — `DraftPlayerView::commanders_required` publishes the procedure-owned
  *      commander designation count. The client renders designation controls
  *      from this required field rather than inferring them from `DraftKind`.
- * 57 â€” `GameAction::BeginResolveAll` gained `scope: ResolveAllScope` (`Own`
+ * 57 — `GameAction::BeginResolveAll` gained `scope: ResolveAllScope` (`Own`
  *      binds only the requester and resolves immediately; `Shared` opens the
  *      table-wide consent protocol), and `PriorityPassingMode` gained
  *      `FullControl`, which is now engine-authoritative rather than a
  *      frontend-only toggle.
- * 56 â€” Host-only authoritative-state export request/response variants. Native
+ * 56 — Host-only authoritative-state export request/response variants. Native
  *      P2P sends each player a redacted view, so the host must ask its local
  *      server for the trusted engine envelope rather than export that view.
- * 55 â€” DerivedViews.room_half_identities publishes both halves of every
+ * 55 — DerivedViews.room_half_identities publishes both halves of every
  *      battlefield Room in printed order, resolved through the COPIED halves
  *      for a permanent that copies a Room (CR 709.5b + CR 707.2). The unlock
  *      offer names the half and shows its unlock cost (CR 709.5e) from this
@@ -760,65 +777,65 @@ export class NativeEngineVersionMismatchError extends Error {
  *      card. Serde-additive, but the client renders the map directly, so an
  *      older server would silently label every door "Tap for Mana" again. The
  *      full handshake refuses stale peers. Lobby messages are unchanged.
- * 54 â€” CreateDraftWithSettings now carries a tagged DraftSourceIntent. A
+ * 54 — CreateDraftWithSettings now carries a tagged DraftSourceIntent. A
  *      Chaos client sends candidate set codes only; the Full server resolves
  *      and persists the private seat-by-round assignment matrix. The full
  *      handshake refuses stale peers. Lobby messages are unchanged.
- * 53 â€” DraftPlayerView.launch_capability publishes the engine-authorized
+ * 53 — DraftPlayerView.launch_capability publishes the engine-authorized
  *      post-draft multiplayer launch. The client renders this procedure-owned
  *      capability instead of inferring it from DraftKind; an older server
  *      would omit it and silently hide a completed Commander pod's launch.
  *      The full-game handshake refuses that capability mismatch. Lobby
  *      messages are unchanged.
- * 52 â€” DerivedViews.storm_count publishes the engine-owned number of copies a
+ * 52 — DerivedViews.storm_count publishes the engine-owned number of copies a
  *      current Storm trigger will create, or a newly cast Storm spell would
  *      create. The field is serde-additive, but this client renders that
  *      scalar directly rather than deriving Storm from raw state; a v51 host
  *      would silently omit the HUD status. The full-game handshake refuses
  *      that capability mismatch. Lobby messages are unchanged.
- * 51 â€” Casting permissions gained a typed lifetime: ExileWithAltAbilityCost
+ * 51 — Casting permissions gained a typed lifetime: ExileWithAltAbilityCost
  *      gained duration and source_id, ExileWithAltCost gained source_id beside
  *      the duration it already had (additive, serde
  *      defaults), and Duration gained the WhileControllingHost and
  *      WhileHostOnBattlefield variants (CR 611.2b). Each new Duration tag is a
- *      one-way parse break â€” a v50 peer cannot deserialize a snapshot
- *      containing it â€” so the handshake refuses the pairing instead of
+ *      one-way parse break — a v50 peer cannot deserialize a snapshot
+ *      containing it — so the handshake refuses the pairing instead of
  *      degrading.
- * 50 â€” FormatConfig gained default_deck_copy_limit, the resolved per-format
+ * 50 — FormatConfig gained default_deck_copy_limit, the resolved per-format
  *      deck-copy ceiling (CR 100.2a / CR 100.2b / CR 903.5b) max_deck_copies
  *      and the deck-compatibility admission path now both read, replacing
  *      per-function hardcoded literals and bare-GameFormat-derived defaults
  *      so the two authorities can't disagree. A CAPABILITY bump like 24: the
  *      field is serde-optional (fail-closed UpTo(1), the tightest possible
- *      cap), so a peer missing it still deserializes GameState cleanly â€” but
+ *      cap), so a peer missing it still deserializes GameState cleanly — but
  *      silently loses the format's real declared limit and falls back to the
  *      singleton cap, wrongly rejecting a legal 4-of deck rather than
  *      admitting one it shouldn't. Symmetric in both directions. See
  *      PROTOCOL_VERSION in crates/lobby-broker/src/protocol.rs for the full
  *      entry; lobby carriers move too, see LOBBY_PROTOCOL_VERSION 3 below.
- * 49 â€” Full-server DraftPlayerView payloads require public-seat
+ * 49 — Full-server DraftPlayerView payloads require public-seat
  *      active_pack_count. An older v48 server can complete the handshake yet
  *      omit that additive field while this client accepts the JSON, leaving it
  *      unable to render a seat's active-pack presence. The Full handshake
  *      refuses that capability mismatch. Lobby messages are unchanged.
- * 48 â€” Full-server DraftPlayerView payloads require the engine-owned
+ * 48 — Full-server DraftPlayerView payloads require the engine-owned
  *      pick_selection_mode. An older server can omit it while this client
  *      accepts the JSON, then silently treats an ordered Commander Draft pick
  *      as direct selection. Lobby messages are unchanged.
- * 47 â€” Resolution-time optional fixed sacrifice payments add a typed
+ * 47 — Resolution-time optional fixed sacrifice payments add a typed
  *      replacement-resumable continuation to GameState.
- * 46 â€” QuantityRef.Aggregate and QuantityRef.TrackedSetAggregate were
+ * 46 — QuantityRef.Aggregate and QuantityRef.TrackedSetAggregate were
  *      replaced in serialized GameState payloads by the canonical
  *      QuantityRef.PropertyAggregate tag with a validated source object. New
  *      peers migrate both old input tags, but a v45 peer cannot deserialize
  *      the canonical tag emitted by v46, so the full-game handshake refuses
  *      that one-way parse mismatch. Lobby messages are unchanged.
- * 45 â€” GameState gained serialized cast-occurrence provenance and prepared-copy links.
- * 44 â€” Resolution-time optional PayCost(OneOf) branch choice added a
+ * 45 — GameState gained serialized cast-occurrence provenance and prepared-copy links.
+ * 44 — Resolution-time optional PayCost(OneOf) branch choice added a
  *      serialized WaitingFor/GameAction pair.
- * 43 â€” Engine-owned stack-resolution automation retired the legacy native
+ * 43 — Engine-owned stack-resolution automation retired the legacy native
  *      Resolve All request/result wire messages.
- * 42 â€” FormatConfig.deck_size changed from a bare u16 to the adjacently
+ * 42 — FormatConfig.deck_size changed from a bare u16 to the adjacently
  *      tagged DeckSizeRule enum (Minimum(u16) / Exactly(u16)), because
  *      CR 903.13f(1) makes Commander Draft a command-zone format with a
  *      minimum rather than an exact size, and GameFormat gained a
@@ -826,36 +843,36 @@ export class NativeEngineVersionMismatchError extends Error {
  *      capability bump like 24: FormatConfig::deck_size carries neither a
  *      serde default nor a deserialize_with, so a v41 peer's "deck_size": 60
  *      fails against the adjacently tagged enum and a v42 peer's
- *      {"type":"Minimum","data":60} fails against a v41 u16 â€” the break is
+ *      {"type":"Minimum","data":60} fails against a v41 u16 — the break is
  *      unconditional and runs in BOTH directions, for every format.
  *      GameState.format_config's serde default does NOT rescue it: a
  *      field-level default applies only when the key is ABSENT, and an old
  *      peer sends the key present with the old inner shape, so the default
  *      never runs. The GameFormat::CommanderDraft variant is the second and
- *      narrower half â€” it breaks only when that variant is actually
+ *      narrower half — it breaks only when that variant is actually
  *      serialized.
- * 41 â€” Operational failure responses are correlated to their pending action.
- * 40 â€” Action rejection responses carry engine-owned structured context.
- * 39 â€” ManaRestriction.CannotCastSpellFromZone adds a serialized
+ * 41 — Operational failure responses are correlated to their pending action.
+ * 40 — Action rejection responses carry engine-owned structured context.
+ * 39 — ManaRestriction.CannotCastSpellFromZone adds a serialized
  *      GameState/ManaUnit restriction used by Karolina Dean. Older peers
  *      cannot deserialize that externally tagged enum variant.
- * 38 â€” WaitingFor.ChooseObjectsSelection publishes the resolving effect's
+ * 38 — WaitingFor.ChooseObjectsSelection publishes the resolving effect's
  *      min and optional max bounds. Older clients silently ignore these
  *      additive fields and offer selections outside the engine-authoritative
  *      range, so the full-game handshake refuses that capability mismatch.
- * 37 â€” PayCostKind::TapCreatures changed from { aggregate:
+ * 37 — PayCostKind::TapCreatures changed from { aggregate:
  *      Option<TapCreaturesAggregate> } to a required { mode:
- *      TapCreaturesSelectionMode } (Fixed/VariableX/Aggregate) â€” the fix that
+ *      TapCreaturesSelectionMode } (Fixed/VariableX/Aggregate) — the fix that
  *      also unlocks the u32::MAX X-sentinel tap-cost form (Glacian,
  *      Powerstone Engineer + 8 sibling cards, #7799). mode carries no serde
  *      default: a GameState snapshot paused mid-TapCreatures payment
  *      (Crew/Saddle/Teamwork/Conspire, or the newly-unlocked X-sentinel form)
  *      under the old aggregate shape now fails deserialization rather than
  *      risk silently misclassifying an aggregate payment as fixed-count (or
- *      vice versa) â€” exactly the ambiguity TapCreaturesSelectionMode exists to
+ *      vice versa) — exactly the ambiguity TapCreaturesSelectionMode exists to
  *      make unrepresentable. Old and new peers can't parse each other's
  *      serialized snapshots while such a payment is in flight.
- * 36 â€” WaitingFor.ChooseDungeon.options changed from DungeonId[] to
+ * 36 — WaitingFor.ChooseDungeon.options changed from DungeonId[] to
  *      DungeonPreview[], and ChooseDungeonRoom dropped option_names, gained a
  *      required dungeon_name, and changed options from number[] to
  *      RoomPreview[], so each option carries the room's printed name and
@@ -863,34 +880,34 @@ export class NativeEngineVersionMismatchError extends Error {
  *      bump like 24: none of the new fields carry a serde default, so a v35
  *      peer fails deserialization on a dungeon-choice GameState outright
  *      rather than degrading silently. DerivedViews.dungeon_rooms rides along
- *      in the same bump â€” it IS serde-optional, but this client deleted its
+ *      in the same bump — it IS serde-optional, but this client deleted its
  *      dungeon_progress room-index derivation, so a v35 server that omits it
  *      would leave this client rendering no dungeon badge at all.
- * 35 â€” DerivedViews.current_target_kind publishes the engine's CR 115.1
+ * 35 — DerivedViews.current_target_kind publishes the engine's CR 115.1
  *      classification of the live target announcement. A CAPABILITY bump like
  *      24 and 32, not a parse bump: the field is serde-optional, but this
  *      client deleted inferTargetNoun, so a v34 server that omits it would
- *      leave this client naming no target at all â€” silently, with no parse
+ *      leave this client naming no target at all — silently, with no parse
  *      error to catch it. The handshake is the only place that pairing is
  *      refusable.
- * 34 â€” DraftKind.CommanderDraft (CR 903.13a) is serialized by draft WebSocket
+ * 34 — DraftKind.CommanderDraft (CR 903.13a) is serialized by draft WebSocket
  *      messages, and DraftAction::Pick renamed card_instance_id to
  *      card_instance_ids: Vec<String> for a whole CR 903.13b pick step. A
- *      PARSE bump, not a capability bump â€” the renamed field carries no serde
+ *      PARSE bump, not a capability bump — the renamed field carries no serde
  *      default. See PROTOCOL_VERSION in crates/lobby-broker/src/protocol.rs
  *      for the full entry, including what it does and does not gate on the
  *      lobby.
- * 33 â€” LegendCandidateIdentity adds Unknown so face-down legend candidates do
+ * 33 — LegendCandidateIdentity adds Unknown so face-down legend candidates do
  *      not publish an affirmative original/copy identity.
- * 32 â€” DerivedViews.legend_candidate_identities publishes the engine-authored
+ * 32 — DerivedViews.legend_candidate_identities publishes the engine-authored
  *      original/copy/token-copy identity for each active legend-rule choice. The
  *      field is serde-optional, but the client deliberately no longer derives this
  *      rules-sensitive identity from raw objects; an older server would silently
  *      omit every choice identity.
- * 31 â€” WaitingFor::LoopShortcut publishes the engine-issued declaration, and
+ * 31 — WaitingFor::LoopShortcut publishes the engine-issued declaration, and
  *      InteractionResponseSpec::Shortcut publishes preview, the per-axis
  *      consequence of the offered count. Both are optional and neither type
- *      sets deny_unknown_fields, so a v30 peer still PARSES the frame â€” a
+ *      sets deny_unknown_fields, so a v30 peer still PARSES the frame — a
  *      capability bump like 24, not a parse bump. UNLIKE 24, no pairing is left
  *      for the capability gap to bite in, so this entry names no silent-drop
  *      hazard: full-game floors are exact-match on BOTH sides
@@ -905,47 +922,47 @@ export class NativeEngineVersionMismatchError extends Error {
  *      all, and which reject_if_disabled in crates/phase-server/src/main.rs
  *      answers under ServerMode::LobbyOnly with an explicit rejection rather
  *      than a silent drop.
- * 30 â€” Serialized player-action completion provenance and modal continuations.
- * 27 â€” Added DraftKind.Sealed, serialized by draft WebSocket messages.
- * 26 â€” Added ActionNoOp acknowledgement for accepted transport no-ops.
- * 25 â€” DebugCardEntries added a serialized, private resolution frame for
+ * 30 — Serialized player-action completion provenance and modal continuations.
+ * 27 — Added DraftKind.Sealed, serialized by draft WebSocket messages.
+ * 26 — Added ActionNoOp acknowledgement for accepted transport no-ops.
+ * 25 — DebugCardEntries added a serialized, private resolution frame for
  *      multi-card sandbox battlefield entries that pause for replacement or
  *      as-enters choices. Old peers cannot deserialize that GameState shape.
- * 24 â€” DerivedViews.unbounded_families carries the engine-owned per-seat family
- *      collapse state behind each âˆž badge. A CAPABILITY bump, not a parse bump:
+ * 24 — DerivedViews.unbounded_families carries the engine-owned per-seat family
+ *      collapse state behind each ∞ badge. A CAPABILITY bump, not a parse bump:
  *      the field is serde-optional, but this client deleted its row-flag
  *      OR-fold derivation, so a v23 server that omits the field would leave
- *      this client rendering NO infinity badges â€” silently, with no parse error
+ *      this client rendering NO infinity badges — silently, with no parse error
  *      to catch it. The handshake is the only place that pairing is refusable.
- * 23 â€” PayableResource::ManaGeneric changed from { per_x } to
- *      { base_cost: ManaCost } (#6410) â€” a GameState payload field type
+ * 23 — PayableResource::ManaGeneric changed from { per_x } to
+ *      { base_cost: ManaCost } (#6410) — a GameState payload field type
  *      change, and base_cost intentionally carries no serde default (a
  *      missing base_cost must fail deserialization, not silently resolve
  *      to a zero-cost payment), so old and new peers can't parse each
  *      other's serialized state.
- * 22 â€” Viewer interaction projections and semantic object-action identities.
- * 21 â€” Native P2P host bridge identity and server-authored state revisions.
- * 20 â€” Actor-scoped priority-passing settings and filtered per-player state.
- * 19 â€” Connive exact subject snapshots and resident paused post-replacement
+ * 22 — Viewer interaction projections and semantic object-action identities.
+ * 21 — Native P2P host bridge identity and server-authored state revisions.
+ * 20 — Actor-scoped priority-passing settings and filtered per-player state.
+ * 19 — Connive exact subject snapshots and resident paused post-replacement
  *      drains changed the serialized full-game state. Phase 4 later pinned
  *      the existing v2 resolution wire shape without another protocol change.
- * 17 â€” Dedicated companion deck slot and typed companion-reveal choices.
- * 16 â€” Meld pair/attacking-entry choices after the mana-payment preview variants.
- * 15 â€” Mana-payment preview request/response variants.
- * 75 â€” ResolutionCastCleanup, its delayed-trigger receipts, and each
+ * 17 — Dedicated companion deck slot and typed companion-reveal choices.
+ * 16 — Meld pair/attacking-entry choices after the mana-payment preview variants.
+ * 15 — Mana-payment preview request/response variants.
+ * 75 — ResolutionCastCleanup, its delayed-trigger receipts, and each
  *      receipt-eligible delayed-install origin carry the producer-issued paid
  *      offer owner. Older peers cannot preserve cross-offer isolation through
  *      a paused state handoff.
- * 74 â€” ResolutionCastCleanup now carries exact delayed-trigger receipts for a
+ * 74 — ResolutionCastCleanup now carries exact delayed-trigger receipts for a
  *      paused paid resolution cast. Older peers cannot preserve the receipt
  *      authority through a state handoff, so this is an exact-match boundary.
  *
- * 14 â€” PrecastCopyShortcut action and its two WaitingFor variants.
- * 13 â€” WaitingFor::MulliganBottomCards removed; mulligan bottoming folded
+ * 14 — PrecastCopyShortcut action and its two WaitingFor variants.
+ * 13 — WaitingFor::MulliganBottomCards removed; mulligan bottoming folded
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  *
- * 79 â€” CR 601.2f + CR 602.2b activated-ability cost-reduction election:
+ * 79 — CR 601.2f + CR 602.2b activated-ability cost-reduction election:
  *      ReductionProvenance gains AbilityCostRider and TransientEffect, which a
  *      v78 peer cannot parse. The new CostReductionEntry.minimum_mana,
  *      PendingCast.activation_cost_snapshot and AbilityModeChoice
@@ -953,7 +970,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 157;
+export { PROTOCOL_VERSION };
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -964,7 +981,7 @@ export const MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION;
 
 /**
  * Lowest server `protocol_version` this client accepts for lobby-only brokers
- * that predate `lobby_protocol_version` â€” the LEGACY path only.
+ * that predate `lobby_protocol_version` — the LEGACY path only.
  *
  * Derived from PROTOCOL_VERSION, so it slides every time the full-game surface
  * bumps. That is the defect LOBBY_PROTOCOL_VERSION below exists to fix; this
@@ -976,55 +993,55 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * Wire version of the LOBBY message set, independent of PROTOCOL_VERSION.
  * Must match `LOBBY_PROTOCOL_VERSION` in `crates/lobby-broker/src/protocol.rs`.
  *
- * Bump ONLY when a lobby message variant changes shape â€” OR when a lobby
+ * Bump ONLY when a lobby message variant changes shape — OR when a lobby
  * message's SEMANTICS change in a way this client must gate behavior on (see 9).
  * A full-game bump must NOT move this number: no lobby variant carries GameState
  * or GameAction, so full-game churn cannot break lobby traffic. Sharing one
- * integer between the two surfaces is what took preview multiplayer down â€”
+ * integer between the two surfaces is what took preview multiplayer down —
  * PROTOCOL_VERSION moved twice for GameState-only changes and the derived lobby
  * window went disjoint from the deployed broker's.
  *
- * 16 â€” GameFormat gains `Dandan` (see PROTOCOL_VERSION 110). A Rust broker below
+ * 16 — GameFormat gains `Dandan` (see PROTOCOL_VERSION 110). A Rust broker below
  *      16 rejects a lobby frame naming it; MIN_LOBBY_PROTOCOL_FOR_DANDAN below
  *      is this client's frozen floor for that pairing.
- * 15 â€” FormatConfig loses `allow_experimental_dungeons` on its three lobby
+ * 15 — FormatConfig loses `allow_experimental_dungeons` on its three lobby
  *      carriers (CreateGameWithSettings, JoinTargetInfo, PeerInfo): the
  *      per-session toggle is gone and the Wilderness pool is format-derived.
- *      A CAPABILITY bump like 13, not a parse bump â€” a v14 frame carrying
- *      the stale key and a v15 frame omitting it both parse â€” so
+ *      A CAPABILITY bump like 13, not a parse bump — a v14 frame carrying
+ *      the stale key and a v15 frame omitting it both parse — so
  *      MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL stays at 2.
- * 14 â€” PairingView.report_gate gains a `Hosted` arm (the Rust ReportGate enum's
+ * 14 — PairingView.report_gate gains a `Hosted` arm (the Rust ReportGate enum's
  *      new variant), the "a field's type changed" trigger. No broker emits it
  *      until server-authoritative hosting is wired behind
  *      MIN_LOBBY_PROTOCOL_FOR_HOSTED_MATCH (a later PR); mirrored in the
  *      `ReportGate` union in types.ts so the wire type stays 1:1.
- * 13 â€” FormatConfig gains `allow_experimental_dungeons` (#[serde(default)]) â€”
- *      the "a lobby field is added" trigger â€” on its three lobby carriers:
- *      CreateGameWithSettings (client â†’ broker), JoinTargetInfo and PeerInfo
- *      (broker â†’ client). A CAPABILITY bump like 3, not a parse bump, so
+ * 13 — FormatConfig gains `allow_experimental_dungeons` (#[serde(default)]) —
+ *      the "a lobby field is added" trigger — on its three lobby carriers:
+ *      CreateGameWithSettings (client → broker), JoinTargetInfo and PeerInfo
+ *      (broker → client). A CAPABILITY bump like 3, not a parse bump, so
  *      MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL stays at 2: against a pre-13
  *      broker the flag is absent and this client classifies JoinTargetInfo
  *      frames without it, while a v12 client keeps creating and joining
  *      games that simply never carry the override.
- * 12 â€” JoinTargetInfo gains an optional `draft_metadata`, the shape LobbyGame
- *      already carries â€” the "a lobby field is added" trigger.
+ * 12 — JoinTargetInfo gains an optional `draft_metadata`, the shape LobbyGame
+ *      already carries — the "a lobby field is added" trigger.
  *      MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL stays at 2 and no capability floor is
  *      added: against a pre-12 broker the field is absent and this client
  *      classifies a typed code from its lobby snapshot alone.
- * 11 â€” Prospective: no lobby variant or field changes shape in this bump.
- *      Moved ahead of new GameFormat variants â€” see LOBBY_PROTOCOL_VERSION's
+ * 11 — Prospective: no lobby variant or field changes shape in this bump.
+ *      Moved ahead of new GameFormat variants — see LOBBY_PROTOCOL_VERSION's
  *      own `/// 11` entry in
  *      crates/lobby-broker/src/protocol.rs. MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL
- *      stays at 2: this client already decodes broker â†’ client frames with
+ *      stays at 2: this client already decodes broker → client frames with
  *      JSON.parse, which arrives at an unknown-yet format name as an
  *      ordinary string with no parse error either way, and moving the floor
- *      would evict every v2â€“v10 broker over a value most of them will never
+ *      would evict every v2–v10 broker over a value most of them will never
  *      encounter. A pre-11 Rust broker rejects a lobby frame naming
  *      Freeform or FreeformCommander; MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS
  *      below is this client's floor for them.
- * 10 â€” Requested room codes. CreateGameWithSettings gains an optional
- *     `requested_code` (#[serde(default)]) â€” the "a lobby field is added"
- *     trigger â€” a caller-pre-minted `[A-Z0-9]{6}` code the host claims instead
+ * 10 — Requested room codes. CreateGameWithSettings gains an optional
+ *     `requested_code` (#[serde(default)]) — the "a lobby field is added"
+ *     trigger — a caller-pre-minted `[A-Z0-9]{6}` code the host claims instead
  *     of a broker-minted one. ServerErrorCode, carried server -> client on
  *     Error.code, gains `game_not_found` and `code_in_use`. Additive, so
  *     MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL stays at 2. This client sends
@@ -1033,98 +1050,98 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  *     drops the field and mints its own code, which the host detects as
  *     `GameCreated.game_code !== requested` and handles; `game_not_found` falls
  *     back to the legacy message classification.
- * 9 â€” Recoverable credential rotation via idempotent-nonce replay.
+ * 9 — Recoverable credential rotation via idempotent-nonce replay.
  *     RenewTournamentCredential gains an optional `rotation_nonce` field
- *     (#[serde(default)]) â€” the "a lobby field is added" trigger;
+ *     (#[serde(default)]) — the "a lobby field is added" trigger;
  *     TournamentCredentialRenewed is unchanged. A rotation mints ONLY from the
  *     current secret (recording the superseded secret + that nonce); presenting
  *     the superseded secret with the SAME nonce REPLAYS the already-committed
  *     secret (minting nothing), so a lost renewal reply is recovered by retrying
- *     the same (token, nonce) rather than by any overlap window â€” a superseded
+ *     the same (token, nonce) rather than by any overlap window — a superseded
  *     secret never stays valid and never yields a fresh primary without the
  *     initiator's nonce. This client gates on it: `maybeRenewNearExpiry`
- *     (multiplayerStore) only rotates proactively â€” and only then relies on
- *     same-nonce replay recovery â€” against a broker at or above
+ *     (multiplayerStore) only rotates proactively — and only then relies on
+ *     same-nonce replay recovery — against a broker at or above
  *     MIN_LOBBY_PROTOCOL_FOR_RECOVERABLE_ROTATION below. Additive, so
  *     MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL stays at 2: every older broker still
  *     parses every v9 frame (the nonce defaults away), and this client simply
  *     does not proactively rotate against one.
- * 8 â€” Tournament match structure. CreateTournament gains `match_type` (Bo1 /
+ * 8 — Tournament match structure. CreateTournament gains `match_type` (Bo1 /
  *     Bo3), optional (`#[serde(default)]`); `None` resolves to the arity default
- *     (Bo3 head-to-head, Bo1 for pods â€” single-game per MSTR), preserving pre-8
- *     behaviour. TournamentSummary gains the resolved `match_type`, server â†’
+ *     (Bo3 head-to-head, Bo1 for pods — single-game per MSTR), preserving pre-8
+ *     behaviour. TournamentSummary gains the resolved `match_type`, server →
  *     client. This lets a 2-player event be Bo1 (e.g. single-game single
  *     elimination). Purely ADDITIVE, so MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL
  *     stays at 2 and no client-side floor is needed: a client's `match_type`
  *     reaching a pre-8 broker deserializes away (the event runs the default
- *     structure â€” a silent capability loss, not a parse error), and a pre-8
+ *     structure — a silent capability loss, not a parse error), and a pre-8
  *     broker's summary omitting it is inert against a `JSON.parse` client.
- * 7 â€” Tournament game-format label and an "automatic + N" round option. Two
+ * 7 — Tournament game-format label and an "automatic + N" round option. Two
  *     fields added to CreateTournament, both optional (`#[serde(default)]`):
  *     `format` (a GameFormat display label, mirroring the one a LobbyGame
  *     listing already carries) and `plus_rounds` (add N to the auto-derived
- *     round count â€” the "Swiss plus N" shape, mutually exclusive with
+ *     round count — the "Swiss plus N" shape, mutually exclusive with
  *     `total_rounds`). Separately, the DIFFERENT TournamentSummary message
- *     gains a `format` echoed back resolved (server â†’ client). Purely ADDITIVE
+ *     gains a `format` echoed back resolved (server → client). Purely ADDITIVE
  *     in BOTH directions, so MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL below stays at
- *     2 and â€” unlike 6's scoring relaxation â€” NO client-side floor is needed:
+ *     2 and — unlike 6's scoring relaxation — NO client-side floor is needed:
  *     a client sending `format`/`plus_rounds` to a pre-7 broker has them
  *     ignored as unknown fields (a silent capability loss, not a parse error),
  *     and a pre-7 broker's summary omitting `format` is inert against this
  *     client, whose consumer is `JSON.parse`.
- * 6 â€” Broker-owned tournament action legality, broker-owned default scoring,
- *     and expiring/rotating tournament credentials. Two lobby variants added â€”
- *     RenewTournamentCredential and TournamentCredentialRenewed â€” which alone
+ * 6 — Broker-owned tournament action legality, broker-owned default scoring,
+ *     and expiring/rotating tournament credentials. Two lobby variants added —
+ *     RenewTournamentCredential and TournamentCredentialRenewed — which alone
  *     makes this bump mandatory. PairingView gains a required report_gate;
  *     TournamentSummary gains a required open_actions and a required resolved
  *     scoring; TournamentCreated and TournamentJoined each gain a required
  *     expires_at_ms beside the token they already carried. All of those are
- *     server â†’ client, and this client ignores fields it does not name, so
- *     MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL below deliberately stays at 2 â€” a
+ *     server → client, and this client ignores fields it does not name, so
+ *     MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL below deliberately stays at 2 — a
  *     v2 broker still speaks everything this client already parses.
  *     CreateTournament.scoring is RELAXED from required to optional, `None`
  *     meaning "the broker applies its arity default". That direction is NOT
  *     symmetric: a client that omits scoring against a pre-6 broker gets a
  *     hard `missing field` parse error, not a degrade. It is gated on the
- *     CLIENT side by MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING below â€” capability,
- *     not parseability, exactly as 5 gated the ack â€” so a below-floor session
+ *     CLIENT side by MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING below — capability,
+ *     not parseability, exactly as 5 gated the ack — so a below-floor session
  *     keeps sending an explicit policy instead of being evicted.
- * 5 â€” Request-correlated settlement for the four GATED tournament actions.
- *     Two LobbyServerMessage variants added â€” TournamentActionAck and
- *     TournamentActionRejected â€” which is what makes this bump mandatory. Both
+ * 5 — Request-correlated settlement for the four GATED tournament actions.
+ *     Two LobbyServerMessage variants added — TournamentActionAck and
+ *     TournamentActionRejected — which is what makes this bump mandatory. Both
  *     are requester-only point replies carrying the client-minted request_id,
  *     so a caller can tell its own outcome from an ambient TournamentUpdate for
  *     the same tournament. StartTournamentRound, ReportMatchResult,
  *     DropFromTournament and EndTournament each gain one optional request_id.
- *     Purely ADDITIVE in both directions â€” an omitted correlator deserializes
- *     to None and a present one is ignored by a v4 broker â€” so
+ *     Purely ADDITIVE in both directions — an omitted correlator deserializes
+ *     to None and a present one is ignored by a v4 broker — so
  *     MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL below deliberately stays at 2.
  *     Capability, not parseability, is what moves here: a pre-5 broker cannot
  *     ANSWER a correlated action, which is what
- *     MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK below exists to gate â€” separately,
+ *     MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK below exists to gate — separately,
  *     and without evicting the session.
- * 4 â€” The tournament-organizer message set: seven LobbyClientMessage variants
+ * 4 — The tournament-organizer message set: seven LobbyClientMessage variants
  *     and five LobbyServerMessage variants. Purely ADDITIVE, so
- *     MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL below deliberately stays at 2 â€” no
+ *     MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL below deliberately stays at 2 — no
  *     existing variant changed shape, so nothing this client already parses
  *     can break against a version-2 broker.
- * 3 â€” FormatConfig gained default_deck_copy_limit (see PROTOCOL_VERSION 50
+ * 3 — FormatConfig gained default_deck_copy_limit (see PROTOCOL_VERSION 50
  *     above for the full entry). Same three carriers as 2:
  *     CreateGameWithSettings, JoinTargetInfo, PeerInfo. Unlike 2, this is a
- *     CAPABILITY bump, not a parse bump â€” the field is serde-optional and
- *     still deserializes cleanly on either side â€” so
+ *     CAPABILITY bump, not a parse bump — the field is serde-optional and
+ *     still deserializes cleanly on either side — so
  *     MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL below does NOT move: a v2 broker
  *     can still create/join a game, it just can't declare or observe a
  *     non-default deck-copy-limit override, silently getting the fail-closed
  *     UpTo(1) fallback instead of the format's real default.
- * 2 â€” FormatConfig.deck_size retyped from a bare integer to the adjacently
+ * 2 — FormatConfig.deck_size retyped from a bare integer to the adjacently
  *     tagged DeckSizeRule, carried by CreateGameWithSettings, JoinTargetInfo
  *     and PeerInfo. See LOBBY_PROTOCOL_VERSION in
  *     crates/lobby-broker/src/protocol.rs for what the floor move evicts.
- * 1 â€” Initial lobby-owned version, covering the lobby variant set unchanged
+ * 1 — Initial lobby-owned version, covering the lobby variant set unchanged
  *     since #1880.
  */
-export const LOBBY_PROTOCOL_VERSION = 16;
+export { LOBBY_PROTOCOL_VERSION };
 
 /**
  * Lowest broker LOBBY_PROTOCOL_VERSION this client accepts.
@@ -1133,10 +1150,10 @@ export const LOBBY_PROTOCOL_VERSION = 16;
  * hurt it by sending a lobby variant the client does not know, and
  * `handleMessage` already ignores unknown tags rather than tearing the session
  * down. Refusing to connect at all would evict this client from a broker whose
- * new variant it may never need â€” which is precisely how a protocol-bumping
+ * new variant it may never need — which is precisely how a protocol-bumping
  * release used to strand every older desktop build.
  */
-export const MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL = 2;
+export { MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL };
 
 /**
  * Lowest broker LOBBY_PROTOCOL_VERSION that can answer a gated tournament
@@ -1148,7 +1165,7 @@ export const MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL = 2;
  * raising this to match the current version would refuse every one of them and
  * silently disable organizer actions against servers that work perfectly. For
  * the same reason it must never be written as an expression over
- * LOBBY_PROTOCOL_VERSION â€” `scripts/check-protocol-version.mjs` matches it only
+ * LOBBY_PROTOCOL_VERSION — `scripts/check-protocol-version.mjs` matches it only
  * against a bare integer literal, so re-deriving it fails the cross-language
  * gate rather than shipping that bug.
  *
@@ -1164,20 +1181,20 @@ export const MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK = 5;
  *
  * A FLOOR frozen at the version that introduced broker-owned default scoring,
  * on exactly the terms {@link MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK} above is
- * frozen â€” and it must NOT be bumped when LOBBY_PROTOCOL_VERSION moves: a v7
+ * frozen — and it must NOT be bumped when LOBBY_PROTOCOL_VERSION moves: a v7
  * or v8 broker still applies the default, and raising this to match the
  * current version would push every one of them below the floor and make this
  * client send an explicit policy forever.
  *
  * The gate it guards is sharper than the ack's, which is why the floor exists
  * at all. Omitting `scoring` against a pre-6 broker is not a missing
- * capability that degrades â€” it is a hard `missing field \`scoring\`` parse
+ * capability that degrades — it is a hard `missing field \`scoring\`` parse
  * error on the broker side. Below this floor the client keeps sending an
  * explicit policy; at or above it, it may omit one and read the resolved
  * value back off `TournamentSummary.scoring`.
  *
  * Written as a bare integer literal and never as an expression over
- * LOBBY_PROTOCOL_VERSION â€” `scripts/check-protocol-version.mjs` matches it
+ * LOBBY_PROTOCOL_VERSION — `scripts/check-protocol-version.mjs` matches it
  * only against a bare integer, so re-deriving it fails the cross-language gate
  * instead of shipping the latent bug. Like the two floors above there is
  * deliberately NO ceiling.
@@ -1185,7 +1202,7 @@ export const MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK = 5;
  * Scope note (protocol v6, wire-contract-only): this floor is the frozen
  * cross-language contract for the omit-`scoring` capability, and is enforced
  * today only by `check-protocol-version.mjs`. It has no runtime send-path
- * consumer yet â€” `tournamentClient.ts` still always sends an explicit
+ * consumer yet — `tournamentClient.ts` still always sends an explicit
  * `ScoringPolicy`, which is the conservative, always-correct direction. The
  * version-gated omit-path this floor guards lands with the tournament
  * client-rendering follow-up, alongside reading the resolved value back off
@@ -1200,7 +1217,7 @@ export const MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING = 6;
  * Below this, a broker discards `match_type` as an unknown field and applies the
  * arity default (Bo3 head-to-head, Bo1 pods). That silent substitution is
  * harmless when the request already matches the default, but it turns an
- * explicit **Bo1 head-to-head** choice into a Bo3 event with no signal â€” so the
+ * explicit **Bo1 head-to-head** choice into a Bo3 event with no signal — so the
  * send path refuses that one request (see `matchTypeNeedsCapability` /
  * `createTournament`) rather than let an organizer receive a structure they did
  * not pick.
@@ -1216,7 +1233,7 @@ export const MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE = 8;
 
 /**
  * Lowest broker `LOBBY_PROTOCOL_VERSION` whose credential rotation is
- * RECOVERABLE â€” i.e. supports idempotent-nonce replay: it mints only from the
+ * RECOVERABLE — i.e. supports idempotent-nonce replay: it mints only from the
  * current secret (recording the superseded secret + the client's nonce) and, on
  * a retry presenting that superseded secret with the SAME nonce, REPLAYS the
  * already-committed secret rather than minting again
@@ -1226,13 +1243,13 @@ export const MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE = 8;
  * or above this floor, a renewal reply lost after the server commits is
  * survivable: the client retries with the same (token, nonce) and the broker
  * replays the committed secret. Against a broker below it there is no replay, so
- * a retry with a superseded token would just be refused â€” hence
+ * a retry with a superseded token would just be refused — hence
  * `maybeRenewNearExpiry` (`stores/multiplayerStore`) does not proactively rotate
  * at all below this floor, leaving the pre-rotation behavior (the credential
  * simply lapses at its TTL) untouched rather than introducing a strand.
  *
- * A CLIENT-side behavioral floor with no shared Rust constant to mirror, so â€”
- * like {@link MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE} â€” it is NOT value-pinned by an
+ * A CLIENT-side behavioral floor with no shared Rust constant to mirror, so —
+ * like {@link MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE} — it is NOT value-pinned by an
  * EXPECTED_* assertion in `scripts/check-protocol-version.mjs`, only listed in
  * its authored-literals classifier. Frozen at 9 (the version that made rotation
  * recoverable) and written as a bare literal, never derived from
@@ -1318,7 +1335,7 @@ export interface ServerInfo {
   protocolVersion: number;
   mode: "Full" | "LobbyOnly";
   /** The server's LOBBY_PROTOCOL_VERSION, when it advertises one. `undefined`
-   * from brokers built before the lobby owned its own version â€” those are
+   * from brokers built before the lobby owned its own version — those are
    * gated on `protocolVersion` instead. */
   lobbyProtocolVersion?: number;
   /** Public base URL the server advertises for `<code>@<host>` join strings
@@ -1338,9 +1355,9 @@ export interface ServerInfo {
  * The surface is a property of the CALLER's intent, not of the server: a `Full`
  * server serves both. `ClientMessage::SubscribeLobby` and friends are "always
  * allowed" in either server mode (`reject_if_disabled` in
- * `crates/phase-server/src/main.rs`), and the whole lobby frame set â€”
+ * `crates/phase-server/src/main.rs`), and the whole lobby frame set —
  * `LobbyClientMessage` / `LobbyServerMessage` in
- * `crates/lobby-broker/src/protocol.rs` â€” carries no `GameState` and no
+ * `crates/lobby-broker/src/protocol.rs` — carries no `GameState` and no
  * `GameAction`. That is what lets the two surfaces version independently.
  */
 export type ProtocolSurface = "full" | "lobby";
@@ -1365,7 +1382,7 @@ export type ProtocolSurface = "full" | "lobby";
  * The surface comes from the caller, never from `info.mode`. A `Full` server
  * serves the lobby too, so reading the mode alone refuses a lobby socket to a
  * server whose `lobbyProtocolVersion` matches and whose only incompatibility is
- * with a game that socket will never carry â€” which a browser can only report as
+ * with a game that socket will never carry — which a browser can only report as
  * "unreachable", not as "a version you cannot play on".
  */
 export function serverProtocolRejection(
@@ -1426,10 +1443,10 @@ export type WsAdapterEvent =
   | { type: "reconnectFailed" }
   | { type: "terminalDelivery"; delivery: FullTerminalDelivery }
   | { type: "terminalUnavailable"; message: string }
-  /** The engine pair travels as one `EngineSnapshot` â€” see the P2P adapter's
+  /** The engine pair travels as one `EngineSnapshot` — see the P2P adapter's
    *  `stateChanged` for why the halves must stay inseparable. */
   | { type: "stateChanged"; snapshot: EngineSnapshot; events: GameEvent[]; logEntries?: GameLogEntry[]; serverRevision?: number;
-      /** Server-published turn boundaries. Always an array on this transport â€”
+      /** Server-published turn boundaries. Always an array on this transport —
        *  `[]` means "the server published none", never "unknown". */
       rewindTargets?: RewindOption[] }
   | { type: "sessionAttached"; attachment: NativeSessionAttachment }
@@ -1621,7 +1638,7 @@ export class WebSocketAdapter implements EngineAdapter {
    *  assigned them (i.e. game creation has completed). Solo-AI native games
    *  persist this so a suspended game can be resumed by constructing a
    *  `kind: "reconnect"` adapter. The player token is issued once at creation
-   *  and lives only client-side â€” it is the reconnect security boundary. */
+   *  and lives only client-side — it is the reconnect security boundary. */
   get nativeSession(): { gameCode: string; playerId: PlayerId; playerToken: string; fullKey: FullSessionKey } | null {
     if (this._gameCode === null || this._playerId === null || this.playerToken === null || this.fullSessionKey === null) {
       return null;
@@ -1687,7 +1704,7 @@ export class WebSocketAdapter implements EngineAdapter {
         }
 
         // A ws:// target from an HTTPS page is blocked by the browser before the
-        // handshake â€” surface why instead of letting it fail as "unreachable".
+        // handshake — surface why instead of letting it fail as "unreachable".
         const blockReason = this.isNativeSocket()
           ? null
           : mixedContentBlockReason(this.serverUrl);
@@ -1843,7 +1860,7 @@ export class WebSocketAdapter implements EngineAdapter {
         const adapterErr = new AdapterError("WS_ERROR", err.message, retryable);
         this.rejectInitialization(adapterErr);
         if (err.kind === "protocol_mismatch" && err.serverInfo) {
-          // Incompatible handshake â€” surface an explicit event so the
+          // Incompatible handshake — surface an explicit event so the
           // UI can render the version-mismatch prompt even if no one is
           // awaiting `initialize()`. Use the real `ServerInfo` parsed
           // from `ServerHello` so the UI can render accurate
@@ -1947,7 +1964,7 @@ export class WebSocketAdapter implements EngineAdapter {
       // dispatch mutex, so none can freeze the board the way a parked
       // submission does. Widening the hoist is a separate judgement.
       if (this.sessionIdentityRejected) return;
-      // Clear the "host waiting for opponent" latch on socket close â€”
+      // Clear the "host waiting for opponent" latch on socket close —
       // otherwise a host who received GameCreated, disconnected before
       // GameStarted, and then reconnected through a different path would
       // fire `opponentJoined` spuriously on the replayed GameStarted.
@@ -2002,7 +2019,7 @@ export class WebSocketAdapter implements EngineAdapter {
 
   async submitAction(action: GameAction, _actor: PlayerId): Promise<SubmitResult> {
     // `_actor` is the local player's PlayerId. The WebSocket wire format
-    // intentionally omits it â€” the server derives the authoritative actor
+    // intentionally omits it — the server derives the authoritative actor
     // from the join-token-authenticated session, never from the payload.
     // A client-supplied actor here would provide zero additional safety and
     // only creates a spoofing surface if it were ever put on the wire.
@@ -2135,7 +2152,7 @@ export class WebSocketAdapter implements EngineAdapter {
 
     return new Promise<InteractionPreview>((resolve, reject) => {
       this.pendingInteractionPreviews.set(request.requestId, { resolve, reject });
-      // `request` is forwarded VERBATIM â€” no field is read, reshaped or rebuilt.
+      // `request` is forwarded VERBATIM — no field is read, reshaped or rebuilt.
       if (!this.send({ type: "PreviewInteraction", data: { request } })) {
         this.pendingInteractionPreviews.delete(request.requestId);
         reject(new AdapterError("WS_CLOSED", "Failed to send interaction preview", true));
@@ -2202,7 +2219,7 @@ export class WebSocketAdapter implements EngineAdapter {
    * authenticates the seat and stamps the instant from its own clock, so the
    * frame carries only the contest's identity and a sequence number. Never queued:
    * a click that cannot be sent now is stale by the time a reconnect could deliver
-   * it. Always `true` â€” the server hosts the contest, so the caller never stamps.
+   * it. Always `true` — the server hosts the contest, so the caller never stamps.
    */
   submitContestClick(contest: number, seq: number): boolean {
     if (this.ws?.readyState === WebSocket.OPEN) {
@@ -2216,7 +2233,7 @@ export class WebSocketAdapter implements EngineAdapter {
    * Defaults to the pre-existing last-action granularity, which keeps the
    * existing zero-argument call site behaving identically.
    *
-   * The last-action frame deliberately carries NO `data` key â€” byte-identical
+   * The last-action frame deliberately carries NO `data` key — byte-identical
    * to the frame this client has always sent, and the shape the server's
    * `Option<RewindTarget>` newtype variant exists to accept. Only a turn rewind
    * carries a payload, and the client can only ask for a turn the server itself
@@ -2586,7 +2603,7 @@ export class WebSocketAdapter implements EngineAdapter {
   /**
    * Serialize and send a frame. Returns `false` (and emits an `error` event)
    * instead of throwing when the socket is missing/closed or `WebSocket.send`
-   * throws, so callers â€” especially `submitAction` â€” can recover rather than
+   * throws, so callers — especially `submitAction` — can recover rather than
    * leaving the adapter wedged. Mirrors the guarded send in `PeerSession`.
    */
   private send(msg: unknown): boolean {
@@ -2641,7 +2658,7 @@ export class WebSocketAdapter implements EngineAdapter {
     if (this.sessionIdentityRejected) return;
 
     switch (msg.type) {
-      // ServerHello is no longer observed here â€” the shared
+      // ServerHello is no longer observed here — the shared
       // `openPhaseSocket` helper consumes it during `attachSocket`, and
       // `_serverInfo` / the `serverHello` event are populated before the
       // post-handshake message loop begins.
@@ -2855,7 +2872,7 @@ export class WebSocketAdapter implements EngineAdapter {
           this.gameStartedReject = null;
         }
         // Always an array, never `undefined`: on this transport `undefined`
-        // would mean "this transport does not publish", which is false here â€”
+        // would mean "this transport does not publish", which is false here —
         // an omitted field means the server published none.
         const startedRewindTargets = data.rewind_targets ?? [];
         if (this.options.nativePregame) {
@@ -2867,7 +2884,7 @@ export class WebSocketAdapter implements EngineAdapter {
             rewindTargets: startedRewindTargets,
           });
         } else if (!initializedNow) {
-          // Reconnect path â€” no initResolve pending, so emit state change
+          // Reconnect path — no initResolve pending, so emit state change
           // so GameProvider's event listener populates the store. Emits the
           // cached snapshot, which carries the derived-attached state (this
           // emit previously sent the raw `data.state`, dropping `derived`).

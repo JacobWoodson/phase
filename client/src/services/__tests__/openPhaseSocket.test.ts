@@ -1,4 +1,4 @@
-﻿import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { lanSupported, probeLan, authorizeLan, invokeLan, channelListener } = vi.hoisted(() => ({
   lanSupported: vi.fn(), probeLan: vi.fn(), authorizeLan: vi.fn(), invokeLan: vi.fn(),
@@ -301,6 +301,14 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
+  it("rejects the immediately previous Full protocol and closes the socket", async () => {
+    const promise = openPhaseSocket("ws://test");
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(helloFrame({ protocol_version: PROTOCOL_VERSION - 1 }));
+    await expect(promise).rejects.toMatchObject({ kind: "protocol_mismatch" });
+    expect(ws.close).toHaveBeenCalled();
+  });
+
   it("rejects Full v142 before it can read modal history keyed by incarnation", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
@@ -334,17 +342,6 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("rejects Full v147 before it can read a targeted-objects aggregate or tracked-set member filter", async () => {
-    const promise = openPhaseSocket("ws://test");
-    const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 147 }));
-
-    await expect(promise).rejects.toMatchObject({
-      kind: "protocol_mismatch",
-    });
-    expect(ws.close).toHaveBeenCalled();
-  });
-
   it("rejects Full v145 before it can read a counted loop offer", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
@@ -360,17 +357,6 @@ describe("openPhaseSocket", () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
     ws.deliverMessage(helloFrame({ protocol_version: 146 }));
-
-    await expect(promise).rejects.toMatchObject({
-      kind: "protocol_mismatch",
-    });
-    expect(ws.close).toHaveBeenCalled();
-  });
-
-  it("rejects Full v149 before it can read a targeted-objects aggregate or tracked-set member filter", async () => {
-    const promise = openPhaseSocket("ws://test");
-    const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 149 }));
 
     await expect(promise).rejects.toMatchObject({
       kind: "protocol_mismatch",
@@ -422,25 +408,6 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("rejects Full v156 before it can read a targeted-objects aggregate or tracked-set member filter", async () => {
-    const promise = openPhaseSocket("ws://test");
-    const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 156 }));
-
-    await expect(promise).rejects.toMatchObject({
-      kind: "protocol_mismatch",
-    });
-    expect(ws.close).toHaveBeenCalled();
-  });
-
-  it("accepts the literal Full v157 branch protocol", async () => {
-    const promise = openPhaseSocket("ws://test");
-    const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 157 }));
-
-    await expect(promise).resolves.toBeDefined();
-    expect(ws.close).not.toHaveBeenCalled();
-  });
 
   it("rejects Full v141 before it can read a linked-exile snapshot's incarnation", async () => {
     const promise = openPhaseSocket("ws://test");
@@ -485,7 +452,7 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it.each([152, 153, 154])("rejects Full v%s before it can read a parked ChangeZone frame's pre-event member entries", async (version) => {
+  it.each([152, 153, 154, 155, 156, 157, 158])("rejects Full v%s before it can read a parked ChangeZone frame's pre-event member entries or a merged coin-flip run", async (version) => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
     ws.deliverMessage(helloFrame({ protocol_version: version }));
@@ -496,10 +463,10 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("rejects Full v153 before it can read a targeted-objects set source", async () => {
+  it.each([154, 155, 156])("rejects Full v%s before it can read a TotalManaValue zone choice", async (version) => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 153 }));
+    ws.deliverMessage(helloFrame({ protocol_version: version }));
 
     await expect(promise).rejects.toMatchObject({
       kind: "protocol_mismatch",
@@ -507,15 +474,13 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("rejects Full v155 before it can read a targeted-objects set source", async () => {
+  it("accepts the current Full protocol", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 155 }));
+    ws.deliverMessage(helloFrame({ protocol_version: PROTOCOL_VERSION }));
 
-    await expect(promise).rejects.toMatchObject({
-      kind: "protocol_mismatch",
-    });
-    expect(ws.close).toHaveBeenCalled();
+    await expect(promise).resolves.toBeDefined();
+    expect(ws.close).not.toHaveBeenCalled();
   });
 
   it("rejects Full v139 before it can read the attack event's attacked players", async () => {
@@ -681,7 +646,7 @@ describe("openPhaseSocket", () => {
   });
 
 
-  // â”€â”€ Lobby-owned protocol version â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Lobby-owned protocol version ────────────────────────────────────────
 
   it("accepts a LobbyOnly broker with a stale full-game protocol when its lobby version is current", async () => {
     // The regression this whole change exists for. `main` drifting two
@@ -930,8 +895,8 @@ describe("withReconnect", () => {
         onStateChange: (s) => states.push(s),
       });
 
-      // Initial attempt fails â†’ reconnecting â†’ retry1 fails â†’ reconnecting
-      //   â†’ retry2 fails â†’ offline.
+      // Initial attempt fails → reconnecting → retry1 fails → reconnecting
+      //   → retry2 fails → offline.
       for (let i = 0; i < 5; i++) {
         await vi.advanceTimersByTimeAsync(20);
       }

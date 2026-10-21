@@ -1,3 +1,4 @@
+import { WIRE_PROTOCOL_VERSION } from "../generated/protocol-versions";
 import type {
   AbilityBlockEntry,
   EndContinuousEffectOffer,
@@ -36,7 +37,7 @@ export interface P2PAuthorityWire {
  * Wire-format projection of `LegalActionsResult`. Single source of truth for
  * the legal-action fields carried by `game_setup`, `state_update`, and
  * `reconnect_ack`. When `LegalActionsResult` grows a new field, this type
- * plus the two helpers below are the only places that need to change â€” the
+ * plus the two helpers below are the only places that need to change — the
  * message variants pick it up via intersection.
  *
  * `legalActions` (plural) is the wire name for what the adapter exposes as
@@ -91,30 +92,35 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * in-band and surface an actionable "refresh both windows" message instead
  * of silently corrupting state.
  *
- * A host â†’ guest mismatch is enforced in exactly ONE place:
+ * A host → guest mismatch is enforced in exactly ONE place:
  * `P2PGuestAdapter.handleHostMessage` (`adapter/p2p-adapter.ts`).
  * `validateMessage` below deliberately does NOT check it. A throw from there
  * propagates out of `decodeWireMessage` into the `catch` in `peer.ts`, which
- * warns and drops the frame â€” so the host's `game_setup` never reaches the
+ * warns and drops the frame — so the host's `game_setup` never reaches the
  * adapter, the setup promise never settles and the guest hangs on the
  * connecting screen with no layer able to tell the user. Only the adapter
  * holds the state needed to perform the response.
  *
- * The guest â†’ host direction has its own single site: current guests must stamp
+ * The guest → host direction has its own single site: current guests must stamp
  * this version on `guest_deck` / `reconnect`, and `P2PHostAdapter`'s
  * first-contact gate rejects a missing or unequal value before it allocates a
  * seat or adopts reconnect state.
  *
- * Bumps to date:
- *  139 — This branch's wire shape, renumbered (coined as 132 here and as
- *       133 "combined wire" at the bf867d08b merge, then 136 at the 6e686ee71
- *       merge): game_setup and state_update carry GameState whose ability
- *       aggregates may name CardTypeSetSource TargetedObjects (the resolving
- *       ability's chosen targets) with a TrackedSet member filter. Main has
- *       taken 133 bestow, 134 shortcut schema, 135 Bolas grant, 136
- *       counter-cost removal and 137 ChangeZone iteration, and 138 is
- *       claimed by a queued/approved PR. Bumped in lockstep
- *       with full-game protocol 157.
+ * Record incompatible changes: `node scripts/protocol-versions.mjs bump game --reason "description"`.
+ * Historical introductions:
+ *  141 — game_setup and state_update carry GameState whose effects carry
+ *       Effect::FlipCoins { flips, .. } in place of FlipCoin, FlipCoins { count }
+ *       and FlipCoinUntilLose, and whose coin-flip resolution frame kind is
+ *       Exactly or UntilLoss. A v140 or older peer reads a multi-flip or until-loss run
+ *       as one flip, so first contact rejects the skew. Bumped in lockstep with
+ *       full-game protocol 159.
+ *  139 — ChooseFromZoneConstraint.TotalManaValue extends serialized paused zone
+ *       choices and ability state; full-game protocol 157.
+ *  138 — game_setup and state_update carry GameState whose ability conditions
+ *       may carry QuantityQuality/NumberQuality. Bumped in lockstep with
+ *       full-game protocol 156, which also adds the optional per-seat
+ *       created_tokens channel (each seat's pinned creation result) on the
+ *       player-scope tail sidecar inside paused resolution frames.
  *  137 — game_setup and state_update carry GameState whose parked ChangeZone
  *       frame stores each remaining member with its pre-event entry
  *       modifications (CR 603.6a + CR 614.12) and whose resolution state moves
@@ -133,74 +139,74 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       subset). A v134 peer drops the defaulted field silently and
  *       over-grants, so first contact rejects the skew. Bumped in
  *       lockstep with full-game protocol 153.
- *  134 â€” game_setup and state_update carry GameState whose loop offers may carry
+ *  134 — game_setup and state_update carry GameState whose loop offers may carry
  *       ShortcutDecisionSchema suggested_declaration and leading_aims, and
  *       ShortcutProposal leading_aims. Bumped in lockstep with full-game protocol 152.
  *  133: Populated GameObject.bestow_form carries removed creature subtypes
  *       as an object instead of the legacy boolean; full-game protocol 151.
- *  132 â€” game_setup and state_update carry GameState whose casting permissions may
+ *  132 — game_setup and state_update carry GameState whose casting permissions may
  *       carry the reshaped cast-this-way gains rider (the permission's
  *       enters_with_modifications object and Effect.AddPendingEntersModifications.rider).
  *       A wire 131 peer cannot parse either shape. Bumped in lockstep with
  *       full-game protocol 150.
- *  131 â€” GameState.deferred_spell_delivery is removed and GameState.resolving_spell_final_part
+ *  131 — GameState.deferred_spell_delivery is removed and GameState.resolving_spell_final_part
  *       ({ spell }) marks the CR 608.2n final part a paused instant or sorcery still owes,
  *       in game_setup and state_update; a v130 peer drops the key and would move the spell
  *       too early. Bumped with full-game protocol 149.
- *  130 â€” game_setup and state_update carry GameState whose abilities may hold
+ *  130 — game_setup and state_update carry GameState whose abilities may hold
  *       Effect::ExileTopCardContest (Timesifter) and whose resolution frames may
  *       park BatchCompletion::TopCardContestRoundComplete; a v129 peer cannot
  *       parse either tag. Bumped in lockstep with full-game protocol 148.
- *  129 â€” game_setup and state_update carry GameState whose waiting_for may be
+ *  129 — game_setup and state_update carry GameState whose waiting_for may be
  *       WaitingFor::PhysicalContest (Eye to Eye / Mouth to Mouth) and whose
  *       abilities may hold Effect::PhysicalContest; a v128 peer cannot parse
  *       either tag. Bumped in lockstep with full-game protocol 147.
- *  128 â€” game_setup and state_update carry GameState whose loop offers may carry
+ *  128 — game_setup and state_update carry GameState whose loop offers may carry
  *       ConfirmedPeriod counted_by and performance (CR 732.2a). Bumped in
  *       lockstep with full-game protocol 146.
- *  127 â€” ParentTargetMissingReason gains SearchLibrary (CR 701.23b), serialized
+ *  127 — ParentTargetMissingReason gains SearchLibrary (CR 701.23b), serialized
  *       on ResolvedAbility.parent_target_missing_reason in game_setup and
  *       state_update; a wire 126 peer cannot parse the tag. Bumped in lockstep
  *       with full-game protocol 145; lobby messages unchanged.
- *  126 â€” game_setup and state_update carry GameState, whose one-time boons
+ *  126 — game_setup and state_update carry GameState, whose one-time boons
  *       (#7495) add Effect.CreateBoon / Effect.NoteNumber, the HasBoon
  *       conditions, and WaitingFor.ChooseTokenHost, and whose perpetual P/T
  *       edit retypes power_delta/toughness_delta integers to required tagged
  *       QuantityExpr power/toughness. A v125 peer cannot parse the new tags or
  *       the retyped edit, so first contact rejects the skew. Bumped in
  *       lockstep with full-game protocol 144.
- *  125 â€” game_setup and state_update carry GameState whose modal no-repeat
+ *  125 — game_setup and state_update carry GameState whose modal no-repeat
  *       history (modal_modes_chosen_this_turn / _this_game) is keyed by
  *       object incarnation, not bare ObjectId (CR 400.7). Bumped in lockstep
  *       with full-game protocol 143.
- *  124 â€” game_setup and state_update carry GameState whose linked-exile
+ *  124 — game_setup and state_update carry GameState whose linked-exile
  *       snapshots carry the exiled card's incarnation (CR 400.7). Bumped in
  *       lockstep with full-game protocol 142.
- *  123 â€” game_setup and state_update carry GameState whose exile_links may hold
+ *  123 — game_setup and state_update carry GameState whose exile_links may hold
  *       ExileLinkKind CastCost (CR 607.2q). Bumped in lockstep with full-game
  *       protocol 141.
- *  122 â€” game_setup and state_update carry GameState whose ability player scopes
+ *  122 — game_setup and state_update carry GameState whose ability player scopes
  *       may hold AttackSubject EventAttackers. Bumped in lockstep with full-game
  *       protocol 140.
- *  121 â€” game_setup and state_update carry GameState with the per-turn crew
+ *  121 — game_setup and state_update carry GameState with the per-turn crew
  *       relation (crew_history_this_turn) and FilterProp::CrewedThisTurn
  *       (CR 702.122c). Bumped in lockstep with full-game protocol 139.
- *  116 â€” game_setup and state_update carry GameState whose AbilityActivated trigger
+ *  116 — game_setup and state_update carry GameState whose AbilityActivated trigger
  *       events may name the activation's stack_entry. Bumped in lockstep with
  *       full-game protocol 134.
- *  115 â€” game_setup and state_update carry GameState whose NamedChoice source
+ *  115 — game_setup and state_update carry GameState whose NamedChoice source
  *       binding may be PendingEntry (CR 614.12a pre-entry as-enters choices).
  *       Bumped in lockstep with full-game protocol 133.
- *  114 â€” GameObject.exile_from_stack_linked_source carries the stamping incarnation
+ *  114 — GameObject.exile_from_stack_linked_source carries the stamping incarnation
  *       (ObjectIncarnationRef) in game_setup and state_update; a v113 peer cannot decode
  *       a set rider. Bumped with full-game protocol 132.
- *  113 â€” game_setup and state_update carry GameState whose ability player scopes
+ *  113 — game_setup and state_update carry GameState whose ability player scopes
  *       may hold PlayerFilter AnyOf / TargetPlayer. Bumped in lockstep with
  *       full-game protocol 131.
- *  112 â€” GameState.linked_exile_lki holds one incarnation-bounded LinkedExileLki per
+ *  112 — GameState.linked_exile_lki holds one incarnation-bounded LinkedExileLki per
  *       departure in game_setup and state_update; a v111 peer cannot decode a non-empty
  *       map. Bumped with full-game protocol 130.
- *  111 â€” game_setup and state_update carry GameState, whose loop-shortcut
+ *  111 — game_setup and state_update carry GameState, whose loop-shortcut
  *       offer and period confirmation change shape: WaitingFor::LoopShortcut's
  *       schema replaced max_iterations with the pair measured_repetition_bound
  *       and deliverable_capacity (serde defaults on both sides, so that skew is
@@ -213,7 +219,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       drops the recorded loop-action sequence; ConfirmedPeriod gains its
  *       reach and PeriodicDelta its cleanup pair. First contact rejects the
  *       skew. Bumped in lockstep with full-game protocol 129.
- *  109 â€” game_setup and state_update carry GameState, whose attachment filters
+ *  109 — game_setup and state_update carry GameState, whose attachment filters
  *       are now one AttachedTo prop with a tagged `to` referent in place of the
  *       AttachedToSource / AttachedToRecipient / AttachedToPlayer tags. Both
  *       peers are browsers and neither validates the shape, so a v108 peer
@@ -222,201 +228,201 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       (null keeps) and the engine-derived copy-walk keep and decline
  *       permissions.
  *       Bumped in lockstep with full-game protocol 127. (Reserved as 101 and then 103 while under review; it landed after 108, so 101 stays unused.)
- *  110 â€” game_setup and state_update carry GameState, whose abilities may now
+ *  110 — game_setup and state_update carry GameState, whose abilities may now
  *       serialize TargetFilter::DeclaredPlayer. A v109 peer cannot deserialize
  *       it, so first contact rejects the skew. SpellContext also gains
  *       outer_declared_players (CR 603.7a), the players a delayed ability's
  *       creating chain named by group, omitted when empty; amended in place, not
  *       bumped. Bumped in lockstep with full-game protocol 128.
- *  108 â€” ZoneChangeRecord carries arrival (the owner and controller the destination
+ *  108 — ZoneChangeRecord carries arrival (the owner and controller the destination
  *       object holds) in game_setup and state_update. Bumped with full-game protocol 126.
- *  107 â€” MulliganDecisionEntry and MulliganDeclaration carry free_reveals_taken in
+ *  107 — MulliganDecisionEntry and MulliganDeclaration carry free_reveals_taken in
  *       game_setup and state_update. Bumped with full-game protocol 125.
- *  106 â€” game_setup and state_update carry GameState, whose resolved-rules journal
+ *  106 — game_setup and state_update carry GameState, whose resolved-rules journal
  *       now admits a land-play rebound_from (Library/Graveyard/Exile -> Battlefield).
  *       A v105 peer rejects the journal, so first contact rejects the skew. Bumped
  *       with full-game protocol 124.
- *  105 â€” game_setup and state_update carry GameState, whose ability
+ *  105 — game_setup and state_update carry GameState, whose ability
  *       definitions now carry the "prepared spell" filter tag, a scope on
  *       the become-prepared / become-unprepared effects, the prepared-copy
  *       source on the cast ledger, and the prepare face on copiable values.
  *       A v104 peer cannot parse the new tag and would read a mass prepare
  *       as a single-target one, so first contact rejects the skew. Bumped
  *       in lockstep with full-game protocol 123.
- *  104 â€” game_setup and state_update carry GameState, whose cast grants can now
+ *  104 — game_setup and state_update carry GameState, whose cast grants can now
  *       name the TriggeringSourceController grantee (and whose damage events
  *       carry the source incarnation). A v103 peer cannot deserialize the
  *       tag, so first contact rejects the skew. Bumped with full-game
  *       protocol 122.
- *  103 â€” game_setup and state_update carry GameState's successful-mana-history
+ *  103 — game_setup and state_update carry GameState's successful-mana-history
  *       ledger as (trigger definition, receiving player) pairs. A v102 peer
  *       cannot decode a nonempty pair ledger. Bumped with full-game 121.
- *  102 â€” GameState carries the CR 601.2a spell announcement and the
+ *  102 — GameState carries the CR 601.2a spell announcement and the
  *       BecomesTarget targeter. Bumped with full-game protocol 120. (101 is
  *       reserved for the Legends of Jidoor PR.)
- *  100 â€” game_setup and state_update carry GameState, whose ability and trigger
+ *  100 — game_setup and state_update carry GameState, whose ability and trigger
  *       conditions now carry a ManaColorSpent color as SpentColor (word or symbol
  *       provenance). A v99 peer cannot deserialize the tagged color, so first
  *       contact rejects the skew. Bumped with full-game protocol 118.
- *  99 â€” game_setup and state_update carry GameState, whose derived views can now
+ *  99 — game_setup and state_update carry GameState, whose derived views can now
  *       carry shared_piles (the seat storing a shared library and graveyard). A v98
  *       peer drops the key and renders per-seat piles for a state whose other
  *       seat's containers are empty, so first contact rejects the skew. Bumped
  *       with full-game protocol 117.
- *  98 â€” game_setup and state_update carry GameState, whose resolution frames can
+ *  98 — game_setup and state_update carry GameState, whose resolution frames can
  *       now hold a simultaneous-draw dealer (RESOLUTION_STATE_WIRE_VERSION 5). A
  *       v97 peer refuses the version-5 resolution state, so first contact rejects
  *       the skew. Bumped with full-game protocol 116.
- *  97 â€” game_setup and state_update carry GameState, whose waiting_for can now
+ *  97 — game_setup and state_update carry GameState, whose waiting_for can now
  *       hold a held free reveal mulligan (MulliganDeclaration.kind) and whose
  *       MulliganDecision action gains the FreeReveal choice. A v96 peer would
  *       run the free reveal as a regular mulligan, so first contact rejects the
  *       skew. Bumped with full-game protocol 115.
- *  96 â€” game_setup and state_update carry GameState, whose waiting_for can now
+ *  96 — game_setup and state_update carry GameState, whose waiting_for can now
  *       hold the mulligans declared in a CR 103.5 round on
  *       MulliganDecision.declared. A v95 peer would drop them silently, so first
  *       contact rejects the skew. Bumped with full-game protocol 114.
- *  95 â€” game_setup and state_update carry GameState, whose journaled zone-change
+ *  95 — game_setup and state_update carry GameState, whose journaled zone-change
  *       commands can now hold rebound_from, the owner a card had before a Hand
  *       entry from a shared zone rebound it to the taker. A v94 peer would drop
  *       it silently, so first contact rejects the skew. Bumped with full-game
  *       protocol 113.
- *  94 â€” game_setup and state_update carry GameState, whose transient continuous
+ *  94 — game_setup and state_update carry GameState, whose transient continuous
  *       effects can now hold the SubstituteTextWord modification (CR 612.1), so a
  *       v93 peer cannot parse the tag and first contact rejects the skew.
- *  93 â€” game_setup and state_update carry GameState, whose FormatConfig can
+ *  93 — game_setup and state_update carry GameState, whose FormatConfig can
  *       now name the Dandan format. A v92 peer cannot parse the format name, so
  *       first contact rejects the skew. Bumped in lockstep with full-game
  *       protocol 111.
- *  92 â€” GameState carries a deferred spell delivery for a spell paused on its
+ *  92 — GameState carries a deferred spell delivery for a spell paused on its
  *       own free-cast window. Older peers would leave the spell on the stack
  *       in no zone. The same bump adds the SpellCopyOrderChoice prompt.
  *       Bumped with full-game protocol 110.
- *  91 â€” GameState carries the CR 201.5a granter binding (ObjectScope
+ *  91 — GameState carries the CR 201.5a granter binding (ObjectScope
  *       GrantingObject / SpecificObject, TargetFilter GrantingObject.bound,
  *       PlayerFilter GrantingObjectCaster and the granting_object stamps).
  *       Bumped with full-game protocol 109 so first contact rejects the skew.
- *  90 â€” Serialized IllegalTargetsDisposition.StillResolves in GameState lets
+ *  90 — Serialized IllegalTargetsDisposition.StillResolves in GameState lets
  *       the root ability resolve after its chosen target becomes illegal.
  *       Older peers would silently apply ordinary non-resolution. Bumped
  *       with full-game protocol 108.
- *  89 â€” game_setup and state_update carry GameState, whose exile-until
+ *  89 — game_setup and state_update carry GameState, whose exile-until
  *       loops now carry a match count, whose paused loop keeps its hits,
  *       whose zone choices can read ParentTargets, and whose spell context
  *       carries the loop's exile batch. A v88 peer would run a counted loop
  *       as a one-card loop, so first contact rejects the skew. Bumped in
  *       lockstep with full-game protocol 107.
- *  88 â€” GameState and game actions carry exact replacement-choice preferences,
+ *  88 — GameState and game actions carry exact replacement-choice preferences,
  *       remembered responses, and prompt eligibility metadata. Bumped with
  *       full-game protocol 106.
- *  87 â€” GameState and game actions carry the nominal quantity of a deferred
+ *  87 — GameState and game actions carry the nominal quantity of a deferred
  *       mana-source selection. Bumped with full-game protocol 105.
- *  86 â€” game_setup and state_update carry GameState, whose PendingCast
+ *  86 — game_setup and state_update carry GameState, whose PendingCast
  *       gains delved_cards and whose pending cost-move resume swaps
  *       DelveManaPayment for FinalizeDelvedCast (#9400). Bumped in lockstep
  *       with full-game protocol 104.
- *  85 â€” game_setup and state_update carry GameState, whose FormatConfig
+ *  85 — game_setup and state_update carry GameState, whose FormatConfig
  *       loses allow_experimental_dungeons: the Wilderness pool is
  *       format-derived now, so a v84 peer would fail it closed in freeform
  *       games. First contact rejects the skew instead. Bumped in lockstep
  *       with full-game protocol 103.
- *  84 â€” full-game protocol 102 adds the SharedCardTypes quantity tag in
+ *  84 — full-game protocol 102 adds the SharedCardTypes quantity tag in
  *       serialized ability definitions. Keep the existing P2P handshake in
  *       lockstep with full-game protocol 102.
- *  83 â€” game_setup and state_update carry GameState, whose events now include
+ *  83 — game_setup and state_update carry GameState, whose events now include
  *       mana-ability activations (AbilityActivated kind "Mana") and a
  *       departed-source LKI. A v82 peer would not recognize the kind; first
  *       contact rejects the skew instead. Bumped in lockstep with full-game
  *       protocol 101.
- *  82 â€” game_setup and state_update carry GameState, whose additional-phase
+ *  82 — game_setup and state_update carry GameState, whose additional-phase
  *       abilities now name what they add as a TurnSegment (segment, and
  *       followed_by's elements) in place of a Phase, and who gets it as an
  *       ExtraPhaseRecipient (recipient) in place of a TargetFilter. Both peers are browsers
  *       and neither validates the shape, so a v81 peer would take the new
  *       shape with no decode error; first contact rejects the skew instead.
  *       Bumped in lockstep with full-game protocol 100.
- *  81 â€” game_setup and state_update carry GameState, whose graveyard cast
+ *  81 — game_setup and state_update carry GameState, whose graveyard cast
  *       permissions now carry a pool (GraveyardPermissionPool: AnyGraveyard is
  *       "from any graveyard"). A v80 peer would default it to the own graveyard
  *       and refuse a cast the permission allows, so first contact rejects the
  *       skew. Bumped in lockstep with full-game protocol 99.
- *  80 â€” game_setup and state_update carry GameState, whose abilities can now
+ *  80 — game_setup and state_update carry GameState, whose abilities can now
  *       serialize ZoneOwner {"Each":"Opponents"}, the PerPlayerChoiceOrder
  *       and SubstituteChooser chooser purposes, and per-player frame
  *       current/nominee fields. A v79 peer cannot deserialize
  *       them, so first contact rejects the skew. Bumped in lockstep with
  *       full-game protocol 98.
- *  79 â€” game_setup and state_update carry GameState, whose stack abilities now
+ *  79 — game_setup and state_update carry GameState, whose stack abilities now
  *       serialize ResolvedAbility.target_reads (TargetReadOrigin): a
  *       ParentAnnouncement instruction reads the object its parent announced
  *       and announces no target of its own. A v78 peer would default the field
  *       and rebuild a target slot, so first contact rejects the skew. Bumped in
  *       lockstep with full-game protocol 97.
- *  77 â€” game_setup and state_update carry GameState, whose ability definitions
+ *  77 — game_setup and state_update carry GameState, whose ability definitions
  *       now carry FilterProp.BlockStatus { status } in place of the unit
  *       FilterProp.Unblocked (CR 509.1h). A v76 peer cannot parse the new
  *       "BlockStatus" tag, so first contact rejects the skew. Bumped in
  *       lockstep with full-game protocol 95.
- *  76 â€” game_setup and state_update carry GameState, whose delayed triggered
+ *  76 — game_setup and state_update carry GameState, whose delayed triggered
  *       abilities now serialize SpellContext.creation_lookback_event and whose
  *       trigger source contexts serialize TriggerSourceContext.mana_cost. A v75
  *       peer would drop both and resolve differently, so first contact rejects
  *       the skew. Bumped in lockstep with full-game protocol 94.
- *  75 â€” ReductionProvenance gains SacrificedForCost, carried by GameState's
+ *  75 — ReductionProvenance gains SacrificedForCost, carried by GameState's
  *       PendingCast and WaitingFor.OrderCostReductions. Bumped with full-game
  *       protocol 93 so first contact rejects the new provenance.
- *  74 â€” game_setup and state_update carry GameState, whose paused
+ *  74 — game_setup and state_update carry GameState, whose paused
  *       continuations now serialize ResolvedAbility.parent_target_missing_reason
  *       including the new RevealUntil reason (a reveal-until whiff), whose
  *       conditions may carry EffectOutcomeSignal.RevealUntilMatched, and which
  *       carries the CR 701.20a stack-bound reveal leases. A v73
  *       peer cannot parse the tags and would drop the verdict, so first contact
  *       rejects the skew. Bumped in lockstep with full-game protocol 92.
- *  73 â€” GameState retypes PendingManaAbility.chosen_counter_count to the
+ *  73 — GameState retypes PendingManaAbility.chosen_counter_count to the
  *       required chosen_counter_counts array (#9207). Bumped with full-game
  *       protocol 91 so first contact rejects the incompatible state shape.
- *  72 â€” game_setup and state_update carry GameState, whose FormatConfig gains
+ *  72 — game_setup and state_update carry GameState, whose FormatConfig gains
  *       allow_experimental_dungeons, the per-session flag behind the
  *       experimental dungeon pool. A v71 peer would fail the flag closed and
  *       run the game without the pool the host chose, so first contact
  *       rejects the skew instead. Bumped in lockstep with full-game protocol 90.
- *  71 â€” game_setup and state_update carry GameState, whose graveyard cast
+ *  71 — game_setup and state_update carry GameState, whose graveyard cast
  *       permissions can now require a casting method (required_cast_keyword),
  *       and casting-menu options carry the non-mana part of their cost
  *       (additional_cost) and the graveyard permission they announce
  *       (authority; the slot prompt's permission; the cast's latched terms).
  *       Bumped in lockstep with full-game protocol 89.
- *  70 â€” game_setup and state_update carry GameState, whose DeclareBlockers
+ *  70 — game_setup and state_update carry GameState, whose DeclareBlockers
  *       prompt can now carry block_capacities (CR 509.1a + CR 101.1). Both
  *       peers are browsers and neither validates the shape, so a v69 peer
  *       would take the new field with no decode error; first contact rejects
  *       the skew instead. Bumped in lockstep with full-game protocol 88.
- *  69 â€” game_setup and state_update can carry WaitingFor.DigRestSplitChoice
+ *  69 — game_setup and state_update can carry WaitingFor.DigRestSplitChoice
  *       and Effect.Dig.rest_split_top_count. First contact refuses a peer
  *       that cannot represent the split. Bumped with full-game protocol 87.
- *  68 â€” game_setup and state_update can carry GameEvent::Melded. An older
+ *  68 — game_setup and state_update can carry GameEvent::Melded. An older
  *       guest cannot present the meld sequence, so first contact refuses the
  *       skew. Bumped in lockstep with full-game protocol 86.
- *  67 â€” game_setup and state_update carry GameEvent[] and can now carry
+ *  67 — game_setup and state_update carry GameEvent[] and can now carry
  *       DieRollIgnored { player_id, sides, result }. Older peers omit ignored
  *       dice from the roll overlay; the exact-match first-contact gate rejects
  *       the skew. Bumped in lockstep with full-game protocol 85.
- *  66 â€” WaitingFor.ChooseDungeon options gained required `card`, `rooms`, and
+ *  66 — WaitingFor.ChooseDungeon options gained required `card`, `rooms`, and
  *       `room_count`: the whole dungeon behind each choice, so the prompt
  *       previews each card instead of describing only its entry room. A PARSE
  *       bump like 50: none of the fields carries a serde default, so a v65
  *       peer cannot parse a snapshot paused at the dungeon choice, and the
- *       reverse skew throws in render â€” this client reads `card`
+ *       reverse skew throws in render — this client reads `card`
  *       unconditionally when resolving the preview art. Since game_setup and
  *       reconnect_ack carry GameState, first contact rejects the skew instead
  *       of allowing either failure. Bumped in lockstep with full-game
  *       protocol 84.
- *  65 â€” game_setup and state_update carry GameState, whose reduce-ability-cost
+ *  65 — game_setup and state_update carry GameState, whose reduce-ability-cost
  *       statics can now carry a target restriction and a once-per-turn
  *       frequency, whose per-turn activation journal records each turn's
  *       activations, and whose activation cost carrier holds the
  *       target-settlement lock. Bumped in lockstep with full-game protocol 83.
- *  64 â€” game_setup and state_update carry GameState, whose additional-phase
+ *  64 — game_setup and state_update carry GameState, whose additional-phase
  *       abilities now hold an ExtraPhaseAnchor, whose delayed triggers can hold
  *       AtBeginningOfAddedPhase, whose scheduled extra phases and resume
  *       records carry a TurnSegment and a minted id, and whose per-turn step
@@ -424,27 +430,27 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       browsers and neither validates the shape, so a v63 peer would take the
  *       new shapes with no decode error; first contact rejects the skew
  *       instead. Bumped in lockstep with full-game protocol 82.
- *  63 â€” game_setup and state_update carry GameState, whose
+ *  63 — game_setup and state_update carry GameState, whose
  *       AlternativeCastChoice prompt can now carry keyword { type: "Surge" }.
  *       Bumped in lockstep with full-game protocol 81.
- *  62 â€” game_setup and state_update carry GameState, whose exile look links
+ *  62 — game_setup and state_update carry GameState, whose exile look links
  *       now carry { grant, lookers, source_incarnation }, and DerivedViews
  *       gains linked_exile_ids, which the board renders directly. Bumped in
  *       lockstep with full-game protocol 80.
- *  61 â€” game_setup and state_update carry GameState, whose pending
+ *  61 — game_setup and state_update carry GameState, whose pending
  *       activations can now hold the CR 601.2f activated-ability cost election
  *       (ReductionProvenance::AbilityCostRider / TransientEffect, the
  *       activation_cost_snapshot carrier). Bumped in lockstep with full-game
  *       protocol 79.
- *  60 â€” game_setup and state_update carry GameState, whose ability
+ *  60 — game_setup and state_update carry GameState, whose ability
  *       definitions and transient continuous effects can now hold the
  *       event-deadline `Duration::UntilEvent`, and whose transient effects
  *       carry duration_event_source. Both peers are browsers and neither
  *       validates the shape, so a v59 peer would take the new duration with
  *       no decode error; first contact rejects the skew instead. Bumped in
  *       lockstep with full-game protocol 78.
- *  59 â€” Prospective: no GameState shape change lands in this bump. Moved
- *       ahead of new GameFormat variants â€” the same precedent as 32's CommanderDraft variant: the
+ *  59 — Prospective: no GameState shape change lands in this bump. Moved
+ *       ahead of new GameFormat variants — the same precedent as 32's CommanderDraft variant: the
  *       break, when it lands, will be conditional on a new variant actually
  *       being serialized in a game_setup/state_update payload, not
  *       unconditional like FormatConfig.deck_size's 32 retype. First
@@ -452,17 +458,17 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       WIRE_PROTOCOL_VERSION`, host `guestVersion !== WIRE_PROTOCOL_VERSION`),
  *       so no older peer ever completes a pairing that could carry a v59
  *       payload.
- *  57 â€” game_setup and state_update carry GameState, whose paid resolution
+ *  57 — game_setup and state_update carry GameState, whose paid resolution
  *       cleanup, receipt, and delayed-install origin now carry a
  *       producer-issued offer owner. A v56 peer cannot preserve cross-offer
  *       isolation across a paused offer, so first contact rejects the skew.
  *       Bumped in lockstep with full-game protocol 75.
- *  56 â€” game_setup and state_update carry GameState, whose
+ *  56 — game_setup and state_update carry GameState, whose
  *       ResolutionCastCleanup can now carry exact delayed-trigger receipts.
  *       A v55 peer cannot preserve the cancellation authority across a paused
  *       paid offer, so first contact rejects the skew. Bumped in lockstep with
  *       full-game protocol 74.
- *  54 â€” game_setup and state_update carry GameState, whose
+ *  54 — game_setup and state_update carry GameState, whose
  *       FreeCastWindow requires `ResolutionCastFacePolicy` instead of the
  *       legacy `filter`; WaitingFor.CastOffer { kind: GraveyardPaidCast } carries
  *       additional_cost and installed_triggers (both serde-additive) and opens
@@ -470,66 +476,66 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       permission. A v53 guest parses the offer and pays the wrong cost, so
  *       first contact rejects a v53 peer before state delivery. Bumped in
  *       lockstep with full-game protocol 72.
- *  53 â€” game_setup and state_update carry GameState, whose OutsideGameChoice
+ *  53 — game_setup and state_update carry GameState, whose OutsideGameChoice
  *       for an opened booster pack now names a required origin: PackOrigin in
  *       place of set_code. First contact therefore rejects a v52 peer before
  *       state delivery. Bumped in lockstep with full-game protocol 70.
- *  52 â€” game_setup and state_update carry GameEvent[] and can now carry the
+ *  52 — game_setup and state_update carry GameEvent[] and can now carry the
  *       tagged ExtraTurnCreated event. First contact therefore rejects a v51
  *       peer before state delivery. Bumped in lockstep with full-game protocol
  *       69.
- *  51 â€” PendingManaAbility.chosen_tappers changed from Vec<ObjectId> to
+ *  51 — PendingManaAbility.chosen_tappers changed from Vec<ObjectId> to
  *       Option<Vec<ObjectId>> (#8698), separating an ANSWERED zero-tapper
  *       CR 107.3a X-sentinel selection (X=0) from an unanswered one. A PARSE
  *       bump like 50: the field carries no serde default, so a pre-51 payload
  *       that omits it is a missing-field error rather than a silent None. The
- *       reverse direction is why first contact must refuse the skew â€” Some([])
+ *       reverse direction is why first contact must refuse the skew — Some([])
  *       goes on the wire as `[]`, which a v50 build's is_empty() gate reads as
  *       *unanswered* and re-prompts forever. Since game_setup and
  *       reconnect_ack carry GameState, first contact rejects the skew instead.
  *       Bumped in lockstep with PROTOCOL_VERSION 68.
- *  50 â€” DerivedViews.dungeon_rooms entries gained required `card` and `rooms`
+ *  50 — DerivedViews.dungeon_rooms entries gained required `card` and `rooms`
  *       fields: the dungeon card's Scryfall identity, and every room with its
  *       outgoing edges (CR 309.5a) and its position on the printed card face.
  *       A PARSE bump like 49, not a silent capability loss like 39: neither
  *       field carries a serde default, so a v49 peer cannot parse a snapshot
- *       in which anyone is venturing. Nor is the reverse benign â€” this client
+ *       in which anyone is venturing. Nor is the reverse benign — this client
  *       reads `card` unconditionally when resolving the dungeon art, so a v49
  *       host would throw in render rather than drop the panel. Since
  *       game_setup and reconnect_ack carry GameState, first contact rejects
  *       the skew instead of allowing either failure.
- *  49 â€” ReplacementCondition.FirstTokenCreationEachTurn moved its required
+ *  49 — ReplacementCondition.FirstTokenCreationEachTurn moved its required
  *       player field to an optional active_player_req, and CopyTargetPurpose
  *       gained a CopyTokenSource variant. Both are one-way parse breaks: the
  *       condition's player field was REQUIRED through v48, so a v48 peer hits a
  *       missing-field error, and the purpose tag is internally tagged, so a v48
  *       peer hits an unknown-variant error on CopyTokenSource. Bumped in
  *       lockstep with PROTOCOL_VERSION 66.
- *  48 â€” Retroactive bump for two new-tag changes that landed without one.
+ *  48 — Retroactive bump for two new-tag changes that landed without one.
  *       #8501 added Effect.OpenBoosterPack and the BoosterPack arms of
  *       OutsideGameChoiceSource / OutsideGameSelection (adjacently-tagged, so
  *       an old peer cannot decode them at all); #8332 added slots/slot_pools to
  *       WaitingFor.RetargetChoice and controller to StackEntryDisplay (optional,
- *       so an old peer decodes and then misrenders â€” RetargetChoiceModal
+ *       so an old peer decodes and then misrenders — RetargetChoiceModal
  *       indexes slot_pools, and its ?? guards an undefined element, not an
  *       undefined array, so an old host + new guest throws during render).
  *       No wire shape changes here; this exists so first contact stops admitting
  *       the skew. Bumped in lockstep with PROTOCOL_VERSION 64.
- *  47 â€” WaitingFor.ReplacementChoice gained an engine-owned
+ *  47 — WaitingFor.ReplacementChoice gained an engine-owned
  *       ReplacementChoiceKind discriminator and a last_applied_decides flag.
  *       Both are optional on the wire, so a skewed host/guest pair decodes
  *       successfully and then misrenders the prompt instead of failing at
  *       first contact.
- *  45 â€” Effect.ChooseCounterKind gained domain and chooser, carried inside
+ *  45 — Effect.ChooseCounterKind gained domain and chooser, carried inside
  *       GameObject.abilities and trigger definitions on every GameState frame
  *       (CR 608.2d). Additive behind serde defaults; a v44 peer has no field to
  *       receive the printed list or the random chooser into and silently reads
  *       both as an on-target prompt, placing no counter. Since game_setup and
  *       reconnect_ack carry GameState, first contact rejects the version skew.
  *       Bumped in lockstep with PROTOCOL_VERSION 61.
- *  44 â€” DerivedViews.back_face_spell_costs publishes, for each card the viewer
+ *  44 — DerivedViews.back_face_spell_costs publishes, for each card the viewer
  *       may cast whose player chooses a spell face at cast time (a split card
- *       such as a Room, a spell//spell MDFC â€” CR 709.3 + CR 712.11b), the live
+ *       such as a Room, a spell//spell MDFC — CR 709.3 + CR 712.11b), the live
  *       cost of the OTHER face; spellCosts reports the live face only. The
  *       cost badge renders both faces from this map. Additive behind a serde
  *       default, but this client renders the map directly; a v43 host would
@@ -537,7 +543,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       half's printed cost. Since game_setup and reconnect_ack carry
  *       GameState, first contact rejects the version skew. Bumped in lockstep
  *       with PROTOCOL_VERSION 60.
- *  43 â€” LegalActionsWire.viewerInteraction's shortcut preview changed from a
+ *  43 — LegalActionsWire.viewerInteraction's shortcut preview changed from a
  *       single optional InteractionShortcutPreview to an
  *       Array<InteractionShortcutPreview>, one element per offerable count,
  *       each element also carrying an allocation list for the declaration's
@@ -547,11 +553,11 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       no decode error anywhere. First-contact version equality is the only
  *       place the skew is refusable, and no shim ships. Bumped in lockstep with
  *       PROTOCOL_VERSION 59 in crates/lobby-broker/src/protocol.rs, which the
- *       same retype breaks in the declared Rust types â€” but no production Rust
+ *       same retype breaks in the declared Rust types — but no production Rust
  *       code deserializes ServerMessage, so that track fails silently at the
  *       browser too, and the handshake is the only refusal point on both.
- *  42 â€” New guest â†’ host `state_ack` frame, carrying the highest state
- *       revision the guest has actually APPLIED â€” the fact a host ledger that
+ *  42 — New guest → host `state_ack` frame, carrying the highest state
+ *       revision the guest has actually APPLIED — the fact a host ledger that
  *       records TRANSMISSION cannot observe, since a send resolving true only
  *       means the bytes reached the channel. On the stale-drop branch of
  *       `state_update` it reports the NEWER revision the guest already holds,
@@ -561,7 +567,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       the sweep). A v41 peer would not carry `state_ack` in
  *       VALID_TYPES, so `validateMessage` would throw, the throw would
  *       propagate out of `decodeWireMessage` into `peer.ts`'s catch, and
- *       every ack would be dropped with a console warning â€” a capability
+ *       every ack would be dropped with a console warning — a capability
  *       loss, not a parse break of the surrounding session, though unlike 24
  *       it is a whole frame rejected rather than an accepted frame missing an
  *       additive field. Since
@@ -569,16 +575,16 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       the skew rather than allowing that loss, so the drop path above is
  *       unreachable in practice; it is stated because it is what the
  *       handshake exists to prevent. That check lives in
- *       `P2PGuestAdapter.handleHostMessage`, not in `validateMessage` â€” see
+ *       `P2PGuestAdapter.handleHostMessage`, not in `validateMessage` — see
  *       the paragraph above.
- *  40 â€” DerivedViews.room_half_identities publishes both halves of every
+ *  40 — DerivedViews.room_half_identities publishes both halves of every
  *       battlefield Room in printed order, resolved through the COPIED halves
  *       for a permanent that copies a Room (CR 709.5b + CR 707.2). The unlock
  *       special action's offer names the half it would unlock and shows that
  *       half's cost (CR 709.5e) from this map: an enter-as-copy recipient
  *       carries neither on its own printed card (its `back_face` is empty and
  *       its printed name is its own), and printed order is engine work
- *       besides â€” `room::live_face_door` reads `modal_back_face`, the
+ *       besides — `room::live_face_door` reads `modal_back_face`, the
  *       CR 709.5d mapping. Face-down permanents are absent (CR 708.2a). The
  *       field is additive behind a serde default, but this client renders the
  *       map directly rather than deriving halves from raw state; a v39 host
@@ -586,13 +592,13 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       the defect this bump exists to fix. Since game_setup and reconnect_ack
  *       carry GameState, first contact rejects the version skew rather than
  *       allowing that capability loss.
- *  39 â€” DerivedViews.storm_count publishes the engine-owned number of copies a
+ *  39 — DerivedViews.storm_count publishes the engine-owned number of copies a
  *       current Storm trigger will create, or a newly cast Storm spell would
  *       create. The field is additive, but this client renders the scalar
  *       directly; a v38 host would silently omit the Storm HUD status. Since
  *       game_setup and reconnect_ack carry GameState, first contact rejects
  *       the version skew rather than allowing that capability loss.
- *  38 â€” Casting permissions gained a typed lifetime. Two parts, with different
+ *  38 — Casting permissions gained a typed lifetime. Two parts, with different
  *       compatibility consequences:
  *       (a) `CastingPermission::ExileWithAltAbilityCost` gained `duration`
  *           and `source_id`; `::ExileWithAltCost` gained `source_id` beside the
@@ -609,28 +615,28 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *           either new tag fails on an unknown variant. There is no serde
  *           default that can rescue it, which is why the handshake must
  *           refuse the pairing rather than degrade.
- *  37 â€” FormatConfig gained default_deck_copy_limit, the resolved per-format
+ *  37 — FormatConfig gained default_deck_copy_limit, the resolved per-format
  *       deck-copy ceiling (CR 100.2a / CR 100.2b / CR 903.5b) max_deck_copies
  *       and the deck-compatibility admission path now both read. The field
  *       is optional and still parses on an older peer, but silently falls
  *       back to the fail-closed UpTo(1) singleton cap instead of the
- *       format's real declared limit â€” a silent capability loss like 24, not
+ *       format's real declared limit — a silent capability loss like 24, not
  *       a parse break. game_setup and reconnect_ack both carry the full
  *       GameState, so this P2P track is broken by the same change as the
  *       full-game PROTOCOL_VERSION track (see
  *       crates/lobby-broker/src/protocol.rs entry 48) and must bump in
  *       lockstep with it.
- *  36 â€” Resolution-time optional fixed sacrifice payments add a typed
+ *  36 — Resolution-time optional fixed sacrifice payments add a typed
  *       replacement-resumable continuation to GameState.
- *  35 â€” QuantityRef.Aggregate and QuantityRef.TrackedSetAggregate were
+ *  35 — QuantityRef.Aggregate and QuantityRef.TrackedSetAggregate were
  *       replaced in GameState snapshots by the canonical
  *       QuantityRef.PropertyAggregate tag with a validated source object. New
  *       peers migrate both legacy input tags, but a v34 peer cannot parse the
  *       canonical tag emitted by v35, so P2P first contact rejects the skew.
- *  34 â€” GameState gained serialized cast-occurrence provenance and prepared-copy links.
- *  33 â€” Resolution-time optional PayCost(OneOf) branch choice added a
+ *  34 — GameState gained serialized cast-occurrence provenance and prepared-copy links.
+ *  33 — Resolution-time optional PayCost(OneOf) branch choice added a
  *       serialized WaitingFor/GameAction pair.
- *  32 â€” FormatConfig.deck_size changed from a bare u16 to the adjacently
+ *  32 — FormatConfig.deck_size changed from a bare u16 to the adjacently
  *       tagged DeckSizeRule enum (Minimum(u16) / Exactly(u16)), because
  *       CR 903.13f(1) makes Commander Draft a command-zone format with a
  *       minimum rather than an exact size, and GameFormat gained a
@@ -639,25 +645,25 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       neither a serde default nor a deserialize_with, so a v31 peer's
  *       "deck_size": 60 cannot deserialize against the adjacently tagged enum
  *       and a v32 peer's {"type":"Minimum","data":60} cannot deserialize
- *       against a v31 u16 â€” the break is unconditional, runs in BOTH
+ *       against a v31 u16 — the break is unconditional, runs in BOTH
  *       directions, and hits every format's snapshot, not just Commander
  *       Draft's. GameState.format_config's serde default does NOT rescue it:
  *       a field-level default applies only when the key is ABSENT, and an old
  *       peer sends the key present with the old inner shape. The
- *       GameFormat::CommanderDraft variant is the second and narrower half â€”
+ *       GameFormat::CommanderDraft variant is the second and narrower half —
  *       it breaks only when that variant is actually serialized.
- *  31 â€” Action and mana-payment-preview rejections carry engine-owned,
+ *  31 — Action and mana-payment-preview rejections carry engine-owned,
  *       viewer-filtered ActionRejection DTOs. First-contact versioning keeps
  *       legacy peers from treating a typed rejection as a transport string.
- *  30 â€” ManaRestriction.CannotCastSpellFromZone adds a serialized
+ *  30 — ManaRestriction.CannotCastSpellFromZone adds a serialized
  *       GameState/ManaUnit restriction used by Karolina Dean. Older peers
  *       cannot deserialize that externally tagged enum variant.
- *  29 â€” WaitingFor.ChooseObjectsSelection publishes min and optional max
+ *  29 — WaitingFor.ChooseObjectsSelection publishes min and optional max
  *       bounds. A v28 peer silently ignores the additive fields and offers
  *       out-of-range selections, so refuse the capability mismatch during
  *       host/guest first contact.
- *  28 â€” PayCostKind::TapCreatures changed from { aggregate } to a required
- *       { mode } (Fixed/VariableX/Aggregate) â€” the fix that also unlocks
+ *  28 — PayCostKind::TapCreatures changed from { aggregate } to a required
+ *       { mode } (Fixed/VariableX/Aggregate) — the fix that also unlocks
  *       the u32::MAX X-sentinel tap-cost form (Glacian, Powerstone Engineer
  *       + 8 sibling cards, #7799). mode carries no serde default, so a
  *       GameState snapshot paused mid-TapCreatures payment under the old
@@ -667,72 +673,72 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       broken by the same change as the full-game PROTOCOL_VERSION track
  *       (see crates/lobby-broker/src/protocol.rs entry 37) and must bump
  *       in lockstep with it.
- *  27 â€” WaitingFor.ChooseDungeon.options changed from DungeonId[] to
+ *  27 — WaitingFor.ChooseDungeon.options changed from DungeonId[] to
  *       DungeonPreview[], and ChooseDungeonRoom dropped option_names, gained a
  *       required dungeon_name, and changed options from number[] to
  *       RoomPreview[], so each option carries the room's printed name and
  *       room-ability text (CR 309.4b-c). A PARSE bump like 16, not a silent
  *       capability loss like 24: none of the new fields carry a serde default,
  *       so a v26 peer cannot deserialize a dungeon-choice snapshot at all.
- *       DerivedViews.dungeon_rooms rides along in the same bump â€” it IS
+ *       DerivedViews.dungeon_rooms rides along in the same bump — it IS
  *       optional and would parse on a v26 peer, but this client deleted its
  *       dungeon_progress room-index derivation, so a v26 host would leave a
  *       v27 guest with no dungeon badge.
- *  26 â€” DerivedViews.current_target_kind publishes the engine's CR 115.1
+ *  26 — DerivedViews.current_target_kind publishes the engine's CR 115.1
  *       classification of the live target announcement. The field is optional
  *       and parses on a v24 peer, so the loss is silent: this client deleted
  *       inferTargetNoun, so a v24 host would leave a v25 guest naming no
  *       target at all. The handshake is the only place to refuse it.
- *  23 â€” WaitingFor::AlternativeCastChoice.alternative_additional_cost_description
+ *  23 — WaitingFor::AlternativeCastChoice.alternative_additional_cost_description
  *       changed from a string to a typed Emerge-sacrifice descriptor. Older
  *       clients would receive an object where their modal expects display text.
- *  22 â€” LegalActionsWire.viewerInteraction carries attachmentViews: the engine's
+ *  22 — LegalActionsWire.viewerInteraction carries attachmentViews: the engine's
  *       membership list for each host's attachment fan. It parses on a v21 peer
- *       as an empty map, so the loss is silent â€” a guest paired with a v21 host
+ *       as an empty map, so the loss is silent — a guest paired with a v21 host
  *       would simply find every attachment fan gone.
- *  21 â€” LegalActionsWire.viewerInteraction carries the loop-shortcut preview,
+ *  21 — LegalActionsWire.viewerInteraction carries the loop-shortcut preview,
  *       and the state snapshot carries WaitingFor::LoopShortcut.declaration.
  *       Both are optional and parse on a v20 peer; the loss is silent, so the
  *       handshake is the only place the pairing can be refused.
- *  24 â€” DerivedViews.legend_candidate_identities carries the engine-authored
+ *  24 — DerivedViews.legend_candidate_identities carries the engine-authored
  *       copy identity required to label legend-rule choices. The field is
  *       additive but the client no longer infers this identity from raw state,
  *       so accepting a v23 peer would silently remove every choice option.
- *  20 â€” Serialized player-action completion provenance and modal continuations.
- *  19 â€” Added an action_noop acknowledgement for accepted transport no-ops.
- *  18 â€” DebugCardEntries added a serialized, private resolution frame for
+ *  20 — Serialized player-action completion provenance and modal continuations.
+ *  19 — Added an action_noop acknowledgement for accepted transport no-ops.
+ *  18 — DebugCardEntries added a serialized, private resolution frame for
  *       multi-card sandbox battlefield entries that pause for replacement or
  *       as-enters choices. Old peers cannot deserialize that GameState shape.
- *  16 â€” PayableResource::ManaGeneric changed from { per_x } to
- *       { base_cost: ManaCost } (#6410) â€” a GameState payload field type
+ *  16 — PayableResource::ManaGeneric changed from { per_x } to
+ *       { base_cost: ManaCost } (#6410) — a GameState payload field type
  *       change, and base_cost intentionally carries no serde default (a
  *       missing base_cost must fail deserialization, not silently resolve
  *       to a zero-cost payment), so old and new peers can't parse each
  *       other's serialized snapshots.
- *   1 â€” pre-compression JSON-serialization era (no longer in production)
- *   2 â€” gzip + version-prefixed binary wire format
- *   3 â€” Planechase state and action payloads in game_setup/reconnect snapshots
- *   4 â€” Archenemy derived view and scheme deck payloads
- *   5 â€” CardPredicateGuessMade game event shape
- *  13 â€” Actor-scoped priority-passing settings and filtered per-player state.
- *  17 â€” Sacrificial-mana source selection action and waiting-state snapshots.
- *  12 â€” Connive exact subject snapshots and resident paused post-replacement
+ *   1 — pre-compression JSON-serialization era (no longer in production)
+ *   2 — gzip + version-prefixed binary wire format
+ *   3 — Planechase state and action payloads in game_setup/reconnect snapshots
+ *   4 — Archenemy derived view and scheme deck payloads
+ *   5 — CardPredicateGuessMade game event shape
+ *  13 — Actor-scoped priority-passing settings and filtered per-player state.
+ *  17 — Sacrificial-mana source selection action and waiting-state snapshots.
+ *  12 — Connive exact subject snapshots and resident paused post-replacement
  *       drains changed P2P GameState snapshots.
- *  11 â€” Serialized GameState trigger provenance and paused logical zone-change owners.
- *  10 â€” Dedicated companion deck slot and typed companion-reveal choices.
- *   9 â€” Meld pair and attacking-entry choices after mana-payment preview variants.
- *   8 â€” Mana-payment preview request/response variants.
- *   7 â€” PrecastCopyShortcut action and its two WaitingFor variants.
- *  17 â€” Bound draft-match concession request. A Traditional-draft guest
+ *  11 — Serialized GameState trigger provenance and paused logical zone-change owners.
+ *  10 — Dedicated companion deck slot and typed companion-reveal choices.
+ *   9 — Meld pair and attacking-entry choices after mana-payment preview variants.
+ *   8 — Mana-payment preview request/response variants.
+ *   7 — PrecastCopyShortcut action and its two WaitingFor variants.
+ *  17 — Bound draft-match concession request. A Traditional-draft guest
  *       asks its match authority to settle the match; it must not send a
  *       game-level concession through the ordinary P2P path.
- *   6 â€” Mulligan bottoming folded into a MulliganDecisionPhase::BottomCards
+ *   6 — Mulligan bottoming folded into a MulliganDecisionPhase::BottomCards
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
 /**
  * Exactly one answer per `preview_interaction` request. `failed` is the
- * host-lifecycle channel â€” every engine-level refusal already rides inside
+ * host-lifecycle channel — every engine-level refusal already rides inside
  * `InteractionPreview.status`, so this union has two arms rather than the mana
  * lane's three. A nested union rather than a third top-level type keeps
  * `VALID_TYPES` at exactly the two entries the round-trip row asserts.
@@ -741,7 +747,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 139 as const;
+export { WIRE_PROTOCOL_VERSION };
 
 export type P2PMessage = P2PAuthorityWire & (
   | {
@@ -782,10 +788,10 @@ export type P2PMessage = P2PAuthorityWire & (
       events: GameEvent[];
       logEntries?: GameLogEntry[];
     } & LegalActionsWire)
-  /** Guest â†’ host: the highest state revision the guest has APPLIED, which a
+  /** Guest → host: the highest state revision the guest has APPLIED, which a
    * host ledger recording transmission cannot otherwise observe. Sent from
    * every arm that accepts a state-bearing frame, and from the stale-drop
-   * branch of `state_update` â€” where it reports the newer revision the guest
+   * branch of `state_update` — where it reports the newer revision the guest
    * already holds, not the stale one it discarded. */
   | { type: "state_ack"; revision: number }
   | { type: "action_rejected"; rejection: ActionRejection }
@@ -826,15 +832,15 @@ export type P2PMessage = P2PAuthorityWire & (
       hostWireProtocolVersion?: number;
       guestWireProtocolVersion?: number;
     }
-  // Kick / forced removal (host â†’ target).
+  // Kick / forced removal (host → target).
   | { type: "kick"; reason: string; format?: string }
-  // Host explicitly quit the game (host â†’ all guests). Terminal: guests set
+  // Host explicitly quit the game (host → all guests). Terminal: guests set
   // their `terminated` flag and skip the reconnect backoff that normally
   // fires on an unexpected connection drop. Distinct from the PeerSession
   // `disconnect` wire message because that one is a pure session-close
   // signal; `host_left` carries the game-level semantic that the room is
   // permanently gone and reconnect attempts would spin against a destroyed
-  // Peer. Sent from `P2PHostAdapter.terminateGame()` only â€” component
+  // Peer. Sent from `P2PHostAdapter.terminateGame()` only — component
   // unmount (StrictMode, tab close) goes through `dispose()` which does NOT
   // send this, since those cases may be transient and the reconnect loop is
   // correct behavior there.
@@ -846,7 +852,7 @@ export type P2PMessage = P2PAuthorityWire & (
   /** Native server AI became unable to advance the authoritative session.
    * The host sends this only after the final state revision it depends on. */
   | { type: "ai_driver_fault"; id: number; revision: number; message: string }
-  // Lifecycle broadcasts (host â†’ all remaining peers).
+  // Lifecycle broadcasts (host → all remaining peers).
   | { type: "player_kicked"; playerId: number; reason: string }
   // Host chose "continue without them" OR guest self-conceded mid-game. Wire
   // variant kept distinct from `player_kicked` so clients can render correctly
@@ -856,7 +862,7 @@ export type P2PMessage = P2PAuthorityWire & (
   | { type: "player_reconnected"; playerId: number }
   | { type: "game_paused"; reason: string }
   | { type: "game_resumed" }
-  // Pre-game lobby progress (host â†’ all peers in the lobby).
+  // Pre-game lobby progress (host → all peers in the lobby).
   | { type: "lobby_progress"; joined: number; total: number }
   | { type: "seat_mutate"; mutation: SeatMutation }
   | { type: "seat_snapshot"; view: SeatView }
@@ -916,10 +922,10 @@ export function validateMessage(raw: unknown): P2PMessage {
   return raw as P2PMessage;
 }
 
-// â”€â”€ Wire-Format Encoding â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Wire-Format Encoding ─────────────────────────────────────────────────
 // The P2P DataChannel carries gzipped JSON with a 1-byte version prefix:
-//   [0x00][raw JSON]       â€” tiny messages where gzip would inflate
-//   [0x01][gzip(JSON)]     â€” state_update, game_setup, etc.
+//   [0x00][raw JSON]       — tiny messages where gzip would inflate
+//   [0x01][gzip(JSON)]     — state_update, game_setup, etc.
 // Messages smaller than COMPRESSION_THRESHOLD skip compression because gzip's
 // ~20-byte header would inflate sub-100-byte payloads. Ping/pong and small
 // control messages take the raw path; state broadcasts take the gzip path.
