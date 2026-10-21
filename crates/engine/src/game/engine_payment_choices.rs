@@ -2166,6 +2166,7 @@ fn payment_outcome_condition(condition: &AbilityCondition) -> bool {
         | AbilityCondition::ControllerControlledMatchingAsCast { .. }
         | AbilityCondition::IsYourTurn
         | AbilityCondition::WasStartingPlayer { .. }
+        | AbilityCondition::PlayerAttackedPlayer { .. }
         | AbilityCondition::SpellCastWithVariantThisTurn { .. }
         | AbilityCondition::FirstCombatPhaseOfTurn
         | AbilityCondition::FirstEndStepOfTurn

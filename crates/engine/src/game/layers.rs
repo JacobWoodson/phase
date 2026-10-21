@@ -5367,6 +5367,7 @@ fn static_condition_reads_monarch(condition: &StaticCondition) -> bool {
         // ever added, it MUST route here.
         StaticCondition::IsPresent { .. }
         | StaticCondition::QuantityComparison { .. }
+        | StaticCondition::QuantityQuality { .. }
         | StaticCondition::DefendingPlayerControls { .. }
         | StaticCondition::SourceMatchesFilter { .. }
         | StaticCondition::TopOfLibraryMatches { .. }

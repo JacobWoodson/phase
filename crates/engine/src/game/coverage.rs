@@ -10261,6 +10261,7 @@ fn extract_ability_condition_features(
         | AbilityCondition::ControllerControlledMatchingAsCast { .. }
         | AbilityCondition::IsYourTurn
         | AbilityCondition::WasStartingPlayer { .. }
+        | AbilityCondition::PlayerAttackedPlayer { .. }
         | AbilityCondition::SpellCastWithVariantThisTurn { .. }
         | AbilityCondition::FirstCombatPhaseOfTurn
         | AbilityCondition::FirstEndStepOfTurn

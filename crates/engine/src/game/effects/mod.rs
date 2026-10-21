@@ -8022,6 +8022,7 @@ fn condition_reads_filter_population(
         | AbilityCondition::HasObjectTarget
         | AbilityCondition::IsYourTurn
         | AbilityCondition::WasStartingPlayer { .. }
+        | AbilityCondition::PlayerAttackedPlayer { .. }
         | AbilityCondition::SpellCastWithVariantThisTurn { .. }
         | AbilityCondition::FirstCombatPhaseOfTurn
         | AbilityCondition::FirstEndStepOfTurn
@@ -9065,6 +9066,7 @@ fn static_condition_reads_filter_population(
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }
@@ -9357,6 +9359,7 @@ fn static_definition_reads_filter_population(
         protection_does_not_remove: _,
         room_door: _,
         granting_object: _,
+        bound_actor: _,
     } = static_def;
     affected
         .as_ref()
@@ -9884,6 +9887,7 @@ fn continuous_modification_reads_filter_population(
         | ContinuousModification::AssignDamageAsThoughUnblocked
         | ContinuousModification::AssignNoCombatDamage
         | ContinuousModification::ChangeController
+        | ContinuousModification::ChangeControllerToDesignation { .. }
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
