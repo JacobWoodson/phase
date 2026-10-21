@@ -927,9 +927,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::LoseTheGame
         | EffectKind::WinTheGame
         | EffectKind::RollDie
-        | EffectKind::FlipCoin
         | EffectKind::FlipCoins
-        | EffectKind::FlipCoinUntilLose
         | EffectKind::RingTemptsYou
         | EffectKind::VentureIntoDungeon
         | EffectKind::VentureInto
