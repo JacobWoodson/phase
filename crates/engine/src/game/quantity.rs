@@ -4035,9 +4035,7 @@ fn fold_compose(expr: &QuantityExpr, recurse: impl Fn(&QuantityExpr) -> i32) -> 
         // CR 107.2: an empty operand list (undeterminable) resolves to 0.
         QuantityExpr::Max { exprs } => exprs.iter().map(&recurse).max().unwrap_or(0),
         QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => {
-            unreachable!(
-                "fold_compose called on leaf variant — caller must dispatch leaves first"
-            )
+            unreachable!("fold_compose called on leaf variant — caller must dispatch leaves first")
         }
     }
 }
