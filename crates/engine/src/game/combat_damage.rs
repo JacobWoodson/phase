@@ -206,7 +206,8 @@ pub fn resolve_combat_damage(
         let batch_event_start = events.len();
         events.extend_from_slice(batch.events());
         match batch {
-            // CR 616.1: the batch parked on a life-gain ordering choice. The
+            // CR 616.1: the batch parked on an ordering choice — a lifelink
+            // life-gain, or (pre-application) a combat-damage event. The
             // sub-step flags are deliberately NOT set here — the resume sets them
             // once the batch actually completes, so neither re-entry nor
             // priority.rs's completeness gate can skip the rest of combat damage.
@@ -495,8 +496,15 @@ pub(crate) fn resume_pending_combat_damage(
     );
     // Install the parked prefix as the live window so the remaining run
     // accumulates onto it. `outer_tally` (the pre-batch window) is restored
-    // by the shared tail on completion, or now on re-pause.
-    let outer_tally = state.combat_prevention_tally.take();
+    // by the shared tail on completion, or now on re-pause. The live window
+    // is `#[serde(skip)]`, so a mid-pause save/load drops it: prefer it when
+    // present, else hydrate the pre-batch window the park captured.
+    let outer_tally = state.combat_prevention_tally.take().or_else(|| {
+        record
+            .outer_tally
+            .as_ref()
+            .map(|entries| tally_map_from_record_entries(entries))
+    });
     let mut live = tally_map_from_record_entries(&record.phase_a_tally);
     for (key, amount) in tally_map_from_record_entries(&record.phase_b_tally) {
         *live.entry(key).or_insert(0) += amount;
@@ -1763,6 +1771,7 @@ struct HydratedCombatEntry {
 /// Phase-A leg with an empty Phase-B leg (merging is keyed sums, so one leg +
 /// empty equals the inline two-leg merge). `events` is the batch's events so
 /// far (inline rider/drain events, plus every folded answer span on resume).
+#[allow(clippy::too_many_arguments)]
 fn apply_combat_survivors(
     state: &mut GameState,
     entries: Vec<HydratedCombatEntry>,
@@ -1814,9 +1823,10 @@ fn apply_combat_survivors(
                 &mut events,
             ) {
                 DamageResult::Applied(amt) => amt,
-                // CR 510.2: Life-loss/lifelink replacement needs a choice, but no
-                // player gets priority between combat damage being assigned and
-                // dealt — combat cannot pause, so the deferred portion is dropped
+                // CR 510.2: Life-loss/lifelink replacement needs a choice
+                // mid-application, but that sub-pause point is unmodeled — the
+                // deferred portion is dropped (the CR 616.1 ordering pause parks
+                // before Phase C; it cannot serve a choice raised here)
                 // (mirrors the legacy `apply_damage_to_target` combat behavior).
                 DamageResult::NeedsChoice => 0,
             },
@@ -8012,6 +8022,579 @@ mod tests {
         assert_eq!(
             state.objects[&blocker].damage_marked, 0,
             "E was prevented: the blocker takes nothing"
+        );
+    }
+
+    /// CR 616.1f: the SAME batch pauses twice. Two warded blockers (E1, E2):
+    /// E1's answer resumes into E2's overlap, which re-pauses with a FRESH
+    /// record (never a mutated one, so no stale `paused_entry_pruned` survives
+    /// across parks). E2's answer completes the one batch.
+    ///
+    /// REVERT PROBES: route the resume's `Paused` outcome to completion instead
+    /// of re-parking → the second prompt never surfaces; mutate the old record
+    /// instead of rebuilding → the fresh-park flag/gate asserts fail; fold an
+    /// answer span twice → the final multisets duplicate.
+    #[test]
+    fn f1_resume_repauses_same_batch_on_second_overlap() {
+        use crate::types::keywords::ProtectionTarget;
+        use crate::types::mana::ManaColor;
+
+        let mut state = setup();
+        let attacker_a = create_creature(&mut state, PlayerId(0), "RG Attacker A", 3, 3);
+        paint(
+            &mut state,
+            attacker_a,
+            vec![ManaColor::Red, ManaColor::Green],
+        );
+        let blocker_a = create_creature(&mut state, PlayerId(1), "Warded Bear A", 2, 2);
+        install_protection_overlap(
+            &mut state,
+            TargetRef::Object(blocker_a),
+            ProtectionTarget::Color(ManaColor::Red),
+            ProtectionTarget::Color(ManaColor::Green),
+        );
+        let attacker_b = create_creature(&mut state, PlayerId(0), "RG Attacker B", 3, 3);
+        paint(
+            &mut state,
+            attacker_b,
+            vec![ManaColor::Red, ManaColor::Green],
+        );
+        let blocker_b = create_creature(&mut state, PlayerId(1), "Warded Bear B", 2, 2);
+        install_protection_overlap(
+            &mut state,
+            TargetRef::Object(blocker_b),
+            ProtectionTarget::Color(ManaColor::Red),
+            ProtectionTarget::Color(ManaColor::Green),
+        );
+        setup_combat(
+            &mut state,
+            vec![attacker_a, attacker_b],
+            vec![(attacker_a, vec![blocker_a]), (attacker_b, vec![blocker_b])],
+        );
+
+        // E1 parks first: both attackers' hits precede the blockers' returns.
+        let mut events = Vec::new();
+        let waiting_e1 =
+            resolve_combat_damage(&mut state, &mut events).expect("E1 pauses the batch");
+        expect_order_prompt(&waiting_e1, PlayerId(1), 2);
+        let pending = state
+            .pending_replacement
+            .as_ref()
+            .expect("E1's pause holds its own authority");
+        assert!(
+            matches!(&pending.proposed, ProposedEvent::Damage { target, .. }
+                if *target == TargetRef::Object(blocker_a)),
+            "E1 owns the FIRST overlap (attacker A's hit), got {:?}",
+            pending.proposed
+        );
+        let record = state.pending_combat_damage.as_ref().unwrap();
+        assert_eq!(
+            (
+                record.paused_entry,
+                record.decided.len(),
+                record.remaining.len()
+            ),
+            (0, 0, 3),
+            "E1 pauses first; E2 plus both returns wait in remaining"
+        );
+
+        // Answer E1: the resume hits E2's overlap and re-pauses with a FRESH
+        // record — a second Order prompt, not completion.
+        state.waiting_for = waiting_e1.clone();
+        answer_replacement_choice(&mut state, &mut events, 0);
+        let waiting_e2 = state.waiting_for.clone();
+        expect_order_prompt(&waiting_e2, PlayerId(1), 2);
+        let pending = state
+            .pending_replacement
+            .as_ref()
+            .expect("E2's pause holds its own authority");
+        assert!(
+            matches!(&pending.proposed, ProposedEvent::Damage { target, .. }
+                if *target == TargetRef::Object(blocker_b)),
+            "E2 owns the SECOND overlap — the same batch re-paused, got {:?}",
+            pending.proposed
+        );
+        let fresh = state.pending_combat_damage.as_ref().unwrap();
+        assert_eq!(
+            (fresh.paused_entry, fresh.decided.len()),
+            (1, 1),
+            "the fresh park re-arms the stash gate (decided.len() == paused_entry)"
+        );
+        assert_eq!(
+            fresh.decided[0], None,
+            "E1's prevention stash carries into the fresh record"
+        );
+        assert!(
+            !fresh.paused_entry_pruned,
+            "a fresh park never inherits a stale prune flag (B6 site 3)"
+        );
+        assert!(
+            !fresh
+                .batch_events
+                .iter()
+                .any(|e| matches!(e, GameEvent::DamagePrevented { .. })),
+            "no aggregate publishes per-park: the one batch publishes once at completion"
+        );
+
+        // Answer E2: the one batch completes — each prevention and each return
+        // exactly once, so no leg duplicated across the two parks.
+        state.waiting_for = waiting_e2.clone();
+        answer_replacement_choice(&mut state, &mut events, 1);
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "the batch settles after E2, got {:?}",
+            state.waiting_for
+        );
+        assert!(state.pending_combat_damage.is_none());
+        assert!(state.pending_replacement.is_none());
+        assert!(state.combat.as_ref().unwrap().regular_damage_done);
+        let prevented: Vec<(TargetRef, u32)> = events
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::DamagePrevented { target, amount, .. } => {
+                    Some((target.clone(), *amount))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            prevented.len(),
+            2,
+            "two preventions, neither duplicated nor dropped, got {events:?}"
+        );
+        assert!(
+            prevented.contains(&(TargetRef::Object(blocker_a), 3))
+                && prevented.contains(&(TargetRef::Object(blocker_b), 3)),
+            "each overlap's prevention publishes exactly once, got {prevented:?}"
+        );
+        let dealt: Vec<(TargetRef, u32)> = events
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::DamageDealt { target, amount, .. } => Some((target.clone(), *amount)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            dealt.len(),
+            2,
+            "two returns, neither duplicated nor dropped, got {events:?}"
+        );
+        assert!(
+            dealt.contains(&(TargetRef::Object(attacker_a), 2))
+                && dealt.contains(&(TargetRef::Object(attacker_b), 2)),
+            "only the two blockers' return damage is dealt, got {dealt:?}"
+        );
+    }
+
+    /// CR 616.1f: ONE event needs TWO ordering choices. 10 damage vs three
+    /// `Next(5)` shields: the first answer applies one shield and the SAME
+    /// event re-parks (the NeedsChoice epilogue, folded by the wrapper — the
+    /// record stays parked and UNSTASHED). The second answer settles the event
+    /// (the stash lands once) and the batch completes as one.
+    ///
+    /// REVERT PROBES: stash on the repeat path → the unstashed assertion fails;
+    /// drop the wrapper fold → a leg strands outside the batch (counts fail);
+    /// apply the survivor per answer → the blocker's marked damage doubles.
+    #[test]
+    fn f1_same_event_repeat_orders_twice_then_completes_as_one() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Ogre", 10, 10);
+        let blocker = create_creature(&mut state, PlayerId(1), "Warded Giant", 1, 11);
+        install_next_shield(&mut state, blocker, 5, "Ward of Embers", false);
+        install_next_shield(&mut state, blocker, 5, "Ward of Thorns", false);
+        install_next_shield(&mut state, blocker, 5, "Ward of Stone", false);
+        setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
+
+        // First prompt: all three shields co-applicable.
+        let mut events = Vec::new();
+        let waiting_first =
+            resolve_combat_damage(&mut state, &mut events).expect("three shields pause");
+        expect_order_prompt(&waiting_first, PlayerId(1), 3);
+
+        // First answer: one shield applies; the SAME event re-parks instead of
+        // settling — a second Order prompt, still unstashed.
+        state.waiting_for = waiting_first.clone();
+        answer_replacement_choice(&mut state, &mut events, 0);
+        let waiting_second = state.waiting_for.clone();
+        expect_order_prompt(&waiting_second, PlayerId(1), 2);
+        let pending = state
+            .pending_replacement
+            .as_ref()
+            .expect("the repeat holds its own authority");
+        assert!(
+            matches!(&pending.proposed, ProposedEvent::Damage { source_id, target, .. }
+                if *source_id == attacker && *target == TargetRef::Object(blocker)),
+            "the repeat owns the SAME event (not a nested child), got {:?}",
+            pending.proposed
+        );
+        let record = state.pending_combat_damage.as_ref().unwrap();
+        assert_eq!(
+            (record.paused_entry, record.decided.len()),
+            (0, 0),
+            "no stash on the repeat path: the paused slot settles exactly once"
+        );
+
+        // Second answer: the event settles and the one batch completes.
+        state.waiting_for = waiting_second.clone();
+        answer_replacement_choice(&mut state, &mut events, 0);
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "the batch settles after the repeat, got {:?}",
+            state.waiting_for
+        );
+        assert!(state.pending_combat_damage.is_none());
+        assert!(state.pending_replacement.is_none());
+        assert!(state.combat.as_ref().unwrap().regular_damage_done);
+        assert_eq!(
+            state.objects[&blocker].damage_marked, 0,
+            "10 - 5 - 5: the survivor applies exactly once"
+        );
+        let mut prevented: Vec<u32> = events
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::DamagePrevented { amount, .. } => Some(*amount),
+                _ => None,
+            })
+            .collect();
+        prevented.sort();
+        assert_eq!(
+            prevented,
+            vec![5, 5],
+            "two shields' aggregates publish once each (a 0 prevention is not an event), got {events:?}"
+        );
+        assert_eq!(
+            state.objects[&attacker].damage_marked, 1,
+            "the blocker's return damage (remaining) still lands"
+        );
+    }
+
+    /// R3 with a non-empty Phase A: a singly-protected hit claims in Phase A
+    /// (tallied, gated out of the entries) while an overlap pauses in Phase B.
+    /// The installs merge the parked Phase-A prefix with the answer's
+    /// accumulation, so BOTH preventions publish once with correct
+    /// per-(shield, recipient) amounts.
+    ///
+    /// REVERT PROBES: install only Phase B → the singly-protected aggregate
+    /// vanishes; publish per leg → one of them duplicates.
+    #[test]
+    fn f1_nonempty_phase_a_tally_merges_across_pause() {
+        use crate::types::keywords::{Keyword, ProtectionTarget};
+        use crate::types::mana::ManaColor;
+
+        let mut state = setup();
+        // Singly-protected pair: claims in Phase A, never an entry.
+        let red_attacker = create_creature(&mut state, PlayerId(0), "Red Attacker", 3, 3);
+        paint(&mut state, red_attacker, vec![ManaColor::Red]);
+        let guarded = create_creature(&mut state, PlayerId(1), "Guarded Bear", 2, 2);
+        state
+            .objects
+            .get_mut(&guarded)
+            .unwrap()
+            .keywords
+            .push(Keyword::Protection(ProtectionTarget::Color(ManaColor::Red)));
+        // Overlap pair: pauses in Phase B.
+        let rg_attacker = create_creature(&mut state, PlayerId(0), "RG Attacker", 3, 3);
+        paint(
+            &mut state,
+            rg_attacker,
+            vec![ManaColor::Red, ManaColor::Green],
+        );
+        let warded = create_creature(&mut state, PlayerId(1), "Warded Bear", 2, 2);
+        install_protection_overlap(
+            &mut state,
+            TargetRef::Object(warded),
+            ProtectionTarget::Color(ManaColor::Red),
+            ProtectionTarget::Color(ManaColor::Green),
+        );
+        setup_combat(
+            &mut state,
+            vec![red_attacker, rg_attacker],
+            vec![(red_attacker, vec![guarded]), (rg_attacker, vec![warded])],
+        );
+
+        let mut events = Vec::new();
+        let waiting = resolve_combat_damage(&mut state, &mut events).expect("the overlap pauses");
+        expect_order_prompt(&waiting, PlayerId(1), 2);
+        let record = state.pending_combat_damage.as_ref().unwrap();
+        assert_eq!(
+            (record.paused_entry, record.decided.len()),
+            (0, 0),
+            "the gated hit is not an entry: the overlap pauses first"
+        );
+        assert_eq!(
+            record.phase_b_tally.len(),
+            0,
+            "reach guard: nothing decided before the pause, so the merge's Phase-B leg is empty"
+        );
+        assert!(
+            record
+                .phase_a_tally
+                .iter()
+                .any(|entry| entry.recipient == TargetRef::Object(guarded) && entry.amount == 3),
+            "reach guard: the singly-protected hit is tallied in Phase A at the pause, got {:?}",
+            record.phase_a_tally
+        );
+
+        state.waiting_for = waiting.clone();
+        answer_replacement_choice(&mut state, &mut events, 0);
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "the batch settles, got {:?}",
+            state.waiting_for
+        );
+        assert!(state.pending_combat_damage.is_none());
+        let prevented: Vec<(TargetRef, u32)> = events
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::DamagePrevented { target, amount, .. } => {
+                    Some((target.clone(), *amount))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            prevented.len(),
+            2,
+            "two preventions, neither duplicated nor dropped, got {events:?}"
+        );
+        assert!(
+            prevented.contains(&(TargetRef::Object(guarded), 3))
+                && prevented.contains(&(TargetRef::Object(warded), 3)),
+            "both preventions publish once with correct per-recipient amounts, got {prevented:?}"
+        );
+        assert_eq!(state.objects[&guarded].damage_marked, 0);
+        assert_eq!(state.objects[&warded].damage_marked, 0);
+        assert_eq!(
+            (
+                state.objects[&red_attacker].damage_marked,
+                state.objects[&rg_attacker].damage_marked
+            ),
+            (2, 2),
+            "both returns (remaining) still land"
+        );
+    }
+
+    /// CR 616.1f: a lifelink gain pauses INSIDE a resumed damage batch. T3's
+    /// shape (lifelinker + overlap) with a gain-replacement overlap on the
+    /// lifelink controller: E's answer resumes through Phase C, and the
+    /// lifelink drain parks its own prompt (the `Paused` sub-arm) instead of
+    /// completing. The gain's answer completes through the lifelink resume
+    /// with the lifelink record drained.
+    ///
+    /// REVERT PROBES: complete through the damage resume without draining →
+    /// no lifelink prompt (the gain vanishes); drop the parked tail → the
+    /// completion asserts fail.
+    #[test]
+    fn f1_lifelink_pause_inside_resumed_batch() {
+        use crate::types::keywords::ProtectionTarget;
+        use crate::types::mana::ManaColor;
+
+        let mut state = setup();
+        let lifelinker = create_creature(&mut state, PlayerId(0), "Lifelink Cat", 2, 2);
+        state
+            .objects
+            .get_mut(&lifelinker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Lifelink);
+        install_gain_life_replacement(
+            &mut state,
+            PlayerId(0),
+            "Rhox Faithmender",
+            doubler_amount(),
+        );
+        install_gain_life_replacement(
+            &mut state,
+            PlayerId(0),
+            "Leyline of Hope",
+            plus_one_amount(),
+        );
+        let attacker = create_creature(&mut state, PlayerId(0), "RG Attacker", 3, 3);
+        paint(&mut state, attacker, vec![ManaColor::Red, ManaColor::Green]);
+        let blocker = create_creature(&mut state, PlayerId(1), "Warded Bear", 2, 2);
+        install_protection_overlap(
+            &mut state,
+            TargetRef::Object(blocker),
+            ProtectionTarget::Color(ManaColor::Red),
+            ProtectionTarget::Color(ManaColor::Green),
+        );
+        setup_combat(
+            &mut state,
+            vec![lifelinker, attacker],
+            vec![(attacker, vec![blocker])],
+        );
+
+        // E pauses on the overlap (the lifelinker is decided ahead of it).
+        let mut events = Vec::new();
+        let waiting_e = resolve_combat_damage(&mut state, &mut events).expect("the overlap pauses");
+        expect_order_prompt(&waiting_e, PlayerId(1), 2);
+
+        // E's answer resumes through Phase C — and the lifelink gain parks
+        // its own prompt instead of completing.
+        state.waiting_for = waiting_e.clone();
+        answer_replacement_choice(&mut state, &mut events, 1);
+        let waiting_gain = state.waiting_for.clone();
+        expect_order_prompt(&waiting_gain, PlayerId(0), 2);
+        let pending = state
+            .pending_replacement
+            .as_ref()
+            .expect("the gain's pause holds its own authority");
+        assert!(
+            matches!(&pending.proposed, ProposedEvent::LifeGain { .. }),
+            "the resumed batch parks on the LIFELINK gain, got {:?}",
+            pending.proposed
+        );
+        assert!(
+            state.pending_combat_damage.is_none(),
+            "the damage record is consumed by its resume"
+        );
+        assert!(
+            state.pending_combat_lifelink.is_some(),
+            "the lifelink tail parks for its own resume"
+        );
+
+        // The gain's answer completes through the lifelink resume.
+        state.waiting_for = waiting_gain.clone();
+        answer_replacement_choice(&mut state, &mut events, 0);
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "the batch settles after the gain, got {:?}",
+            state.waiting_for
+        );
+        assert!(state.pending_combat_damage.is_none());
+        assert!(
+            state.pending_combat_lifelink.is_none(),
+            "the lifelink record drains on completion"
+        );
+        assert!(state.combat.as_ref().unwrap().regular_damage_done);
+        let gains: Vec<i32> = events
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::LifeChanged {
+                    player_id, amount, ..
+                } if *player_id == PlayerId(0) => Some(*amount),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            gains.len(),
+            1,
+            "the lifelink gain applies exactly once, got {events:?}"
+        );
+        assert!(
+            [25, 26].contains(&(20 + gains[0])),
+            "doubler + plus-one order the 2 exactly once (2*2+1 or (2+1)*2), got {gains:?}"
+        );
+        assert_eq!(state.players[1].life, 18, "the lifelinker dealt 2");
+        assert!(
+            events.iter().any(
+                |e| matches!(e, GameEvent::DamagePrevented { target, amount: 3, .. }
+                    if *target == TargetRef::Object(blocker))
+            ),
+            "the overlap's prevention still publishes, got {events:?}"
+        );
+    }
+
+    /// CR 510.2 + CR 615.13: the pre-batch outer window survives a mid-pause
+    /// save/load. The live window is `#[serde(skip)]`, so the round trip drops
+    /// it — but the park captured it in `record.outer_tally`, and the
+    /// wrapper/resume installs prefer the parked copy when the live window is
+    /// gone. The batch still completes with its own aggregate published once
+    /// (never merged into the outer window).
+    ///
+    /// REVERT PROBE: install the live window alone (drop the `or_else`) → the
+    /// restored-outer assertion fails (the load silently downgrades `Some` to
+    /// `None`, flipping accumulate-vs-emit for later prevention).
+    #[test]
+    fn f1_outer_tally_restored_after_mid_pause_save_load() {
+        use crate::types::keywords::ProtectionTarget;
+        use crate::types::mana::ManaColor;
+        use crate::types::proposed_event::AppliedReplacementKey;
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "RG Attacker", 3, 3);
+        paint(&mut state, attacker, vec![ManaColor::Red, ManaColor::Green]);
+        let blocker = create_creature(&mut state, PlayerId(1), "Warded Bear", 2, 2);
+        install_protection_overlap(
+            &mut state,
+            TargetRef::Object(blocker),
+            ProtectionTarget::Color(ManaColor::Red),
+            ProtectionTarget::Color(ManaColor::Green),
+        );
+        setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
+
+        // Seed a pre-batch outer window (an outer simultaneity's accumulation).
+        let outer_key = (
+            AppliedReplacementKey::Object {
+                source: attacker,
+                index: 0,
+            },
+            TargetRef::Player(PlayerId(0)),
+        );
+        let mut outer_window = std::collections::HashMap::new();
+        outer_window.insert(outer_key, 7);
+        state.combat_prevention_tally = Some(outer_window.clone());
+
+        // The overlap parks, capturing the outer window on the record.
+        let mut events = Vec::new();
+        let waiting = resolve_combat_damage(&mut state, &mut events).expect("the overlap pauses");
+        expect_order_prompt(&waiting, PlayerId(1), 2);
+        let record = state.pending_combat_damage.as_ref().unwrap();
+        assert_eq!(
+            record.outer_tally.as_ref().map(|entries| entries.len()),
+            Some(1),
+            "reach guard: the park captures the pre-batch window, got {:?}",
+            record.outer_tally
+        );
+        assert_eq!(
+            state.combat_prevention_tally.as_ref(),
+            Some(&outer_window),
+            "reach guard: the live window still holds the outer at the park"
+        );
+
+        // Mid-pause save/load: the live window drops (serde skip); the record
+        // — outer tally included — survives.
+        let json = serde_json::to_string(&state).expect("mid-pause state serializes");
+        let mut loaded: GameState = serde_json::from_str(&json).expect("mid-pause state reloads");
+        assert!(
+            loaded.combat_prevention_tally.is_none(),
+            "the hole: the live window does not survive the round trip"
+        );
+        assert_eq!(
+            loaded.pending_combat_damage.as_ref().unwrap().outer_tally,
+            record.outer_tally,
+            "the parked outer tally survives the round trip"
+        );
+
+        // Answer on the reloaded state: the batch completes AND the outer
+        // window is restored exactly (not merged, not dropped).
+        loaded.waiting_for = waiting.clone();
+        let mut loaded_events = Vec::new();
+        answer_replacement_choice(&mut loaded, &mut loaded_events, 0);
+        assert!(
+            matches!(loaded.waiting_for, WaitingFor::Priority { .. }),
+            "the reloaded batch settles, got {:?}",
+            loaded.waiting_for
+        );
+        assert!(loaded.pending_combat_damage.is_none());
+        assert_eq!(
+            loaded.combat_prevention_tally.as_ref(),
+            Some(&outer_window),
+            "the pre-batch outer window is restored on completion"
+        );
+        let prevented: Vec<(TargetRef, u32)> = loaded_events
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::DamagePrevented { target, amount, .. } => {
+                    Some((target.clone(), *amount))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            prevented,
+            vec![(TargetRef::Object(blocker), 3)],
+            "the batch publishes its own aggregate once — never merged into the outer, got {loaded_events:?}"
         );
     }
 }

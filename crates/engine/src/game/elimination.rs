@@ -2288,6 +2288,168 @@ mod tests {
         );
     }
 
+    /// CR 800.4e + CR 614.9 + CR 616.1 (B6 site 3 companion): a parked
+    /// pre-application batch whose REMAINING tail names a leaver-owned
+    /// recipient pair-prunes that entry with its `remaining` slot, and
+    /// `remaining` stays aligned with the post-pause entries (`remaining[j]`
+    /// ↔ `entries[paused_entry + 1 + j]`).
+    ///
+    /// REVERT PROBE: retain the departed remaining entry (or mis-index
+    /// `old_remaining[index - paused - 1]` under drops) → the alignment
+    /// asserts fail in both stash states.
+    #[test]
+    fn parked_damage_batch_prunes_leaver_owned_remaining_entry() {
+        use crate::game::combat::{DamageAssignment, DamageTarget};
+        use crate::types::ability::DamageContextSnapshot;
+        use crate::types::game_state::{
+            CombatDamageSubStep, ParkedCombatDamageEntry, PendingCombatDamageBatch,
+        };
+        use crate::types::zones::Zone;
+
+        fn snapshot(source: ObjectId, controller: PlayerId) -> DamageContextSnapshot {
+            DamageContextSnapshot {
+                source_id: source,
+                source_incarnation: Some(3),
+                controller,
+                source_is_creature: true,
+                has_deathtouch: false,
+                has_lifelink: false,
+                has_wither: false,
+                has_infect: false,
+                combat_damage_poison: 0,
+                excess_recipient: None,
+                lifelink_bonus: 0,
+            }
+        }
+        fn parked(
+            source: ObjectId,
+            controller: PlayerId,
+            target: DamageTarget,
+        ) -> ParkedCombatDamageEntry {
+            ParkedCombatDamageEntry {
+                ctx: snapshot(source, controller),
+                source_is_commander: false,
+                assignment: DamageAssignment { target, amount: 3 },
+                lifelink_controller: None,
+            }
+        }
+        fn damage(source: ObjectId, target: TargetRef) -> ProposedEvent {
+            ProposedEvent::Damage {
+                source_id: source,
+                target,
+                amount: 3,
+                is_combat: true,
+                applied: std::collections::HashSet::new(),
+            }
+        }
+        // Four entries: a decided player hit on the leaver, the paused hit on
+        // the leaver-owned (stolen) creature, a remaining hit on a living
+        // seat's creature, and a remaining hit on a leaver-owned creature.
+        fn fixture(stashed: bool) -> (GameState, ObjectId, ObjectId) {
+            let mut state = setup_three_player();
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(2),
+                "Attacker".to_string(),
+                Zone::Battlefield,
+            );
+            let stolen = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Stolen Bear".to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&stolen).unwrap().controller = PlayerId(2);
+            let survivor = create_object(
+                &mut state,
+                CardId(3),
+                PlayerId(2),
+                "Survivor".to_string(),
+                Zone::Battlefield,
+            );
+            let doomed = create_object(
+                &mut state,
+                CardId(4),
+                PlayerId(0),
+                "Doomed Bear".to_string(),
+                Zone::Battlefield,
+            );
+            let mut decided = vec![Some(damage(source, TargetRef::Player(PlayerId(0))))];
+            if stashed {
+                decided.push(Some(damage(source, TargetRef::Object(stolen))));
+            }
+            state.pending_combat_damage = Some(Box::new(PendingCombatDamageBatch {
+                entries: vec![
+                    parked(source, PlayerId(2), DamageTarget::Player(PlayerId(0))),
+                    parked(source, PlayerId(2), DamageTarget::Object(stolen)),
+                    parked(source, PlayerId(2), DamageTarget::Object(survivor)),
+                    parked(source, PlayerId(2), DamageTarget::Object(doomed)),
+                ],
+                decided,
+                paused_entry: 1,
+                paused_entry_pruned: false,
+                remaining: vec![
+                    damage(source, TargetRef::Object(survivor)),
+                    damage(source, TargetRef::Object(doomed)),
+                ],
+                phase_a_tally: Vec::new(),
+                phase_b_tally: Vec::new(),
+                outer_tally: None,
+                batch_events: Vec::new(),
+                lives_before: vec![20, 20, 20],
+                sub_step: CombatDamageSubStep::Regular,
+            }));
+            (state, stolen, survivor)
+        }
+
+        for stashed in [false, true] {
+            let (mut state, stolen, survivor) = fixture(stashed);
+            {
+                let record = state.pending_combat_damage.as_ref().unwrap();
+                assert_eq!(
+                    (record.entries.len(), record.remaining.len()),
+                    (4, 2),
+                    "reach guard: the leaver-owned remaining pair exists pre-prune (stashed={stashed})"
+                );
+            }
+            let mut events = Vec::new();
+            eliminate_player(&mut state, PlayerId(0), &mut events);
+            let record = state.pending_combat_damage.as_ref().unwrap();
+            assert_eq!(
+                record.entries.len(),
+                2,
+                "the decided pair AND the leaver-owned remaining pair prune (stashed={stashed})"
+            );
+            assert_eq!(
+                record.remaining.len(),
+                1,
+                "the leaver-owned remaining slot drops with its entry (stashed={stashed})"
+            );
+            assert!(
+                matches!(&record.remaining[0], ProposedEvent::Damage { target, .. }
+                    if *target == TargetRef::Object(survivor)),
+                "the surviving slot still names the survivor (stashed={stashed}), got {:?}",
+                record.remaining[0]
+            );
+            assert_eq!(
+                record.entries[1].assignment.target,
+                DamageTarget::Object(survivor),
+                "remaining stays aligned with the post-pause entries (stashed={stashed})"
+            );
+            assert_eq!(
+                record.paused_entry, 0,
+                "paused_entry re-indexes by pruned decided slots before it (stashed={stashed})"
+            );
+            assert_eq!(
+                record.entries[0].assignment.target,
+                DamageTarget::Object(stolen),
+                "the retained paused entry still names the departed recipient (stashed={stashed})"
+            );
+        }
+    }
+
     fn setup_2hg() -> GameState {
         let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
         state.turn_number = 1;

@@ -676,7 +676,7 @@ pub(crate) fn apply_damage_to_target(
             Ok(DamageResult::Applied(0))
         }
         ReplacementResult::NeedsChoice(player) => {
-            // Only set waiting_for for non-combat damage; combat damage cannot pause mid-resolution.
+            // Only set waiting_for for non-combat damage; combat pauses via the parked batch, not this arm (no production caller passes `is_combat`).
             if !is_combat {
                 state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
             }

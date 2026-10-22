@@ -217,9 +217,10 @@ fn stash_paused_combat_damage_slot(state: &mut GameState, survivor: Option<Propo
 /// CR 616.1 + CR 510.2 + CR 702.15b: the CR 616.1 round trip, plus the one turn-based
 /// action that can be parked waiting on it.
 ///
-/// A simultaneous combat-damage batch (CR 510.2) parks in `state.pending_combat_lifelink`
-/// when a lifelink life gain meets two or more co-applicable replacements. This is the only
-/// boundary that knows where THIS action's events begin, and the resumed `LifeChanged` must
+/// A simultaneous combat-damage batch (CR 510.2) parks in
+/// `state.pending_combat_lifelink` (lifelink gain ordering) or
+/// `state.pending_combat_damage` (pre-application damage ordering). This is the
+/// only boundary that knows where THIS action's events begin, and the resumed `LifeChanged` must
 /// join the batch's own CR 603.3b trigger batch — so the anchor is a LOCAL captured here, and
 /// the drain lives here rather than in `engine::resume_pending_continuation_if_priority`,
 /// which has no such anchor. Stored on the record it would be a persisted index into a
@@ -250,12 +251,22 @@ pub(super) fn handle_replacement_choice(
     // return), so the resumed choice's accumulation joins the batch instead
     // of fragmenting into per-event emission.
     let outer_tally = if state.pending_combat_damage.is_some() {
-        let outer_tally = state.combat_prevention_tally.take();
-        let live = {
+        let live_window = state.combat_prevention_tally.take();
+        let (outer_tally, live) = {
+            // `take()` above needs `&mut`, so the record re-borrows in scope.
+            #[allow(clippy::unnecessary_unwrap)]
             let record = state
                 .pending_combat_damage
                 .as_ref()
                 .expect("checked parked above");
+            // The live window is `#[serde(skip)]`, so a mid-pause save/load
+            // drops it: prefer it when present, else hydrate the pre-batch
+            // window the park captured.
+            let outer_tally = live_window.or_else(|| {
+                record.outer_tally.as_ref().map(|entries| {
+                    super::effects::deal_damage::tally_map_from_record_entries(entries)
+                })
+            });
             let mut live =
                 super::effects::deal_damage::tally_map_from_record_entries(&record.phase_a_tally);
             for (key, amount) in
@@ -263,7 +274,7 @@ pub(super) fn handle_replacement_choice(
             {
                 *live.entry(key).or_insert(0) += amount;
             }
-            live
+            (outer_tally, live)
         };
         state.combat_prevention_tally = Some(live);
         outer_tally
