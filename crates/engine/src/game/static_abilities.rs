@@ -1953,6 +1953,10 @@ fn all_matching_player_protections(
                 | ProtectionTarget::Quality(_)
                 | ProtectionTarget::CardType(_)
                 | ProtectionTarget::Filter(_) => None,
+                // CR 702.16i: no card grants a color-set protection to a player;
+                // inert like the arms above (no quality to resolve). Object-level
+                // sets expand through `keywords::resolve_granted_protection`.
+                ProtectionTarget::EachColor(_) => None,
             };
             if let Some(quality) = matched {
                 if !out.contains(&quality) {
