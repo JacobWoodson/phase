@@ -2223,6 +2223,7 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SourceEnteredThisTurn
         | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
@@ -2394,6 +2395,7 @@ fn static_condition_characteristic_reads_at(
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SourceEnteredThisTurn
         | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
@@ -2526,6 +2528,7 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SourceEnteredThisTurn
         | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
@@ -2912,6 +2915,8 @@ fn evaluate_condition_inner(
         StaticCondition::RingLevelAtLeast { level } => {
             state.ring_level.get(&controller).copied().unwrap_or(0) >= *level
         }
+        // CR 701.43b: Untapping does not erase an exert from this turn.
+        StaticCondition::SourceExertedThisTurn => state.exerted_this_turn.contains(&source_id),
         // CR 611.2b + CR 110.5d: require battlefield — cards not on the battlefield are
         // neither tapped nor untapped. A source that has left the battlefield (e.g.
         // Callous Oppressor dying while tapped) fails this predicate and any
@@ -5275,6 +5280,7 @@ fn static_condition_reads_life(condition: &StaticCondition) -> bool {
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
         | StaticCondition::SourceEnteredThisTurn
         | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
@@ -8994,6 +9000,11 @@ fn expand_granted_triggered_abilities(
                 continue;
             };
             for entry in provider.trigger_definitions.iter_all() {
+                // CR 701.43d + CR 603.1: A triggered-only grant does not copy
+                // a standalone static attack permission from the aggregate.
+                if entry.definition.is_standalone_attack_exert_permission() {
+                    continue;
+                }
                 let provider_ref = provider.trigger_definition_ref(entry);
                 let modification = ContinuousModification::GrantTrigger {
                     trigger: Box::new(entry.definition.clone()),
@@ -11902,13 +11913,7 @@ fn apply_continuous_effect_filtered(
             // `Effect::ChoosePermanent` answer (values fixed per CR 707.2c) —
             // so applying anything here would double-install. Explicit no-op.
             ContinuousModification::CopyChosen => {}
-            ContinuousModification::CopyValues {
-                values,
-                display_source,
-                printed_ref,
-                token_image_ref,
-                token_art,
-            } => {
+            ContinuousModification::CopyValues { values, display } => {
                 let copy_effect = crate::types::ability::CopyEffectInstanceRef {
                     continuous_effect_id: effect
                         .transient_id
@@ -11928,10 +11933,7 @@ fn apply_continuous_effect_filtered(
                 // copied name has no real-card printing); for a printed source,
                 // `display_source = Card` + `printed_ref`. None are copiable
                 // values — purely display routing.
-                obj.display_source = *display_source;
-                obj.printed_ref = printed_ref.clone();
-                obj.token_image_ref = token_image_ref.clone();
-                obj.token_art = token_art.clone();
+                obj.install_display_identity(display);
             }
             // CR 707.9b + CR 707.2: Name override is a copiable-value override
             // applied at Layer 1 after the base CopyValues (ordered by timestamp
@@ -13455,10 +13457,7 @@ mod tests {
                 TargetFilter::SpecificObject { id: copier },
                 vec![ContinuousModification::CopyValues {
                     values: Box::new(values),
-                    display_source: crate::game::game_object::DisplaySource::Card,
-                    printed_ref: None,
-                    token_image_ref: None,
-                    token_art: None,
+                    display: crate::game::game_object::DisplayIdentity::default(),
                 }],
                 None,
             )
@@ -14817,10 +14816,7 @@ mod tests {
             TargetFilter::SpecificObject { id: recipient },
             vec![ContinuousModification::CopyValues {
                 values: Box::new(donor_values),
-                display_source: crate::game::game_object::DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
+                display: Default::default(),
             }],
             None,
         );
@@ -15288,10 +15284,7 @@ mod tests {
             host,
             ContinuousModification::CopyValues {
                 values: Box::new(donor_values),
-                display_source: crate::game::game_object::DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
+                display: Default::default(),
             },
         );
         install_until_end_of_turn(
@@ -27513,10 +27506,7 @@ mod tests {
             values: Box::new(crate::game::printed_cards::intrinsic_copiable_values(
                 &state.objects[&donor],
             )),
-            display_source: crate::game::game_object::DisplaySource::Card,
-            printed_ref: None,
-            token_image_ref: None,
-            token_art: None,
+            display: Default::default(),
         }
     }
 
@@ -29902,10 +29892,7 @@ mod tests {
                 TargetFilter::SpecificObject { id: target },
                 vec![ContinuousModification::CopyValues {
                     values: Box::new(copy_values),
-                    display_source: crate::game::game_object::DisplaySource::Card,
-                    printed_ref: None,
-                    token_image_ref: None,
-                    token_art: None,
+                    display: Default::default(),
                 }],
                 None,
             )
@@ -31529,10 +31516,7 @@ mod tests {
             TargetFilter::SpecificObject { id: fd },
             vec![ContinuousModification::CopyValues {
                 values: Box::new(donor_values),
-                display_source: crate::game::game_object::DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
+                display: Default::default(),
             }],
             None,
         );
@@ -31556,10 +31540,7 @@ mod tests {
             TargetFilter::SpecificObject { id: plain },
             vec![ContinuousModification::CopyValues {
                 values: Box::new(donor_values2),
-                display_source: crate::game::game_object::DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
+                display: Default::default(),
             }],
             None,
         );
@@ -32454,10 +32435,7 @@ mod tests {
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
             vec![ContinuousModification::CopyValues {
                 values: Box::new(copied_values),
-                display_source: crate::game::game_object::DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
+                display: Default::default(),
             }],
             None,
         );
@@ -32540,10 +32518,7 @@ mod tests {
             TargetFilter::SpecificObject { id: clone },
             vec![ContinuousModification::CopyValues {
                 values: Box::new(copied_values),
-                display_source: crate::game::game_object::DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
+                display: Default::default(),
             }],
             None,
         );
@@ -32630,10 +32605,7 @@ mod tests {
         );
         let copy_of = |values: CopiableValues| ContinuousModification::CopyValues {
             values: Box::new(values),
-            display_source: crate::game::game_object::DisplaySource::Card,
-            printed_ref: None,
-            token_image_ref: None,
-            token_art: None,
+            display: Default::default(),
         };
 
         // The whole `Layer::Copy` set: (modification, adds ANY generator, adds a
@@ -32798,10 +32770,7 @@ mod tests {
                 TargetFilter::SpecificObject { id: target },
                 vec![ContinuousModification::CopyValues {
                     values: Box::new(values),
-                    display_source: crate::game::game_object::DisplaySource::Card,
-                    printed_ref: None,
-                    token_image_ref: None,
-                    token_art: None,
+                    display: Default::default(),
                 }],
                 None,
             );
@@ -32894,10 +32863,7 @@ mod tests {
                 TargetFilter::SpecificObject { id: recipient },
                 vec![ContinuousModification::CopyValues {
                     values: Box::new(values),
-                    display_source: crate::game::game_object::DisplaySource::Card,
-                    printed_ref: None,
-                    token_image_ref: None,
-                    token_art: None,
+                    display: Default::default(),
                 }],
                 None,
             );
@@ -33033,10 +32999,7 @@ mod tests {
                     prepare_face: None,
                     name_origin: Default::default(),
                 }),
-                display_source: Default::default(),
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
+                display: Default::default(),
             },
             ContinuousModification::CopyChosen,
             ContinuousModification::SetName {
