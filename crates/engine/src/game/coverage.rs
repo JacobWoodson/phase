@@ -20932,6 +20932,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 QuantityRef::DistinctSubtypes {
                     source: poisoned.clone(),
                     exclude: crate::types::ability::SubtypeExclusion::None,
+                    restrict: None,
                 },
             ),
             (
