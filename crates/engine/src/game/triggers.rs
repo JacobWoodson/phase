@@ -9634,7 +9634,10 @@ pub(crate) enum PendingTriggeredManaClass {
 }
 
 /// True iff any reachable `sub_ability` / `else_ability` link satisfies `pred`.
-fn any_reachable_link(ability: &ResolvedAbility, pred: &dyn Fn(&ResolvedAbility) -> bool) -> bool {
+pub(crate) fn any_reachable_link(
+    ability: &ResolvedAbility,
+    pred: &dyn Fn(&ResolvedAbility) -> bool,
+) -> bool {
     if pred(ability) {
         return true;
     }
@@ -17707,12 +17710,12 @@ pub mod tests {
         ControllerRef, DamageChannel, DamageKindFilter, DelayedTriggerCondition,
         DelayedTriggerKind, DelayedTriggerLifetime, DiscardSelfScope, Duration,
         EachDamageRecipient, Effect, FilterProp, GuessSubject, KickerVariant, ModalChoice,
-        MultiTargetSpec, NumberQuality, Parity, PlayerFilter, PlayerScope, PtStat, PtValue,
-        PtValueScope, QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode,
-        ResolvedAbility, SearchSelectionConstraint, SharedQuality, SharedQualityRelation,
-        SpentColor, StaticCondition, StaticDefinition, TargetFilter, TargetRef,
-        TargetSelectionMode, TriggerCondition, TriggerConstraint, TriggerDefinition,
-        TriggerGrantInstanceRef, TypeFilter, TypedFilter,
+        MultiTargetSpec, NumberQuality, Parity, PlayerFilter, PlayerScope, PreventionAmount,
+        PreventionScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+        ReplacementDefinition, ReplacementMode, ResolvedAbility, SearchSelectionConstraint,
+        SharedQuality, SharedQualityRelation, SpentColor, StaticCondition, StaticDefinition,
+        TargetFilter, TargetRef, TargetSelectionMode, TriggerCondition, TriggerConstraint,
+        TriggerDefinition, TriggerGrantInstanceRef, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::LayoutKind;
@@ -17741,6 +17744,50 @@ pub mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    /// CR 115.10a + CR 609.7a: a SOURCE-scoped prevention's recipient field is
+    /// an untargeted scope, so `extract_target_filter_from_effect` surfaces no
+    /// slot for it — the only declared target is the damage source. The source
+    /// role remains present, and a single declared recipient remains a target.
+    #[test]
+    fn source_scoped_prevent_recipient_scope_is_not_a_target() {
+        let prevent =
+            |recipient_scope, damage_source_filter: Option<TargetFilter>| Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::Player,
+                recipient_scope,
+                scope: PreventionScope::CombatDamage,
+                damage_source_filter,
+                prevention_duration: Some(Duration::UntilEndOfCombat),
+            };
+        let source_scoped = prevent(
+            EffectScope::All,
+            Some(TargetFilter::And {
+                filters: vec![
+                    TargetFilter::ParentTargetSlot { index: 0 },
+                    TargetFilter::Typed(TypedFilter::creature()),
+                ],
+            }),
+        );
+        assert_eq!(extract_target_filter_from_effect(&source_scoped), None);
+        assert_eq!(source_scoped.target_filter(), None);
+        // The declared damage source still supplies its independent target role.
+        assert!(
+            crate::game::ability_utils::damage_replacement_source_slot_filter(&source_scoped)
+                .is_some()
+        );
+        // A single declared recipient keeps its target filter.
+        let source_less = prevent(EffectScope::Single, None);
+        assert_eq!(
+            extract_target_filter_from_effect(&source_less),
+            Some(&TargetFilter::Player)
+        );
+        assert!(
+            crate::game::ability_utils::damage_replacement_source_slot_filter(&source_less)
+                .is_none()
+        );
     }
 
     /// CR 103.4e + CR 904.5 + CR 608.2c: Cecil's parsed resolution-time
@@ -24552,6 +24599,7 @@ pub mod tests {
             QuantityRef::references_cost_paid_object(&QuantityRef::DistinctSubtypes {
                 source: nested,
                 exclude: Default::default(),
+                restrict: None,
             }),
             "a reference nested inside a union of unions must be detected"
         );
@@ -42804,6 +42852,7 @@ pub mod tests {
                 ability_cost: None,
                 activation_cost_snapshot: None,
                 unavailable_modes: Vec::new(),
+                activation_payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
             WaitingFor::TriggerTargetSelection {
                 player: PlayerId(0),
@@ -45231,6 +45280,7 @@ pub mod tests {
                 .act(GameAction::ActivateAbility {
                     source_id: konrad,
                     ability_index: 0,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                 })
                 .unwrap_or_else(|e| panic!("activation {activation} failed: {e:?}"));
             resolve_stack_to_empty(&mut runner);
