@@ -17,7 +17,7 @@ use engine::types::ability::{
     AbilityCost, GameRestriction, ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope,
 };
 use engine::types::actions::GameAction;
-use engine::types::game_state::{ExtraPhase, GameState, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, ExtraPhase, GameState, WaitingFor};
 use engine::types::identifiers::{ExtraPhaseId, ObjectId};
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::{Phase, PhaseGroup, TurnSegment};
@@ -556,6 +556,7 @@ fn monarch_required_at_fire_and_resolution() {
         .act(GameAction::ActivateAbility {
             source_id: throne,
             ability_index: 1,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate throne in response");
     assert_eq!(
