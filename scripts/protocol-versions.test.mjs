@@ -315,8 +315,13 @@ function ownershipFixture(path) {
     .map((match) => Number(match[1]));
   const stagedBaseline = JSON.parse(readFileSync(join(path, "protocol/baseline.json"), "utf8"));
   const backfill = Math.max(0, Math.max(stagedBaseline.lobby, ...frozen) - stagedBaseline.lobby);
+  // Deterministic names+bytes (not randomUUID): history tests compare two
+  // separately staged fixtures against each other, so every fixture must
+  // backfill identical records. Counter in the trailing group keeps valid
+  // UUIDv4 shape for any floor count.
   for (let i = 0; i < backfill; i++) {
-    writeFileSync(join(path, "protocol/changes", `${crypto.randomUUID()}.json`),
+    const name = `00000000-0000-4000-8000-${String(i).padStart(12, "0")}.json`;
+    writeFileSync(join(path, "protocol/changes", name),
       JSON.stringify({ surfaces: ["lobby"], reason: "fixture backfill for frozen capability floors" }));
   }
   generateProtocolVersions(path);
