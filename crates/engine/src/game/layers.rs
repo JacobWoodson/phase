@@ -5414,6 +5414,7 @@ fn static_condition_reads_monarch(condition: &StaticCondition) -> bool {
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
         | StaticCondition::SourceEnteredThisTurn
         | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
