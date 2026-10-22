@@ -26728,6 +26728,27 @@ fn validate_draw_dealer(frame: &DrawSequenceFrame, dealer: &DrawDealer) -> Resul
     }
 }
 
+/// CR 510.2 + CR 616.1 (Matt R12): stable ownership binding a paused
+/// combat-damage batch member to its replacement continuation. Captured at the
+/// combat park point (original `paused_entry` index + the entry's damage
+/// source) and carried across CR 616.1f re-parks by the NeedsChoice epilogue,
+/// so the answer-stash gate survives recipient rewrites (a redirect answered
+/// from an earlier choice changes the parked `proposed` target but never the
+/// source) and repeated choices. Reconstructing ownership from the original
+/// assignment target is insufficient: after Palisade Giant redirects P1→Giant,
+/// the parked event names Giant while the assignment still names P1.
+/// Single-use: consumed with the prompt it rides; inert once its combat
+/// record is gone (the gate requires a parked record).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CombatPauseSlot {
+    /// Index into the parked record's `entries` of the paused member.
+    pub paused_entry: usize,
+    /// The paused member's damage source. Redirects rewrite the recipient, so
+    /// the source (never rewritten) is the same-event signal across re-parks;
+    /// a nested child event names a different source and never inherits.
+    pub source: ObjectId,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingReplacement {
     pub proposed: ProposedEvent,
@@ -26822,6 +26843,17 @@ pub struct PendingReplacement {
     /// continuation). Single-use: consumed with the prompt it rides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub each_source_batch_owner: Option<u64>,
+    /// CR 510.2 + CR 616.1 (Matt R12): the paused combat-damage batch member
+    /// this prompt is the replacement continuation of — set ONLY by a combat
+    /// park point (first park or re-pause) whose pending record is that
+    /// member's own event park, and carried across CR 616.1f re-parks by the
+    /// NeedsChoice epilogue's same-source inheritance. The answer-stash gate
+    /// reads this instead of reconstructing ownership from the original
+    /// assignment target, so recipient rewrites between choices cannot strand
+    /// the paused slot. `None` for every other parked event. Single-use:
+    /// consumed with the prompt it rides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub combat_pause_slot: Option<CombatPauseSlot>,
 }
 
 impl PendingReplacement {

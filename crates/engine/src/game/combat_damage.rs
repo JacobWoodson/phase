@@ -14,9 +14,9 @@ use crate::types::ability::{DamageContextSnapshot, ShieldKind, TargetRef};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CombatDamageAssignmentMode, CombatDamageSubStep, CombatPreventionTally, DamageSlot, GameState,
-    ParkedCombatDamageEntry, PendingCombatDamageBatch, PendingCombatLifelink, PendingLifelinkGain,
-    PreventedDamageEntry, WaitingFor,
+    CombatDamageAssignmentMode, CombatDamageSubStep, CombatPauseSlot, CombatPreventionTally,
+    DamageSlot, GameState, ParkedCombatDamageEntry, PendingCombatDamageBatch,
+    PendingCombatLifelink, PendingLifelinkGain, PreventedDamageEntry, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
@@ -472,6 +472,32 @@ pub(crate) fn settle_orphaned_combat_damage_choice(state: &mut GameState) {
 /// events are folded into the parked batch (see
 /// `resume_pending_combat_lifelink`), so observers see ONE CR 603.3b batch.
 ///
+/// CR 510.2 + CR 616.1 (Matt R12): bind the paused batch member to its
+/// replacement continuation with stable ownership captured at the pause point.
+/// Stamps `state.pending_replacement` with the paused slot (`paused_entry` +
+/// the member's damage source) so the answer-stash gate survives recipient
+/// rewrites between choices. Stamps ONLY the member's own event park: the
+/// parked `proposed` must be a Damage event from the member's source (a
+/// redirect may already have rewritten its recipient — that is exactly the
+/// case the stamp exists for). A nested child's park names a different source
+/// and stays unstamped, so its answer still delivers inline exactly once.
+/// Both park points (first park and re-pause) stamp; a re-parked prompt
+/// inherits via the NeedsChoice epilogue instead.
+fn stamp_combat_pause_slot(state: &mut GameState, paused_entry: usize, source: ObjectId) {
+    let own_park = state.pending_replacement.as_ref().is_some_and(|pending| {
+        matches!(&pending.proposed, ProposedEvent::Damage { source_id, .. } if *source_id == source)
+    });
+    if !own_park {
+        return;
+    }
+    if let Some(pending) = state.pending_replacement.as_mut() {
+        pending.combat_pause_slot = Some(CombatPauseSlot {
+            paused_entry,
+            source,
+        });
+    }
+}
+
 /// Returns `None` when nothing is parked, so callers can keep their own wait.
 pub(crate) fn resume_pending_combat_damage(
     state: &mut GameState,
@@ -630,6 +656,13 @@ pub(crate) fn resume_pending_combat_damage(
                 lives_before: std::mem::take(&mut record.lives_before),
                 sub_step: record.sub_step,
             };
+            // CR 510.2 + CR 616.1 (Matt R12): re-bind the later paused member
+            // to its fresh prompt — the re-pause re-arms the stash gate for a
+            // NEW slot, so it needs a NEW stamp (the old prompt was consumed
+            // with its answer).
+            if let Some(entry) = fresh.entries.get(paused_entry) {
+                stamp_combat_pause_slot(state, paused_entry, entry.ctx.source_id);
+            }
             // CR 732.2a: the batch may have moved life (an inline redirect or
             // rider leg). Invalidate now as well as at completion, against the
             // SAME pre-batch snapshot. The guard only ever CLEARS, so the
@@ -2165,6 +2198,12 @@ pub(crate) fn apply_combat_damage(
                     lifelink_controller: entry.lifelink_controller,
                 })
                 .collect();
+            // CR 510.2 + CR 616.1 (Matt R12): bind the paused member to this
+            // prompt BEFORE the record parks, so the answer-stash gate keeps
+            // working after an answered choice redirects the event.
+            if let Some(entry) = parked_entries.get(paused_entry) {
+                stamp_combat_pause_slot(state, paused_entry, entry.ctx.source_id);
+            }
             // CR 732.2a: the batch may already have moved life (an inline
             // redirect or rider leg inside Phase B). Invalidate now as well as
             // at completion, against the SAME pre-batch snapshot. The guard

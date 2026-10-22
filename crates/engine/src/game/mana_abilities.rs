@@ -6252,6 +6252,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             each_source_batch_owner: None,
+            combat_pause_slot: None,
         });
         let live_prompt = WaitingFor::DiscardChoice {
             player: PlayerId(0),

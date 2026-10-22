@@ -2615,6 +2615,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             each_source_batch_owner: None,
+            combat_pause_slot: None,
         }
     }
 
@@ -4137,6 +4138,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             each_source_batch_owner: None,
+            combat_pause_slot: None,
         });
         // Latched chooser identity — the fix's key. C = P2.
         state.waiting_for = WaitingFor::ReplacementChoice {
@@ -4282,6 +4284,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             each_source_batch_owner: None,
+            combat_pause_slot: None,
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
@@ -4339,6 +4342,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             each_source_batch_owner: None,
+            combat_pause_slot: None,
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
@@ -4388,6 +4392,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             each_source_batch_owner: None,
+            combat_pause_slot: None,
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
@@ -4467,6 +4472,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             each_source_batch_owner: None,
+            combat_pause_slot: None,
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),

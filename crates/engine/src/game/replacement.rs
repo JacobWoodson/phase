@@ -11813,6 +11813,7 @@ fn park_entry_controller_choice(
         may_cost_remaining: None,
         delivery_boundary: None,
         each_source_batch_owner: None,
+        combat_pause_slot: None,
     });
     state.waiting_for = WaitingFor::EntryControllerChoice { player, candidates };
     ReplacementResult::NeedsChoice(player)
@@ -11987,6 +11988,7 @@ fn park_as_enters_named_choice(
         may_cost_remaining: None,
         delivery_boundary: None,
         each_source_batch_owner: None,
+        combat_pause_slot: None,
     });
     raise_as_enters_named_choice(state, object_id, choice, events)
 }
@@ -12556,6 +12558,7 @@ fn pipeline_loop(
                     may_cost_remaining: None,
                     delivery_boundary: None,
                     each_source_batch_owner: None,
+                    combat_pause_slot: None,
                 });
                 return replay_pending_replacement(state, affected, events);
             }
@@ -12620,6 +12623,7 @@ fn pipeline_loop(
                 may_cost_remaining: None,
                 delivery_boundary: None,
                 each_source_batch_owner: None,
+                combat_pause_slot: None,
             });
             return replay_pending_replacement(state, affected, events);
         } else {
@@ -12929,6 +12933,10 @@ fn continue_replacement_impl(
         // strand an empty-tail batch's boundary (practically `None` on this
         // zone-change path, but the lifecycle must not depend on that).
         let reparked_batch_owner = pending.each_source_batch_owner;
+        // CR 510.2 + CR 616.1 (Matt R12): same lifecycle rule for the
+        // combat-pause stamp (practically `None` on this zone-change path,
+        // but the lifecycle must not depend on that).
+        let reparked_pause_slot = pending.combat_pause_slot;
         let mut proposed = pending.proposed.clone();
         if chosen_index == 0 {
             if let Some((player, entry_candidates)) = entry_controller_choice(state, &proposed, rid)
@@ -13062,6 +13070,7 @@ fn continue_replacement_impl(
                     may_cost_remaining: remaining_cost,
                     delivery_boundary: reparked_delivery_boundary,
                     each_source_batch_owner: reparked_batch_owner,
+                    combat_pause_slot: reparked_pause_slot,
                 };
                 if let Some(crate::types::game_state::PendingCostMoveResume::ReplacementMayCost {
                     outer_replacement: parked_outer,
@@ -16392,6 +16401,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             each_source_batch_owner: None,
+            combat_pause_slot: None,
         });
 
         let WaitingFor::ReplacementChoice {
@@ -16457,6 +16467,7 @@ mod tests {
                 may_cost_remaining: None,
                 delivery_boundary: None,
                 each_source_batch_owner: None,
+                combat_pause_slot: None,
             });
 
             let WaitingFor::ReplacementChoice { candidates, .. } =
@@ -16543,6 +16554,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             each_source_batch_owner: None,
+            combat_pause_slot: None,
         });
 
         let WaitingFor::ReplacementChoice { candidates, .. } =
@@ -18704,6 +18716,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             each_source_batch_owner: None,
+            combat_pause_slot: None,
         };
         let json = serde_json::to_string(&pending).expect("pending choice serializes");
         assert!(
@@ -21487,6 +21500,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             each_source_batch_owner: None,
+            combat_pause_slot: None,
         });
 
         let waiting_for = replacement_choice_waiting_for(PlayerId(0), &state);

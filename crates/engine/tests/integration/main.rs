@@ -1301,6 +1301,7 @@ mod padeem_consul_of_innovation;
 mod pain_magnification_single_source_damage;
 mod painters_servant_multi_zone_additive_color;
 mod palace_jailer;
+mod palisade_giant_combat_pause_ownership;
 mod palisade_giant_redirect;
 mod panther_habit_equipped_prevention_scope;
 mod parent_target_slot_delayed_condition_8758;

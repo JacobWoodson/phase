@@ -10,8 +10,8 @@ use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::counter::CounterType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
-    CounterCostRootSubtree, GameState, PendingCostMoveResume, PendingCounterPostAction,
-    TokenEntryEventEmission, WaitingFor,
+    CombatPauseSlot, CounterCostRootSubtree, GameState, PendingCostMoveResume,
+    PendingCounterPostAction, TokenEntryEventEmission, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -171,20 +171,37 @@ pub(crate) fn drain_pending_connive_reentry(
 /// must be STASHED into the parked combat-damage batch instead of applied.
 /// Stash iff a damage record is parked AND unstashed (`decided.len() ==
 /// paused_entry`, which also re-arms correctly across re-pause) AND the
-/// ANSWERED event's identity (captured before `continue_replacement`
-/// consumed the pending record) matches the paused entry's source + target.
-/// Nested answers therefore deliver inline exactly once (never stashed, never
-/// lost): after the paused slot is stashed the len gate excludes them, and
-/// the identity match excludes them regardless.
+/// answered prompt owns the paused slot — by its combat-pause stamp (Matt
+/// R12: stable ownership captured at the pause point, surviving recipient
+/// rewrites and repeated choices) or, for a prompt that carries no stamp, by
+/// the legacy answered-identity match against the paused entry's source +
+/// target. Nested answers therefore deliver inline exactly once (never
+/// stashed, never lost): after the paused slot is stashed the len gate
+/// excludes them, and the stamp/identity match excludes them regardless.
 fn combat_damage_answer_stashes(
     state: &GameState,
     parked_damage_identity: &Option<(ObjectId, TargetRef, bool)>,
+    parked_combat_pause_slot: &Option<CombatPauseSlot>,
 ) -> bool {
     let Some(record) = state.pending_combat_damage.as_ref() else {
         return false;
     };
     if record.decided.len() != record.paused_entry {
         return false;
+    }
+    // Matt R12: the stamp binds the paused member to its replacement
+    // continuation across recipient rewrites — a prompt stamped for this exact
+    // slot (index, cross-checked against the entry's source) settles it no
+    // matter what the parked `proposed` currently names.
+    let stamped_for_this_slot = parked_combat_pause_slot.is_some_and(|slot| {
+        slot.paused_entry == record.paused_entry
+            && record
+                .entries
+                .get(slot.paused_entry)
+                .is_some_and(|entry| entry.ctx.source_id == slot.source)
+    });
+    if stamped_for_this_slot {
+        return true;
     }
     let Some((source_id, target, _)) = parked_damage_identity else {
         return false;
@@ -521,6 +538,13 @@ fn handle_replacement_choice_inner(
             } => Some((*source_id, target.clone(), *is_combat)),
             _ => None,
         });
+    // CR 510.2 + CR 616.1 (Matt R12): the answered prompt's combat-pause
+    // stamp, captured before `continue_replacement` consumes the pending
+    // record — the stash gate's stable ownership signal.
+    let parked_combat_pause_slot: Option<CombatPauseSlot> = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| pending.combat_pause_slot);
     let result = super::replacement::continue_replacement(state, index, events);
     // CR 614.12a: an optional `MayCost` accept whose payment surfaced an
     // interactive sub-choice (e.g. Mox Diamond's "discard a land card" with
@@ -546,7 +570,11 @@ fn handle_replacement_choice_inner(
             // is known — every applier arm returns Damage/Modified(Damage)/
             // Prevented — so a firing here is a hit-report, not a path.
             if !matches!(event, ProposedEvent::Damage { .. })
-                && combat_damage_answer_stashes(state, &parked_damage_identity)
+                && combat_damage_answer_stashes(
+                    state,
+                    &parked_damage_identity,
+                    &parked_combat_pause_slot,
+                )
             {
                 debug_assert!(false, "Damage-to-non-Damage transform hit the combat stash");
                 stash_paused_combat_damage_slot(state, None);
@@ -746,7 +774,11 @@ fn handle_replacement_choice_inner(
                     // Damage event's riders (an arm drain would run BEFORE the
                     // epilogue's UNCONDITIONAL `waiting_for = Priority` reset
                     // and clobber any nested prompt it parks).
-                    if combat_damage_answer_stashes(state, &parked_damage_identity) {
+                    if combat_damage_answer_stashes(
+                        state,
+                        &parked_damage_identity,
+                        &parked_combat_pause_slot,
+                    ) {
                         stash_paused_combat_damage_slot(state, Some(damage));
                     } else {
                         let mut ctx =
@@ -1827,6 +1859,31 @@ fn handle_replacement_choice_inner(
                         }
                     }
                 }
+                // CR 510.2 + CR 616.1 (Matt R12): a SECOND (or later) ordering
+                // choice on the same combat-damage event re-parked a fresh
+                // record with `combat_pause_slot: None` (pipeline_loop
+                // constructs it unstamped). Reapply the stamp captured before
+                // `continue_replacement` consumed the prior record so the
+                // eventual answer still settles the paused slot even though an
+                // answered choice redirected the event since the park.
+                // Same-event gated on the damage SOURCE (redirects rewrite
+                // only the recipient): a nested child event's choice names a
+                // different source and must not inherit the stamp.
+                if pending.combat_pause_slot.is_none() {
+                    let fresh_damage_source: Option<ObjectId> = match &pending.proposed {
+                        ProposedEvent::Damage { source_id, .. } => Some(*source_id),
+                        _ => None,
+                    };
+                    if let (Some(slot), Some((parked_source, _, _)), Some(fresh_source)) = (
+                        parked_combat_pause_slot,
+                        parked_damage_identity.as_ref(),
+                        fresh_damage_source,
+                    ) {
+                        if parked_source == &fresh_source {
+                            pending.combat_pause_slot = Some(slot);
+                        }
+                    }
+                }
             }
             Ok(super::replacement::replacement_choice_waiting_for(
                 player, state,
@@ -1839,7 +1896,11 @@ fn handle_replacement_choice_inner(
             // drain exists on this arm) BEFORE the nested-prompt surface below
             // — stash-then-surface, so the paused slot is settled before any
             // nested prompt surfaces.
-            if combat_damage_answer_stashes(state, &parked_damage_identity) {
+            if combat_damage_answer_stashes(
+                state,
+                &parked_damage_identity,
+                &parked_combat_pause_slot,
+            ) {
                 stash_paused_combat_damage_slot(state, None);
                 if state.has_post_replacement_drain() {
                     let _ = apply_pending_post_replacement_effect(state, None, None, None, events);
@@ -4510,6 +4571,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             each_source_batch_owner: None,
+            combat_pause_slot: None,
         });
         state.waiting_for = replacement_mod::replacement_choice_waiting_for(PlayerId(0), &state);
 
@@ -5188,6 +5250,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             each_source_batch_owner: None,
+            combat_pause_slot: None,
         });
         state.waiting_for = replacement_mod::replacement_choice_waiting_for(PlayerId(0), &state);
         state.priority_player = PlayerId(0);
