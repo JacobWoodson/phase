@@ -35139,7 +35139,7 @@ pub struct ReplacementDefinition {
     /// as before (every object-attached replacement; unchanged).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_controller: Option<crate::types::player::PlayerId>,
-    /// CR 113.7a + CR 109.1: Installing SOURCE anchor for global pending damage
+    /// CR 113.7a + CR 109.1: Installing SOURCE anchor for global pending
     /// replacements whose filters, conditions, or exclusions are HOST-RELATIVE.
     ///
     /// The object half of `source_controller` (directly above), added for the same
@@ -35174,16 +35174,23 @@ pub struct ReplacementDefinition {
     /// object-hosting before the authority existed: `Zone::Battlefield` for
     /// `prevent_damage::resolve`'s untargeted branch, `Zone::Battlefield |
     /// Zone::Command` for `push_player_scoped_shield`, and EMPTY for
-    /// `create_damage_replacement`'s already-registry arm. A shield created by a
-    /// resolving instant never had a host, so it has no host identity to anchor and
-    /// keeps `None`; so does an untargeted shield from a Command-zone emblem, which
-    /// that branch already routed to the registry before this field existed.
-    /// `None` therefore reproduces the pre-anchor sentinel behavior exactly, for
-    /// every replacement that existed before this field.
+    /// `create_damage_replacement`'s already-registry arm. `add_target_replacement::
+    /// resolve`'s `TargetFilter::None` arm also passes `Zone::Battlefield`, but its
+    /// riders were never object-hosted: anchoring them is a deliberate change
+    /// (issue #9991) so a battlefield-sourced rider's host-relative references
+    /// (Communal Brewing's "this enchantment") read its installing source. A shield
+    /// created by a resolving instant never had a host, so it has no host identity
+    /// to anchor and keeps `None`; so does an untargeted shield from a Command-zone
+    /// emblem, which that branch already routed to the registry before this field
+    /// existed. `None` therefore reproduces the pre-anchor sentinel behavior
+    /// exactly, for every replacement that existed before this field other than the
+    /// battlefield-sourced `TargetFilter::None` riders anchored above.
     ///
-    /// Consumed by the pending scan in `game::replacement::find_applicable_replacements`,
-    /// which fills with `source_object.unwrap_or(ObjectId(0))` every argument
-    /// position that `object_replacement_candidate_applies` fills with `obj.id`.
+    /// Consumed through `game::replacement::replacement_source_host` by the pending
+    /// scan in `find_applicable_replacements`, the CR 616.1 display label, and
+    /// `apply_single_replacement`'s entry-modifier evaluation. The scan fills with
+    /// the host every argument position that `object_replacement_candidate_applies`
+    /// fills with `obj.id`.
     /// `ReplacementId::source` is NOT this field: it stays `ObjectId(0)`, because it
     /// is the STORAGE discriminator that routes ~14 downstream consumers to the
     /// registry rather than to `state.objects`.
