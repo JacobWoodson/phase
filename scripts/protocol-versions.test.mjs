@@ -302,13 +302,22 @@ function ownershipFixture(path) {
     mkdirSync(dirname(join(path, file)), { recursive: true });
     copyFileSync(join(root, file), join(path, file));
   }
-  // Frozen capability floors are validated against computed versions, so the
-  // staged registry must include the real change records — an empty changes
-  // dir would strand any floor above the baseline. Flat copy: every record is
-  // inert history the tests below never mutate (they only add their own).
-  for (const name of readdirSync(join(root, "protocol/changes"))) {
-    if (name === ".gitkeep") continue;
-    copyFileSync(join(root, "protocol/changes", name), join(path, "protocol/changes", name));
+  // Frozen capability floors are validated against computed versions, but the
+  // staged registry is deliberately empty (migration tests assert exact
+  // increments on top of it), so a floor above the baseline would strand the
+  // fixture. Backfill synthetic LOBBY-only records up to the highest frozen
+  // floor parsed out of the staged checker: lobby-only because no assertion
+  // below does exact arithmetic on lobby, while full/wire/draft/directory
+  // must stay exactly baseline plus the test's own records. Synthetic (not
+  // copies of the real records) so the fixture never depends on repo state.
+  const stagedChecker = readFileSync(join(path, "scripts/check-protocol-version.mjs"), "utf8");
+  const frozen = [...stagedChecker.matchAll(/MIN_LOBBY_PROTOCOL_FOR_\w+:\s*(\d+)/g)]
+    .map((match) => Number(match[1]));
+  const stagedBaseline = JSON.parse(readFileSync(join(path, "protocol/baseline.json"), "utf8"));
+  const backfill = Math.max(0, Math.max(stagedBaseline.lobby, ...frozen) - stagedBaseline.lobby);
+  for (let i = 0; i < backfill; i++) {
+    writeFileSync(join(path, "protocol/changes", `${crypto.randomUUID()}.json`),
+      JSON.stringify({ surfaces: ["lobby"], reason: "fixture backfill for frozen capability floors" }));
   }
   generateProtocolVersions(path);
   checker(path);
