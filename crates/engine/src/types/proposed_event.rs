@@ -22,10 +22,25 @@ use super::zones::Zone;
 
 pub use super::zones::{ChainReferentIntent, EtbTapState};
 
+/// CR 616.1: identity of one replacement candidate: the source object plus a
+/// per-source ordinal — or, for virtual protection candidates, the quality's
+/// full 64-bit minor word. `u64`, never `usize`: the index rides in
+/// serialized pause records on every target including wasm32, where `usize`
+/// is 32 bits wide and would truncate fingerprint qualities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ReplacementId {
     pub source: ObjectId,
-    pub index: usize,
+    pub index: u64,
+}
+
+impl ReplacementId {
+    /// Contained `u64`→`usize` conversion for registry indexing. Real
+    /// definition ordinals always fit; anything wider (a virtual-candidate
+    /// payload, or foreign) resolves to `None` — the same answer a direct
+    /// `.get()` gives an out-of-range index on 64-bit.
+    pub(crate) fn index_as_usize(self) -> Option<usize> {
+        usize::try_from(self.index).ok()
+    }
 }
 
 /// CR 701.23a + CR 614.6: Final disposition of one found card after the
@@ -84,20 +99,20 @@ pub struct BoundSearchFoundCandidate {
 pub enum AppliedReplacementKey {
     Object {
         source: ObjectId,
-        index: usize,
+        index: u64,
     },
     Floating {
-        index: usize,
+        index: u64,
     },
     StepEndMana {
-        index: usize,
+        index: u64,
     },
     /// CR 614.12a: The selected controller for an as-enters replacement.
     /// This rides the event's existing replacement provenance so the selected
     /// answer remains distinguishable from an originating controller override.
     EntryControllerChoice {
         source: ObjectId,
-        index: usize,
+        index: u64,
         controller: PlayerId,
     },
     /// CR 702.16e + CR 615.13 (Matt F4, keyed by ability in R8-F1):
@@ -119,17 +134,17 @@ pub enum AppliedReplacementKey {
 enum TaggedAppliedReplacementKey {
     Object {
         source: ObjectId,
-        index: usize,
+        index: u64,
     },
     Floating {
-        index: usize,
+        index: u64,
     },
     StepEndMana {
-        index: usize,
+        index: u64,
     },
     EntryControllerChoice {
         source: ObjectId,
-        index: usize,
+        index: u64,
         controller: PlayerId,
     },
     Protection {
@@ -202,15 +217,15 @@ impl<'de> Deserialize<'de> for AppliedReplacementKey {
 }
 
 impl AppliedReplacementKey {
-    pub fn object(source: ObjectId, index: usize) -> Self {
+    pub fn object(source: ObjectId, index: u64) -> Self {
         Self::Object { source, index }
     }
 
-    pub fn floating(index: usize) -> Self {
+    pub fn floating(index: u64) -> Self {
         Self::Floating { index }
     }
 
-    pub fn step_end_mana(index: usize) -> Self {
+    pub fn step_end_mana(index: u64) -> Self {
         Self::StepEndMana { index }
     }
 
@@ -224,7 +239,7 @@ impl AppliedReplacementKey {
         }
     }
 
-    pub fn index(self) -> usize {
+    pub fn index(self) -> u64 {
         match self {
             AppliedReplacementKey::Object { index, .. }
             | AppliedReplacementKey::Floating { index }
@@ -247,16 +262,15 @@ impl AppliedReplacementKey {
     pub fn for_event(event: &ProposedEvent, id: ReplacementId) -> Self {
         // CR 616.1 (Matt R10-F1): protection virtual candidates key by
         // their quality (pure unpack — no state needed, so the applied-set
-        // path stays total). Foreign rids in the source range, or a minor
-        // that overflows u64 (32-bit targets only; never our own writes),
-        // fall through to the opaque object key, contained.
+        // path stays total). The rid index carries the minor word whole on
+        // every target (`u64`, never `usize`), so our own writes always
+        // decode; foreign rids in the source range fall through to the
+        // opaque object key, contained.
         if let Some(discriminant) = id.source.protection_source_discriminant() {
-            if let Ok(minor) = u64::try_from(id.index) {
-                if let Some(quality) =
-                    MatchedProtectionQuality::from_replacement_parts(discriminant, minor)
-                {
-                    return Self::Protection { quality };
-                }
+            if let Some(quality) =
+                MatchedProtectionQuality::from_replacement_parts(discriminant, id.index)
+            {
+                return Self::Protection { quality };
             }
         }
         if id.source != ObjectId(0) {

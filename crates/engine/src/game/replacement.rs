@@ -51,34 +51,34 @@ use super::game_object::GameObject;
 // `ReplacementDefinition`s: ordinary `ShieldKind` definitions expire at cleanup,
 // while shield counters persist. Use reserved per-object candidate IDs so the
 // existing CR 616 replacement-ordering pipeline can still own choice/application.
-const SHIELD_COUNTER_DESTROY_INDEX: usize = usize::MAX;
-const SHIELD_COUNTER_DAMAGE_INDEX: usize = usize::MAX - 1;
+const SHIELD_COUNTER_DESTROY_INDEX: u64 = u64::MAX;
+const SHIELD_COUNTER_DAMAGE_INDEX: u64 = u64::MAX - 1;
 /// CR 702.89a: Umbra armor — virtual destroy-replacement keyed on the enchanted
 /// permanent (the `source` is the would-be-destroyed host, not the Aura). Reserved
 /// candidate id so the CR 616 replacement-ordering pipeline owns its application.
-const UMBRA_ARMOR_DESTROY_INDEX: usize = usize::MAX - 2;
+const UMBRA_ARMOR_DESTROY_INDEX: u64 = u64::MAX - 2;
 /// CR 702.150a: Compleated — virtual loyalty-counter replacement keyed on the
 /// resolving planeswalker. Compleated is an intrinsic cast-payment replacement,
 /// not a battlefield `ReplacementDefinition`, but it must still participate in
 /// CR 616 ordering against AddCounter replacements such as Doubling Season.
-const COMPLEATED_LOYALTY_INDEX: usize = usize::MAX - 3;
+const COMPLEATED_LOYALTY_INDEX: u64 = u64::MAX - 3;
 /// CR 614.10 + CR 614.10a: Turn-scoped combat-phase skip (False Peace / Empty
 /// City Ruse — "skips all combat phases of their next turn"). The skip effect
 /// leaves no battlefield object, so it is a virtual BeginPhase replacement keyed
 /// on the affected player (whose `PlayerId` is encoded into the sentinel
 /// `source` `ObjectId`). It is armed by `GameState::combat_phase_skip_next_turn`
 /// being `Active` for the active player on a combat phase.
-const TURN_SCOPED_COMBAT_SKIP_INDEX: usize = usize::MAX - 4;
+const TURN_SCOPED_COMBAT_SKIP_INDEX: u64 = u64::MAX - 4;
 /// CR 122.1h: Finality-counter redirect — a virtual `ZoneChange{BF→GY}`
 /// replacement keyed on the dying permanent. Intrinsic to the counter (persists
 /// past cleanup, like shield counters), so a reserved candidate id lets the
 /// CR 616 ordering pipeline own its choice/application.
-const FINALITY_COUNTER_INDEX: usize = usize::MAX - 5;
+const FINALITY_COUNTER_INDEX: u64 = u64::MAX - 5;
 /// CR 903.9b: A commander moving to its owner's hand or library may move to
 /// the command zone instead. This is a rules-source replacement rather than a
 /// card-granted `ReplacementDefinition`, so it uses the existing virtual-ID
 /// protocol shared by intrinsic shield, finality, and compleated effects.
-const COMMANDER_HAND_OR_LIBRARY_RETURN_INDEX: usize = usize::MAX - 6;
+const COMMANDER_HAND_OR_LIBRARY_RETURN_INDEX: u64 = u64::MAX - 6;
 /// CR 702.44a + CR 702.44d: Granted Sunburst — a virtual `Moved`→Battlefield
 /// ETB-counter replacement keyed on the entering spell that was GRANTED
 /// sunburst ("that spell gains sunburst": Solar Array / Lux Artillery). Printed
@@ -97,7 +97,7 @@ const COMMANDER_HAND_OR_LIBRARY_RETURN_INDEX: usize = usize::MAX - 6;
 /// (`granted_keyword_etb_instances`, `apply_granted_keyword_etb_replacement`);
 /// only the reserved index and per-instance-definition builder differ. Any future
 /// granted as-enters keyword adds one more reserved index feeding the same core.
-const GRANTED_SUNBURST_INDEX: usize = usize::MAX - 7;
+const GRANTED_SUNBURST_INDEX: u64 = u64::MAX - 7;
 /// CR 702.54a + CR 702.54c: Granted Bloodthirst — the Bloodthirst analogue of
 /// `GRANTED_SUNBURST_INDEX`. Bloodlord of Vaasgoth's "Whenever you cast a Vampire
 /// creature spell, it gains bloodthirst 3" adds only the keyword to the cast
@@ -106,7 +106,7 @@ const GRANTED_SUNBURST_INDEX: usize = usize::MAX - 7;
 /// replacement per GRANTED Bloodthirst instance. Unlike Sunburst, the fixed-N
 /// form is CONDITIONAL (an opponent must have been dealt damage this turn), so the
 /// shared applier honors each granted instance's carried `condition`.
-const GRANTED_BLOODTHIRST_INDEX: usize = usize::MAX - 8;
+const GRANTED_BLOODTHIRST_INDEX: u64 = u64::MAX - 8;
 /// CR 702.52a: Granted Dredge — a virtual Draw replacement keyed on a
 /// graveyard card that has Dredge only via a runtime grant (e.g. The
 /// Necrobloom's "Land cards in your graveyard have dredge 2"), not a printed
@@ -118,7 +118,7 @@ const GRANTED_BLOODTHIRST_INDEX: usize = usize::MAX - 8;
 /// exactly like the object-carried definitions it mirrors — the SAME
 /// definition shape, built by `database::synthesis::dredge_replacement_definition`
 /// (extracted from `synthesize_dredge` for this reuse).
-const GRANTED_DREDGE_INDEX: usize = usize::MAX - 9;
+const GRANTED_DREDGE_INDEX: u64 = u64::MAX - 9;
 
 /// CR 109.4 + CR 108.4a: Cards outside the battlefield/stack have no
 /// controller; if an effect asks for a card's controller, use its owner
@@ -326,7 +326,7 @@ enum GrantedEtbKeyword {
 }
 
 impl GrantedEtbKeyword {
-    fn from_index(index: usize) -> Option<Self> {
+    fn from_index(index: u64) -> Option<Self> {
         match index {
             GRANTED_SUNBURST_INDEX => Some(Self::Sunburst),
             GRANTED_BLOODTHIRST_INDEX => Some(Self::Bloodthirst),
@@ -334,7 +334,7 @@ impl GrantedEtbKeyword {
         }
     }
 
-    fn index(self) -> usize {
+    fn index(self) -> u64 {
         match self {
             Self::Sunburst => GRANTED_SUNBURST_INDEX,
             Self::Bloodthirst => GRANTED_BLOODTHIRST_INDEX,
@@ -1081,9 +1081,7 @@ pub(crate) fn pending_replacement_option_count(
             .candidates
             .iter()
             .filter(|rid| {
-                state
-                    .pending_step_end_mana_handlers
-                    .get(rid.index)
+                rid.index_as_usize().and_then(|i| state.pending_step_end_mana_handlers.get(i))
                     .is_some()
             })
             .count();
@@ -1145,9 +1143,7 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
                     .candidates
                     .iter()
                     .filter_map(|rid| {
-                        state
-                            .pending_step_end_mana_handlers
-                            .get(rid.index)
+                        rid.index_as_usize().and_then(|i| state.pending_step_end_mana_handlers.get(i))
                             .map(|entry| ReplacementCandidateSummary {
                                 source_id: entry.source,
                                 source_name: name_of(entry.source),
@@ -1607,7 +1603,7 @@ fn replacement_choice_definition(
     rid: ReplacementId,
 ) -> Option<&ReplacementDefinition> {
     if rid.source == ObjectId(0) {
-        state.pending_damage_replacements.get(rid.index)
+        rid.index_as_usize().and_then(|i| state.pending_damage_replacements.get(i))
     } else {
         replacement_definition_for_id(state, rid)
     }
@@ -2146,9 +2142,7 @@ fn damage_modification_for_rid(
 ) -> Option<DamageModification> {
     // CR 615.3: Pending prevention shields use sentinel ObjectId(0).
     if rid.source == ObjectId(0) {
-        return state
-            .pending_damage_replacements
-            .get(rid.index)?
+        return rid.index_as_usize().and_then(|i| state.pending_damage_replacements.get(i))?
             .damage_modification
             .clone();
     }
@@ -2156,7 +2150,7 @@ fn damage_modification_for_rid(
         .objects
         .get(&rid.source)?
         .replacement_definitions
-        .get(rid.index)?
+        .get_by_rid(rid)?
         .damage_modification
         .clone()
 }
@@ -2175,9 +2169,7 @@ fn resolve_prevention_formula(
         PreventionFormula::Fixed(value) => Some(*value),
         PreventionFormula::Quantity { quantity } => {
             let controller = if rid.source == ObjectId(0) {
-                state
-                    .pending_damage_replacements
-                    .get(rid.index)
+                rid.index_as_usize().and_then(|i| state.pending_damage_replacements.get(i))
                     .and_then(|replacement| replacement.source_controller)
             } else {
                 state
@@ -2211,15 +2203,13 @@ fn resolve_prevention_formula(
 /// as `damage_modification_for_rid`.
 fn shield_kind_for_rid(state: &GameState, rid: ReplacementId) -> Option<ShieldKind> {
     if rid.source == ObjectId(0) {
-        return state
-            .pending_damage_replacements
-            .get(rid.index)
+        return rid.index_as_usize().and_then(|i| state.pending_damage_replacements.get(i))
             .map(|repl| repl.shield_kind);
     }
     state
         .objects
         .get(&rid.source)
-        .and_then(|obj| obj.replacement_definitions.get(rid.index))
+        .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
         .map(|repl| repl.shield_kind)
 }
 
@@ -2230,12 +2220,12 @@ fn shield_kind_for_rid(state: &GameState, rid: ReplacementId) -> Option<ShieldKi
 /// only `runtime_execute`.
 fn shield_has_per_event_execute_followup(state: &GameState, rid: ReplacementId) -> bool {
     let repl = if rid.source == ObjectId(0) {
-        state.pending_damage_replacements.get(rid.index)
+        rid.index_as_usize().and_then(|i| state.pending_damage_replacements.get(i))
     } else {
         state
             .objects
             .get(&rid.source)
-            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+            .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
     };
     repl.is_some_and(|r| r.execute.is_some() && r.runtime_execute.is_none())
 }
@@ -2253,12 +2243,12 @@ fn shield_has_per_event_execute_followup(state: &GameState, rid: ReplacementId) 
 /// `shield_rider_reflects_per_event`.
 fn shield_has_inline_runtime_rider(state: &GameState, rid: ReplacementId) -> bool {
     let repl = if rid.source == ObjectId(0) {
-        state.pending_damage_replacements.get(rid.index)
+        rid.index_as_usize().and_then(|i| state.pending_damage_replacements.get(i))
     } else {
         state
             .objects
             .get(&rid.source)
-            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+            .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
     };
     repl.is_some_and(|r| {
         matches!(
@@ -2313,12 +2303,12 @@ fn rider_reflects_per_event_damage_source(rider: &ResolvedAbility) -> bool {
 /// re-fire the rider.
 pub(crate) fn shield_rider_reflects_per_event(state: &GameState, rid: ReplacementId) -> bool {
     let repl = if rid.source == ObjectId(0) {
-        state.pending_damage_replacements.get(rid.index)
+        rid.index_as_usize().and_then(|i| state.pending_damage_replacements.get(i))
     } else {
         state
             .objects
             .get(&rid.source)
-            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+            .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
     };
     repl.and_then(|r| r.runtime_execute.as_deref())
         .is_some_and(rider_reflects_per_event_damage_source)
@@ -2430,12 +2420,12 @@ pub(crate) fn accumulate_batch_prevention(
 /// creature" / "to any target", or the creating ability's implicit "you").
 fn redirect_chosen_target_for_rid(state: &GameState, rid: ReplacementId) -> Option<TargetRef> {
     let repl = if rid.source == ObjectId(0) {
-        state.pending_damage_replacements.get(rid.index)
+        rid.index_as_usize().and_then(|i| state.pending_damage_replacements.get(i))
     } else {
         state
             .objects
             .get(&rid.source)
-            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+            .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
     };
     match repl.and_then(|r| r.redirect_target.as_ref()) {
         Some(TargetFilter::SpecificObject { id }) => Some(TargetRef::Object(*id)),
@@ -2552,12 +2542,12 @@ fn prevention_shield_route(
     amount: PreventionAmount,
 ) -> PreventionShieldRoute {
     let repl = if rid.source == ObjectId(0) {
-        state.pending_damage_replacements.get(rid.index)
+        rid.index_as_usize().and_then(|i| state.pending_damage_replacements.get(i))
     } else {
         state
             .objects
             .get(&rid.source)
-            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+            .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
     };
     repl.map_or(PreventionShieldRoute::Prevent, |repl| {
         prevention_shield_route_for_def(repl, amount)
@@ -2789,9 +2779,7 @@ fn damage_done_applier(
                 // `SetToSourcePower` arm).
                 DamageModification::Plus { value } => {
                     let controller = if rid.source == ObjectId(0) {
-                        state
-                            .pending_damage_replacements
-                            .get(rid.index)
+                        rid.index_as_usize().and_then(|i| state.pending_damage_replacements.get(i))
                             .and_then(|r| r.source_controller)
                             .unwrap_or(PlayerId(0))
                     } else {
@@ -2987,15 +2975,13 @@ fn damage_done_applier(
     // Branch 2: CR 615 — Prevention shield
     // Look up shield from either object replacement_definitions or pending_damage_replacements.
     let shield_kind = if rid.source == ObjectId(0) {
-        state
-            .pending_damage_replacements
-            .get(rid.index)
+        rid.index_as_usize().and_then(|i| state.pending_damage_replacements.get(i))
             .map(|repl| repl.shield_kind)
     } else {
         state
             .objects
             .get(&rid.source)
-            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+            .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
             .map(|repl| repl.shield_kind)
     };
 
@@ -3313,12 +3299,12 @@ fn damage_done_applier(
 /// CR 614.5: Mark a one-shot replacement as consumed after it successfully applies.
 fn mark_replacement_consumed(state: &mut GameState, rid: ReplacementId) {
     let repl = if rid.source == ObjectId(0) {
-        state.pending_damage_replacements.get_mut(rid.index)
+        rid.index_as_usize().and_then(|i| state.pending_damage_replacements.get_mut(i))
     } else {
         state
             .objects
             .get_mut(&rid.source)
-            .and_then(|obj| obj.replacement_definitions.get_mut(rid.index))
+            .and_then(|obj| obj.replacement_definitions.get_mut_by_rid(rid))
     };
     if let Some(repl) = repl {
         repl.is_consumed = true;
@@ -3334,12 +3320,12 @@ fn consume_prevention_shield(
     new_amount: Option<PreventionAmount>,
 ) {
     let repl = if rid.source == ObjectId(0) {
-        state.pending_damage_replacements.get_mut(rid.index)
+        rid.index_as_usize().and_then(|i| state.pending_damage_replacements.get_mut(i))
     } else {
         state
             .objects
             .get_mut(&rid.source)
-            .and_then(|obj| obj.replacement_definitions.get_mut(rid.index))
+            .and_then(|obj| obj.replacement_definitions.get_mut_by_rid(rid))
     };
 
     if let Some(repl) = repl {
@@ -3362,12 +3348,12 @@ fn update_redirection_shield(
     lifetime: RedirectionLifetime,
 ) {
     let repl = if rid.source == ObjectId(0) {
-        state.pending_damage_replacements.get_mut(rid.index)
+        rid.index_as_usize().and_then(|i| state.pending_damage_replacements.get_mut(i))
     } else {
         state
             .objects
             .get_mut(&rid.source)
-            .and_then(|obj| obj.replacement_definitions.get_mut(rid.index))
+            .and_then(|obj| obj.replacement_definitions.get_mut_by_rid(rid))
     };
 
     if let Some(repl) = repl {
@@ -3417,7 +3403,7 @@ fn destroy_applier(
     let is_regen = state
         .objects
         .get(&rid.source)
-        .and_then(|obj| obj.replacement_definitions.get(rid.index))
+        .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
         .is_some_and(|repl| {
             matches!(
                 repl.shield_kind,
@@ -3468,7 +3454,7 @@ fn destroy_applier(
 
     // Mark the shield as consumed (one-shot).
     if let Some(obj) = state.objects.get_mut(&rid.source) {
-        if let Some(repl) = obj.replacement_definitions.get_mut(rid.index) {
+        if let Some(repl) = obj.replacement_definitions.get_mut_by_rid(rid) {
             repl.is_consumed = true;
         }
     }
@@ -3772,7 +3758,7 @@ fn draw_applier(
     let prevents = state
         .objects
         .get(&rid.source)
-        .and_then(|obj| obj.replacement_definitions.get(rid.index))
+        .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
         .and_then(|def| def.quantity_modification.as_ref())
         .is_some_and(|m| matches!(m, QuantityModification::Prevent));
     if prevents {
@@ -3864,7 +3850,7 @@ fn draw_replacement_count(
         .objects
         .get(&rid.source)?
         .replacement_definitions
-        .get(rid.index)?;
+        .get_by_rid(rid)?;
     let execute = repl_def.execute.as_deref()?;
 
     match &*execute.effect {
@@ -4044,7 +4030,7 @@ fn scry_applier(
     let execute = state
         .objects
         .get(&rid.source)
-        .and_then(|source| source.replacement_definitions.get(rid.index))
+        .and_then(|source| source.replacement_definitions.get_by_rid(rid))
         .and_then(|def| def.execute.as_deref());
 
     match execute {
@@ -4139,7 +4125,7 @@ fn explore_applier(
     };
     let Some(execute) = source
         .replacement_definitions
-        .get(rid.index)
+        .get_by_rid(rid)
         .and_then(|def| def.execute.clone())
     else {
         return ApplyResult::Modified(ProposedEvent::Explore { object_id, applied });
@@ -4227,7 +4213,7 @@ fn connive_applier(
     };
     let Some(execute) = source
         .replacement_definitions
-        .get(rid.index)
+        .get_by_rid(rid)
         .and_then(|def| def.execute.clone())
     else {
         // CR 614.5: carry the captured `applied` set (already marks this rid) so
@@ -4401,7 +4387,7 @@ fn coin_flip_applier(
     let execute = state
         .objects
         .get(&rid.source)
-        .and_then(|source| source.replacement_definitions.get(rid.index))
+        .and_then(|source| source.replacement_definitions.get_by_rid(rid))
         .and_then(|def| def.execute.as_deref());
 
     let new_count = match execute {
@@ -4461,7 +4447,7 @@ fn roll_dice_applier(
     let def = state
         .objects
         .get(&rid.source)
-        .and_then(|source| source.replacement_definitions.get(rid.index));
+        .and_then(|source| source.replacement_definitions.get_by_rid(rid));
 
     // CR 614.1a: "instead roll that many dice plus one" — the definition's
     // `execute` carries `RollDie { count: Offset { EventContextAmount, +1 } }`.
@@ -4522,7 +4508,7 @@ fn proliferate_applier(
     let new_count = state
         .objects
         .get(&rid.source)
-        .and_then(|source| source.replacement_definitions.get(rid.index))
+        .and_then(|source| source.replacement_definitions.get_by_rid(rid))
         .and_then(|def| def.execute.as_deref())
         .and_then(|execute| match &*execute.effect {
             Effect::Proliferate if execute.sub_ability.is_none() => execute
@@ -4632,7 +4618,7 @@ fn gain_life_applier(
     let qmod = state
         .objects
         .get(&rid.source)
-        .and_then(|obj| obj.replacement_definitions.get(rid.index))
+        .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
         .and_then(|def| def.quantity_modification.clone());
     if let Some(modification) = qmod {
         if let ProposedEvent::LifeGain {
@@ -4717,7 +4703,7 @@ fn gain_life_execute_substitutes_event_type(state: &GameState, rid: ReplacementI
     let Some(execute) = state
         .objects
         .get(&rid.source)
-        .and_then(|obj| obj.replacement_definitions.get(rid.index))
+        .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
         .and_then(|def| def.execute.as_deref())
     else {
         return false;
@@ -4742,7 +4728,7 @@ fn gain_life_replacement_amount(
         .objects
         .get(&rid.source)?
         .replacement_definitions
-        .get(rid.index)?
+        .get_by_rid(rid)?
         .execute
         .as_deref()?;
 
@@ -4791,7 +4777,7 @@ fn lose_life_applier(
     let definition = state
         .objects
         .get(&rid.source)
-        .and_then(|obj| obj.replacement_definitions.get(rid.index));
+        .and_then(|obj| obj.replacement_definitions.get_by_rid(rid));
 
     if let Some(modification) = definition.and_then(|def| def.quantity_modification.clone()) {
         let ProposedEvent::LifeLoss {
@@ -4885,7 +4871,7 @@ fn add_counter_applier(
     let modification = state
         .objects
         .get(&rid.source)
-        .and_then(|obj| obj.replacement_definitions.get(rid.index))
+        .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
         .and_then(|def| def.quantity_modification.clone());
     let Some(modification) = modification else {
         return ApplyResult::Modified(event);
@@ -5023,9 +5009,7 @@ fn create_token_applier(
         // `pending_damage_replacements`; their installing controller is latched
         // in `source_controller` (mirrors `damage_modification_for_rid`). Fall
         // back to the active player when unstamped.
-        state
-            .pending_damage_replacements
-            .get(rid.index)
+        rid.index_as_usize().and_then(|i| state.pending_damage_replacements.get(i))
             .map(|def| {
                 let controller = def.source_controller.unwrap_or(state.active_player);
                 extract(def, controller)
@@ -5037,7 +5021,7 @@ fn create_token_applier(
             .get(&rid.source)
             .and_then(|obj| {
                 obj.replacement_definitions
-                    .get(rid.index)
+                    .get_by_rid(rid)
                     .map(|def| extract(def, obj.controller))
             })
             .unwrap_or((None, None, None, None, None, false, PlayerId(0)))
@@ -5368,7 +5352,7 @@ fn produce_mana_applier(
     let modification = state
         .objects
         .get(&rid.source)
-        .and_then(|obj| obj.replacement_definitions.get(rid.index))
+        .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
         .and_then(|def| def.mana_modification.clone());
 
     if let ProposedEvent::ProduceMana {
@@ -5486,7 +5470,7 @@ fn apply_empty_mana_pool_replacement(
         unreachable!("apply_empty_mana_pool_replacement discriminator guarantees variant");
     };
 
-    let entry = match state.pending_step_end_mana_handlers.get(rid.index) {
+    let entry = match rid.index_as_usize().and_then(|i| state.pending_step_end_mana_handlers.get(i)) {
         Some(e) => e.clone(),
         None => {
             // Handler vanished — return event unchanged so the pipeline can complete.
@@ -5569,7 +5553,7 @@ fn untap_applier(
     let controller = source.controller;
     let execute = source
         .replacement_definitions
-        .get(rid.index)
+        .get_by_rid(rid)
         .and_then(|def| def.execute.clone());
 
     // Run the alternative effect chain (if any) against the would-be-untapped
@@ -5623,7 +5607,7 @@ fn turn_face_up_applier(
     let controller = source.controller;
     let execute = source
         .replacement_definitions
-        .get(rid.index)
+        .get_by_rid(rid)
         .and_then(|def| def.execute.clone());
 
     if let Some(execute) = execute {
@@ -5770,7 +5754,7 @@ fn dealt_damage_applier(
     ) && state
         .objects
         .get(&rid.source)
-        .and_then(|obj| obj.replacement_definitions.get(rid.index))
+        .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
         .and_then(|def| def.execute.as_deref())
         .is_some_and(|execute| {
             execute.sub_ability.is_none()
@@ -5823,7 +5807,7 @@ fn mill_applier(
     let new_count = state
         .objects
         .get(&rid.source)
-        .and_then(|source| source.replacement_definitions.get(rid.index))
+        .and_then(|source| source.replacement_definitions.get_by_rid(rid))
         .and_then(|def| def.execute.as_deref())
         .and_then(|execute| match &*execute.effect {
             Effect::Mill { count: qty, .. } if execute.sub_ability.is_none() => {
@@ -5963,7 +5947,7 @@ fn bind_search_found_definition(
     rid: ReplacementId,
 ) -> Option<BoundSearchFoundDisposition> {
     let source = state.objects.get(&rid.source)?;
-    let definition = source.replacement_definitions.get(rid.index)?;
+    let definition = source.replacement_definitions.get_by_rid(rid)?;
     if definition.event != ReplacementEvent::SearchFound {
         return None;
     }
@@ -6122,7 +6106,7 @@ fn snapshot_search_found_candidates(
         .iter()
         .filter_map(|rid| {
             let source = state.objects.get(&rid.source)?;
-            let definition = source.replacement_definitions.get(rid.index)?;
+            let definition = source.replacement_definitions.get_by_rid(*rid)?;
             let disposition = bind_search_found_definition(state, *rid)?;
             Some(BoundSearchFoundCandidate {
                 replacement_id: *rid,
@@ -6509,12 +6493,12 @@ fn is_damage_prevention_replacement(
 
     // Look up the replacement definition from either objects or pending_damage_replacements.
     let repl_def = if rid.source == ObjectId(0) {
-        state.pending_damage_replacements.get(rid.index)
+        rid.index_as_usize().and_then(|i| state.pending_damage_replacements.get(i))
     } else {
         state
             .objects
             .get(&rid.source)
-            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+            .and_then(|obj| obj.replacement_definitions.get_by_rid(*rid))
     };
 
     let Some(repl) = repl_def else {
@@ -7628,7 +7612,7 @@ fn object_replacement_candidate_applies(
     let Some(obj) = liminal_obj.or_else(|| state.objects.get(&rid.source)) else {
         return false;
     };
-    let Some(repl_def) = obj.replacement_definitions.get(rid.index) else {
+    let Some(repl_def) = obj.replacement_definitions.get_by_rid(rid) else {
         return false;
     };
 
@@ -8441,7 +8425,7 @@ fn legacy_object_replacement_candidates(
             }
             let rid = ReplacementId {
                 source: obj.id,
-                index,
+                index: index as u64,
             };
             object_replacement_candidate_applies(state, event, registry, rid).then_some(rid)
         })
@@ -8458,7 +8442,7 @@ fn legacy_object_replacement_candidates(
                     .filter_map(|(index, _)| {
                         let rid = ReplacementId {
                             source: entry_ref,
-                            index,
+                            index: index as u64,
                         };
                         object_replacement_candidate_applies(state, event, registry, rid)
                             .then_some(rid)
@@ -8514,7 +8498,7 @@ fn indexed_object_replacement_candidates_from_index(
                     .filter_map(|(index, _)| {
                         let rid = ReplacementId {
                             source: entry_ref,
-                            index,
+                            index: index as u64,
                         };
                         object_replacement_candidate_applies(state, event, registry, rid)
                             .then_some(rid)
@@ -8581,7 +8565,7 @@ fn rebuild_replacement_index(state: &mut GameState) {
         let entry = ReplacementIndexEntry {
             id: ReplacementId {
                 source: obj.id,
-                index,
+                index: index as u64,
             },
             ordinal,
         };
@@ -8612,15 +8596,15 @@ fn clear_replacement_index_pipeline(state: &mut GameState) {
 
 /// CR 616.1 (Matt R10-F1): the virtual-candidate rid for one applicable
 /// protection quality. The source selects the quality variant's sentinel;
-/// the index carries the minor word. Lossless on 64-bit; on 32-bit targets
-/// the low word survives (`as` truncation, deterministic — the engine
-/// builds 64-bit only, so this is documentation, not a live path).
+/// the index carries the minor word whole. The index is `u64` on every
+/// target (never `usize`), so 64-bit fingerprint qualities survive the pack
+/// on wasm32 exactly as on native.
 fn protection_replacement_id(quality: MatchedProtectionQuality) -> ReplacementId {
     use crate::types::identifiers::PROTECTION_REPLACEMENT_SOURCE_BASE;
     let (discriminant, minor) = quality.replacement_rid_parts();
     ReplacementId {
         source: ObjectId(PROTECTION_REPLACEMENT_SOURCE_BASE + u64::from(discriminant)),
-        index: minor as usize,
+        index: minor,
     }
 }
 
@@ -8629,8 +8613,7 @@ fn protection_replacement_id(quality: MatchedProtectionQuality) -> ReplacementId
 /// foreign quality — never our own writes; callers fail contained).
 fn protection_quality_from_rid(rid: ReplacementId) -> Option<MatchedProtectionQuality> {
     let discriminant = rid.source.protection_source_discriminant()?;
-    let minor = u64::try_from(rid.index).ok()?;
-    MatchedProtectionQuality::from_replacement_parts(discriminant, minor)
+    MatchedProtectionQuality::from_replacement_parts(discriminant, rid.index)
 }
 
 /// CR 616.1 (Matt R10-F1): English tail for a protection candidate label,
@@ -8869,7 +8852,7 @@ pub fn find_applicable_replacements(
     // card via a runtime continuous effect rather than printing it, so the
     // card's `replacement_definitions` is empty and the ordinary
     // object-carried scan (`object_replacement_candidate_applies`, which reads
-    // `obj.replacement_definitions.get(rid.index)`) never offers it. Surface
+    // `obj.replacement_definitions.get_by_rid(rid)`) never offers it. Surface
     // one virtual Draw-replacement candidate per graveyard card with an
     // effective GRANTED (non-printed) Dredge value.
     //
@@ -9092,7 +9075,7 @@ pub fn find_applicable_replacements(
 
             let rid = ReplacementId {
                 source: ObjectId(0),
-                index,
+                index: index as u64,
             };
 
             if event.already_applied(&rid) {
@@ -9304,7 +9287,7 @@ pub fn find_applicable_replacements(
         for (index, entry) in state.pending_step_end_mana_handlers.iter().enumerate() {
             let rid = ReplacementId {
                 source: ObjectId(0),
-                index,
+                index: index as u64,
             };
             // CR 614.5: skip handlers that already applied to this event.
             if event.already_applied(&rid) {
@@ -9432,7 +9415,7 @@ pub(crate) fn proposed_event_prompt_cause(
         let def = state
             .objects
             .get(&rid.source)
-            .and_then(|o| o.replacement_definitions.get(rid.index));
+            .and_then(|o| o.replacement_definitions.get_by_rid(*rid));
         let Some(def) = def else {
             // CR 614.1a: no resolvable definition (every virtual candidate) ⇒
             // conservatively interactive.
@@ -9905,7 +9888,7 @@ pub(super) fn current_self_enter_replacement_modifiers(
         let Some(replacement) = state
             .objects
             .get(&rid.source)
-            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+            .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
         else {
             continue;
         };
@@ -9944,7 +9927,7 @@ pub(super) fn current_self_enter_replacement_choice(
             state
                 .objects
                 .get(&rid.source)
-                .and_then(|obj| obj.replacement_definitions.get(rid.index))
+                .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
         })
         .filter(|replacement| !replacement_mode_is_optional(&replacement.mode))
         .filter_map(|replacement| {
@@ -10131,14 +10114,14 @@ fn apply_single_replacement(
     // CR 615.3: Pending damage prevention shields use sentinel ObjectId(0).
     // Look up from game-state-level registry instead of object replacement_definitions.
     let repl_def_ref = if rid.source == ObjectId(0) {
-        state.pending_damage_replacements.get(rid.index)
+        rid.index_as_usize().and_then(|i| state.pending_damage_replacements.get(i))
     } else {
         state
             .liminal_entries
             .get(&rid.source)
             .map(|entry| entry.object.projected())
             .or_else(|| state.objects.get(&rid.source))
-            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+            .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
     };
     // CR 109.5: snapshot the replacing ability's controller HERE, while
     // `repl_def_ref`'s borrow is still live. The stash sites below run after the
@@ -11191,7 +11174,7 @@ fn candidate_materiality(
 
     // CR 702.52a + CR 616.1: granted dredge has no object-carried definition
     // to walk via the generic execute-chain classifier below (that walk reads
-    // `state.objects...replacement_definitions.get(rid.index)`, which always
+    // `state.objects...replacement_definitions.get_by_rid(rid)`, which always
     // misses for `GRANTED_DREDGE_INDEX`), so mirror here what that walk would
     // find for PRINTED dredge: the execute chain's head (`Effect::Mill`)
     // matches no specific arm in the walk and falls to its conservative
@@ -11563,7 +11546,7 @@ fn replacement_definition_for_id(
         .get(&rid.source)
         .map(|entry| entry.object.projected())
         .or_else(|| state.objects.get(&rid.source))
-        .and_then(|obj| obj.replacement_definitions.get(rid.index))
+        .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
         // CR 121.2: an instruction to draw multiple cards is performed as that many
         // individual draws, and CR 121.2a modifies the instruction's count *before* any
         // individual draw happens. A Draw replacement must therefore declare which of the
@@ -12006,7 +11989,7 @@ fn auto_choice_identities(
         .iter()
         .map(|rid| {
             if matches!(proposed, ProposedEvent::EmptyManaPool { .. }) {
-                let entry = state.pending_step_end_mana_handlers.get(rid.index)?;
+                let entry = rid.index_as_usize().and_then(|i| state.pending_step_end_mana_handlers.get(i))?;
                 let object = state.objects.get(&entry.source)?;
                 return Some(ReplacementAutoChoiceIdentity::Mana {
                     source: ObjectIncarnationRef::from_object(object),
@@ -18413,6 +18396,123 @@ mod tests {
         }
     }
 
+    /// CR 616.1 (Matt R11-F2): the virtual-candidate rid pack/unpack
+    /// round-trips every protection quality through the REAL `ReplacementId`
+    /// — including 64-bit fingerprints with high bits set — so candidate
+    /// identities survive pause records on every target. The halves-only test
+    /// in `keywords.rs` never touches the pack; this one fails on any target
+    /// that narrows the index (the wasm32 `as usize` truncation).
+    #[test]
+    fn protection_replacement_id_codec_round_trips_through_rid() {
+        for quality in [
+            MatchedProtectionQuality::Color(ManaColor::Red),
+            MatchedProtectionQuality::CardType(CoreType::Artifact),
+            MatchedProtectionQuality::CardType(CoreType::Conspiracy),
+            MatchedProtectionQuality::CardSubtype(0),
+            MatchedProtectionQuality::CardSubtype(0xFFFF_FFFF_0000_0001),
+            MatchedProtectionQuality::CardSubtype(u64::MAX),
+            MatchedProtectionQuality::Colorlessness(
+                ProtectionColorlessness::Multicolored,
+            ),
+            MatchedProtectionQuality::Multicolored,
+            MatchedProtectionQuality::Player(PlayerId(7)),
+            MatchedProtectionQuality::Everything,
+            MatchedProtectionQuality::Filter(1),
+            MatchedProtectionQuality::Filter(0x0000_0001_0000_0000),
+            MatchedProtectionQuality::Filter(u64::MAX),
+            MatchedProtectionQuality::FromPlayer(ProtectionPlayerScope::Opponent),
+            MatchedProtectionQuality::FromPlayer(ProtectionPlayerScope::You),
+        ] {
+            let rid = protection_replacement_id(quality);
+            assert_eq!(
+                protection_quality_from_rid(rid),
+                Some(quality),
+                "rid codec must round-trip {quality:?}"
+            );
+        }
+        // The narrowing probe: a fingerprint with high bits set must ride the
+        // index whole. Under the old `minor as usize` pack this assertion
+        // fails on 32-bit targets (wasm32).
+        let rid = protection_replacement_id(MatchedProtectionQuality::Filter(u64::MAX));
+        assert!(
+            rid.index > u64::from(u32::MAX),
+            "high fingerprint bits must survive the pack, got index {:#x}",
+            rid.index
+        );
+        // Foreign rids fail contained, never decode to a quality.
+        assert_eq!(
+            protection_quality_from_rid(ReplacementId {
+                source: ObjectId(1),
+                index: 0
+            }),
+            None
+        );
+        assert_eq!(
+            protection_quality_from_rid(ReplacementId {
+                source: ObjectId(
+                    crate::types::identifiers::PROTECTION_REPLACEMENT_SOURCE_BASE
+                ),
+                index: 6,
+            }),
+            None,
+            "sentinel source with an out-of-range Color minor is foreign"
+        );
+    }
+
+    /// CR 616.1 (Matt R11-F2): a parked protection-overlap choice serializes
+    /// its candidate rids losslessly — high-bit fingerprint minors survive a
+    /// JSON round trip and still decode to their qualities. JSON numbers
+    /// carry `u64` exactly, so this holds on 32- and 64-bit targets alike;
+    /// under the old `usize` index the same payload overflows on wasm32.
+    #[test]
+    fn protection_overlap_pending_choice_serializes_losslessly() {
+        let qualities = [
+            MatchedProtectionQuality::CardSubtype(u64::MAX),
+            MatchedProtectionQuality::Filter(0xDEAD_BEEF_CAFE_F00D),
+            MatchedProtectionQuality::Color(ManaColor::Red),
+        ];
+        let pending = PendingReplacement {
+            proposed: ProposedEvent::Damage {
+                source_id: ObjectId(9),
+                target: TargetRef::Player(PlayerId(0)),
+                amount: 2,
+                is_combat: false,
+                applied: HashSet::new(),
+            },
+            sacrifice_provenance: None,
+            candidates: qualities.map(protection_replacement_id).to_vec(),
+            search_found_candidates: Vec::new(),
+            depth: 0,
+            is_optional: false,
+            choice_player: None,
+            library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: Default::default(),
+            excess_recipient: None,
+            lifelink_bonus: 0,
+            may_cost_paid: false,
+            may_cost_remaining: None,
+            delivery_boundary: None,
+            each_source_batch_owner: None,
+        };
+        let json = serde_json::to_string(&pending).expect("pending choice serializes");
+        assert!(
+            json.contains("18446744073709551615"),
+            "u64::MAX minor must ride whole in JSON: {json}"
+        );
+        let back: PendingReplacement =
+            serde_json::from_str(&json).expect("pending choice deserializes");
+        assert_eq!(back.candidates, pending.candidates);
+        for (rid, quality) in back.candidates.iter().zip(qualities) {
+            assert_eq!(
+                protection_quality_from_rid(*rid),
+                Some(quality),
+                "deserialized candidate must still decode"
+            );
+        }
+    }
+
     #[test]
     fn finality_competes_by_identity_and_resumes_through_the_cr_616_choice() {
         let finality_id = ObjectId(10);
@@ -19013,7 +19113,7 @@ mod tests {
                 .token_owner_redirect(ControllerRef::You),
         );
 
-        let on_object = |index: usize| ReplacementId {
+        let on_object = |index: u64| ReplacementId {
             source: ObjectId(10),
             index,
         };

@@ -2050,12 +2050,12 @@ pub(crate) fn fire_batch_prevention_riders(
         // they have no host permanent; object-hosted shields are found in the
         // host's `replacement_definitions`.
         let repl_def = if rid.source == ObjectId(0) {
-            state.pending_damage_replacements.get(rid.index)
+            rid.index_as_usize().and_then(|i| state.pending_damage_replacements.get(i))
         } else {
             state
                 .objects
                 .get(&rid.source)
-                .and_then(|obj| obj.replacement_definitions.get(rid.index))
+                .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
         };
         let Some(repl_def) = repl_def else {
             continue;

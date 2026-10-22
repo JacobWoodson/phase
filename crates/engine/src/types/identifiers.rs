@@ -29,8 +29,9 @@ pub(crate) const TRIGGERING_SPELL_PLACEHOLDER: ObjectId = ObjectId(u64::MAX);
 /// rids. One sentinel per matched-protection-quality variant, in explicit
 /// discriminant order (`BASE + 0` = Color through `BASE + 8` = FromPlayer,
 /// matching `MatchedProtectionQuality::replacement_rid_parts` — never `as`
-/// casts): the rid index carries the quality's minor word whole, so the
-/// mapping is lossless and save-stable. Never a real object's id (the
+/// casts): the rid index (`u64` on every target, never `usize`) carries the
+/// quality's minor word whole, so the mapping is lossless, save-stable, and
+/// identical on native and wasm32. Never a real object's id (the
 /// allocator starts at 1), and disjoint from `ObjectId(0)` (registry-hosted
 /// replacements) so dispatch can discriminate by source alone.
 pub(crate) const PROTECTION_REPLACEMENT_SOURCE_BASE: u64 = u64::MAX - 16;

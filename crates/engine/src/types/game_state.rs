@@ -10812,7 +10812,7 @@ pub enum ReplacementChoiceKind {
 pub enum ReplacementAutoChoiceIdentity {
     Definition {
         source: ObjectIncarnationRef,
-        index: usize,
+        index: u64,
         definition: Box<crate::types::ability::ReplacementDefinition>,
     },
     Mana {

@@ -1656,7 +1656,8 @@ mod tests {
         let ((rid, recipient), &prevented) = tally.iter().next().unwrap();
         // CR 120.3: the aggregate names the recipient it was prevented for.
         assert_eq!(*recipient, TargetRef::Player(PlayerId(0)));
-        let runtime = state.pending_damage_replacements[rid.index()]
+        let runtime = state.pending_damage_replacements
+            [usize::try_from(rid.index()).expect("test shield index fits usize")]
             .runtime_execute
             .clone()
             .unwrap();

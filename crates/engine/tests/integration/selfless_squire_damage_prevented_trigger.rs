@@ -3571,7 +3571,7 @@ fn typed_nested_batch_second_ordering_retains_child_stamp() {
     let double_index = pending
         .candidates
         .iter()
-        .position(|rid| rid.index == double_pos)
+        .position(|rid| rid.index == double_pos as u64)
         .expect("the Double must be offered on the Bat2 event");
     let child_owner = pending
         .each_source_batch_owner
