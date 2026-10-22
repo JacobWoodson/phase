@@ -1636,11 +1636,15 @@ mod tests {
             is_combat: true,
             applied: std::collections::HashSet::new(),
         };
-        let (survivors, tally) = crate::game::replacement::replace_combat_damage_batch(
-            &mut state,
-            &mut events,
-            vec![proposed],
-        );
+        let crate::game::replacement::CombatDamageReplacementOutcome::Complete { survivors, tally } =
+            crate::game::replacement::replace_combat_damage_batch(
+                &mut state,
+                &mut events,
+                vec![proposed],
+            )
+        else {
+            panic!("a single Prevention::All shield is one candidate: no CR 616.1 pause is possible here");
+        };
         assert_eq!(survivors, vec![None], "all 3 combat damage prevented");
         // CR 615.7: the shield aggregated 3 prevented damage.
         let total: i32 = tally.values().sum();
@@ -1658,9 +1662,9 @@ mod tests {
         assert_eq!(*recipient, TargetRef::Player(PlayerId(0)));
         let runtime = state.pending_damage_replacements
             [usize::try_from(rid.index()).expect("test shield index fits usize")]
-            .runtime_execute
-            .clone()
-            .unwrap();
+        .runtime_execute
+        .clone()
+        .unwrap();
         state.last_effect_count = Some(prevented);
         state.install_ready_continuation(
             crate::types::ability::PostReplacementContinuation::Resolved(runtime),

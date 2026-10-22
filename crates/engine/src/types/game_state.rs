@@ -17,10 +17,10 @@ use super::ability::{
     CastTimingPermission, CastVariantPaid, CastingPermission, CategoryChooserScope, ChoiceType,
     ChoiceValue, ChooseFromZoneConstraint, ChosenAttribute, CoinFlipResult, Comparator,
     ContinuousModification, ControlWindow, CopiableValues, CopyChooseScope, CopyScale,
-    CopyTargetPurpose, CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition,
-    DelayedTriggerKind, DigRestOrder, DigRestSplitScope, Duration, EffectKind, FaceDownProfile,
-    GameRestriction, KeywordAction, KickerVariant, LibraryPosition, ModalChoice,
-    PermanentEntryMode, PileSource, QuantityExpr, ResolvedAbility, ReturnResultId,
+    CopyTargetPurpose, CostPaidObjectSnapshot, CounterCostSelection, DamageContextSnapshot,
+    DelayedTriggerCondition, DelayedTriggerKind, DigRestOrder, DigRestSplitScope, Duration,
+    EffectKind, FaceDownProfile, GameRestriction, KeywordAction, KickerVariant, LibraryPosition,
+    ModalChoice, PermanentEntryMode, PileSource, QuantityExpr, ResolvedAbility, ReturnResultId,
     SearchDestinationSplit, SearchOrderingHint, SearchSelectionConstraint, StackAbilityKind,
     StaticCondition, TapCreaturesSelectionMode, TargetFilter, TargetRef, ThisWayCause,
     TriggerBaseSetInstanceRef, TriggerCondition, TriggerDefinition, TriggerDefinitionOccurrenceRef,
@@ -82,7 +82,7 @@ use super::zones::{ExileCostSourceZone, Zone};
 
 use crate::analysis::resource::{object_class, CounterClass, ObjectClass, ResourceAxis};
 use crate::game::bracket_estimate::CommanderBracketTier;
-use crate::game::combat::{AttackTarget, BlockHistoryPair, CombatState};
+use crate::game::combat::{AttackTarget, BlockHistoryPair, CombatState, DamageAssignment};
 use crate::game::deck_loading::DeckEntry;
 use crate::game::target_occurrences::{
     legacy_keyed_pins_to_positional, pins_align_with, TargetPinAlignmentError,
@@ -12524,6 +12524,11 @@ fn visit_persisted_live_zone_changed_records(
         // prevention shield's rider (CR 615.5) — their `turn_zone_change_index`
         // must be rebound on load for the same reason as the siblings above.
         "pending_combat_lifelink",
+        // `PendingCombatDamageBatch::batch_events` holds the paused batch's
+        // events, which can include `ZoneChanged` records created by a
+        // prevention shield's rider (CR 615.5) — their `turn_zone_change_index`
+        // must be rebound on load for the same reason as the sibling above.
+        "pending_combat_damage",
         "stack",
         "waiting_for",
         "resolution_stack",
@@ -18324,6 +18329,80 @@ pub struct PendingCombatLifelink {
     pub sub_step: CombatDamageSubStep,
 }
 
+/// CR 510.2 + CR 616.1: one source's place in a PAUSED combat-damage batch —
+/// the storage twin of `combat_damage.rs`'s borrowed inline `BatchEntry`.
+/// Snapshots, never live reads (CR 400.7: the snapshot's
+/// `source_incarnation` survives zone changes across the pause).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParkedCombatDamageEntry {
+    pub ctx: DamageContextSnapshot,
+    pub source_is_commander: bool,
+    pub assignment: DamageAssignment,
+    /// CR 119.3 + CR 702.15b: when the source has lifelink, the controller it
+    /// gains life for. Snapshotted per entry (CR 702.15c LKI), mirroring
+    /// [`PendingLifelinkGain`].
+    pub lifelink_controller: Option<PlayerId>,
+}
+
+/// CR 510.2 + CR 616.1: a combat-damage batch paused on a replacement
+/// ordering choice before ANY of its damage was applied. The lifelink record
+/// parks a POST-damage tail (damage dealt, gains owed); this record parks a
+/// PRE-application batch (nothing dealt, survivors + entries owed) — two
+/// precise records rather than one half-populated one.
+///
+/// Entry↔survivor binding is positional: `entries[i]` ↔ `decided[i]` for
+/// `i < decided.len()`, and `remaining[j]` ↔ `entries[paused_entry + 1 + j]`.
+/// The paused event itself is owned by `state.pending_replacement` and is in
+/// neither list (mirroring [`PendingCombatLifelink`]'s "deliberately absent"
+/// rule). `paused_entry == decided.len()` at every park; the equality doubles
+/// as the answer-stash gate and re-arms across re-pause.
+///
+/// `PartialEq` without `Eq`: `ProposedEvent` is not `Eq`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingCombatDamageBatch {
+    /// ALL entries in batch order.
+    pub entries: Vec<ParkedCombatDamageEntry>,
+    /// Survivors for `entries[..paused_entry]`, RECORDED but NOT applied
+    /// (atomicity is structural: Phase C never ran). The paused slot is
+    /// appended by the answer path, so `decided.len() == paused_entry + 1`
+    /// once stashed.
+    pub decided: Vec<Option<ProposedEvent>>,
+    /// Index of the event owned by `pending_replacement`. Positions the
+    /// answer's stash and bounds every alignment.
+    pub paused_entry: usize,
+    /// CR 800.4e + CR 614.9: set by elimination ONLY when the paused entry's
+    /// recipient departs while UNSTASHED (the entry is retained — it has no
+    /// decided/remaining slot to pair-prune, so positional alignment never
+    /// shifts under the live authority). Both discard points (the answer-stash
+    /// path and the guard-settle path) convert the paused slot to `None` when
+    /// set, then clear. Every fresh park initializes it false.
+    pub paused_entry_pruned: bool,
+    /// Unprocessed events for `entries[paused_entry + 1..]`.
+    pub remaining: Vec<ProposedEvent>,
+    /// CR 615.13: the Phase-A protection tally as sorted entries
+    /// (deterministic across saves/AI clones). Snapshot-back merges the live
+    /// window into `phase_b_tally` and clears this field, so reinstall is
+    /// unambiguous.
+    pub phase_a_tally: Vec<PreventedDamageEntry>,
+    /// CR 615.13: the Phase-B applier tally as sorted entries, plus every
+    /// answer's accumulation (see `phase_a_tally`).
+    pub phase_b_tally: Vec<PreventedDamageEntry>,
+    /// The pre-batch outer tally window, restored on every exit to a prompt
+    /// AND on completion (never merged outward: combat is its own
+    /// simultaneity). `Option` like `EachSourceBatchFrame::restore_tally` so
+    /// the restore is exact (`Some` vs `None` decides accumulate-vs-emit for
+    /// later prevention).
+    pub outer_tally: Option<Vec<PreventedDamageEntry>>,
+    /// CR 510.2 + CR 603.3b: every event this batch has produced, so
+    /// completion emits ONE batch to `process_combat_damage_triggers`.
+    pub batch_events: Vec<GameEvent>,
+    /// CR 732.2a: the PRE-BATCH life totals. Carried, never re-snapshotted.
+    pub lives_before: Vec<i32>,
+    /// CR 510.4: which sub-step owns this batch. Snapshotted because
+    /// `combat.first_strike_done` mutates during the resume.
+    pub sub_step: CombatDamageSubStep,
+}
+
 /// CR 510.1c: A blocker with its lethal damage threshold for UI display.
 /// `lethal_minimum` is only enforced as a hard constraint before trample excess (CR 702.19b).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22191,6 +22270,13 @@ declare_game_state! {
     /// pointer, not inline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_combat_lifelink: Option<Box<PendingCombatLifelink>>,
+    /// CR 510.2 + CR 616.1: see [`PendingCombatDamageBatch`]. Boxed like its
+    /// `pending_combat_lifelink` sibling — `GameState` is moved by value
+    /// through the server action and AI paths and has a hard stack budget
+    /// (`game_state_size.rs`), so a multi-`Vec` parked record rides behind a
+    /// pointer, not inline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_combat_damage: Option<Box<PendingCombatDamageBatch>>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
     pub liminal_entries: HashMap<ObjectId, LiminalEntry>,
@@ -30395,6 +30481,7 @@ impl GameState {
             priority_pass_count: 0,
             pending_replacement: None,
             pending_combat_lifelink: None,
+            pending_combat_damage: None,
             liminal_entries: HashMap::new(),
             pending_liminal_entry_resume: None,
             entering_aura_authority: None,
@@ -32455,6 +32542,7 @@ impl GameState {
             && self.pending_player_scope_sacrifice_choice.is_none()
             && self.pending_discard_batch.is_none()
             && self.pending_combat_lifelink.is_none()
+            && self.pending_combat_damage.is_none()
             && self.pending_each_source_batches.is_empty()
             && self.deferred_entry_events.is_empty()
             && self.pending_attack_trigger_events.is_empty()
@@ -33428,6 +33516,13 @@ fn _gamestate_partition_is_total(s: &GameState) {
         //     suppress a legitimate loop's detection. Classified identically to its
         //     `pending_discard_batch` sibling below.
         pending_combat_lifelink: _,
+        //   - `pending_combat_damage`: COMPARED (hand-written `impl PartialEq` conjunct) — the
+        //     parked pre-application half of one CR 510.2 combat-damage batch. `decided` only
+        //     GROWS (answer stashes) and `remaining` only SHRINKS (re-pause) within a batch, so
+        //     two states differing in this field are genuinely different points in the same
+        //     turn-based action and COMPARING it can never suppress a legitimate loop's
+        //     detection. Classified identically to its `pending_combat_lifelink` sibling above.
+        pending_combat_damage: _,
         replacement_may_cost_paused: _,
         post_replacement_token_choice_applied: _,
         deferred_entry_events: _,
@@ -33999,6 +34094,7 @@ impl PartialEq for GameState {
             && self.pending_discard_batch == other.pending_discard_batch
             && self.pending_exile_from_top_until == other.pending_exile_from_top_until
             && self.pending_combat_lifelink == other.pending_combat_lifelink
+            && self.pending_combat_damage == other.pending_combat_damage
             && self.pending_each_source_batches == other.pending_each_source_batches
             // CR 615.13 + CR 616.1e (Matt M1): the allocator cursor compares
             // (mirrors `next_object_id`); the synchronous drain owner is
@@ -38114,6 +38210,192 @@ mod tests {
             "the prevention tally round-trips as a Vec — an enum key is not a JSON map key — \
              and CR 120.3's recipient round-trips WITH it, so a parked batch resumes naming \
              the player the damage was headed at rather than re-deriving one at drain time"
+        );
+    }
+
+    /// A mid-pause pre-application combat-damage batch carrying one
+    /// current-turn `ZoneChanged` in `batch_events` — the shape a prevention
+    /// shield's CR 615.5 rider produces inside a batch that then parks.
+    fn parked_combat_damage(record: ZoneChangeRecord) -> Box<PendingCombatDamageBatch> {
+        use crate::game::combat::DamageTarget;
+        let entry = |target: DamageTarget| ParkedCombatDamageEntry {
+            ctx: DamageContextSnapshot {
+                source_id: ObjectId(9_401),
+                source_incarnation: Some(7),
+                controller: PlayerId(0),
+                source_is_creature: true,
+                has_deathtouch: false,
+                has_lifelink: false,
+                has_wither: false,
+                has_infect: false,
+                combat_damage_poison: 0,
+                excess_recipient: None,
+                lifelink_bonus: 0,
+            },
+            source_is_commander: false,
+            assignment: DamageAssignment { target, amount: 3 },
+            lifelink_controller: None,
+        };
+        Box::new(PendingCombatDamageBatch {
+            entries: vec![
+                entry(DamageTarget::Player(PlayerId(1))),
+                entry(DamageTarget::Player(PlayerId(1))),
+            ],
+            decided: vec![Some(ProposedEvent::Damage {
+                source_id: ObjectId(9_401),
+                target: TargetRef::Player(PlayerId(1)),
+                amount: 3,
+                is_combat: true,
+                applied: HashSet::new(),
+            })],
+            paused_entry: 1,
+            paused_entry_pruned: false,
+            remaining: Vec::new(),
+            phase_a_tally: Vec::new(),
+            phase_b_tally: vec![PreventedDamageEntry {
+                key: AppliedReplacementKey::Object {
+                    source: ObjectId(9_402),
+                    index: 0,
+                },
+                recipient: TargetRef::Player(PlayerId(1)),
+                amount: 2,
+            }],
+            outer_tally: None,
+            batch_events: vec![persisted_zone_change_event(record)],
+            lives_before: vec![20, 20],
+            sub_step: CombatDamageSubStep::Regular,
+        })
+    }
+
+    /// Registration surfaces 4 and 5 for `pending_combat_damage`: the
+    /// hand-written `PartialEq` conjunct, and membership in
+    /// `LIVE_EVENT_CARRIER_FIELDS`.
+    ///
+    /// REVERT PROBES:
+    ///   * delete `"pending_combat_damage"` from `LIVE_EVENT_CARRIER_FIELDS` →
+    ///     the visitor reaches no record and `erased > 0` fails inside
+    ///     `erase_persisted_event_occurrence_fields`.
+    ///   * delete the `self.pending_combat_damage == other.pending_combat_damage`
+    ///     conjunct → the `assert_ne!` below sees two states as equal.
+    #[test]
+    fn parked_combat_damage_is_a_live_event_carrier_and_a_compared_field() {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 19;
+        let record = persisted_zone_change_record(ObjectId(9_401), 19, 0);
+        state.zone_changes_this_turn.push_back(record.clone());
+        state.pending_combat_damage = Some(parked_combat_damage(record));
+
+        let bare = {
+            let mut bare = state.clone();
+            bare.pending_combat_damage = None;
+            bare
+        };
+        assert_ne!(
+            state, bare,
+            "a parked pre-application batch is interaction state and must be COMPARED"
+        );
+
+        let mut persisted = serde_json::to_value(PersistedGameState::Raw(Box::new(state.clone())))
+            .expect("fixture serializes");
+        // Asserts internally that the traversal reached at least one record —
+        // which it can only do if the field is a declared live-event carrier.
+        erase_persisted_event_occurrence_fields(persisted_state_payload_mut(&mut persisted));
+        let restored = serde_json::from_value::<PersistedGameState>(persisted)
+            .expect("the parked batch's records reconcile")
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
+        let parked = restored
+            .pending_combat_damage
+            .as_ref()
+            .expect("the parked batch survives the round trip");
+        let GameEvent::ZoneChanged { record, .. } = &parked.batch_events[0] else {
+            panic!("the fixture stores one ZoneChanged");
+        };
+        assert_eq!(
+            (record.recorded_turn_number, record.turn_zone_change_index),
+            (19, 0),
+            "the carried record is rebound to this turn's ledger on load"
+        );
+        assert_eq!(
+            (
+                parked.paused_entry,
+                parked.decided.len(),
+                parked.entries.len()
+            ),
+            (1, 1, 2),
+            "the positional alignment (paused_entry == decided.len()) round-trips"
+        );
+        assert_eq!(
+            parked.phase_b_tally,
+            vec![PreventedDamageEntry {
+                key: AppliedReplacementKey::Object {
+                    source: ObjectId(9_402),
+                    index: 0,
+                },
+                recipient: TargetRef::Player(PlayerId(1)),
+                amount: 2,
+            }],
+            "the parked tally round-trips WITH CR 120.3's recipient"
+        );
+    }
+
+    /// Save-compat: an old save without the field loads with it as `None`,
+    /// and the prompt it was paused on survives VERBATIM. Modelled on
+    /// `absent_pending_combat_lifelink_deserializes_as_none`.
+    #[test]
+    fn absent_pending_combat_damage_deserializes_as_none() {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 19;
+        let record = persisted_zone_change_record(ObjectId(9_401), 19, 0);
+        state.zone_changes_this_turn.push_back(record.clone());
+        state.pending_combat_damage = Some(parked_combat_damage(record));
+        // CR 616.1: the ordering prompt a parked batch is waiting on. Without it
+        // the save is not mid-pause and this test measures nothing.
+        state.waiting_for = WaitingFor::ReplacementChoice {
+            player: PlayerId(0),
+            candidate_count: 2,
+            candidates: Vec::new(),
+            kind: Default::default(),
+            last_applied_decides: false,
+            remember_identity: None,
+        };
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "reach guard: the INPUT must not already satisfy the property under test"
+        );
+
+        // Loaded through `PersistedGameState::into_game_state()`, NOT bare
+        // `from_value::<GameState>` — the chokepoint where this repo puts
+        // load-time repairs.
+        let mut wire = serde_json::to_value(PersistedGameState::Raw(Box::new(state)))
+            .expect("fixture serializes");
+        assert!(
+            wire.as_object_mut()
+                .expect("a raw persisted state is an object")
+                .remove("pending_combat_damage")
+                .is_some(),
+            "reach guard: the field must actually have been serialized to remove"
+        );
+
+        let restored = serde_json::from_value::<PersistedGameState>(wire)
+            .expect("an absent parked batch defaults to None")
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
+        assert!(restored.pending_combat_damage.is_none());
+        assert!(
+            matches!(
+                restored.waiting_for,
+                WaitingFor::ReplacementChoice {
+                    player,
+                    candidate_count,
+                    ..
+                } if player == PlayerId(0) && candidate_count == 2
+            ),
+            "a batch-less mid-pause save must round-trip its prompt VERBATIM — player \
+             AND candidate_count, since asserting only the variant would pass for a \
+             prompt rebuilt with different contents — so the inconsistency stays \
+             observable to a caller instead of being silently rewritten into a \
+             plausible-looking state"
         );
     }
 
@@ -43371,6 +43653,31 @@ mod tests {
         assert!(
             crate::analysis::resource::ring_delta_signature(&ring).is_none(),
             "no shortcut is certified across an unsettled beat"
+        );
+    }
+
+    /// CR 104.4b: a parked pre-application combat-damage batch holds a live
+    /// `batch_events` carrier + unapplied survivors, so its state must never
+    /// compare equal — it never compares equal, even with an identical copy
+    /// of itself. Sibling of
+    /// `an_unsettled_delivery_carrier_makes_the_state_not_loop_comparable`.
+    ///
+    /// REVERT PROBE: delete the `self.pending_combat_damage.is_none()`
+    /// conjunct from `is_loop_comparable` — the assertions below fail.
+    #[test]
+    fn parked_combat_damage_makes_the_state_not_loop_comparable() {
+        let settled = GameState::new_two_player(7);
+        assert!(settled.is_loop_comparable());
+        let mut unsettled = settled.clone();
+        let record = persisted_zone_change_record(ObjectId(9_401), 19, 0);
+        unsettled.turn_number = 19;
+        unsettled.zone_changes_this_turn.push_back(record.clone());
+        unsettled.pending_combat_damage = Some(parked_combat_damage(record));
+        assert!(!unsettled.is_loop_comparable());
+        let normalized = unsettled.normalize_for_loop();
+        assert!(
+            !loop_states_equal(&normalized, &normalized.clone()),
+            "a parked pre-application batch is never loop-equal, even to itself"
         );
     }
 

@@ -542,15 +542,14 @@ pub(crate) fn pre_replacement_damage_gate(
         }
     }
 
-    // CR 616.1 (Matt R10-F1): overlapping protections (two-plus applicable
-    // qualities) route through the replacement-candidate/choice authority —
-    // EXCEPT in combat. Combat damage cannot pause for a replacement
-    // ordering choice (`replace_combat_damage_batch` skips on `NeedsChoice`;
-    // `apply_damage_to_target` sets no prompt for combat), and batch-adjacent
-    // choice is out of scope engine-wide (the CR 615.7 Next(N) path is
-    // explicitly not modeled), so combat keeps first-match claiming for any
-    // overlap while every pausable path prompts the affected player. A single
-    // applicable quality claims directly everywhere: no choice exists.
+    // CR 616.1 (Matt R10-F1, R11-F1): overlapping protections (two-plus
+    // applicable qualities) route through the replacement-candidate/choice
+    // authority in combat exactly as out of it. A CR 616.1 ordering choice is
+    // not a priority window, so CR 510.2 simultaneity is not violated by
+    // pausing the batch: the combat driver parks its remaining events, prompts
+    // the affected player, and resumes through the same choice authority as
+    // the noncombat path. A single applicable quality claims directly
+    // everywhere: no choice exists.
     // CR 702.16b + CR 702.16e: Protection prevents damage from sources with the matching quality.
     if let TargetRef::Object(target_obj_id) = target {
         if let (Some(target_obj), Some(source_obj)) = (
@@ -559,7 +558,7 @@ pub(crate) fn pre_replacement_damage_gate(
         ) {
             let applicable = keywords::all_preventing_protection_qualities(target_obj, source_obj);
             if let Some(first) = applicable.first().copied() {
-                if is_combat || applicable.len() == 1 {
+                if applicable.len() == 1 {
                     return DamageGateOutcome::Protected(amount, first);
                 }
             }
@@ -576,7 +575,7 @@ pub(crate) fn pre_replacement_damage_gate(
             Some(ctx.source_id),
         );
         if let Some(first) = applicable.first().copied() {
-            if is_combat || applicable.len() == 1 {
+            if applicable.len() == 1 {
                 return DamageGateOutcome::Protected(amount, first);
             }
         }
@@ -5602,6 +5601,154 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, GameEvent::DamageDealt { .. })),
             "must not emit DamageDealt for prevented damage"
+        );
+    }
+
+    /// CR 616.1 (Matt R11-F1): overlapping protections (two-plus applicable
+    /// qualities) route through the replacement-candidate/choice authority in
+    /// combat exactly as out of it — the gate PROPOSES. A single applicable
+    /// quality still claims directly everywhere: no choice exists.
+    ///
+    /// REVERT PROBE: restore either `is_combat ||` exemption — the
+    /// `Proposed` assertions below fail (the overlap claims silently).
+    #[test]
+    fn combat_protection_overlap_proposes_single_quality_claims() {
+        use crate::types::ability::ControllerRef;
+        use crate::types::ability::{ChosenAttribute, StaticDefinition, TypedFilter};
+        use crate::types::card_type::CoreType;
+        use crate::types::keywords::{Keyword, ProtectionTarget};
+        use crate::types::mana::ManaColor;
+        use crate::types::statics::StaticMode;
+
+        fn pairing(source_colors: Vec<ManaColor>) -> (GameState, DamageContext, ObjectId) {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(10),
+                PlayerId(0),
+                "Source".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.color = source_colors;
+            obj.card_types.core_types.push(CoreType::Creature);
+            let ctx = DamageContext::fallback(source, PlayerId(0));
+            (state, ctx, source)
+        }
+
+        // Object scope, two qualities: propose in combat.
+        let (mut state, ctx, _) = pairing(vec![ManaColor::Red, ManaColor::Green]);
+        let warded = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(1),
+            "Warded".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&warded).unwrap().keywords.extend([
+            Keyword::Protection(ProtectionTarget::Color(ManaColor::Red)),
+            Keyword::Protection(ProtectionTarget::Color(ManaColor::Green)),
+        ]);
+        assert!(
+            matches!(
+                pre_replacement_damage_gate(&state, &ctx, &TargetRef::Object(warded), 3, true,),
+                DamageGateOutcome::Proposed(_)
+            ),
+            "a two-quality combat overlap must propose into the pipeline"
+        );
+
+        // Object scope, one quality: claim in combat (no choice exists).
+        let (mut state, ctx, _) = pairing(vec![ManaColor::Red]);
+        let guarded = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(1),
+            "Guarded".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&guarded)
+            .unwrap()
+            .keywords
+            .push(Keyword::Protection(ProtectionTarget::Color(ManaColor::Red)));
+        assert!(
+            matches!(
+                pre_replacement_damage_gate(&state, &ctx, &TargetRef::Object(guarded), 3, true,),
+                DamageGateOutcome::Protected(3, _)
+            ),
+            "a single quality claims directly in combat"
+        );
+
+        // Player scope, two qualities: propose in combat. Grants are
+        // `PlayerProtection` statics (color qualities are inert at the player
+        // level; only the `Everything` transient arm reads that table).
+        let (mut state, ctx, _) = pairing(vec![ManaColor::Red]);
+        let grantor = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(1),
+            "Shelter".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&grantor)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::CardType(CoreType::Creature));
+        for quality in [
+            ProtectionTarget::FromPlayer(ControllerRef::Opponent),
+            ProtectionTarget::ChosenCardType,
+        ] {
+            state
+                .objects
+                .get_mut(&grantor)
+                .unwrap()
+                .static_definitions
+                .push(
+                    StaticDefinition::new(StaticMode::PlayerProtection(quality)).affected(
+                        TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+                    ),
+                );
+        }
+        assert!(
+            matches!(
+                pre_replacement_damage_gate(&state, &ctx, &TargetRef::Player(PlayerId(1)), 3, true,),
+                DamageGateOutcome::Proposed(_)
+            ),
+            "a two-quality player-scope combat overlap must propose into the pipeline"
+        );
+
+        // Player scope, one quality: claim in combat (proves the statics are
+        // VISIBLE — an invisible grant would propose-via-empty instead).
+        let (mut state, ctx, _) = pairing(vec![ManaColor::Red]);
+        let grantor = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(1),
+            "Shelter".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&grantor)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::PlayerProtection(ProtectionTarget::FromPlayer(
+                    ControllerRef::Opponent,
+                )))
+                .affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            );
+        assert!(
+            matches!(
+                pre_replacement_damage_gate(&state, &ctx, &TargetRef::Player(PlayerId(1)), 3, true,),
+                DamageGateOutcome::Protected(3, _)
+            ),
+            "a single player-scope quality claims directly in combat"
         );
     }
 

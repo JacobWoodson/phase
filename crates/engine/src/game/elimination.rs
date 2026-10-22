@@ -14,6 +14,7 @@ use crate::types::resolved_commands::{
 };
 use crate::types::zones::Zone;
 
+use super::combat::DamageTarget;
 use super::players;
 
 /// CR 800.4a: A spell that has been announced but not yet cast can be parked in
@@ -1488,6 +1489,96 @@ fn do_eliminate(
         record.remaining.retain(|gain| gain.controller != player);
     }
 
+    // CR 800.4e + CR 614.9 + CR 616.1: prune a parked PRE-application damage
+    // batch for the leaving player. Departed lifelink controllers gain
+    // nothing (per-entry `None`, mirroring the lifelink prune above).
+    // Departed recipients are owed no damage: player recipients equal to the
+    // leaver, and object recipients the leaver owns (exiled below), prune as
+    // entry+slot PAIRS (decided slots and remaining events), preserving
+    // positional alignment; `paused_entry` is re-indexed by the count of
+    // pruned decided slots before it.
+    //
+    // Paused-slot fate is conditioned on stash state. UNSTASHED
+    // (`decided.len() == paused_entry`): the paused entry itself is RETAINED
+    // (it has no decided/remaining slot — it lives in `pending_replacement`
+    // — so pair-pruning cannot express it); instead the prune sets
+    // `paused_entry_pruned = true`, and both the answer-stash path and the
+    // guard-settle path convert the paused slot to `None`, TAKING the flag on
+    // use. STASHED (`len == paused_entry + 1`, the nested window):
+    // `decided[paused_entry]` EXISTS, so the prune writes it `None` IN PLACE
+    // (entry retained, flag left clear, no re-index for the paused slot —
+    // mirroring the lifelink per-entry None-ing). Sources never prune: the
+    // snapshot incarnation is LKI-correct.
+    let departed_recipients: Vec<bool> = state
+        .pending_combat_damage
+        .as_ref()
+        .map(|record| {
+            record
+                .entries
+                .iter()
+                .map(|entry| match &entry.assignment.target {
+                    DamageTarget::Player(recipient) => *recipient == player,
+                    DamageTarget::Object(object_id) => state
+                        .objects
+                        .get(object_id)
+                        .is_some_and(|obj| obj.owner == player),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(record) = state.pending_combat_damage.as_mut() {
+        for entry in record.entries.iter_mut() {
+            if entry.lifelink_controller == Some(player) {
+                entry.lifelink_controller = None;
+            }
+        }
+        let paused = record.paused_entry;
+        let unstashed = record.decided.len() == paused;
+        debug_assert!(
+            unstashed || record.decided.len() == paused + 1,
+            "a parked batch is either unstashed or holds exactly its paused slot's stash"
+        );
+        debug_assert!(
+            paused < record.entries.len()
+                && record.remaining.len() + paused + 1 == record.entries.len(),
+            "paused slot must sit exactly between decided and remaining"
+        );
+        let old_entries = std::mem::take(&mut record.entries);
+        let old_decided = std::mem::take(&mut record.decided);
+        let old_remaining = std::mem::take(&mut record.remaining);
+        let mut pruned_before_paused = 0usize;
+        for (index, entry) in old_entries.into_iter().enumerate() {
+            let departed = departed_recipients.get(index).copied().unwrap_or(false);
+            if index == paused {
+                // The paused slot: always retained (see above).
+                if departed {
+                    if unstashed {
+                        record.paused_entry_pruned = true;
+                    } else {
+                        record.decided.push(None);
+                    }
+                } else if !unstashed {
+                    record.decided.push(old_decided[paused].clone());
+                }
+                record.entries.push(entry);
+            } else if departed {
+                // Pair-prune: drop the entry with its decided/remaining slot.
+                if index < paused {
+                    pruned_before_paused += 1;
+                }
+            } else if index < paused {
+                record.decided.push(old_decided[index].clone());
+                record.entries.push(entry);
+            } else {
+                record
+                    .remaining
+                    .push(old_remaining[index - paused - 1].clone());
+                record.entries.push(entry);
+            }
+        }
+        record.paused_entry = paused - pruned_before_paused;
+    }
+
     // CR 800.4a: A coupled ETB spell-resolution context can outlive its
     // `pending_replacement` (nested `ContinueZoneDeliveryTail` early-return,
     // engine_replacement.rs), so it is torn down under its OWN controller-keyed
@@ -2006,6 +2097,195 @@ mod tests {
         let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
         state.turn_number = 1;
         state
+    }
+
+    /// CR 800.4e + CR 614.9 + CR 616.1 (B4/B6 site 1): eliminating a player
+    /// prunes a parked pre-application damage batch. Departed recipients
+    /// prune as entry+slot PAIRS with `paused_entry` re-indexed; departed
+    /// lifelink controllers None out per entry; sources never prune (LKI).
+    /// The paused slot's fate is stash-state-conditioned: UNSTASHED it is
+    /// retained with `paused_entry_pruned` set (no slot exists to pair-prune,
+    /// so alignment never shifts under the live authority); STASHED the
+    /// prune writes `decided[paused_entry] = None` IN PLACE. Object departure
+    /// is owner-keyed (exile is owner-keyed): the paused recipient here is
+    /// STOLEN (owned by the leaver, controlled by a living seat).
+    #[test]
+    fn parked_damage_batch_prunes_departed_recipients_in_both_stash_states() {
+        use crate::game::combat::{DamageAssignment, DamageTarget};
+        use crate::types::ability::DamageContextSnapshot;
+        use crate::types::game_state::{
+            CombatDamageSubStep, ParkedCombatDamageEntry, PendingCombatDamageBatch,
+        };
+        use crate::types::zones::Zone;
+
+        fn snapshot(source: ObjectId, controller: PlayerId) -> DamageContextSnapshot {
+            DamageContextSnapshot {
+                source_id: source,
+                source_incarnation: Some(3),
+                controller,
+                source_is_creature: true,
+                has_deathtouch: false,
+                has_lifelink: false,
+                has_wither: false,
+                has_infect: false,
+                combat_damage_poison: 0,
+                excess_recipient: None,
+                lifelink_bonus: 0,
+            }
+        }
+        fn parked(
+            source: ObjectId,
+            controller: PlayerId,
+            target: DamageTarget,
+            lifelink_controller: Option<PlayerId>,
+        ) -> ParkedCombatDamageEntry {
+            ParkedCombatDamageEntry {
+                ctx: snapshot(source, controller),
+                source_is_commander: false,
+                assignment: DamageAssignment { target, amount: 3 },
+                lifelink_controller,
+            }
+        }
+        fn decided_damage(source: ObjectId, target: TargetRef) -> Option<ProposedEvent> {
+            Some(ProposedEvent::Damage {
+                source_id: source,
+                target,
+                amount: 3,
+                is_combat: true,
+                applied: std::collections::HashSet::new(),
+            })
+        }
+        // Three entries: a decided player hit on the leaver, the paused hit
+        // on the leaver-owned (stolen) creature, a remaining hit on a living
+        // seat's creature whose lifelink controller is the leaver.
+        fn fixture(stashed: bool) -> (GameState, ObjectId, ObjectId, ObjectId) {
+            let mut state = setup_three_player();
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(2),
+                "Attacker".to_string(),
+                Zone::Battlefield,
+            );
+            let stolen = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Stolen Bear".to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&stolen).unwrap().controller = PlayerId(2);
+            let survivor = create_object(
+                &mut state,
+                CardId(3),
+                PlayerId(2),
+                "Survivor".to_string(),
+                Zone::Battlefield,
+            );
+            let mut decided = vec![decided_damage(source, TargetRef::Player(PlayerId(0)))];
+            if stashed {
+                decided.push(decided_damage(source, TargetRef::Object(stolen)));
+            }
+            state.pending_combat_damage = Some(Box::new(PendingCombatDamageBatch {
+                entries: vec![
+                    parked(source, PlayerId(2), DamageTarget::Player(PlayerId(0)), None),
+                    parked(source, PlayerId(2), DamageTarget::Object(stolen), None),
+                    parked(
+                        source,
+                        PlayerId(2),
+                        DamageTarget::Object(survivor),
+                        Some(PlayerId(0)),
+                    ),
+                ],
+                decided,
+                paused_entry: 1,
+                paused_entry_pruned: false,
+                remaining: vec![ProposedEvent::Damage {
+                    source_id: source,
+                    target: TargetRef::Object(survivor),
+                    amount: 3,
+                    is_combat: true,
+                    applied: std::collections::HashSet::new(),
+                }],
+                phase_a_tally: Vec::new(),
+                phase_b_tally: Vec::new(),
+                outer_tally: None,
+                batch_events: Vec::new(),
+                lives_before: vec![20, 20, 20],
+                sub_step: CombatDamageSubStep::Regular,
+            }));
+            (state, source, stolen, survivor)
+        }
+
+        // UNSTASHED: the decided pair prunes, the paused slot retains + flags,
+        // the remaining pair survives with its lifelink controller noned.
+        let (mut state, source, stolen, survivor) = fixture(false);
+        let mut events = Vec::new();
+        eliminate_player(&mut state, PlayerId(0), &mut events);
+        let record = state.pending_combat_damage.as_ref().unwrap();
+        assert_eq!(
+            record.entries.len(),
+            2,
+            "the decided pair prunes; the paused slot retains"
+        );
+        assert!(
+            record.decided.is_empty(),
+            "the decided slot pair-prunes with its entry"
+        );
+        assert_eq!(
+            record.paused_entry, 0,
+            "paused_entry re-indexes by pruned decided slots before it"
+        );
+        assert!(
+            record.paused_entry_pruned,
+            "owner-keyed departure flags the retained paused entry"
+        );
+        assert_eq!(record.remaining.len(), 1, "the remaining pair survives");
+        assert_eq!(
+            record.entries[0].assignment.target,
+            DamageTarget::Object(stolen),
+            "the retained paused entry still names the departed recipient"
+        );
+        assert_eq!(
+            record.entries[1].assignment.target,
+            DamageTarget::Object(survivor)
+        );
+        assert_eq!(
+            record.entries[1].ctx.source_id, source,
+            "sources never prune: the snapshot incarnation is LKI-correct"
+        );
+        assert_eq!(
+            record.entries[1].lifelink_controller, None,
+            "the departed lifelink controller gains nothing"
+        );
+
+        // STASHED (the nested window): same pair-prunes, but the paused slot
+        // EXISTS — written None IN PLACE, flag left clear, no re-index for
+        // the paused slot itself.
+        let (mut state, _, stolen, survivor) = fixture(true);
+        let mut events = Vec::new();
+        eliminate_player(&mut state, PlayerId(0), &mut events);
+        let record = state.pending_combat_damage.as_ref().unwrap();
+        assert_eq!(record.entries.len(), 2);
+        assert_eq!(
+            record.decided,
+            vec![None],
+            "the stashed slot converts to None in place"
+        );
+        assert_eq!(record.paused_entry, 0);
+        assert!(
+            !record.paused_entry_pruned,
+            "the stashed path takes no flag (nothing to defer)"
+        );
+        assert_eq!(record.remaining.len(), 1);
+        assert_eq!(
+            record.entries[0].assignment.target,
+            DamageTarget::Object(stolen)
+        );
+        assert_eq!(
+            record.entries[1].assignment.target,
+            DamageTarget::Object(survivor)
+        );
     }
 
     fn setup_2hg() -> GameState {

@@ -23,6 +23,7 @@ use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 
 use super::ability_utils::build_resolved_from_def_with_targets;
+use super::combat::DamageTarget;
 use super::effects;
 use super::effects::deal_damage::{apply_damage_after_replacement, DamageContext};
 use super::effects::destroy::apply_destroy_after_replacement;
@@ -166,6 +167,53 @@ pub(crate) fn drain_pending_connive_reentry(
     }
 }
 
+/// CR 510.2 + CR 616.1: whether the just-answered damage event's survivor
+/// must be STASHED into the parked combat-damage batch instead of applied.
+/// Stash iff a damage record is parked AND unstashed (`decided.len() ==
+/// paused_entry`, which also re-arms correctly across re-pause) AND the
+/// ANSWERED event's identity (captured before `continue_replacement`
+/// consumed the pending record) matches the paused entry's source + target.
+/// Nested answers therefore deliver inline exactly once (never stashed, never
+/// lost): after the paused slot is stashed the len gate excludes them, and
+/// the identity match excludes them regardless.
+fn combat_damage_answer_stashes(
+    state: &GameState,
+    parked_damage_identity: &Option<(ObjectId, TargetRef, bool)>,
+) -> bool {
+    let Some(record) = state.pending_combat_damage.as_ref() else {
+        return false;
+    };
+    if record.decided.len() != record.paused_entry {
+        return false;
+    }
+    let Some((source_id, target, _)) = parked_damage_identity else {
+        return false;
+    };
+    let Some(entry) = record.entries.get(record.paused_entry) else {
+        return false;
+    };
+    if entry.ctx.source_id != *source_id {
+        return false;
+    }
+    match (&entry.assignment.target, target) {
+        (DamageTarget::Object(a), TargetRef::Object(b)) => a == b,
+        (DamageTarget::Player(a), TargetRef::Player(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Push the paused slot's stash. A set `paused_entry_pruned` flag converts
+/// the slot to `None` and is taken on use (damage to departed recipients
+/// does nothing, CR 800.4e/614.9). The caller checked the stash gate.
+fn stash_paused_combat_damage_slot(state: &mut GameState, survivor: Option<ProposedEvent>) {
+    let record = state
+        .pending_combat_damage
+        .as_mut()
+        .expect("the stash gate checked a damage record is parked");
+    let pruned = std::mem::take(&mut record.paused_entry_pruned);
+    record.decided.push(if pruned { None } else { survivor });
+}
+
 /// CR 616.1 + CR 510.2 + CR 702.15b: the CR 616.1 round trip, plus the one turn-based
 /// action that can be parked waiting on it.
 ///
@@ -196,7 +244,48 @@ pub(super) fn handle_replacement_choice(
         .pending_replacement
         .as_ref()
         .and_then(|pending| pending.each_source_batch_owner);
+    // CR 510.2 + CR 615.13 + CR 616.1: a parked combat-damage batch owns this
+    // answer's prevention accumulation. Install its parked prefix as the live
+    // window (locals only — the outer window is restored below on EVERY
+    // return), so the resumed choice's accumulation joins the batch instead
+    // of fragmenting into per-event emission.
+    let outer_tally = if state.pending_combat_damage.is_some() {
+        let outer_tally = state.combat_prevention_tally.take();
+        let live = {
+            let record = state
+                .pending_combat_damage
+                .as_ref()
+                .expect("checked parked above");
+            let mut live =
+                super::effects::deal_damage::tally_map_from_record_entries(&record.phase_a_tally);
+            for (key, amount) in
+                super::effects::deal_damage::tally_map_from_record_entries(&record.phase_b_tally)
+            {
+                *live.entry(key).or_insert(0) += amount;
+            }
+            live
+        };
+        state.combat_prevention_tally = Some(live);
+        outer_tally
+    } else {
+        None
+    };
     let waiting_for = handle_replacement_choice_inner(state, index, events)?;
+    // CR 510.2 + CR 615.13 + CR 616.1: snapshot the answer's accumulation back
+    // into the parked record (ONE field — Phase B, clearing Phase A — so
+    // reinstall is unambiguous) and restore the outer window. Runs on EVERY
+    // return with a record parked, so the combat window is live ONLY during
+    // the inner handler. A vanished live window snapshots nothing: the
+    // install only READ the record, so the parked prefix is still intact.
+    if state.pending_combat_damage.is_some() {
+        if let Some(live) = state.combat_prevention_tally.take() {
+            if let Some(record) = state.pending_combat_damage.as_mut() {
+                record.phase_a_tally = Vec::new();
+                record.phase_b_tally = super::effects::deal_damage::tally_entries_for_record(&live);
+            }
+        }
+        state.combat_prevention_tally = outer_tally;
+    }
     // CR 615.13 + CR 616.1e: a resumed prevention batch whose continuation is
     // empty (single source, no downstream) completes with no drain at all, so
     // the drain hook never evaluates — publish here on the fresh outcome. A
@@ -238,9 +327,38 @@ pub(super) fn handle_replacement_choice(
     // parked for the next answer; only a settled round trip may close the batch.
     // Nothing is left behind on this path — the anchor is a local that dies here.
     if !matches!(waiting_for, WaitingFor::Priority { .. }) {
+        // CR 510.2 + CR 603.3b: EVERY non-Priority answer's events join the ONE
+        // batch (CR 616.1f repeats AND sub-drain fresh prompts) — fold them
+        // into the damage record AND claim them, so no answer's inline-rider
+        // events strand into a premature separate batch.
+        if let Some(record) = state.pending_combat_damage.as_mut() {
+            record
+                .batch_events
+                .extend_from_slice(&events[action_event_start..]);
+        }
+        if state.pending_combat_damage.is_some() {
+            super::combat_damage::claim_combat_lifelink_batch_events_for_ordinary_collection(
+                state,
+                events,
+                action_event_start,
+            );
+        }
         return Ok(waiting_for);
     }
     state.waiting_for = waiting_for.clone();
+    debug_assert!(
+        state.pending_combat_damage.is_none() || state.pending_combat_lifelink.is_none(),
+        "single-park invariant: at most one combat batch parks"
+    );
+    // Damage before lifelink: a damage resume owns its outcome (re-pause
+    // prompt, lifelink-pause prompt, finish prompt, or the Priority
+    // sentinel), so the lifelink drain runs only when no damage record was
+    // parked.
+    if let Some(resumed) =
+        super::combat_damage::resume_pending_combat_damage(state, action_event_start, events)
+    {
+        return Ok(resumed);
+    }
     Ok(
         super::combat_damage::resume_pending_combat_lifelink(state, action_event_start, events)
             .unwrap_or(waiting_for),
@@ -407,6 +525,26 @@ fn handle_replacement_choice_inner(
     }
     match result {
         super::replacement::ReplacementResult::Execute(event) => {
+            // CR 510.2 + CR 616.1: a transformed (non-Damage) Execute payload
+            // for the PAUSED combat event stashes `None` at the arm's ENTRY —
+            // dominating the early returns — and RETURNS with no generic
+            // delivery (the `None` stash is the paused slot's whole
+            // settlement; the transformed payload is dropped, symmetric to
+            // the lifelink "never re-queued" loss). Damage payloads proceed
+            // to the Damage sub-arm. No Damage→non-Damage pipeline transform
+            // is known — every applier arm returns Damage/Modified(Damage)/
+            // Prevented — so a firing here is a hit-report, not a path.
+            if !matches!(event, ProposedEvent::Damage { .. })
+                && combat_damage_answer_stashes(state, &parked_damage_identity)
+            {
+                debug_assert!(false, "Damage-to-non-Damage transform hit the combat stash");
+                stash_paused_combat_damage_slot(state, None);
+                let settled = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                state.waiting_for = settled.clone();
+                return Ok(settled);
+            }
             let mut zone_change_object_id = None;
             let mut enters_battlefield = false;
             match event {
@@ -589,22 +727,35 @@ fn handle_replacement_choice_inner(
                     is_combat,
                     ..
                 } => {
-                    let mut ctx =
-                        DamageContext::from_source(state, source_id).unwrap_or_else(|| {
-                            let controller = state
-                                .objects
-                                .get(&source_id)
-                                .map(|obj| obj.controller)
-                                .unwrap_or(state.active_player);
-                            DamageContext::fallback(source_id, controller)
-                        });
-                    // CR 120.4a + CR 702.15b: restore the excess-redirect rider and
-                    // the deferred lifelink bonus dropped by the source-derived ctx
-                    // rebuild, so the resumed hit still redirects and a resumed redirect
-                    // leg still gains the combined lifelink total.
-                    ctx.excess_recipient = parked_excess_recipient;
-                    ctx.lifelink_bonus = parked_lifelink_bonus;
-                    let _ = apply_damage_after_replacement(state, &ctx, damage, is_combat, events);
+                    // CR 510.2 + CR 616.1: the PAUSED combat event's survivor
+                    // stashes into the record instead of applying — the generic
+                    // arm's live-ctx rebuild would gain lifelink per-event,
+                    // breaking per-source summing AND ordering. NO inline drain
+                    // here: the Execute epilogue below drains the resumed
+                    // Damage event's riders (an arm drain would run BEFORE the
+                    // epilogue's UNCONDITIONAL `waiting_for = Priority` reset
+                    // and clobber any nested prompt it parks).
+                    if combat_damage_answer_stashes(state, &parked_damage_identity) {
+                        stash_paused_combat_damage_slot(state, Some(damage));
+                    } else {
+                        let mut ctx =
+                            DamageContext::from_source(state, source_id).unwrap_or_else(|| {
+                                let controller = state
+                                    .objects
+                                    .get(&source_id)
+                                    .map(|obj| obj.controller)
+                                    .unwrap_or(state.active_player);
+                                DamageContext::fallback(source_id, controller)
+                            });
+                        // CR 120.4a + CR 702.15b: restore the excess-redirect rider and
+                        // the deferred lifelink bonus dropped by the source-derived ctx
+                        // rebuild, so the resumed hit still redirects and a resumed redirect
+                        // leg still gains the combined lifelink total.
+                        ctx.excess_recipient = parked_excess_recipient;
+                        ctx.lifelink_bonus = parked_lifelink_bonus;
+                        let _ =
+                            apply_damage_after_replacement(state, &ctx, damage, is_combat, events);
+                    }
                 }
                 // CR 122.1: Counter addition accepted after replacement choice (e.g.,
                 // Corpsejack Menace doubler on a prompted counter-placement).
@@ -1671,6 +1822,18 @@ fn handle_replacement_choice_inner(
             ))
         }
         super::replacement::ReplacementResult::Prevented => {
+            // CR 510.2 + CR 615.5 + CR 616.1: the PAUSED combat event's
+            // prevention stashes `None`, and its pipeline's per-event rider
+            // stash drains inline HERE (mirroring the batch fn — no epilogue
+            // drain exists on this arm) BEFORE the nested-prompt surface below
+            // — stash-then-surface, so the paused slot is settled before any
+            // nested prompt surfaces.
+            if combat_damage_answer_stashes(state, &parked_damage_identity) {
+                stash_paused_combat_damage_slot(state, None);
+                if state.has_post_replacement_drain() {
+                    let _ = apply_pending_post_replacement_effect(state, None, None, None, events);
+                }
+            }
             if let Some(paused) = parked_zone_change_delivery.as_ref() {
                 state.capture_paused_zone_change_delivery(
                     paused.member,
