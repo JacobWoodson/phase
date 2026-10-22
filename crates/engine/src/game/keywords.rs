@@ -13,8 +13,8 @@ use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{
     BestowCost, BlitzCost, EmbalmCost, EmergeCost, EternalizeCost, EvokeCost, FlashbackCost,
-    GiftKind, Keyword, KeywordKind, MatchedProtectionQuality, ProtectionColorlessness,
-    ProtectionColorSet, ProtectionPlayerScope, ProtectionTarget,
+    GiftKind, Keyword, KeywordKind, MatchedProtectionQuality, ProtectionColorSet,
+    ProtectionColorlessness, ProtectionPlayerScope, ProtectionTarget,
 };
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
