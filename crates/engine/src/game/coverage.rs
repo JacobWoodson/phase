@@ -2258,12 +2258,15 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
         PlayerFilter::All => "each player",
         // CR 109.4: `AllExcept` is a recursive carrier — the excluded player is
         // itself a `PlayerFilter`, so two different exclusions must not render
-        // identically.
-        PlayerFilter::AllExcept { exclude } => {
-            return format!("each player other than {}", fmt_player_filter(exclude));
-        }
-        PlayerFilter::OpponentExcept { exclude } => {
-            return format!("each opponent other than {}", fmt_player_filter(exclude));
+        // identically. The base population (`relation`) renders too, so the
+        // all-players and opponents readings stay distinct.
+        PlayerFilter::AllExcept { exclude, relation } => {
+            let who = match relation {
+                PlayerRelation::Controller => "you",
+                PlayerRelation::Opponent => "each opponent",
+                PlayerRelation::All => "each player",
+            };
+            return format!("{who} other than {}", fmt_player_filter(exclude));
         }
         // CR 102.1: `AnyOf` is a recursive carrier too — two different unions
         // must not render identically, so each member is rendered.
@@ -2303,7 +2306,6 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
             return format!("the chosen player {index}");
         }
         PlayerFilter::ParentObjectTargetOwner => "the parent target's owner",
-        PlayerFilter::ParentPlayerTarget => "the parent player target",
         PlayerFilter::GrantingObjectCaster => "the player who cast the granting object",
         PlayerFilter::TargetPlayer => "the target player",
         // CR 109.4 + CR 109.5: "each [player class] who controls [comparator]
@@ -10998,10 +11000,6 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         // target owner anchors for villainous-choice choosers).
         PlayerFilter::ChosenPlayer { .. } => ("ChosenPlayer", Handled),
         PlayerFilter::ParentObjectTargetOwner => ("ParentObjectTargetOwner", Handled),
-        // Resolved ability-aware by the `DamageEachPlayer` resolver and
-        // `speed_effects::players_for_filter` (player_scope driver routing).
-        PlayerFilter::ParentPlayerTarget => ("ParentPlayerTarget", Handled),
-        PlayerFilter::OpponentExcept { .. } => ("OpponentExcept", Handled),
         // CR 201.5a: installing the grant replaces it with the caster's `SpecificPlayer`.
         PlayerFilter::GrantingObjectCaster => ("GrantingObjectCaster", Handled),
         // CR 115.1: resolved from the declared player target by
@@ -14933,12 +14931,21 @@ mod tests {
                 "except controller",
                 &PlayerFilter::AllExcept {
                     exclude: Box::new(PlayerFilter::Controller),
+                    relation: PlayerRelation::All,
                 },
             ),
             (
                 "except defending player",
                 &PlayerFilter::AllExcept {
                     exclude: Box::new(PlayerFilter::DefendingPlayer),
+                    relation: PlayerRelation::All,
+                },
+            ),
+            (
+                "opponents except controller",
+                &PlayerFilter::AllExcept {
+                    exclude: Box::new(PlayerFilter::Controller),
+                    relation: PlayerRelation::Opponent,
                 },
             ),
         ]);

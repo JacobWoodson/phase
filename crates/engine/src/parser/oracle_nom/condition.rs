@@ -7932,10 +7932,32 @@ fn parse_no_attacked_this_turn(input: &str) -> OracleResult<'_, StaticCondition>
     ))
 }
 
+/// History windows shared by the cast/draw history conditions: the current
+/// turn, the previous turn, and the "since your last turn ended" window
+/// (I Bask in Your Silent Awe). Each action maps the windows it has counters
+/// for and declines the rest, so related wordings compose without new tags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HistoryWindow {
+    ThisTurn,
+    LastTurn,
+    SinceYourLastTurnEnded,
+}
+
+fn parse_history_window(input: &str) -> OracleResult<'_, HistoryWindow> {
+    alt((
+        value(
+            HistoryWindow::SinceYourLastTurnEnded,
+            tag("since your last turn ended"),
+        ),
+        value(HistoryWindow::ThisTurn, tag("this turn")),
+        value(HistoryWindow::LastTurn, tag("last turn")),
+    ))
+    .parse(input)
+}
+
 fn parse_spell_history_condition(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
-        parse_you_drew_cards_this_turn,
-        parse_you_drew_a_card_last_turn,
+        parse_you_drew_cards_in_window,
         parse_opponent_drew_cards_this_turn,
         // "you cast another spell this turn" / "you cast a [type] spell this turn"
         parse_you_cast_spell_this_turn,
@@ -7950,9 +7972,9 @@ fn parse_spell_history_condition(input: &str) -> OracleResult<'_, StaticConditio
         // "two or more spells were cast last turn" (table-wide only; the
         // per-player "a player cast N or more spells last turn" is declined)
         parse_spells_cast_last_turn,
-        // CR 601.2i + CR 603.4: "no opponent cast a spell since your last
-        // turn ended" (I Bask in Your Silent Awe).
-        parse_no_opponent_cast_since_last_turn,
+        // CR 601.2i + CR 603.4: "no opponent cast a spell <window>"
+        // (I Bask in Your Silent Awe).
+        parse_no_opponent_cast_spell_in_window,
         parse_you_cast_both_spell_kinds_this_turn,
         // CR 702.185c: "a spell was warped this turn" — any player cast a spell
         // for its warp cost this turn.
@@ -7993,26 +8015,39 @@ fn parse_you_activated_loyalty_this_turn(input: &str) -> OracleResult<'_, Static
     .parse(input)
 }
 
-/// CR 601.2i + CR 603.4: Parse "no opponent cast a spell since your last
-/// turn ended" → the controller's opponents cast 0 spells in the window.
-/// Reads `OpponentSpellsCastSinceLastTurn` (per-player window counter bumped
-/// on every finalized cast, reset when the controller's turn ends), not the
-/// this-turn journal — approximating as "this turn" would abandon every
-/// upkeep unconditionally. Canonical card: I Bask in Your Silent Awe.
-fn parse_no_opponent_cast_since_last_turn(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) =
-        tag::<_, _, OracleError<'_>>("no opponent cast a spell since your last turn ended")
-            .parse(input)?;
-    Ok((
-        rest,
-        make_quantity_comparison(
-            QuantityRef::OpponentSpellsCastSinceLastTurn {
-                player: PlayerScope::Controller,
-            },
-            Comparator::EQ,
-            0,
-        ),
-    ))
+/// CR 601.2i + CR 603.4: "no opponent cast a spell <window>" — the
+/// controller's opponents cast 0 spells in the window. Composes the negation
+/// ("no"), the opponent subject, the singular spell item (shared article),
+/// and the shared history window: "since your last turn ended" reads
+/// `OpponentSpellsCastSinceLastTurn` (per-player window counter bumped on
+/// every finalized cast, reset when the controller's turn ends — approximating
+/// as "this turn" would abandon every upkeep unconditionally), and "this turn"
+/// reads `SpellsCastThisTurn` over the `Opponents` scope (EQ-0, so the sum and
+/// the existential coincide). "last turn" has no per-opponent counter and is
+/// declined. Canonical card: I Bask in Your Silent Awe.
+fn parse_no_opponent_cast_spell_in_window(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("no ").parse(input)?;
+    let (rest, _) = tag("opponent ").parse(rest)?;
+    let (rest, _) = tag("cast ").parse(rest)?;
+    let (rest, _) = parse_article(rest)?;
+    let (rest, _) = tag("spell ").parse(rest)?;
+    let (rest, window) = parse_history_window(rest)?;
+    let qty = match window {
+        HistoryWindow::SinceYourLastTurnEnded => QuantityRef::OpponentSpellsCastSinceLastTurn {
+            player: PlayerScope::Controller,
+        },
+        HistoryWindow::ThisTurn => QuantityRef::SpellsCastThisTurn {
+            scope: CountScope::Opponents,
+            filter: None,
+        },
+        HistoryWindow::LastTurn => {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Fail,
+            )))
+        }
+    };
+    Ok((rest, make_quantity_comparison(qty, Comparator::EQ, 0)))
 }
 
 fn parse_counter_history_condition(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -8823,48 +8858,66 @@ fn parse_opponent_lost_life_this_turn(input: &str) -> OracleResult<'_, StaticCon
 
 fn parse_youve_drawn_cards_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("drawn ").parse(input)?;
-    parse_drawn_cards_this_turn(rest)
+    parse_drawn_cards_in_window(rest)
 }
 
-fn parse_drawn_cards_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, n) = parse_ge_threshold(input)?;
-    let (rest, _) = tag("cards this turn").parse(rest)?;
-    Ok((
-        rest,
-        make_quantity_ge(
-            QuantityRef::CardsDrawnThisTurn {
-                player: PlayerScope::Controller,
-            },
-            n,
-        ),
-    ))
-}
-
-fn parse_you_drew_cards_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = alt((
+/// The "you drew " / "you've drawn " subject prefix shared by the
+/// controller-draw history conditions.
+fn parse_you_drew_prefix(input: &str) -> OracleResult<'_, ()> {
+    alt((
         value((), tag("you drew ")),
         value((), (parse_youve, tag(" drawn "))),
     ))
-    .parse(input)?;
-    parse_drawn_cards_this_turn(rest)
+    .parse(input)
 }
 
-/// CR 121.1 + CR 603.4: Parse "you drew a card last turn" → the controller
-/// drew ≥ 1 card during the previous turn. The singular "a card" is the GE-1
-/// threshold idiom (drawing is the unit event; `has_drawn_this_turn` is the
-/// boolean twin). Routes through `CardsDrawnLastTurn` (turn-start snapshot),
-/// not the this-turn counter. Canonical card: Mine Is the Only Truth.
-fn parse_you_drew_a_card_last_turn(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = tag::<_, _, OracleError<'_>>("you drew a card last turn").parse(input)?;
-    Ok((
-        rest,
-        make_quantity_ge(
-            QuantityRef::CardsDrawnLastTurn {
-                player: PlayerScope::Controller,
-            },
-            1,
-        ),
-    ))
+/// "<threshold> card(s) <window>" for controller draws: the plural
+/// `parse_ge_threshold` form ("two or more cards") plus the singular GE-1
+/// article idiom ("a card"; drawing is the unit event), each over the shared
+/// history window. Covers "you drew a card this turn" and "you drew two or
+/// more cards last turn" with no new tags; "since your last turn ended" has
+/// no draw counter and is declined.
+fn parse_drawn_cards_in_window(input: &str) -> OracleResult<'_, StaticCondition> {
+    if let Ok((rest, n)) = parse_ge_threshold(input) {
+        let (rest, _) = tag("cards ").parse(rest)?;
+        let (rest, window) = parse_history_window(rest)?;
+        return draw_window_condition(input, rest, window, n);
+    }
+    let (rest, _) = parse_article(input)?;
+    let (rest, _) = tag("card ").parse(rest)?;
+    let (rest, window) = parse_history_window(rest)?;
+    draw_window_condition(input, rest, window, 1)
+}
+
+/// CR 121.1 + CR 603.4: map a controller-draw threshold onto its window
+/// counter — `CardsDrawnLastTurn` (turn-start snapshot) for "last turn", not
+/// the this-turn counter. Canonical last-turn card: Mine Is the Only Truth.
+fn draw_window_condition<'a>(
+    input: &'a str,
+    rest: &'a str,
+    window: HistoryWindow,
+    n: u32,
+) -> OracleResult<'a, StaticCondition> {
+    let qty = match window {
+        HistoryWindow::ThisTurn => QuantityRef::CardsDrawnThisTurn {
+            player: PlayerScope::Controller,
+        },
+        HistoryWindow::LastTurn => QuantityRef::CardsDrawnLastTurn {
+            player: PlayerScope::Controller,
+        },
+        HistoryWindow::SinceYourLastTurnEnded => {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Fail,
+            )))
+        }
+    };
+    Ok((rest, make_quantity_ge(qty, n)))
+}
+
+fn parse_you_drew_cards_in_window(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = parse_you_drew_prefix(input)?;
+    parse_drawn_cards_in_window(rest)
 }
 
 fn parse_opponent_drew_cards_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -20872,6 +20925,70 @@ mod tests {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::OpponentSpellsCastSinceLastTurn {
                         player: PlayerScope::Controller,
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            }
+        );
+    }
+
+    /// CR 121.1 + CR 603.4: the composed draw window — the singular GE-1
+    /// article idiom over "this turn" (previously only the plural threshold
+    /// parsed here).
+    #[test]
+    fn you_drew_a_card_this_turn_counts_controller_this_turn_draws() {
+        let (rest, c) = parse_inner_condition("you drew a card this turn").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CardsDrawnThisTurn {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }
+        );
+    }
+
+    /// CR 121.1 + CR 603.4: the composed draw window — a plural threshold
+    /// over "last turn" (previously only the singular idiom parsed here).
+    #[test]
+    fn you_drew_two_or_more_cards_last_turn_counts_controller_last_turn_draws() {
+        let (rest, c) = parse_inner_condition("you drew two or more cards last turn").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CardsDrawnLastTurn {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 2 },
+            }
+        );
+    }
+
+    /// CR 601.2i + CR 603.4: the composed cast window — "no opponent cast a
+    /// spell this turn" reads `SpellsCastThisTurn` over the `Opponents` scope
+    /// (EQ-0, so the sum and the existential coincide), mirroring the
+    /// pre-existing "an opponent cast N or more spells this turn" mapping.
+    #[test]
+    fn no_opponent_cast_a_spell_this_turn_counts_no_opponent_casts() {
+        let (rest, c) = parse_inner_condition("no opponent cast a spell this turn").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: CountScope::Opponents,
+                        filter: None,
                     },
                 },
                 comparator: Comparator::EQ,

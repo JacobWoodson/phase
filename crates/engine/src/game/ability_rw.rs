@@ -2341,8 +2341,10 @@ fn legacy_player_filter(x: &PlayerFilter) -> bool {
         PlayerFilter::PlayerAttribute { attr, value, .. } => {
             legacy_quantity_ref(attr) || legacy_quantity_expr(value)
         }
-        PlayerFilter::AllExcept { exclude } => legacy_player_filter(exclude),
-        PlayerFilter::OpponentExcept { exclude } => legacy_player_filter(exclude),
+        PlayerFilter::AllExcept {
+            exclude,
+            relation: _,
+        } => legacy_player_filter(exclude),
         PlayerFilter::AnyOf { filters } => filters.iter().any(legacy_player_filter),
         // The damage-source narrowing is a nested object population.
         PlayerFilter::OpponentDealtDamage { source, .. } => {
@@ -2358,7 +2360,6 @@ fn legacy_player_filter(x: &PlayerFilter) -> bool {
         | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ParentObjectTargetOwner
-        | PlayerFilter::ParentPlayerTarget
         | PlayerFilter::GrantingObjectCaster
         | PlayerFilter::TargetPlayer
         | PlayerFilter::Controller
@@ -7451,8 +7452,10 @@ fn rw_player_filter(x: &PlayerFilter) -> RwProfile {
             p.merge(rw_quantity_expr(value));
             p
         }
-        PlayerFilter::AllExcept { exclude } => rw_player_filter(exclude),
-        PlayerFilter::OpponentExcept { exclude } => rw_player_filter(exclude),
+        PlayerFilter::AllExcept {
+            exclude,
+            relation: _,
+        } => rw_player_filter(exclude),
         PlayerFilter::AnyOf { filters } => {
             let mut p = RwProfile::empty();
             for f in filters {
@@ -7492,7 +7495,6 @@ fn rw_player_filter(x: &PlayerFilter) -> RwProfile {
         | PlayerFilter::ZoneChangedThisWay
         | PlayerFilter::PerformedActionThisWay { .. }
         | PlayerFilter::VotedFor { .. }
-        | PlayerFilter::ParentPlayerTarget
         // CR 115.1: a declared-target read, the same read as
         // `ControllerRef::TargetPlayer` (no sibling-mutable state).
         | PlayerFilter::TargetPlayer

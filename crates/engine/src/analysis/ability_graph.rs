@@ -391,7 +391,6 @@ fn scoped_players(scope: &PlayerFilter) -> Option<&'static [PlayerId]> {
         | PlayerFilter::OpponentAttacked { .. }
         | PlayerFilter::OpponentAttackingEnchantedPlayer
         | PlayerFilter::AllExcept { .. }
-        | PlayerFilter::OpponentExcept { .. }
         | PlayerFilter::HighestSpeed
         | PlayerFilter::ZoneChangedThisWay
         | PlayerFilter::PerformedActionThisWay { .. }
@@ -402,7 +401,6 @@ fn scoped_players(scope: &PlayerFilter) -> Option<&'static [PlayerId]> {
         | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
         | PlayerFilter::VotedFor { .. }
         | PlayerFilter::ParentObjectTargetController
-        | PlayerFilter::ParentPlayerTarget
         | PlayerFilter::ControlsCount { .. }
         | PlayerFilter::PlayerAttribute { .. }
         | PlayerFilter::ChosenPlayer { .. }
@@ -1187,7 +1185,7 @@ fn effect_projection(effect: &Effect) -> Projection {
 // ---------------------------------------------------------------------------
 
 /// MEDIUM-1 compile-time drift gate: an exhaustive **no-wildcard** match over all
-/// 169 [`TriggerMode`] variants. A trigger node *consumes* (requires) the event
+/// 170 [`TriggerMode`] variants. A trigger node *consumes* (requires) the event
 /// axis its mode fires on, so a producer of that axis edges into it. Takes the
 /// whole [`TriggerDefinition`] (not the bare mode) so the shared
 /// `TriggerMode::ChangesZone` encoding can disambiguate ETB vs dies vs LTB from
@@ -1374,6 +1372,7 @@ fn trigger_axis(trig: &TriggerDefinition) -> Option<AxisKey> {
         | TriggerMode::SearchedLibrary
         | TriggerMode::SeekAll
         | TriggerMode::SetInMotion
+        | TriggerMode::AsSetInMotion
         | TriggerMode::Specializes
         | TriggerMode::Stationed
         | TriggerMode::Trains

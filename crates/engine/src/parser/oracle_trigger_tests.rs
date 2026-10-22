@@ -17,11 +17,11 @@ use crate::types::ability::{
     CounterTransferMode, DamageAmountScope, DamageAmountThreshold, DamageChannel,
     DamageModification, DamageSource, DelayedTriggerCondition, DiscardSelfScope, Duration, Effect,
     EffectScope, FilterProp, ManaContribution, ManaProduction, ManaSpendPermission, ModalChoice,
-    ObjectProperty, ObjectScope, PerPlayerScope, PerpetualModification, PlayerFilter, PlayerScope,
-    PropertyAggregate, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, RoundingMode,
-    SeatDirection, SharedQuality, SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter,
-    TriggerCondition, TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter,
-    ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneOwner, ZoneRef,
+    ObjectProperty, ObjectScope, PerPlayerScope, PerpetualModification, PlayerFilter,
+    PlayerRelation, PlayerScope, PropertyAggregate, PtStat, PtValue, PtValueScope, QuantityExpr,
+    QuantityRef, RoundingMode, SeatDirection, SharedQuality, SiblingCondition, SubAbilityLink,
+    TapStateChange, TargetFilter, TriggerCondition, TriggerDefinition, TurnJournalKind, TypeFilter,
+    TypedFilter, ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneOwner, ZoneRef,
 };
 use crate::types::ability::{
     EffectOutcomeSignal, IllegalTargetsDisposition, MultiTargetSpec, NumberQuality, Parity,
@@ -114,7 +114,8 @@ fn assert_owner_relative_loss_scope(ability: &AbilityDefinition) {
     assert_eq!(
         ability.player_scope,
         Some(PlayerFilter::AllExcept {
-            exclude: Box::new(PlayerFilter::ParentObjectTargetOwner)
+            exclude: Box::new(PlayerFilter::ParentObjectTargetOwner),
+            relation: PlayerRelation::All,
         })
     );
 }
@@ -155,7 +156,8 @@ fn dies_trigger_owner_subject_anchors_each_other_player_scope() {
     assert_eq!(
         lose.player_scope,
         Some(PlayerFilter::AllExcept {
-            exclude: Box::new(PlayerFilter::ParentObjectTargetOwner)
+            exclude: Box::new(PlayerFilter::ParentObjectTargetOwner),
+            relation: PlayerRelation::All,
         })
     );
 }
@@ -19198,11 +19200,11 @@ fn trigger_set_in_motion_choose_opponent_stays_local_in_isolation() {
     }
 }
 
-/// CR 904.9: "As you set this scheme in motion, choose an opponent" (Bow to
-/// My Command) lowers onto the same `SetInMotion` mode as the "When ..."
-/// sibling — the turn-based action takes no priority in between, so the
-/// trigger-shaped lowering is behavior-preserving. Persist is likewise
-/// relation-owned (see above).
+/// CR 904.9 + CR 603.1: "As you set this scheme in motion, choose an
+/// opponent" (Bow to My Command) lowers to the dedicated `AsSetInMotion`
+/// mode — NOT the "When ..." sibling's `SetInMotion`: the choice is made
+/// inside the turn-based action and must never touch the stack. Persist is
+/// likewise relation-owned (see above).
 #[test]
 fn trigger_as_set_in_motion_choose_opponent_mode() {
     use crate::types::ability::ChoiceType;
@@ -19210,7 +19212,7 @@ fn trigger_as_set_in_motion_choose_opponent_mode() {
         "As you set this scheme in motion, choose an opponent.",
         "Bow to My Command",
     );
-    assert_eq!(def.mode, TriggerMode::SetInMotion);
+    assert_eq!(def.mode, TriggerMode::AsSetInMotion);
     let execute = def.execute.as_deref().expect("choose body");
     assert!(
         matches!(

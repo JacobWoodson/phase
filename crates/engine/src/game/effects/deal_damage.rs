@@ -2193,7 +2193,7 @@ pub fn resolve_all(
 /// for the `DamageEachPlayer` resolver's exclusion anchors. The generic
 /// `matches_player_scope` predicate cannot resolve ability-target-dependent
 /// anchors (it carries no `ability.targets`), so this wrapper intercepts the
-/// anchor-bearing combinators and the `ParentPlayerTarget` leaf, resolving them
+/// anchor-bearing combinators and the `TargetPlayer` leaf, resolving them
 /// against the resolving ability, and recurses through nested combinators. Every
 /// other filter delegates to the generic predicate — written as `if let`
 /// interceptions plus fallthrough (not a `match` with a wildcard arm) so a
@@ -2204,16 +2204,17 @@ fn player_filter_matches_with_ability(
     filter: &PlayerFilter,
     ability: &ResolvedAbility,
 ) -> bool {
-    if let PlayerFilter::ParentPlayerTarget = filter {
-        return crate::game::ability_utils::parent_target_player(ability)
+    if let PlayerFilter::TargetPlayer = filter {
+        return crate::game::filter::target_player_from_ability_or_root(state, Some(ability))
             .is_some_and(|pid| pid == player);
     }
-    if let PlayerFilter::OpponentExcept { exclude } = filter {
-        return crate::game::players::is_opponent(state, ability.controller, player)
-            && !player_filter_matches_with_ability(state, player, exclude, ability);
-    }
-    if let PlayerFilter::AllExcept { exclude } = filter {
-        return !player_filter_matches_with_ability(state, player, exclude, ability);
+    if let PlayerFilter::AllExcept { exclude, relation } = filter {
+        return crate::game::players::matches_relation(
+            state,
+            player,
+            ability.controller,
+            *relation,
+        ) && !player_filter_matches_with_ability(state, player, exclude, ability);
     }
     crate::game::effects::matches_player_scope(
         state,
@@ -2243,8 +2244,16 @@ fn collect_matching_players(
                     // The generic predicate authority is used here; ability-target
                     // anchors are resolved by the player_scope driver, not by this
                     // damage-population helper.
-                    PlayerFilter::AllExcept { ref exclude } => {
-                        !crate::game::effects::matches_player_scope(
+                    PlayerFilter::AllExcept {
+                        ref exclude,
+                        relation,
+                    } => {
+                        crate::game::players::matches_relation(
+                            state,
+                            p.id,
+                            source_controller,
+                            relation,
+                        ) && !crate::game::effects::matches_player_scope(
                             state,
                             p.id,
                             exclude,
@@ -2398,21 +2407,6 @@ fn collect_matching_players(
                     | PlayerFilter::TargetPlayer
                     | PlayerFilter::GrantingObjectCaster
                     | PlayerFilter::ChosenPlayer { .. } => false,
-                    // CR 115.1 + CR 608.2c: the parent-player-target anchor
-                    // requires the resolving `ResolvedAbility` (for
-                    // `ability.targets`), which this damage-population helper
-                    // does not carry (it takes only controller + source id).
-                    // The `DamageEachPlayer` resolver is ability-aware and
-                    // resolves it there; unreachable here — fail closed,
-                    // mirroring the `ParentObjectTargetController` arm.
-                    PlayerFilter::ParentPlayerTarget => false,
-                    // CR 102.2 + CR 102.3: the opponents-except combinator
-                    // with an ability-target-dependent anchor cannot resolve
-                    // here for the same reason. The parser only produces it
-                    // in `DamageEachPlayer` position (never in `DamageAll`
-                    // `player_filter`), so this arm is unreachable — fail
-                    // closed, mirroring the `AllExcept` contract.
-                    PlayerFilter::OpponentExcept { .. } => false,
                     // CR 109.4 + CR 109.5: "each [player class] who controls
                     // [comparator] [count] [filter]" — candidate satisfies both
                     // `relation` and the controlled-permanent count comparison.
@@ -2539,15 +2533,18 @@ pub fn resolve_each_player(
                 && match &player_filter {
                     PlayerFilter::Controller => p.id == ability.controller,
                     PlayerFilter::All => true,
-                    // CR 608.2c + CR 109.4: all players except the anchor's set.
-                    PlayerFilter::AllExcept { exclude } => {
-                        !crate::game::effects::matches_player_scope(
+                    // CR 608.2c + CR 109.4: players matching the base
+                    // `relation` except the anchor's set. The anchor resolves
+                    // ability-aware so a declared-target anchor reads this
+                    // resolving ability's targets; every other anchor falls
+                    // through to the generic predicate there.
+                    PlayerFilter::AllExcept { exclude, relation } => {
+                        crate::game::players::matches_relation(
                             state,
                             p.id,
-                            exclude,
                             ability.controller,
-                            ability.source_id,
-                        )
+                            *relation,
+                        ) && !player_filter_matches_with_ability(state, p.id, exclude, ability)
                     }
                     // CR 102.1 + CR 608.2c: the union of the members, answered
                     // member by member by the generic predicate authority.
@@ -2697,28 +2694,6 @@ pub fn resolve_each_player(
                     | PlayerFilter::TargetPlayer
                     | PlayerFilter::GrantingObjectCaster
                     | PlayerFilter::ChosenPlayer { .. } => false,
-                    // CR 115.1 + CR 608.2c: the resolving ability's first
-                    // player target (parent-target propagation feeds
-                    // sub-ability targets before sub-resolution). This
-                    // resolver is ability-aware (`ability` is in scope), so
-                    // unlike the generic scope predicate it CAN resolve the
-                    // anchor. Fail-closed when the ability carries no
-                    // player target.
-                    PlayerFilter::ParentPlayerTarget => {
-                        crate::game::ability_utils::parent_target_player(ability)
-                            .is_some_and(|pid| pid == p.id)
-                    }
-                    // CR 102.2 + CR 102.3 + CR 608.2c + CR 109.4:
-                    // opponents of the controller except the anchor's set.
-                    // The opponents-base analogue of the `AllExcept` arm
-                    // above. Opponent-ness is team-aware via
-                    // `players::is_opponent` (CR 102.3); the anchor is
-                    // evaluated ability-aware so `ParentPlayerTarget`
-                    // resolves against this resolving ability's targets.
-                    PlayerFilter::OpponentExcept { exclude } => {
-                        crate::game::players::is_opponent(state, ability.controller, p.id)
-                            && !player_filter_matches_with_ability(state, p.id, exclude, ability)
-                    }
                     // CR 109.4 + CR 109.5: "each [player class] who controls
                     // [comparator] [count] [filter]" — candidate satisfies both
                     // `relation` and the controlled-permanent count comparison.

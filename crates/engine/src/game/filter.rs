@@ -2382,7 +2382,7 @@ pub(crate) fn player_filter_contains(
         PlayerFilter::AnyOf { filters } => filters.iter().any(|f| player_filter_contains(f, leaf)),
         // The excluded players are themselves a player filter, which can box
         // a `TargetFilter` of its own (e.g. `ControlsCount { filter }`).
-        PlayerFilter::AllExcept { exclude } => player_filter_contains(exclude, leaf),
+        PlayerFilter::AllExcept { exclude, .. } => player_filter_contains(exclude, leaf),
         // Leaves: no nested `TargetFilter`. `PlayerAttribute`'s `QuantityRef` /
         // `QuantityExpr` and `ControlsCount.count` are quantities, which the
         // scope rule on `filter_contains` assigns to the operand-closed twin.
@@ -2408,10 +2408,6 @@ pub(crate) fn player_filter_contains(
         | PlayerFilter::PlayerAttribute { .. }
         | PlayerFilter::ChosenPlayer { .. }
         | PlayerFilter::ParentObjectTargetOwner
-        // No nested `TargetFilter`: like `AllExcept`, the combinator nests
-        // only a `PlayerFilter`.
-        | PlayerFilter::ParentPlayerTarget
-        | PlayerFilter::OpponentExcept { .. }
         | PlayerFilter::TargetPlayer
         | PlayerFilter::GrantingObjectCaster => false,
     }
@@ -2753,8 +2749,7 @@ fn player_filter_grammar_any(
             quantity_ref_grammar_any(attr, visit) || quantity_expr_grammar_any(value, visit)
         }
         PlayerFilter::TrackedSetPossessor { filter, .. } => filter_grammar_any(filter, visit),
-        PlayerFilter::AllExcept { exclude } => player_filter_grammar_any(exclude, visit),
-        PlayerFilter::OpponentExcept { exclude } => player_filter_grammar_any(exclude, visit),
+        PlayerFilter::AllExcept { exclude, .. } => player_filter_grammar_any(exclude, visit),
         PlayerFilter::AnyOf { filters } => {
             filters.iter().any(|f| player_filter_grammar_any(f, visit))
         }
@@ -2780,7 +2775,6 @@ fn player_filter_grammar_any(
         | PlayerFilter::ChosenPlayer { .. }
         | PlayerFilter::ParentObjectTargetOwner
         | PlayerFilter::TargetPlayer
-        | PlayerFilter::ParentPlayerTarget
         | PlayerFilter::GrantingObjectCaster => false,
     }
 }
@@ -3440,18 +3434,7 @@ fn player_filter_contains_input(
             false,
             None,
         ),
-        PlayerFilter::AllExcept { exclude } => player_filter_contains_input(
-            exclude,
-            predicate,
-            raw_reference,
-            scalar_filter,
-            population_leaf,
-            false,
-            None,
-        ),
-        // Like `AllExcept`, the combinator nests only a `PlayerFilter`:
-        // recurse with the same plumbing.
-        PlayerFilter::OpponentExcept { exclude } => player_filter_contains_input(
+        PlayerFilter::AllExcept { exclude, .. } => player_filter_contains_input(
             exclude,
             predicate,
             raw_reference,
@@ -3491,7 +3474,6 @@ fn player_filter_contains_input(
         | PlayerFilter::VotedFor { .. }
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ChosenPlayer { .. }
-        | PlayerFilter::ParentPlayerTarget
         | PlayerFilter::ParentObjectTargetOwner
         | PlayerFilter::TargetPlayer
         | PlayerFilter::GrantingObjectCaster => false,
@@ -5116,17 +5098,7 @@ fn rewrite_player_filter_props(
             false,
             None,
         ),
-        PlayerFilter::AllExcept { exclude } => rewrite_player_filter_props(
-            exclude,
-            rewrite_node,
-            rewrite,
-            post_property,
-            complete,
-            false,
-            None,
-        ),
-        // Like `AllExcept`, the combinator nests only a `PlayerFilter`.
-        PlayerFilter::OpponentExcept { exclude } => rewrite_player_filter_props(
+        PlayerFilter::AllExcept { exclude, .. } => rewrite_player_filter_props(
             exclude,
             rewrite_node,
             rewrite,
@@ -5166,7 +5138,6 @@ fn rewrite_player_filter_props(
         | PlayerFilter::VotedFor { .. }
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ChosenPlayer { .. }
-        | PlayerFilter::ParentPlayerTarget
         | PlayerFilter::ParentObjectTargetOwner
         | PlayerFilter::TargetPlayer
         | PlayerFilter::GrantingObjectCaster => {}
@@ -13372,6 +13343,7 @@ mod tests {
             let wrapped = PlayerFilter::AnyOf {
                 filters: vec![PlayerFilter::AllExcept {
                     exclude: Box::new(player),
+                    relation: crate::types::ability::PlayerRelation::All,
                 }],
             };
             let visits = std::cell::Cell::new(0);
@@ -19694,6 +19666,7 @@ mod tests {
                 },
                 PlayerFilter::AllExcept {
                     exclude: Box::new(controls_count_of(count_of(anaphor), TargetFilter::Any)),
+                    relation: crate::types::ability::PlayerRelation::All,
                 },
             ]
         };
@@ -19780,6 +19753,7 @@ mod tests {
                 comparator: crate::types::ability::Comparator::GE,
                 count: Box::new(QuantityExpr::Fixed { value: 1 }),
             }),
+            relation: crate::types::ability::PlayerRelation::All,
         };
         let is_last_created = |filter: &TargetFilter| matches!(filter, TargetFilter::LastCreated);
         assert!(player_filter_contains(
@@ -20042,6 +20016,7 @@ mod tests {
                 TargetFilter::PlayerMatching {
                     player: Box::new(PlayerFilter::AllExcept {
                         exclude: Box::new(controls(owned())),
+                        relation: crate::types::ability::PlayerRelation::All,
                     }),
                 },
                 TargetFilter::Typed(
@@ -20333,6 +20308,7 @@ mod tests {
             TargetFilter::PlayerMatching {
                 player: Box::new(PlayerFilter::AllExcept {
                     exclude: Box::new(controls(chosen())),
+                    relation: crate::types::ability::PlayerRelation::All,
                 }),
             },
             TargetFilter::Typed(TypedFilter::creature().properties(vec![

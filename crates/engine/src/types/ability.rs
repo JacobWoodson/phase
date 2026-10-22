@@ -12059,17 +12059,27 @@ pub enum PlayerFilter {
     OpponentAttackingEnchantedPlayer,
     /// All players.
     All,
-    /// CR 608.2c + CR 109.4 + CR 608.2h: All non-eliminated players except those
-    /// matching `exclude`. The iteration-axis analogue of
-    /// `PlayerScope::AllPlayers { exclude }` (the quantity axis): the exclusion
-    /// anchor is itself a `PlayerFilter`, composing the enum with itself so
-    /// "each player other than its controller" parses to
+    /// CR 608.2c + CR 109.4 + CR 608.2h: Non-eliminated players matching
+    /// `relation` except those matching `exclude`. The iteration-axis analogue
+    /// of `PlayerScope::AllPlayers { exclude }` (the quantity axis): the
+    /// exclusion anchor is itself a `PlayerFilter`, composing the enum with
+    /// itself so "each player other than its controller" parses to
     /// `exclude: ParentObjectTargetController` and any future "each player other
-    /// than ⟨ref⟩" reuses the same variant. When the anchor object has left the
+    /// than ⟨ref⟩" reuses the same variant. `relation` selects the base
+    /// population (`All` preserves the original reading; `Opponent` covers
+    /// "each of your other opponents" with CR 102.3-aware opponent-ness via
+    /// `players::matches_relation`). When the anchor object has left the
     /// battlefield (e.g. the exiled permanent of Fractured Identity), the anchor
     /// is resolved with last-known information (CR 608.2h). `Box` breaks the
     /// enum's self-referential size cycle.
-    AllExcept { exclude: Box<PlayerFilter> },
+    AllExcept {
+        exclude: Box<PlayerFilter>,
+        #[serde(
+            default = "player_relation_all",
+            skip_serializing_if = "is_player_relation_all"
+        )]
+        relation: PlayerRelation,
+    },
     /// CR 702.179f: Each player whose speed is tied for the highest speed among players.
     HighestSpeed,
     /// "each player who [verb]ed a card this way" — scoped to players who owned objects
@@ -12224,35 +12234,6 @@ pub enum PlayerFilter {
     /// player facing the choice is the owner of the targeted permanent named in
     /// the prior clause, not the ability controller.
     ParentObjectTargetOwner,
-    /// CR 115.1 + CR 608.2c: The first player target of the resolving ability —
-    /// the player-target sibling of `ParentObjectTargetController` /
-    /// `ParentObjectTargetOwner`, which derive a player from an OBJECT target's
-    /// controller/owner. Resolved via `ability_utils::parent_target_player`,
-    /// which reads the propagation-fed `ability.targets` (parent-target
-    /// propagation feeds sub-ability targets before sub-resolution, the same
-    /// mechanism `RestrictionTarget::ParentTargetedPlayer` relies on). Matches
-    /// no player when the resolving ability carries no player target
-    /// (fail-closed). Powers the "each of your other opponents" exclusion
-    /// anchor (Fate of the Flammable) as the `exclude` leaf of
-    /// `OpponentExcept`: the "other" anaphors back to the opponent targeted by
-    /// the prior instruction in the same chain. Ability-aware consumers only
-    /// (the `DamageEachPlayer` resolver); the generic scope predicate, the
-    /// `DamageAll` population helper, and the quantity axis fail closed, mirroring
-    /// the `ParentObjectTargetController` arms.
-    ParentPlayerTarget,
-    /// CR 102.2 + CR 102.3 + CR 608.2c + CR 109.4: Opponents of the ability's
-    /// controller except those matching `exclude`. The opponents-base analogue
-    /// of `AllExcept { exclude }` (the all-players base): the exclusion anchor
-    /// is itself a `PlayerFilter`, composing the enum with itself so "each of
-    /// your other opponents" parses to `exclude: ParentPlayerTarget` and any
-    /// future "each opponent other than ⟨ref⟩" reuses the same variant.
-    /// Opponent-ness is CR 102.3-aware (teammates are not opponents) via
-    /// `players::is_opponent`. `Box` breaks the enum's self-referential size
-    /// cycle. Ability-target-dependent anchors (e.g. `ParentPlayerTarget`)
-    /// resolve only in ability-aware consumers (the `DamageEachPlayer`
-    /// resolver); every other consumer fails closed on them, mirroring the
-    /// `AllExcept` contract.
-    OpponentExcept { exclude: Box<PlayerFilter> },
     /// CR 601.2a + CR 201.5a: the player who cast the granting object; lowered to
     /// `TargetFilter::SpecificPlayer` when the grant is latched.
     GrantingObjectCaster,

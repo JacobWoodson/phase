@@ -1599,7 +1599,9 @@ fn player_filter_reads_player_chosen_number(filter: &PlayerFilter) -> bool {
         PlayerFilter::ControlsCount { count, .. } => {
             quantity_expr_reads_player_chosen_number(count)
         }
-        PlayerFilter::AllExcept { exclude } => player_filter_reads_player_chosen_number(exclude),
+        PlayerFilter::AllExcept { exclude, .. } => {
+            player_filter_reads_player_chosen_number(exclude)
+        }
         PlayerFilter::AnyOf { filters } => {
             filters.iter().any(player_filter_reads_player_chosen_number)
         }
@@ -15394,8 +15396,7 @@ fn player_filter_reads_chain_local_result(filter: &PlayerFilter) -> bool {
         | PlayerFilter::PerformedActionThisWay { .. }
         | PlayerFilter::TrackedSetPossessor { .. }
         | PlayerFilter::VotedFor { .. } => true,
-        PlayerFilter::AllExcept { exclude } => player_filter_reads_chain_local_result(exclude),
-        PlayerFilter::OpponentExcept { exclude } => player_filter_reads_chain_local_result(exclude),
+        PlayerFilter::AllExcept { exclude, .. } => player_filter_reads_chain_local_result(exclude),
         PlayerFilter::AnyOf { filters } => {
             filters.iter().any(player_filter_reads_chain_local_result)
         }
@@ -15421,7 +15422,6 @@ fn player_filter_reads_chain_local_result(filter: &PlayerFilter) -> bool {
         | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ChosenPlayer { .. }
-        | PlayerFilter::ParentPlayerTarget
         | PlayerFilter::ParentObjectTargetOwner
         | PlayerFilter::TargetPlayer
         | PlayerFilter::GrantingObjectCaster => false,
@@ -29421,6 +29421,17 @@ fn player_filter_as_controller_ref(filter: &TargetFilter) -> Option<ControllerRe
         // surfaces a player target slot and `resolve_sacrifice_scope` reads the
         // chosen player at resolution — identical to the "target opponent" path.
         TargetFilter::Player => Some(ControllerRef::TargetPlayer),
+        // CR 115.1 + CR 701.21a + CR 608.2c: A "that player" / "the player"
+        // anaphor subject ("If that player chooses self, the player sacrifices
+        // two creatures" — Feed the Machine) lowers to the unit
+        // `TargetFilter::ParentTarget`, which otherwise fell through to `None`
+        // and dropped the controller scope, so the edict defaulted to the
+        // ability's controller (the archenemy sacrifices their own creatures).
+        // The anaphor names the announced player target, so promote it to
+        // `TargetPlayer` exactly as the `ChangeZoneAll` injection below does —
+        // the engine surfaces no new slot and `resolve_sacrifice_scope` reads
+        // the announced player from the ability's targets at resolution time.
+        TargetFilter::ParentTarget => Some(ControllerRef::TargetPlayer),
         // CR 508.5 + CR 701.21a: A bare "defending player" subject on an
         // attack-trigger edict ("Whenever ~ attacks, defending player
         // sacrifices an artifact of their choice" — Kibo, Uktabi Prince). Like
@@ -47811,6 +47822,7 @@ fn parse_effect_chain_ir_body(
         {
             chain_parent_target_owner_scope = Some(PlayerFilter::AllExcept {
                 exclude: Box::new(PlayerFilter::ParentObjectTargetOwner),
+                relation: PlayerRelation::All,
             });
         }
 

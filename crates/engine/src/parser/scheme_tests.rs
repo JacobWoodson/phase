@@ -180,7 +180,7 @@ fn fate_of_the_flammable_branches_hit_self_source_and_anaphor_targets() {
 /// chooser, who chose Others precisely to dodge the damage).
 #[test]
 fn fate_of_the_flammable_others_branch_excludes_targeted_chooser() {
-    use crate::types::ability::{PlayerFilter, QuantityExpr};
+    use crate::types::ability::{PlayerFilter, PlayerRelation, QuantityExpr};
 
     let oracle = "When you set this scheme in motion, target opponent chooses self or others. If that player chooses self, this scheme deals 6 damage to that player. If the player chooses others, this scheme deals 3 damage to each of your other opponents.";
     let (types, subtypes) = scheme_types();
@@ -207,8 +207,9 @@ fn fate_of_the_flammable_others_branch_excludes_targeted_chooser() {
     );
     assert_eq!(
         player_filter,
-        &PlayerFilter::OpponentExcept {
-            exclude: Box::new(PlayerFilter::ParentPlayerTarget),
+        &PlayerFilter::AllExcept {
+            exclude: Box::new(PlayerFilter::TargetPlayer),
+            relation: PlayerRelation::Opponent,
         },
         "others branch must exclude the targeted chooser, got {player_filter:?}"
     );
@@ -261,7 +262,7 @@ fn surrender_your_thoughts_is_supported() {
 /// Others precisely to dodge it).
 #[test]
 fn surrender_others_branch_scope_excludes_targeted_chooser() {
-    use crate::types::ability::PlayerFilter;
+    use crate::types::ability::{PlayerFilter, PlayerRelation};
 
     let oracle = "When you set this scheme in motion, target opponent chooses self or others. If that player chooses self, that player discards four cards. If the player chooses others, each of your other opponents discards two cards.";
     let (types, subtypes) = scheme_types();
@@ -279,8 +280,9 @@ fn surrender_others_branch_scope_excludes_targeted_chooser() {
     );
     assert_eq!(
         others_branch.player_scope,
-        Some(PlayerFilter::OpponentExcept {
-            exclude: Box::new(PlayerFilter::ParentPlayerTarget),
+        Some(PlayerFilter::AllExcept {
+            exclude: Box::new(PlayerFilter::TargetPlayer),
+            relation: PlayerRelation::Opponent,
         }),
         "others branch must scope to opponents-except-chooser, got {:?}",
         others_branch.player_scope
@@ -332,7 +334,7 @@ fn may_civilization_collapse_is_supported() {
 /// strip arm is verb-agnostic.
 #[test]
 fn sacrifice_siblings_others_branch_scope_excludes_targeted_chooser() {
-    use crate::types::ability::PlayerFilter;
+    use crate::types::ability::{PlayerFilter, PlayerRelation};
 
     for (name, oracle) in [
         (
@@ -357,8 +359,9 @@ fn sacrifice_siblings_others_branch_scope_excludes_targeted_chooser() {
             .expect("others branch");
         assert_eq!(
             others_branch.player_scope,
-            Some(PlayerFilter::OpponentExcept {
-                exclude: Box::new(PlayerFilter::ParentPlayerTarget),
+            Some(PlayerFilter::AllExcept {
+                exclude: Box::new(PlayerFilter::TargetPlayer),
+                relation: PlayerRelation::Opponent,
             }),
             "{name}: others branch must scope to opponents-except-chooser, got {:?}",
             others_branch.player_scope

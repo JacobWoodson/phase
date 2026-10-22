@@ -424,17 +424,19 @@ pub(crate) fn matches_player_scope(
                 && match scope {
                     PlayerFilter::Controller => p.id == controller,
                     PlayerFilter::All => true,
-                    // CR 608.2c + CR 109.4: predicate form — a player matches
-                    // unless it matches the `exclude` anchor. Exact for excludes
-                    // resolvable without ability targets (Controller, Opponent,
-                    // …); ability-target-dependent anchors
+                    // CR 608.2c + CR 109.4: predicate form — a player
+                    // matching the base `relation` matches unless it matches
+                    // the `exclude` anchor. Exact for excludes resolvable
+                    // without ability targets (Controller, Opponent, …);
+                    // ability-target-dependent anchors
                     // (ParentObjectTargetController) return `false` from this
                     // generic predicate, so the player_scope driver routes
                     // `AllExcept` through the ability-aware
                     // `speed_effects::players_for_filter` instead, which is
                     // authoritative for `AllExcept` effect-iteration.
-                    PlayerFilter::AllExcept { exclude } => {
-                        !matches_player_scope(state, p.id, exclude, controller, source_id)
+                    PlayerFilter::AllExcept { exclude, relation } => {
+                        crate::game::players::matches_relation(state, p.id, controller, *relation)
+                            && !matches_player_scope(state, p.id, exclude, controller, source_id)
                     }
                     // CR 102.1 + CR 608.2c: predicate form of the union — a
                     // player matches when any member names it.
@@ -604,31 +606,6 @@ pub(crate) fn matches_player_scope(
                     // `ability_utils::parent_target_owner`. Resolved in
                     // `choose_one_of::choosing_players`; unreachable here.
                     PlayerFilter::ParentObjectTargetOwner => false,
-                    // CR 115.1 + CR 608.2c: the parent-player-target anchor
-                    // likewise requires the resolving `ResolvedAbility` (for
-                    // `ability.targets`), which this generic scope predicate
-                    // does not carry. Resolved in the ability-aware
-                    // `DamageEachPlayer` resolver via
-                    // `ability_utils::parent_target_player`; unreachable
-                    // here — fail closed, mirroring the
-                    // `ParentObjectTargetController` arm.
-                    PlayerFilter::ParentPlayerTarget => false,
-                    // CR 102.2 + CR 102.3 + CR 608.2c + CR 109.4:
-                    // predicate form — an opponent matches unless it
-                    // matches the `exclude` anchor. Exact for excludes
-                    // resolvable without ability targets (Controller,
-                    // Opponent, …); ability-target-dependent anchors
-                    // (`ParentPlayerTarget`) return `false` from this
-                    // generic predicate, so the player_scope driver routes
-                    // `OpponentExcept` through the ability-aware
-                    // `speed_effects::players_for_filter` instead, which is
-                    // authoritative for `OpponentExcept` effect-iteration
-                    // (mirroring the `AllExcept` contract). Opponent-ness
-                    // is team-aware via `players::is_opponent` (CR 102.3).
-                    PlayerFilter::OpponentExcept { exclude } => {
-                        crate::game::players::is_opponent(state, controller, p.id)
-                            && !matches_player_scope(state, p.id, exclude, controller, source_id)
-                    }
                     // CR 201.5a: an unlatched caster names nobody.
                     PlayerFilter::GrantingObjectCaster => false,
                     // CR 109.4 + CR 109.5: "each [player class] who controls
@@ -11098,7 +11075,6 @@ fn scope_keeps_scoped_whole_hand_shuffle_local(scope: &PlayerFilter) -> bool {
         | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ParentObjectTargetOwner
-        | PlayerFilter::ParentPlayerTarget
         | PlayerFilter::GrantingObjectCaster
         | PlayerFilter::TargetPlayer
         | PlayerFilter::ChosenPlayer { .. }
@@ -11123,8 +11099,7 @@ fn scope_keeps_scoped_whole_hand_shuffle_local(scope: &PlayerFilter) -> bool {
         // `player_filter_references_tracked_set`'s treatment of the same variant.
         // Behaviour-identical while every arm above is `true`; recursing keeps it
         // from silently disagreeing with its anchor the moment one is not.
-        PlayerFilter::AllExcept { exclude } => scope_keeps_scoped_whole_hand_shuffle_local(exclude),
-        PlayerFilter::OpponentExcept { exclude } => {
+        PlayerFilter::AllExcept { exclude, .. } => {
             scope_keeps_scoped_whole_hand_shuffle_local(exclude)
         }
         // The union keeps the pair local only when every member does.
@@ -13163,7 +13138,6 @@ fn player_filter_references_tracked_set(filter: &PlayerFilter) -> bool {
         | PlayerFilter::VotedFor { .. }
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ParentObjectTargetOwner
-        | PlayerFilter::ParentPlayerTarget
         | PlayerFilter::GrantingObjectCaster
         | PlayerFilter::TargetPlayer
         | PlayerFilter::ChosenPlayer { .. }
@@ -13171,8 +13145,9 @@ fn player_filter_references_tracked_set(filter: &PlayerFilter) -> bool {
         | PlayerFilter::PlayerAttribute { .. } => false,
         // The negation wrapper inherits its inner filter's consumption: an
         // "all except <tracked-set possessor>" scope still needs the set.
-        PlayerFilter::AllExcept { exclude } => player_filter_references_tracked_set(exclude),
-        PlayerFilter::OpponentExcept { exclude } => player_filter_references_tracked_set(exclude),
+        PlayerFilter::AllExcept { exclude, .. } => {
+            player_filter_references_tracked_set(exclude)
+        }
         // The union needs the set when any member does.
         PlayerFilter::AnyOf { filters } => filters.iter().any(player_filter_references_tracked_set),
     }
@@ -20912,16 +20887,14 @@ fn resolve_chain_body(
         );
         let matching_players: Vec<PlayerId> = match scope {
             PlayerFilter::AllExcept { .. }
-            | PlayerFilter::OpponentExcept { .. }
             | PlayerFilter::ParentObjectTargetController
             | PlayerFilter::ParentObjectTargetOwner
-            | PlayerFilter::ParentPlayerTarget
             | PlayerFilter::AnyOf { .. }
             | PlayerFilter::TargetPlayer => {
                 // CR 608.2c + CR 109.4 + CR 608.2h: these anchors are all
-                // ability-target references — the `AllExcept` / `OpponentExcept`
+                // ability-target references — the `AllExcept`
                 // exclude anchors and the direct `ParentObjectTargetController` /
-                // `ParentObjectTargetOwner` / `ParentPlayerTarget` scopes (e.g.
+                // `ParentObjectTargetOwner` scopes (e.g.
                 // Declaration in Stone's "That player investigates", where "that
                 // player" = the controller of the exiled target). The generic
                 // `matches_player_scope` predicate cannot resolve them (it
@@ -26819,17 +26792,13 @@ fn scoped_player_matches_filter(
         // controller nor an opponent.
         PlayerFilter::Opponent => crate::game::players::is_opponent(state, controller, candidate),
         PlayerFilter::All => true,
-        // CR 608.2c + CR 109.4: candidate matches unless it matches the anchor.
-        // Recursive against the same printed-controller-relative predicate;
-        // ability-target anchors fall through to the fail-closed arm below.
-        PlayerFilter::AllExcept { exclude } => {
-            !scoped_player_matches_filter(state, ability, candidate, exclude)
-        }
-        // CR 102.2 + CR 102.3 + CR 608.2c + CR 109.4: the opponents-base
-        // analogue of `AllExcept` — the candidate must be an opponent of the
-        // printed controller (team-aware) AND not match the anchor.
-        PlayerFilter::OpponentExcept { exclude } => {
-            crate::game::players::is_opponent(state, controller, candidate)
+        // CR 608.2c + CR 109.4 (+ CR 102.2/102.3 for an opponents base):
+        // a candidate matching the base relation matches unless it matches
+        // the anchor. Recursive against the same
+        // printed-controller-relative predicate; ability-target anchors fall
+        // through to the fail-closed arm below.
+        PlayerFilter::AllExcept { exclude, relation } => {
+            crate::game::players::matches_relation(state, candidate, controller, *relation)
                 && !scoped_player_matches_filter(state, ability, candidate, exclude)
         }
         PlayerFilter::AnyOf { filters } => filters
@@ -26871,7 +26840,6 @@ fn scoped_player_matches_filter(
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ChosenPlayer { .. }
         | PlayerFilter::ParentObjectTargetOwner
-        | PlayerFilter::ParentPlayerTarget
         | PlayerFilter::GrantingObjectCaster
         | PlayerFilter::TargetPlayer
         | PlayerFilter::ControlsCount { .. }
@@ -47896,6 +47864,7 @@ mod tests {
                     "PlayerCount(AllExcept(ControlsCount))".to_string(),
                     gain(player_count(PlayerFilter::AllExcept {
                         exclude: Box::new(controls(anaphor.clone(), one())),
+                        relation: crate::types::ability::PlayerRelation::All,
                     })),
                 ),
                 (
@@ -58413,6 +58382,7 @@ mod tests {
             PlayerFilter::Opponent,
             PlayerFilter::AllExcept {
                 exclude: Box::new(PlayerFilter::Controller),
+                relation: crate::types::ability::PlayerRelation::All,
             },
             PlayerFilter::TrackedSetPossessor {
                 relation: crate::types::ability::PlayerRelation::Opponent,

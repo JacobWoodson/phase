@@ -1849,7 +1849,6 @@ fn quantity_ref_recipient_read(qty: &QuantityRef) -> RecipientRead {
             | PlayerFilter::OpponentAttackingEnchantedPlayer
             | PlayerFilter::All
             | PlayerFilter::AllExcept { .. }
-            | PlayerFilter::OpponentExcept { .. }
             | PlayerFilter::HighestSpeed
             | PlayerFilter::ZoneChangedThisWay
             | PlayerFilter::PerformedActionThisWay { .. }
@@ -1861,7 +1860,6 @@ fn quantity_ref_recipient_read(qty: &QuantityRef) -> RecipientRead {
             | PlayerFilter::VotedFor { .. }
             | PlayerFilter::ParentObjectTargetController
             | PlayerFilter::ChosenPlayer { .. }
-            | PlayerFilter::ParentPlayerTarget
             | PlayerFilter::ParentObjectTargetOwner
             | PlayerFilter::TargetPlayer
             | PlayerFilter::GrantingObjectCaster
@@ -10149,23 +10147,12 @@ pub(crate) fn resolve_player_count(
                         // set (count context). Uses the generic predicate
                         // authority; ability-target anchors are resolved by the
                         // player_scope driver, not by this count helper.
-                        PlayerFilter::AllExcept { exclude } => {
-                            !crate::game::effects::matches_player_scope(
+                        PlayerFilter::AllExcept { exclude, relation } => {
+                            crate::game::players::matches_relation(
+                                state, p.id, controller, *relation,
+                            ) && !crate::game::effects::matches_player_scope(
                                 state, p.id, exclude, controller, source_id,
                             )
-                        }
-                        // CR 102.2 + CR 102.3 + CR 608.2c + CR 109.4:
-                        // opponents except the anchor's set (count context).
-                        // The opponents-base analogue of `AllExcept`: the
-                        // base is team-aware via `players::is_opponent`
-                        // (CR 102.3) and the anchor uses the generic
-                        // predicate authority (ability-target anchors fail
-                        // closed there — no live card counts this set).
-                        PlayerFilter::OpponentExcept { exclude } => {
-                            crate::game::players::is_opponent(state, controller, p.id)
-                                && !crate::game::effects::matches_player_scope(
-                                    state, p.id, exclude, controller, source_id,
-                                )
                         }
                         // CR 102.1 + CR 608.2c: the union of the members (count
                         // context). Delegates to the single-authority predicate in
@@ -10274,7 +10261,6 @@ pub(crate) fn resolve_player_count(
                         // to a single anchored player, not a counted set).
                         PlayerFilter::ParentObjectTargetController
                         | PlayerFilter::ParentObjectTargetOwner
-                        | PlayerFilter::ParentPlayerTarget
                         | PlayerFilter::TargetPlayer
                         | PlayerFilter::GrantingObjectCaster
                         | PlayerFilter::ChosenPlayer { .. } => false,

@@ -29467,13 +29467,7 @@ fn player_filter_reads_chosen_target(filter: &PlayerFilter, read: TargetRead) ->
         PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ParentObjectTargetOwner
         | PlayerFilter::TargetPlayer => true,
-        // CR 115.1 + CR 608.2c: likewise anchored on the resolving
-        // ability's player target — read settlement can't price it either.
-        PlayerFilter::ParentPlayerTarget => true,
-        PlayerFilter::AllExcept { exclude } => player_filter_reads_chosen_target(exclude, read),
-        PlayerFilter::OpponentExcept { exclude } => {
-            player_filter_reads_chosen_target(exclude, read)
-        }
+        PlayerFilter::AllExcept { exclude, .. } => player_filter_reads_chosen_target(exclude, read),
         PlayerFilter::AnyOf { filters } => filters
             .iter()
             .any(|f| player_filter_reads_chosen_target(f, read)),

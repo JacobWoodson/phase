@@ -340,8 +340,8 @@ fn choosing_players(
         PlayerFilter::ParentObjectTargetController => {
             crate::game::ability_utils::parent_target_controller(ability, state)
         }
-        PlayerFilter::ParentPlayerTarget => {
-            crate::game::ability_utils::parent_target_player(ability)
+        PlayerFilter::TargetPlayer => {
+            crate::game::filter::target_player_from_ability_or_root(state, Some(ability))
         }
         _ => None,
     };

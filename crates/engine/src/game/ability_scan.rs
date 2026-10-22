@@ -5133,7 +5133,10 @@ fn scan_player_filter(x: &PlayerFilter, mode: ScanMode) -> Axes {
         // resource, matching the `OpponentAttacked` / `DefendingPlayer` arms.
         PlayerFilter::OpponentAttackingEnchantedPlayer => Axes::NONE,
         PlayerFilter::All => Axes::NONE,
-        PlayerFilter::AllExcept { exclude } => {
+        PlayerFilter::AllExcept {
+            exclude,
+            relation: _,
+        } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_player_filter(exclude, mode));
             acc
@@ -5225,21 +5228,6 @@ fn scan_player_filter(x: &PlayerFilter, mode: ScanMode) -> Axes {
             projected: false,
             history: HistoryReads::NONE,
         },
-        // CR 115.1 + CR 608.2c: reads the resolving ability's own stored
-        // targets (chosen at cast/stack-put, immutable during resolution —
-        // never shared across abilities). Like `ChosenPlayer`, a
-        // resolution-scoped ability-field read with no event, sibling, or
-        // projected-resource axis. (Unlike `ParentObjectTargetOwner` there is
-        // no LKI / effect-context fallback read, so no event axis.)
-        PlayerFilter::ParentPlayerTarget => Axes::NONE,
-        // CR 102.2 + CR 102.3: the opponents-base analogue of `AllExcept` —
-        // the base population reads no mutable state; recurse into the
-        // exclusion anchor.
-        PlayerFilter::OpponentExcept { exclude } => {
-            let mut acc = Axes::NONE;
-            acc = acc.or(scan_player_filter(exclude, mode));
-            acc
-        }
         // CR 603.3b + CR 608.2c: the membership set is published by a PRECEDING
         // SIBLING effect in the same chain, and the per-member filter reads live
         // board state for members still on the battlefield — both are

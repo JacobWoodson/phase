@@ -16703,16 +16703,18 @@ fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefi
         return Some((TriggerMode::SetInMotion, def));
     }
 
-    // CR 904.9: "As you set this scheme in motion" (Bow to My Command) lowers
-    // onto the same `SetInMotion` mode as the "When ..." sibling. The
-    // turn-based set-in-motion action doesn't use the stack, so no player
-    // receives priority between an "as" choice and the scheme's subsequent
-    // reads — the trigger-shaped lowering is behavior-preserving, and it lets
-    // the persist post-pass in `lower_trigger_ir` store the choice for the
-    // scheme's linked "the chosen player" abilities (CR 607.2d).
+    // CR 904.9 + CR 603.1: "As you set this scheme in motion" (Bow to My
+    // Command) is a choice made inside the turn-based action, NOT a triggered
+    // ability — it must never touch the stack (no priority, not counterable).
+    // It lowers to the dedicated `AsSetInMotion` mode, which the matcher
+    // dispatch and the index both skip; the post-action scan resolves it via
+    // `archenemy::resolve_pending_as_set_in_motion_choices` before the
+    // scheme's "when" triggers collect. The persist post-pass in
+    // `lower_trigger_ir` still stores the choice for the scheme's linked
+    // "the chosen player" abilities (CR 607.2d).
     if matches!(lower, "as you set this scheme in motion") {
-        def.mode = TriggerMode::SetInMotion;
-        return Some((TriggerMode::SetInMotion, def));
+        def.mode = TriggerMode::AsSetInMotion;
+        return Some((TriggerMode::AsSetInMotion, def));
     }
 
     if matches!(
@@ -21220,6 +21222,7 @@ fn rewrite_each_other_player_scope_for_any_caster_spell_triggers(
     }
     ability.player_scope = Some(PlayerFilter::AllExcept {
         exclude: Box::new(PlayerFilter::TriggeringPlayer),
+        relation: PlayerRelation::All,
     });
 }
 

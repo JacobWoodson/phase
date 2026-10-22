@@ -4346,8 +4346,7 @@ fn player_filter_reads_zone(filter: &PlayerFilter, zone: Zone) -> bool {
             .as_deref()
             .is_some_and(|f| target_filter_reads_zone(f, zone)),
         // CR 608.2c: self-composing exclusion anchor — recurse on the exclude.
-        PlayerFilter::AllExcept { exclude } => player_filter_reads_zone(exclude, zone),
-        PlayerFilter::OpponentExcept { exclude } => player_filter_reads_zone(exclude, zone),
+        PlayerFilter::AllExcept { exclude, .. } => player_filter_reads_zone(exclude, zone),
         // CR 102.1 + CR 608.2c: the union reads what any member reads.
         PlayerFilter::AnyOf { filters } => {
             filters.iter().any(|f| player_filter_reads_zone(f, zone))
@@ -4391,7 +4390,6 @@ fn player_filter_reads_zone(filter: &PlayerFilter, zone: Zone) -> bool {
         | PlayerFilter::VotedFor { .. }
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ChosenPlayer { .. }
-        | PlayerFilter::ParentPlayerTarget
         | PlayerFilter::ParentObjectTargetOwner
         | PlayerFilter::TargetPlayer
         | PlayerFilter::GrantingObjectCaster => false,
@@ -4884,8 +4882,7 @@ fn player_filter_reads_life(pf: &PlayerFilter) -> bool {
             .as_deref()
             .is_some_and(target_filter_reads_life_total),
         // CR 608.2c: self-composing exclusion anchor — recurse on the exclude.
-        PlayerFilter::AllExcept { exclude } => player_filter_reads_life(exclude),
-        PlayerFilter::OpponentExcept { exclude } => player_filter_reads_life(exclude),
+        PlayerFilter::AllExcept { exclude, .. } => player_filter_reads_life(exclude),
         // CR 102.1 + CR 608.2c: the union reads what any member reads.
         PlayerFilter::AnyOf { filters } => filters.iter().any(player_filter_reads_life),
         // CR 109.4 + CR 109.5: controls-count routes its object `filter` and its
@@ -4922,7 +4919,6 @@ fn player_filter_reads_life(pf: &PlayerFilter) -> bool {
         | PlayerFilter::VotedFor { .. }
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ChosenPlayer { .. }
-        | PlayerFilter::ParentPlayerTarget
         | PlayerFilter::ParentObjectTargetOwner
         | PlayerFilter::TargetPlayer
         | PlayerFilter::GrantingObjectCaster => false,
@@ -31283,6 +31279,7 @@ mod tests {
         // CR 608.2c: exclusion anchor recurses.
         assert!(player_filter_reads_life(&PlayerFilter::AllExcept {
             exclude: Box::new(PlayerFilter::OpponentGainedLife),
+            relation: crate::types::ability::PlayerRelation::All,
         }));
         // CR 109.4 + CR 109.5: controls-count routes its object filter.
         assert!(player_filter_reads_life(&PlayerFilter::ControlsCount {

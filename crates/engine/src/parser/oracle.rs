@@ -2032,8 +2032,7 @@ fn player_filter_uses_filter_prop(
         PlayerFilter::TrackedSetPossessor { filter, .. } => {
             target_filter_uses_filter_prop(filter, pred)
         }
-        PlayerFilter::AllExcept { exclude } => player_filter_uses_filter_prop(exclude, pred),
-        PlayerFilter::OpponentExcept { exclude } => player_filter_uses_filter_prop(exclude, pred),
+        PlayerFilter::AllExcept { exclude, .. } => player_filter_uses_filter_prop(exclude, pred),
         PlayerFilter::AnyOf { filters } => filters
             .iter()
             .any(|f| player_filter_uses_filter_prop(f, pred)),
@@ -2057,7 +2056,6 @@ fn player_filter_uses_filter_prop(
         | PlayerFilter::VotedFor { .. }
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ChosenPlayer { .. }
-        | PlayerFilter::ParentPlayerTarget
         | PlayerFilter::GrantingObjectCaster
         | PlayerFilter::TargetPlayer
         | PlayerFilter::ParentObjectTargetOwner => false,

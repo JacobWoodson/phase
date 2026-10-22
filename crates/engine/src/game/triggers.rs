@@ -13203,14 +13203,12 @@ fn count_scope_binding_diverges(scope: &crate::types::ability::CountScope) -> bo
 /// gap this classifier exists to catch.
 fn player_filter_binding_diverges(player: &PlayerFilter) -> bool {
     match player {
-        PlayerFilter::AllExcept { exclude } => player_filter_binding_diverges(exclude),
-        PlayerFilter::OpponentExcept { exclude } => player_filter_binding_diverges(exclude),
+        PlayerFilter::AllExcept { exclude, .. } => player_filter_binding_diverges(exclude),
         PlayerFilter::AnyOf { filters } => filters.iter().any(player_filter_binding_diverges),
         // CR 109.4 + CR 115.1 + CR 601.2a: the anchor lives on the resolving ability
         // (`targets` / `chosen_players` / `cast_occurrence`).
         PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ParentObjectTargetOwner
-        | PlayerFilter::ParentPlayerTarget
         | PlayerFilter::TargetPlayer
         | PlayerFilter::GrantingObjectCaster
         | PlayerFilter::ChosenPlayer { .. }
@@ -16061,9 +16059,6 @@ fn evaluate_trigger_condition_with_source(
             // has no single-player "whose turn" semantic. Fail-closed. A union
             // of player sets is likewise set-valued.
             | PlayerFilter::AllExcept { .. }
-            // CR 608.2c + CR 102.2: likewise set-valued ("opponents except an
-            // anchor") — no single-player "whose turn" semantic. Fail-closed.
-            | PlayerFilter::OpponentExcept { .. }
             | PlayerFilter::AnyOf { .. }
             | PlayerFilter::HighestSpeed
             | PlayerFilter::ZoneChangedThisWay
@@ -16076,7 +16071,6 @@ fn evaluate_trigger_condition_with_source(
             // target anchors are effect-resolution references, not turn-binding
             // predicates — no "whose turn" semantic. Fail-closed.
             | PlayerFilter::ParentObjectTargetOwner
-            | PlayerFilter::ParentPlayerTarget
             | PlayerFilter::TargetPlayer
             | PlayerFilter::GrantingObjectCaster
             | PlayerFilter::ChosenPlayer { .. }

@@ -112,25 +112,32 @@ pub(crate) fn players_for_filter(
             .filter(|player| !player.is_eliminated)
             .map(|player| player.id)
             .collect(),
-        // CR 608.2c + CR 109.4 + CR 608.2h: every non-eliminated player except
-        // the anchor's set. The ability-aware path: the `exclude` anchor is
-        // resolved recursively through this same function so an
-        // ability-target-dependent anchor (ParentObjectTargetController) reads
-        // `ability.targets` / last-known info, which the generic
-        // `matches_player_scope` predicate cannot. This is the authoritative
-        // resolver for `AllExcept` effect-iteration (see the player_scope driver
-        // routing in `effects::mod.rs`).
-        PlayerFilter::AllExcept { exclude }
+        // CR 608.2c + CR 109.4 + CR 608.2h: every non-eliminated player
+        // matching the base `relation` except the anchor's set. The
+        // ability-aware path: the `exclude` anchor is resolved recursively
+        // through this same function so an ability-target-dependent anchor
+        // (ParentObjectTargetController) reads `ability.targets` /
+        // last-known info, which the generic `matches_player_scope`
+        // predicate cannot. This is the authoritative resolver for
+        // `AllExcept` effect-iteration (see the player_scope driver routing
+        // in `effects::mod.rs`).
+        PlayerFilter::AllExcept { exclude, .. }
             if matches!(exclude.as_ref(), PlayerFilter::ParentObjectTargetOwner) =>
         {
             players_except_required_owner_anchor(state, ability)
         }
-        PlayerFilter::AllExcept { exclude } => {
+        PlayerFilter::AllExcept { exclude, relation } => {
             let excluded = players_for_filter(state, exclude, ability);
             state
                 .players
                 .iter()
-                .filter(|player| !player.is_eliminated && !excluded.contains(&player.id))
+                .filter(|player| {
+                    !player.is_eliminated
+                        && crate::game::players::matches_relation(
+                            state, player.id, controller, *relation,
+                        )
+                        && !excluded.contains(&player.id)
+                })
                 .map(|player| player.id)
                 .collect()
         }
@@ -263,39 +270,6 @@ pub(crate) fn players_for_filter(
         PlayerFilter::ParentObjectTargetOwner => parent_object_target_owner_player(state, ability)
             .into_iter()
             .collect(),
-        // CR 115.1 + CR 608.2c: the first player target of the resolving
-        // ability — the player-target sibling of the object-target anchors
-        // above. Eliminated players are filtered (CR 104.5).
-        PlayerFilter::ParentPlayerTarget => {
-            crate::game::ability_utils::parent_target_player(ability)
-                .filter(|pid| {
-                    state
-                        .players
-                        .iter()
-                        .any(|player| player.id == *pid && !player.is_eliminated)
-                })
-                .into_iter()
-                .collect()
-        }
-        // CR 102.2 + CR 102.3 + CR 608.2c + CR 109.4: opponents of the
-        // controller except the anchor's set. The opponents-base analogue
-        // of the `AllExcept` arm above: the anchor resolves recursively
-        // through this same ability-aware function so a
-        // target-dependent anchor reads `ability.targets`. Opponent-ness
-        // is team-aware via `players::is_opponent` (CR 102.3).
-        PlayerFilter::OpponentExcept { exclude } => {
-            let excluded = players_for_filter(state, exclude, ability);
-            state
-                .players
-                .iter()
-                .filter(|player| {
-                    !player.is_eliminated
-                        && crate::game::players::is_opponent(state, controller, player.id)
-                        && !excluded.contains(&player.id)
-                })
-                .map(|player| player.id)
-                .collect()
-        }
         // CR 201.5a: an unlatched caster names nobody.
         PlayerFilter::GrantingObjectCaster => Vec::new(),
         // CR 102.1 + CR 608.2c: the union of the members, each resolved by its
@@ -665,6 +639,7 @@ mod tests {
 
         let filter = PlayerFilter::AllExcept {
             exclude: Box::new(PlayerFilter::ParentObjectTargetController),
+            relation: PlayerRelation::All,
         };
         let ability = ResolvedAbility::new(
             Effect::StartYourEngines {
@@ -681,6 +656,49 @@ mod tests {
             selected,
             vec![PlayerId(0), PlayerId(2)],
             "AllExcept excludes the parent target's controller (P1)"
+        );
+    }
+
+    /// CR 102.2 + CR 102.3 + CR 115.1 + CR 608.2c: `AllExcept` with an
+    /// `Opponent` base and a `TargetPlayer` anchor (the "each of your other
+    /// opponents" shape) names the controller's opponents minus the declared
+    /// player target. With a 3-player free-for-all, controller P0, and player
+    /// target P1, the result is {P2}; the same anchor under the `All` base
+    /// keeps the controller ({P0, P2}).
+    #[test]
+    fn all_except_opponent_base_excludes_declared_player_target() {
+        let state = GameState::new(FormatConfig::standard(), 3, 0);
+        let ability = ResolvedAbility::new(
+            Effect::StartYourEngines {
+                player_scope: PlayerFilter::Controller,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(0),
+            PlayerId(0),
+        );
+
+        let opponents = PlayerFilter::AllExcept {
+            exclude: Box::new(PlayerFilter::TargetPlayer),
+            relation: PlayerRelation::Opponent,
+        };
+        let mut selected = players_for_filter(&state, &opponents, &ability);
+        selected.sort_by_key(|p| p.0);
+        assert_eq!(
+            selected,
+            vec![PlayerId(2)],
+            "opponents {{P1, P2}} minus declared target P1"
+        );
+
+        let everyone = PlayerFilter::AllExcept {
+            exclude: Box::new(PlayerFilter::TargetPlayer),
+            relation: PlayerRelation::All,
+        };
+        let mut selected = players_for_filter(&state, &everyone, &ability);
+        selected.sort_by_key(|p| p.0);
+        assert_eq!(
+            selected,
+            vec![PlayerId(0), PlayerId(2)],
+            "all players {{P0, P1, P2}} minus declared target P1"
         );
     }
 
@@ -821,6 +839,7 @@ mod tests {
 
         let filter = PlayerFilter::AllExcept {
             exclude: Box::new(PlayerFilter::ParentObjectTargetOwner),
+            relation: PlayerRelation::All,
         };
         let ability = ResolvedAbility::new(
             Effect::StartYourEngines {
@@ -848,6 +867,7 @@ mod tests {
         let state = GameState::new(FormatConfig::standard(), 3, 0);
         let filter = PlayerFilter::AllExcept {
             exclude: Box::new(PlayerFilter::ParentObjectTargetOwner),
+            relation: PlayerRelation::All,
         };
         let ability = ResolvedAbility::new(
             Effect::StartYourEngines {

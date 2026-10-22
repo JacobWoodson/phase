@@ -513,7 +513,8 @@ fn owner_subject_anchors_each_other_player_scope() {
     assert_eq!(
         lose.player_scope,
         Some(PlayerFilter::AllExcept {
-            exclude: Box::new(PlayerFilter::ParentObjectTargetOwner)
+            exclude: Box::new(PlayerFilter::ParentObjectTargetOwner),
+            relation: PlayerRelation::All,
         })
     );
 }
@@ -556,7 +557,8 @@ fn goat_post_extraction_body_anchors_each_other_player_scope() {
     assert_eq!(
         lose.player_scope,
         Some(PlayerFilter::AllExcept {
-            exclude: Box::new(PlayerFilter::ParentObjectTargetOwner)
+            exclude: Box::new(PlayerFilter::ParentObjectTargetOwner),
+            relation: PlayerRelation::All,
         })
     );
 }
@@ -34944,8 +34946,9 @@ fn strip_each_player_subject_accepts_of_your_other_opponents_with_target_anchor(
         strip_each_player_subject("each of your other opponents discards two cards", true);
     assert_eq!(
         scope,
-        Some(PlayerFilter::OpponentExcept {
-            exclude: Box::new(PlayerFilter::ParentPlayerTarget),
+        Some(PlayerFilter::AllExcept {
+            exclude: Box::new(PlayerFilter::TargetPlayer),
+            relation: PlayerRelation::Opponent,
         }),
         "gated arm must bind the target-anchored exclusion"
     );
@@ -34955,8 +34958,9 @@ fn strip_each_player_subject_accepts_of_your_other_opponents_with_target_anchor(
         strip_each_player_subject("each of your other foes sacrifices a creature", true);
     assert_eq!(
         scope,
-        Some(PlayerFilter::OpponentExcept {
-            exclude: Box::new(PlayerFilter::ParentPlayerTarget),
+        Some(PlayerFilter::AllExcept {
+            exclude: Box::new(PlayerFilter::TargetPlayer),
+            relation: PlayerRelation::Opponent,
         }),
     );
     // Without a targeted-player antecedent the anchor is undefined: decline.
@@ -68985,8 +68989,7 @@ fn player_filter_has_chosen_color(pf: &PlayerFilter) -> bool {
         PlayerFilter::OpponentDealtDamage { source, .. } => {
             source.as_deref().is_some_and(filter_has_chosen_color)
         }
-        PlayerFilter::AllExcept { exclude } => player_filter_has_chosen_color(exclude),
-        PlayerFilter::OpponentExcept { exclude } => player_filter_has_chosen_color(exclude),
+        PlayerFilter::AllExcept { exclude, .. } => player_filter_has_chosen_color(exclude),
         PlayerFilter::AnyOf { filters } => filters.iter().any(player_filter_has_chosen_color),
         PlayerFilter::ControlsCount { filter, .. } => filter_has_chosen_color(filter),
         PlayerFilter::TrackedSetPossessor { filter, .. } => filter_has_chosen_color(filter),
@@ -69011,7 +69014,6 @@ fn player_filter_has_chosen_color(pf: &PlayerFilter) -> bool {
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::PlayerAttribute { .. }
         | PlayerFilter::ChosenPlayer { .. }
-        | PlayerFilter::ParentPlayerTarget
         | PlayerFilter::ParentObjectTargetOwner
         | PlayerFilter::TargetPlayer
         | PlayerFilter::GrantingObjectCaster => false,
@@ -69119,6 +69121,7 @@ fn nested_chosen_color_is_seen_at_every_depth_of_the_filter_closure() {
         filter_has_chosen_color(&TargetFilter::PlayerMatching {
             player: Box::new(PlayerFilter::AllExcept {
                 exclude: Box::new(controls_stamped(FilterProp::IsChosenColor)),
+                relation: PlayerRelation::All,
             }),
         }),
         "axis 3: a prop stamped under PlayerMatching → AllExcept → ControlsCount must be seen"
@@ -69127,6 +69130,7 @@ fn nested_chosen_color_is_seen_at_every_depth_of_the_filter_closure() {
         !filter_has_chosen_color(&TargetFilter::PlayerMatching {
             player: Box::new(PlayerFilter::AllExcept {
                 exclude: Box::new(controls_stamped(FilterProp::Tapped)),
+                relation: PlayerRelation::All,
             }),
         }),
         "axis 3 negative: the same player-filter nesting without the prop must NOT be seen"
@@ -71261,16 +71265,18 @@ fn damage_each_player_scope_accepts_the_partitive_spelling() {
 fn damage_each_player_scope_accepts_of_your_other_opponents_with_target_anchor() {
     assert_eq!(
         parse_damage_each_player_scope("each of your other opponents", true),
-        Some(PlayerFilter::OpponentExcept {
-            exclude: Box::new(PlayerFilter::ParentPlayerTarget),
+        Some(PlayerFilter::AllExcept {
+            exclude: Box::new(PlayerFilter::TargetPlayer),
+            relation: PlayerRelation::Opponent,
         }),
         "gated arm must bind the target-anchored exclusion",
     );
     // The archaic "foe" synonym behaves identically.
     assert_eq!(
         parse_damage_each_player_scope("each of your other foes", true),
-        Some(PlayerFilter::OpponentExcept {
-            exclude: Box::new(PlayerFilter::ParentPlayerTarget),
+        Some(PlayerFilter::AllExcept {
+            exclude: Box::new(PlayerFilter::TargetPlayer),
+            relation: PlayerRelation::Opponent,
         }),
     );
     // Without a targeted-player antecedent the anchor is undefined: decline.

@@ -42,10 +42,10 @@ use crate::types::ability::{
     ConjureSource, ContinuousModification, ControllerRef, CountBinding, DamageChannel,
     DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope, ExiledSpellRider,
     FilterProp, GameRestriction, LibraryPosition, MultiTargetSpec, NameStickerSet, ObjectProperty,
-    ObjectScope, PermissionGrantee, PlayerFilter, PreventionAmount, PreventionScope,
-    PropertyAggregate, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope, RoundingMode,
-    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
-    TargetChoiceTiming, TargetFilter, TargetSelectionMode, TypeFilter, TypedFilter,
+    ObjectScope, PermissionGrantee, PlayerFilter, PlayerRelation, PreventionAmount,
+    PreventionScope, PropertyAggregate, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope,
+    RoundingMode, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
+    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetSelectionMode, TypeFilter, TypedFilter,
 };
 use crate::types::ability_visit::nodes_mut::visit_ability_def;
 use crate::types::ability_visit::DefinitionNodeMut;
@@ -6131,8 +6131,9 @@ pub(super) fn strip_each_player_subject(
                     )),
                     (opt(tag("s")), tag(" ")),
                 ),
-                |_| PlayerFilter::OpponentExcept {
-                    exclude: Box::new(PlayerFilter::ParentPlayerTarget),
+                |_| PlayerFilter::AllExcept {
+                    exclude: Box::new(PlayerFilter::TargetPlayer),
+                    relation: crate::types::ability::PlayerRelation::Opponent,
                 },
             )
             .parse(i)
@@ -6164,6 +6165,7 @@ pub(super) fn strip_each_player_subject(
                     ),
                     |anchor| PlayerFilter::AllExcept {
                         exclude: Box::new(anchor),
+                        relation: PlayerRelation::All,
                     },
                 ),
                 value(PlayerFilter::All, tag("each player ")),
@@ -7110,8 +7112,6 @@ fn strip_performed_action_this_way_clause(
         | PlayerFilter::PlayerAttribute { .. }
         | PlayerFilter::ChosenPlayer { .. }
         | PlayerFilter::ParentObjectTargetOwner
-        | PlayerFilter::ParentPlayerTarget
-        | PlayerFilter::OpponentExcept { .. }
         | PlayerFilter::GrantingObjectCaster
         | PlayerFilter::TargetPlayer
         | PlayerFilter::TrackedSetPossessor { .. } => return None,
@@ -7361,8 +7361,9 @@ fn parse_damage_each_player_scope_with_remainder(
         );
         if let Ok((rest, _)) = gated.parse(text) {
             return Some((
-                PlayerFilter::OpponentExcept {
-                    exclude: Box::new(PlayerFilter::ParentPlayerTarget),
+                PlayerFilter::AllExcept {
+                    exclude: Box::new(PlayerFilter::TargetPlayer),
+                    relation: crate::types::ability::PlayerRelation::Opponent,
                 },
                 rest,
             ));
@@ -14710,7 +14711,7 @@ mod tests {
     // Fractured Identity and the "each player other than ⟨ref⟩ does X" class.
     #[test]
     fn each_player_other_than_its_controller_strips_to_all_except_scope() {
-        use crate::types::ability::PlayerFilter;
+        use crate::types::ability::{PlayerFilter, PlayerRelation};
         let (scope, residual) = super::strip_each_player_subject(
             "each player other than its controller creates a token that's a copy of it.",
             false,
@@ -14719,6 +14720,7 @@ mod tests {
             scope,
             Some(PlayerFilter::AllExcept {
                 exclude: Box::new(PlayerFilter::ParentObjectTargetController),
+                relation: PlayerRelation::All,
             }),
         );
         assert_eq!(
