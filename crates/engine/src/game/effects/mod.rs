@@ -59504,6 +59504,7 @@ mod entry_observation_settlement_tests {
                     declared_targets_recorded: false,
                     local_target_pins: Vec::new(),
                     keyed_target_incarnations: Vec::new(),
+                    declared_player: None,
                 })));
             state
         };
