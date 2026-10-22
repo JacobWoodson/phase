@@ -77384,6 +77384,7 @@ fn compound_choice_c4_full_gamble_execute_shape() {
     assert_eq!(
         choose.effect.as_ref(),
         &Effect::Choose {
+            chooser: ControllerRef::You,
             choice_type: ChoiceType::opponent(),
             persist: false,
             selection: TargetSelectionMode::Chosen,
@@ -77419,6 +77420,7 @@ fn compound_choice_c7_oracle_coin_branch_reads_the_chosen_opponent() {
     assert_eq!(
         choose.effect.as_ref(),
         &Effect::Choose {
+            chooser: ControllerRef::You,
             choice_type: ChoiceType::opponent(),
             persist: false,
             selection: TargetSelectionMode::Chosen,
@@ -77506,6 +77508,7 @@ fn compound_choice_c9_coin_branch_after_two_choices_reads_index_one() {
     assert_eq!(
         player.effect.as_ref(),
         &Effect::Choose {
+            chooser: ControllerRef::You,
             choice_type: ChoiceType::player(),
             persist: false,
             selection: TargetSelectionMode::Chosen,
@@ -77586,6 +77589,7 @@ fn compound_choice_c5_nested_player_choice_increments_chain_counter() {
     assert_eq!(
         player.effect.as_ref(),
         &Effect::Choose {
+            chooser: ControllerRef::You,
             choice_type: ChoiceType::player(),
             persist: false,
             selection: TargetSelectionMode::Chosen
@@ -77612,6 +77616,7 @@ fn compound_choice_c6_existing_player_nouns_keep_their_parse() {
         assert_eq!(
             bare.effect.as_ref(),
             &Effect::Choose {
+                chooser: ControllerRef::You,
                 choice_type: expected.clone(),
                 persist: false,
                 selection: TargetSelectionMode::Chosen

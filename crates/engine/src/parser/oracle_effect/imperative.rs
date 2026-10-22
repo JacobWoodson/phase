@@ -15734,6 +15734,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             clause.sub_ability = Some(Box::new(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Choose {
+                    chooser: ControllerRef::You,
                     choice_type: player,
                     persist: false,
                     selection: TargetSelectionMode::Chosen,
