@@ -35461,6 +35461,7 @@ fn subgoyf_cda_power_is_bare_count_toughness_is_count_plus_one() {
                 scope: CountScope::All,
             },
             exclude: SubtypeExclusion::CreatureTypes,
+            restrict: None,
         },
     };
 

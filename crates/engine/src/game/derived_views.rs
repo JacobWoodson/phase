@@ -4052,10 +4052,7 @@ mod tests {
             TargetFilter::SpecificObject { id: clone },
             vec![ContinuousModification::CopyValues {
                 values: Box::new(values.clone()),
-                display_source: DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
+                display: Default::default(),
             }],
             None,
         );
@@ -4066,10 +4063,7 @@ mod tests {
             TargetFilter::SpecificObject { id: hidden_copy },
             vec![ContinuousModification::CopyValues {
                 values: Box::new(values),
-                display_source: DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
+                display: Default::default(),
             }],
             None,
         );
@@ -4142,10 +4136,7 @@ mod tests {
                 TargetFilter::SpecificObject { id: source },
                 vec![ContinuousModification::CopyValues {
                     values: Box::new(values),
-                    display_source: DisplaySource::Card,
-                    printed_ref: None,
-                    token_image_ref: None,
-                    token_art: None,
+                    display: Default::default(),
                 }],
                 None,
                 crate::types::game_state::TransientContinuousEffectBindings {
@@ -4243,10 +4234,7 @@ mod tests {
                 TargetFilter::SpecificObject { id: host },
                 vec![ContinuousModification::CopyValues {
                     values: Box::new(values),
-                    display_source: DisplaySource::Card,
-                    printed_ref: None,
-                    token_image_ref: None,
-                    token_art: None,
+                    display: Default::default(),
                 }],
                 None,
             )
@@ -4287,10 +4275,7 @@ mod tests {
             TargetFilter::SpecificObject { id: hidden },
             vec![ContinuousModification::CopyValues {
                 values: Box::new(values),
-                display_source: DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
+                display: Default::default(),
             }],
             None,
         );
@@ -5211,6 +5196,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: second,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activate the second ability");
 
@@ -8289,6 +8275,7 @@ mod tests {
             ability_cost: None,
             activation_cost_snapshot: None,
             unavailable_modes: Vec::new(),
+            activation_payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         };
 
         let trusted = serde_json::to_value(&state).expect("serialize trusted state");

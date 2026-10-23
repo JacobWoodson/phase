@@ -2102,6 +2102,7 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         | StaticCondition::SourceIsBlocked
         | StaticCondition::SourceEnteredThisTurn
         | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceExertedThisTurn
         | StaticCondition::SourceIsSaddled
         | StaticCondition::SourceIsEquipped
         | StaticCondition::SourceIsEnchanted
@@ -3052,6 +3053,10 @@ fn legacy_replacement_definition(rd: &ReplacementDefinition) -> bool {
 fn legacy_trigger_definition(td: &TriggerDefinition) -> bool {
     td.execute.as_deref().is_some_and(legacy_definition)
         || td.condition.as_ref().is_some_and(legacy_trigger_condition)
+        || td
+            .attack_cost_condition
+            .as_ref()
+            .is_some_and(legacy_static_condition)
         || td.valid_card.as_ref().is_some_and(legacy_target_filter)
         || td.valid_source.as_ref().is_some_and(legacy_target_filter)
 }
@@ -3754,6 +3759,7 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::RegisterBending { .. }
         | Effect::Cleanup { .. }
         | Effect::Learn
+        | Effect::ModifyAnnouncedX { .. }
         | Effect::NoteManaSpent
         | Effect::Forage
         | Effect::CompletePlayerAction { .. }
@@ -5125,6 +5131,16 @@ fn rw_effect(
             p.writes_external_counter_census.merge(Census::Any);
             p.merge(rw_quantity_expr(amount));
             (p, Some(WriteScope::External))
+        }
+        // CR 107.3 + CR 603.3b: rewrites the event spell's X. The read of the
+        // current X is this write's own modify-input (read-modify-write), so it is
+        // not profiled as an event-live read, and identical doublings commute
+        // (x·2·2). No StateKind models a stack object's X, so the fail-closed
+        // `Other` kind.
+        Effect::ModifyAnnouncedX { modification: _ } => {
+            let mut p = RwProfile::empty();
+            place_object_write(&mut p, StateKind::Other, WriteScope::EventObject);
+            (p, Some(WriteScope::EventObject))
         }
         Effect::Double {
             target,
@@ -7171,6 +7187,7 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
         StaticCondition::HasCounters { .. } => reads_src_of(StateKind::ObjectCounters),
         StaticCondition::IsTapped { scope, .. } => read_object_scope(scope, StateKind::TapState),
         StaticCondition::SourceIsTapped => reads_src_of(StateKind::TapState),
+        StaticCondition::SourceExertedThisTurn => RwProfile::conservative(),
         StaticCondition::OpponentPoisonAtLeast { count: _ } => {
             reads_player_of(StateKind::PlayerLife)
         }
@@ -7824,6 +7841,7 @@ mod tests {
             QuantityRef::DistinctSubtypes {
                 source: journal.clone(),
                 exclude: crate::types::ability::SubtypeExclusion::None,
+                restrict: None,
             },
             QuantityRef::DistinctColorsAmong {
                 source: journal.clone(),
