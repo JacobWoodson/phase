@@ -24010,8 +24010,29 @@ fn resolve_chain_body(
         // it last — so downstream fires exactly once after the batch
         // completes. The generic prepend below would run it a second time,
         // ahead of the batch remainder — skip it the same way PayCost does.
+        //
+        // CR 608.2c + CR 616.1e (Matt R14-MED): the same holds for every
+        // damage resolver whose EVERY park path stashes remaining work plus
+        // the parent's `sub_ability` — `DealDamage` (single/multi-target and
+        // EachTarget loops via `stash_remaining_damage_chain` /
+        // `stash_remaining_each_source_damage`), `DamageAll`, `DamageEachPlayer`
+        // and `EachDealsDamageEqualToPower` (same helpers), and `Fight` (whose
+        // three park arms each append the sub). Without the skip, a parked
+        // node with a sub is preserved TWICE — once by its own stash and once
+        // by the generic prepend — so a nested same-batch prompt re-drives its
+        // event forever (the resumed tail re-parks the already-answered
+        // member). `ApplyPostReplacementDamage` parks stash nothing and keep
+        // the generic path.
         if continuation_installed_by_this_effect
-            && matches!(ability.effect, Effect::EachSourceDealsDamage { .. })
+            && matches!(
+                ability.effect,
+                Effect::EachSourceDealsDamage { .. }
+                    | Effect::DealDamage { .. }
+                    | Effect::DamageAll { .. }
+                    | Effect::DamageEachPlayer { .. }
+                    | Effect::EachDealsDamageEqualToPower { .. }
+                    | Effect::Fight { .. }
+            )
         {
             return Ok(progress);
         }

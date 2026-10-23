@@ -4128,6 +4128,13 @@ fn aggregate_rider_choice_parks_later_groups_behind_it() {
 /// application, so Squire triggers once for 3 plus 1 from Scales = 4
 /// counters. Pre-fix the gate fragments into three (P0,1) events and Squire
 /// triggers three times for 6 counters.
+///
+/// Matt R14-MED: the cast Squire's live ETB shield now competes with the Ring
+/// protection per event (CR 616.1 — two applicable preventions), so each of
+/// the three 1s parks an ordering choice where the old eager gate claimed
+/// protection silently. The test answers protection each time — the pre-fix
+/// outcome — and the aggregation pin below is unchanged: the batch boundary
+/// still publishes ONE (P0,3), not three (P0,1)s.
 #[test]
 fn protection_prevention_aggregates_at_batch_boundary() {
     let mut scenario = GameScenario::new();
@@ -4169,6 +4176,46 @@ fn protection_prevention_aggregates_at_batch_boundary() {
     let mut log: Vec<GameEvent> = Vec::new();
     let outcome = runner.cast(charm).modes(&[2]).resolve();
     log.extend(outcome.events().iter().cloned());
+    // Matt R14-MED: each of the three 1s pauses for the Ring-protection vs
+    // Squire-shield CR 616.1 order. Answer protection every time (the pre-fix
+    // outcome); exactly three prompts — no more, no fewer.
+    let mut answers = 0;
+    while let WaitingFor::ReplacementChoice {
+        candidate_count,
+        candidates,
+        ..
+    } = runner.state().waiting_for.clone()
+    {
+        assert_eq!(
+            candidate_count, 2,
+            "each event must offer Ring protection + Squire shield, got {candidates:?}"
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.source_name.contains("Selfless Squire")),
+            "one candidate must be the Squire's ETB shield, got {candidates:?}"
+        );
+        let index = candidates
+            .iter()
+            .position(|c| {
+                c.description
+                    .starts_with("Prevent damage with protection from ")
+            })
+            .unwrap_or_else(|| {
+                panic!("one candidate must be the Ring protection, got {candidates:?}")
+            });
+        let result = runner
+            .act(GameAction::ChooseReplacement { index })
+            .expect("the ordering choice must be answerable");
+        log.extend(result.events);
+        answers += 1;
+        assert!(
+            answers <= 3,
+            "three damage events must park at most three prompts"
+        );
+    }
+    assert_eq!(answers, 3, "each of the three 1s must park its order");
     runner.advance_until_stack_empty();
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),

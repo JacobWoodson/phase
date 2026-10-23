@@ -1577,6 +1577,29 @@ fn do_eliminate(
             }
         }
         record.paused_entry = paused - pruned_before_paused;
+        // CR 800.4a + CR 510.2 + CR 616.1 (Matt R14-HIGH): pair-pruning
+        // earlier recipients shifted `paused_entry`; rebind the surviving
+        // prompt's combat-pause stamp by the same shift so its answer still
+        // settles the paused slot. Only the paused member's own continuation
+        // moves — the stamp must name the pre-shift index AND the member's
+        // source (checked against the retained entry). A nested prompt is
+        // unstamped and a stale stamp never matches, so neither moves.
+        if pruned_before_paused > 0 {
+            if let Some(slot) = state
+                .pending_replacement
+                .as_mut()
+                .and_then(|pending| pending.combat_pause_slot.as_mut())
+            {
+                if slot.paused_entry == paused
+                    && record
+                        .entries
+                        .get(record.paused_entry)
+                        .is_some_and(|entry| entry.ctx.source_id == slot.source)
+                {
+                    slot.paused_entry = record.paused_entry;
+                }
+            }
+        }
     }
 
     // CR 800.4a: A coupled ETB spell-resolution context can outlive its

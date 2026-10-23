@@ -31,11 +31,15 @@ use engine::types::game_state::{
     CombatPauseSlot, PersistedGameState, ReplacementCandidateSummary, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::proposed_event::ProposedEvent;
 use engine::types::zones::Zone;
+
+/// Third seat for the three-player elimination-rebind regression. The
+/// scenario module only names P0/P1.
+const P2: PlayerId = PlayerId(2);
 
 /// Verbatim Palisade Giant (`client/public/card-data.json`).
 const PALISADE_GIANT_TEXT: &str =
@@ -529,4 +533,335 @@ fn redirected_second_park_survives_save_load() {
 
     answer_from_second_park(&mut fixture, &restored_candidates);
     assert_final_tallies(&fixture, p0_life_before, p1_life_before);
+}
+
+// ---------------------------------------------------------------------------
+// Matt R14-HIGH: a concession that pair-prunes an earlier batch member must
+// rebind the surviving prompt's stamp to the shifted paused index.
+// ---------------------------------------------------------------------------
+
+/// Palisade Giant carrying Akroma-pattern multi-quality protection
+/// ("protection from black and from red"). The redirect still comes from the
+/// Giant line; the protection line adds the two post-redirect prevention
+/// qualities whose ordering pauses the member.
+const PALISADE_GIANT_PROTECTED_TEXT: &str = "All damage that would be dealt to you and other permanents you control is dealt to this creature instead.\nThis creature has protection from black and from red.";
+
+struct EliminationFixture {
+    runner: GameRunner,
+    e0: ObjectId,
+    e1: ObjectId,
+    e2: ObjectId,
+    giant: ObjectId,
+}
+
+fn stock_libraries_3p(scenario: &mut GameScenario) {
+    scenario.with_library_top(
+        P0,
+        &["F0a", "F0b", "F0c", "F0d", "F0e", "F0f", "F0g", "F0h"],
+    );
+    scenario.with_library_top(
+        P1,
+        &["F1a", "F1b", "F1c", "F1d", "F1e", "F1f", "F1g", "F1h"],
+    );
+    scenario.with_library_top(
+        P2,
+        &["F2a", "F2b", "F2c", "F2d", "F2e", "F2f", "F2g", "F2h"],
+    );
+}
+
+/// Three seats: P0 attacks with an earlier 1/1 into P1 (E0), a black-red 2/2
+/// into P2 (E1), and a green 3/3 lifelinker into P2 (E2). P2 holds one
+/// protected Giant. No casts are needed.
+fn elimination_setup() -> EliminationFixture {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    stock_libraries_3p(&mut scenario);
+    let e0 = scenario.add_creature(P0, "Mite", 1, 1).id();
+    let e1 = scenario
+        .add_creature(P0, "Cackler", 2, 2)
+        .with_color(vec![ManaColor::Black, ManaColor::Red])
+        .id();
+    let e2 = scenario
+        .add_creature(P0, "Priest", 3, 3)
+        .with_color(vec![ManaColor::Green])
+        .lifelink()
+        .id();
+    let giant = scenario
+        .add_creature_from_oracle(P2, "Palisade Giant", 3, 4, PALISADE_GIANT_PROTECTED_TEXT)
+        .id();
+    let runner = scenario.build();
+    EliminationFixture {
+        runner,
+        e0,
+        e1,
+        e2,
+        giant,
+    }
+}
+
+/// Declare E0 into P1 and E1/E2 into P2 with no blockers, then drive to the
+/// protection-ordering pause on E1's redirected event.
+fn drive_to_protection_pause(fixture: &mut EliminationFixture) -> Vec<ReplacementCandidateSummary> {
+    let EliminationFixture {
+        runner, e0, e1, e2, ..
+    } = fixture;
+    let (e0, e1, e2) = (*e0, *e1, *e2);
+    for _ in 0..80 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::DeclareAttackers { player, .. } if player == P0 => {
+                runner
+                    .declare_attackers(&[
+                        (e0, AttackTarget::Player(P1)),
+                        (e1, AttackTarget::Player(P2)),
+                        (e2, AttackTarget::Player(P2)),
+                    ])
+                    .expect("declaring all three attackers must succeed");
+            }
+            WaitingFor::DeclareAttackers { .. } => {
+                runner
+                    .declare_attackers(&[])
+                    .expect("declaring no attackers must succeed");
+            }
+            WaitingFor::DeclareBlockers { .. } => {
+                runner
+                    .declare_blockers(&[])
+                    .expect("declaring no blockers must succeed");
+            }
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("passing priority must succeed");
+            }
+            WaitingFor::ReplacementChoice { candidates, .. } => return candidates,
+            other => panic!("unexpected prompt while driving combat: {other:?}"),
+        }
+    }
+    panic!("never reached the protection-ordering pause");
+}
+
+fn pending_slot(runner: &GameRunner) -> Option<CombatPauseSlot> {
+    runner
+        .state()
+        .pending_replacement
+        .as_ref()
+        .expect("a replacement record must be parked at an ordering prompt")
+        .combat_pause_slot
+}
+
+/// Drive to E1's pause and concede P1 (who neither owns nor must answer the
+/// prompt). Returns the live prompt's candidates after the prune.
+fn drive_to_pause_and_concede(
+    fixture: &mut EliminationFixture,
+) -> Vec<ReplacementCandidateSummary> {
+    let giant = fixture.giant;
+    let e1 = fixture.e1;
+    let candidates = drive_to_protection_pause(fixture);
+    let runner = &mut fixture.runner;
+
+    // The pause: E1's event silently redirected, then parked on the two
+    // protection qualities. E0 decided inline ahead of it.
+    assert_eq!(
+        parked_damage(runner),
+        (e1, TargetRef::Object(giant)),
+        "the pause must name E1's event redirected to the Giant"
+    );
+    assert_eq!(
+        candidates.len(),
+        2,
+        "the pause must offer exactly the two protection qualities, got {candidates:?}"
+    );
+    assert_eq!(
+        pending_slot(runner),
+        Some(CombatPauseSlot {
+            paused_entry: 1,
+            source: e1,
+        }),
+        "E1's prompt must be stamped with slot 1"
+    );
+    let record = runner
+        .state()
+        .pending_combat_damage
+        .as_ref()
+        .expect("the combat batch must be parked at the pause");
+    assert_eq!(record.paused_entry, 1, "E1 must be the paused entry");
+    assert_eq!(
+        record.decided.len(),
+        1,
+        "E0 must be decided inline ahead of the pause"
+    );
+
+    // P1 concedes without owning or answering the prompt. Pair-pruning E0
+    // shifts the parked index 1 -> 0; the stamp must rebind with it.
+    runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("concede is always legal, even at another player's prompt");
+    assert!(
+        runner.state().players[P1.0 as usize].is_eliminated,
+        "reach guard: P1 must actually leave the game"
+    );
+    let record = runner
+        .state()
+        .pending_combat_damage
+        .as_ref()
+        .expect("the batch must stay parked across the concession");
+    assert_eq!(
+        record.paused_entry, 0,
+        "pruning E0 must shift the paused index 1 -> 0"
+    );
+    assert!(
+        record.decided.is_empty(),
+        "E0's decided slot must be pair-pruned with its entry"
+    );
+    assert_eq!(
+        pending_slot(runner),
+        Some(CombatPauseSlot {
+            paused_entry: 0,
+            source: e1,
+        }),
+        "the surviving prompt's stamp must rebind 1 -> 0 at the elimination boundary"
+    );
+    assert_eq!(
+        parked_damage(runner),
+        (e1, TargetRef::Object(giant)),
+        "the surviving prompt must still name E1's redirected event"
+    );
+    match runner.state().waiting_for.clone() {
+        WaitingFor::ReplacementChoice { candidates, .. } => candidates,
+        other => panic!("P2's prompt must survive P1's concession, got {other:?}"),
+    }
+}
+
+/// Answer the surviving protection pause (either quality prevents E1's 2/2
+/// fully), finish combat, and pin the alignment tallies.
+fn answer_and_finish_elimination(
+    fixture: &mut EliminationFixture,
+    p0_life_before: i32,
+    p2_life_before: i32,
+) {
+    // Either protection quality prevents E1's black-red 2 fully. The
+    // rebound stamp must settle slot 0 (without the rebind the resume trips
+    // its paused-slot assert here). E2's event runs inline to completion —
+    // nothing re-pauses — so the batch is consumed by the answer.
+    answer(&mut fixture.runner, 0);
+    assert!(
+        fixture.runner.state().pending_combat_damage.is_none(),
+        "E2 runs inline after the stash, consuming the batch"
+    );
+
+    for _ in 0..80 {
+        if matches!(
+            fixture.runner.state().phase,
+            Phase::EndCombat | Phase::PostCombatMain
+        ) {
+            break;
+        }
+        match fixture.runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => {
+                fixture
+                    .runner
+                    .act(GameAction::PassPriority)
+                    .expect("passing priority must succeed");
+            }
+            other => panic!("unexpected prompt after the last answer: {other:?}"),
+        }
+    }
+    assert!(
+        matches!(
+            fixture.runner.state().phase,
+            Phase::EndCombat | Phase::PostCombatMain
+        ),
+        "combat must complete, stuck at {:?} / {:?}",
+        fixture.runner.state().phase,
+        fixture.runner.state().waiting_for
+    );
+    assert!(
+        fixture.runner.state().pending_replacement.is_none(),
+        "no replacement record may survive completion"
+    );
+
+    let runner = &fixture.runner;
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        p0_life_before + 3,
+        "P0 must gain exactly E2's surviving 3 via batch lifelink"
+    );
+    assert_eq!(
+        runner.state().players[P2.0 as usize].life,
+        p2_life_before,
+        "P2 must lose no life: E1 prevented, E2 redirected"
+    );
+    assert_eq!(
+        runner.state().objects[&fixture.giant].damage_marked,
+        3,
+        "the Giant must carry E2's surviving 3"
+    );
+    assert!(
+        runner.state().players[P1.0 as usize].is_eliminated,
+        "P1 must stay eliminated"
+    );
+}
+
+#[test]
+fn concede_before_paused_entry_rebinds_the_stamp_and_keeps_the_batch_aligned() {
+    let mut fixture = elimination_setup();
+    let p0_life_before = fixture.runner.state().players[P0.0 as usize].life;
+    let p2_life_before = fixture.runner.state().players[P2.0 as usize].life;
+    let _candidates = drive_to_pause_and_concede(&mut fixture);
+    answer_and_finish_elimination(&mut fixture, p0_life_before, p2_life_before);
+}
+
+/// The same run save/loaded THROUGH the post-concession pause — the shifted
+/// record, the rebound stamp, and the live prompt must all survive the
+/// authoritative round trip, and the restored run must complete identically.
+#[test]
+fn concede_shifted_pause_survives_save_load() {
+    let mut fixture = elimination_setup();
+    let p0_life_before = fixture.runner.state().players[P0.0 as usize].life;
+    let p2_life_before = fixture.runner.state().players[P2.0 as usize].life;
+    let candidates = drive_to_pause_and_concede(&mut fixture);
+
+    let saved = serde_json::to_string(&PersistedGameState::capture(fixture.runner.state().clone()))
+        .expect("the authoritative paused state serializes");
+    let restored: PersistedGameState =
+        serde_json::from_str(&saved).expect("the authoritative paused state deserializes");
+    fixture.runner = GameRunner::from_state(
+        restored
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract"),
+    );
+
+    let restored_candidates = match fixture.runner.state().waiting_for.clone() {
+        WaitingFor::ReplacementChoice { candidates, .. } => candidates,
+        other => panic!("the pause must survive restore, got {other:?}"),
+    };
+    assert_eq!(
+        restored_candidates.len(),
+        candidates.len(),
+        "the restored prompt must offer the same candidates"
+    );
+    assert_eq!(
+        parked_damage(&fixture.runner),
+        (fixture.e1, TargetRef::Object(fixture.giant)),
+        "the restored park must still name the redirected event"
+    );
+    assert_eq!(
+        pending_slot(&fixture.runner),
+        Some(CombatPauseSlot {
+            paused_entry: 0,
+            source: fixture.e1,
+        }),
+        "the rebound stamp must survive restore"
+    );
+    let record = fixture
+        .runner
+        .state()
+        .pending_combat_damage
+        .as_ref()
+        .expect("the parked combat record must survive restore");
+    assert_eq!(
+        record.paused_entry, 0,
+        "the shifted paused index must survive restore"
+    );
+
+    answer_and_finish_elimination(&mut fixture, p0_life_before, p2_life_before);
 }

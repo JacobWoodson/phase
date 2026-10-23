@@ -497,14 +497,13 @@ pub(crate) enum DamageResult {
 /// *before* the CR 614/615 replacement pipeline.
 ///
 /// Classifies the damage without emitting: `Proposed` proceeds into the
-/// replacement pipeline, `Protected` reports prevention by protection (the
-/// caller emits or aggregates it — the gate is shared-read), and `Gated`
-/// drops fully gated damage silently. Shared by the single-source
-/// `apply_damage_to_target` path and the combat-damage batch path so both run
-/// identical pre-pipeline gating.
+/// replacement pipeline (protections included — the pipeline publishes one
+/// virtual candidate per applicable quality and lets materiality choose or
+/// auto-apply, Matt R14-MED), and `Gated` drops fully gated damage silently.
+/// Shared by the single-source `apply_damage_to_target` path and the
+/// combat-damage batch path so both run identical pre-pipeline gating.
 pub(crate) enum DamageGateOutcome {
     Proposed(ProposedEvent),
-    Protected(u32, MatchedProtectionQuality),
     Gated,
 }
 
@@ -542,44 +541,20 @@ pub(crate) fn pre_replacement_damage_gate(
         }
     }
 
-    // CR 616.1 (Matt R10-F1, R11-F1): overlapping protections (two-plus
-    // applicable qualities) route through the replacement-candidate/choice
-    // authority in combat exactly as out of it. A CR 616.1 ordering choice is
-    // not a priority window, so CR 510.2 simultaneity is not violated by
-    // pausing the batch: the combat driver parks its remaining events, prompts
-    // the affected player, and resumes through the same choice authority as
-    // the noncombat path. A single applicable quality claims directly
-    // everywhere: no choice exists.
-    // CR 702.16b + CR 702.16e: Protection prevents damage from sources with the matching quality.
-    if let TargetRef::Object(target_obj_id) = target {
-        if let (Some(target_obj), Some(source_obj)) = (
-            state.objects.get(target_obj_id),
-            state.objects.get(&ctx.source_id),
-        ) {
-            let applicable = keywords::all_preventing_protection_qualities(target_obj, source_obj);
-            if let Some(first) = applicable.first().copied() {
-                if applicable.len() == 1 {
-                    return DamageGateOutcome::Protected(amount, first);
-                }
-            }
-        }
-    }
-
-    // CR 702.16e + CR 615.1: "All damage that would be dealt to [a player with
-    // protection from the damage source] is prevented." Mirror the object-
-    // protection gate above for player targets.
-    if let TargetRef::Player(player_id) = target {
-        let applicable = crate::game::static_abilities::all_preventing_player_protection_qualities(
-            state,
-            *player_id,
-            Some(ctx.source_id),
-        );
-        if let Some(first) = applicable.first().copied() {
-            if applicable.len() == 1 {
-                return DamageGateOutcome::Protected(amount, first);
-            }
-        }
-    }
+    // CR 616.1 (Matt R10-F1, R11-F1, R14-MED): applicable protections —
+    // one quality or many — route through the replacement-candidate/choice
+    // authority in combat exactly as out of it; the gate never claims a
+    // protection directly. A lone quality used to return `Protected` here,
+    // which silently defeated a competing amount-changer (Furnace of Rath
+    // never got its CR 616.1 order against a single protection). Now the
+    // event always proposes and the pipeline publishes one virtual
+    // candidate per applicable quality: a lone quality with no competitors
+    // auto-applies through the same prevention emission, while a crowded
+    // field parks an ordering choice. A CR 616.1 ordering choice is not a
+    // priority window, so CR 510.2 simultaneity is not violated by pausing
+    // the batch: the combat driver parks its remaining events, prompts the
+    // affected player, and resumes through the same choice authority as
+    // the noncombat path.
 
     DamageGateOutcome::Proposed(ProposedEvent::Damage {
         source_id: ctx.source_id,
@@ -631,17 +606,6 @@ pub(crate) fn apply_damage_to_target(
 ) -> Result<DamageResult, EffectError> {
     let proposed = match pre_replacement_damage_gate(state, ctx, &target, amount, is_combat) {
         DamageGateOutcome::Proposed(proposed) => proposed,
-        DamageGateOutcome::Protected(prevented, quality) => {
-            emit_or_accumulate_protection_prevention(
-                state,
-                ctx.source_id,
-                &target,
-                prevented,
-                quality,
-                events,
-            );
-            return Ok(DamageResult::Applied(0));
-        }
         DamageGateOutcome::Gated => return Ok(DamageResult::Applied(0)),
     };
 
@@ -1948,9 +1912,10 @@ fn resolve_each_target_power_damage(
         .collect();
 
     // --- Phase A: Collect proposed damage events (no application yet). ---
-    // CR 120.8 / CR 702.16: per-source pre-replacement gate. Fully gated sources
-    // (0 damage, protection, prohibition) contribute nothing; protection
-    // prevention emits or aggregates through the shared helper.
+    // CR 120.8: per-source pre-replacement gate. Fully gated sources
+    // (0 damage, prohibition) contribute nothing; protections propose into
+    // the Phase B pipeline, which publishes one virtual candidate per
+    // applicable quality (Matt R14-MED).
     let mut entries: Vec<(usize, &DamageContext)> = Vec::with_capacity(batch.len());
     let mut proposed_events: Vec<ProposedEvent> = Vec::with_capacity(batch.len());
     for (idx, (_, ctx, amt)) in batch.iter().enumerate() {
@@ -1958,16 +1923,6 @@ fn resolve_each_target_power_damage(
             DamageGateOutcome::Proposed(proposed) => {
                 entries.push((idx, ctx));
                 proposed_events.push(proposed);
-            }
-            DamageGateOutcome::Protected(prevented, quality) => {
-                emit_or_accumulate_protection_prevention(
-                    state,
-                    ctx.source_id,
-                    &recipient,
-                    prevented,
-                    quality,
-                    events,
-                );
             }
             DamageGateOutcome::Gated => {}
         }
@@ -3451,21 +3406,11 @@ fn resolve_each_source_deals_damage_inner(
     }
     state.combat_prevention_tally = Some(HashMap::new());
     for (i, (_src, ctx, target, dmg)) in entries.iter().enumerate() {
-        // CR 702.16e + CR 615.13 (Matt F4): protection prevention joins the
-        // live batch tally here (the helper aggregates); other gates skip.
+        // CR 702.16e + CR 615.13 (Matt F4, R14-MED): protections propose
+        // into the per-event pipeline below, whose applier joins the live
+        // batch tally through the shared helper; other gates skip.
         let proposed = match pre_replacement_damage_gate(state, ctx, target, *dmg, false) {
             DamageGateOutcome::Proposed(proposed) => proposed,
-            DamageGateOutcome::Protected(prevented, quality) => {
-                emit_or_accumulate_protection_prevention(
-                    state,
-                    ctx.source_id,
-                    target,
-                    prevented,
-                    quality,
-                    events,
-                );
-                continue;
-            }
             DamageGateOutcome::Gated => continue,
         };
         match replacement::replace_event(state, proposed, events) {
@@ -5657,7 +5602,11 @@ mod tests {
             "a two-quality combat overlap must propose into the pipeline"
         );
 
-        // Object scope, one quality: claim in combat (no choice exists).
+        // Object scope, one quality: propose in combat (Matt R14-MED). The
+        // pipeline publishes the lone quality as a virtual candidate and
+        // auto-applies it when nothing competes; the gate never claims it
+        // directly, so a competing amount-changer still gets its CR 616.1
+        // order.
         let (mut state, ctx, _) = pairing(vec![ManaColor::Red]);
         let guarded = create_object(
             &mut state,
@@ -5675,9 +5624,9 @@ mod tests {
         assert!(
             matches!(
                 pre_replacement_damage_gate(&state, &ctx, &TargetRef::Object(guarded), 3, true,),
-                DamageGateOutcome::Protected(3, _)
+                DamageGateOutcome::Proposed(_)
             ),
-            "a single quality claims directly in combat"
+            "a single quality proposes into the pipeline in combat"
         );
 
         // Player scope, two qualities: propose in combat. Grants are
@@ -5720,8 +5669,11 @@ mod tests {
             "a two-quality player-scope combat overlap must propose into the pipeline"
         );
 
-        // Player scope, one quality: claim in combat (proves the statics are
-        // VISIBLE — an invisible grant would propose-via-empty instead).
+        // Player scope, one quality: propose in combat (Matt R14-MED). The
+        // pipeline publishes the lone quality as a virtual candidate and
+        // auto-applies it when nothing competes; the gate never claims it
+        // directly, so a competing amount-changer still gets its CR 616.1
+        // order.
         let (mut state, ctx, _) = pairing(vec![ManaColor::Red]);
         let grantor = create_object(
             &mut state,
@@ -5746,9 +5698,9 @@ mod tests {
         assert!(
             matches!(
                 pre_replacement_damage_gate(&state, &ctx, &TargetRef::Player(PlayerId(1)), 3, true,),
-                DamageGateOutcome::Protected(3, _)
+                DamageGateOutcome::Proposed(_)
             ),
-            "a single player-scope quality claims directly in combat"
+            "a single player-scope quality proposes into the pipeline in combat"
         );
     }
 

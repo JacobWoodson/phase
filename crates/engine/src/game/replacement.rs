@@ -8750,15 +8750,16 @@ pub fn find_applicable_replacements(
         _ => {}
     }
 
-    // CR 616.1 (Matt R10-F1): overlapping protections are virtual
+    // CR 616.1 (Matt R10-F1, R14-MED): applicable protections are virtual
     // candidates — one rid per applicable quality — so the affected player
-    // orders them against each other (and any shields) instead of the gate's
-    // scan order deciding silently. A separate `if let` (like umbra armor
-    // below), independent of the shield-counter match above, so a damage
-    // event with both exposes every candidate. Drawn iff two-plus apply
-    // (the same predicate the gate uses to propose): single-quality events
-    // never reach here through a gated path. Amount-gated, so a
-    // fully-prevented event draws nothing on re-derive.
+    // orders them against each other, any shields, and any amount-changers
+    // instead of the gate's scan order deciding silently. A separate `if let`
+    // (like umbra armor below), independent of the shield-counter match
+    // above, so a damage event with both exposes every candidate. Drawn
+    // whenever at least one quality applies: a lone quality with no
+    // competitors auto-applies through the same prevention emission the
+    // old eager gate used, while a crowded field parks an ordering choice.
+    // Amount-gated, so a fully-prevented event draws nothing on re-derive.
     if let ProposedEvent::Damage {
         target,
         amount,
@@ -8786,7 +8787,7 @@ pub fn find_applicable_replacements(
                     )
                 }
             };
-            if applicable.len() >= 2 {
+            if !applicable.is_empty() {
                 for quality in applicable {
                     let rid = protection_replacement_id(quality);
                     if !event.already_applied(&rid) {

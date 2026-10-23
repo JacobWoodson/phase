@@ -1,8 +1,7 @@
 use crate::game::combat::{AttackTarget, CombatState, DamageAssignment, DamageTarget, TrampleKind};
 use crate::game::effects::deal_damage::{
-    apply_damage_after_replacement, emit_or_accumulate_protection_prevention,
-    pre_replacement_damage_gate, tally_entries_for_record, tally_map_from_record_entries,
-    DamageContext, DamageGateOutcome, DamageResult,
+    apply_damage_after_replacement, pre_replacement_damage_gate, tally_entries_for_record,
+    tally_map_from_record_entries, DamageContext, DamageGateOutcome, DamageResult,
 };
 use crate::game::effects::life::ReplacementDeferred;
 use crate::game::game_object::GameObject;
@@ -2106,9 +2105,10 @@ pub(crate) fn apply_combat_damage(
             DamageTarget::Player(id) => TargetRef::Player(*id),
         };
 
-        // CR 702.16e + CR 615.13 (Matt F4, aggregated by R7-F1): protection
-        // prevention aggregates through the shared helper into the tally
-        // window opened above, publishing once per recipient at the boundary.
+        // CR 702.16e + CR 615.13 (Matt F4, aggregated by R7-F1, R14-MED):
+        // protections propose into the Phase B pipeline, whose applier
+        // aggregates through the shared helper into the tally window opened
+        // above, publishing once per recipient at the boundary.
         match pre_replacement_damage_gate(state, &ctx, &target_ref, assignment.amount, true) {
             DamageGateOutcome::Proposed(proposed) => {
                 entries.push(BatchEntry {
@@ -2118,16 +2118,6 @@ pub(crate) fn apply_combat_damage(
                     lifelink_controller,
                 });
                 proposed_events.push(proposed);
-            }
-            DamageGateOutcome::Protected(prevented, quality) => {
-                emit_or_accumulate_protection_prevention(
-                    state,
-                    ctx.source_id,
-                    &target_ref,
-                    prevented,
-                    quality,
-                    &mut events,
-                );
             }
             DamageGateOutcome::Gated => {}
         }
@@ -8307,21 +8297,23 @@ mod tests {
         );
     }
 
-    /// R3 with a non-empty Phase A: a singly-protected hit claims in Phase A
-    /// (tallied, gated out of the entries) while an overlap pauses in Phase B.
-    /// The installs merge the parked Phase-A prefix with the answer's
+    /// R3 with a non-empty Phase-B prefix: a singly-protected hit is an
+    /// entry now (Matt R14-MED retired the Phase-A eager claim), decided
+    /// inline during the Phase-B drain, while an overlap pauses in Phase B.
+    /// The installs merge the parked Phase-B prefix with the answer's
     /// accumulation, so BOTH preventions publish once with correct
-    /// per-(shield, recipient) amounts.
+    /// per-(shield, recipient) amounts. The Phase-A leg is empty: the gate
+    /// only proposes or skips, never tallies.
     ///
-    /// REVERT PROBES: install only Phase B → the singly-protected aggregate
-    /// vanishes; publish per leg → one of them duplicates.
+    /// REVERT PROBES: install only the answer leg → the singly-protected
+    /// aggregate vanishes; publish per leg → one of them duplicates.
     #[test]
-    fn f1_nonempty_phase_a_tally_merges_across_pause() {
+    fn f1_nonempty_phase_b_prefix_merges_across_pause() {
         use crate::types::keywords::{Keyword, ProtectionTarget};
         use crate::types::mana::ManaColor;
 
         let mut state = setup();
-        // Singly-protected pair: claims in Phase A, never an entry.
+        // Singly-protected pair: an entry, decided inline during the drain.
         let red_attacker = create_creature(&mut state, PlayerId(0), "Red Attacker", 3, 3);
         paint(&mut state, red_attacker, vec![ManaColor::Red]);
         let guarded = create_creature(&mut state, PlayerId(1), "Guarded Bear", 2, 2);
@@ -8357,21 +8349,21 @@ mod tests {
         let record = state.pending_combat_damage.as_ref().unwrap();
         assert_eq!(
             (record.paused_entry, record.decided.len()),
-            (0, 0),
-            "the gated hit is not an entry: the overlap pauses first"
+            (1, 1),
+            "the singly-protected hit is entry 0 (decided inline); the overlap pauses second"
         );
         assert_eq!(
-            record.phase_b_tally.len(),
+            record.phase_a_tally.len(),
             0,
-            "reach guard: nothing decided before the pause, so the merge's Phase-B leg is empty"
+            "reach guard: the gate claims nothing, so the merge's Phase-A leg is empty"
         );
         assert!(
             record
-                .phase_a_tally
+                .phase_b_tally
                 .iter()
                 .any(|entry| entry.recipient == TargetRef::Object(guarded) && entry.amount == 3),
-            "reach guard: the singly-protected hit is tallied in Phase A at the pause, got {:?}",
-            record.phase_a_tally
+            "reach guard: the singly-protected hit is tallied in the Phase-B prefix at the pause, got {:?}",
+            record.phase_b_tally
         );
 
         state.waiting_for = waiting.clone();
