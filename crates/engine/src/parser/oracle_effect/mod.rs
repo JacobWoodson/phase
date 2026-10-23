@@ -27069,23 +27069,6 @@ fn chain_prior_chosen_target(clauses: &[ClauseIr]) -> Option<&TargetFilter> {
     None
 }
 
-/// CR 608.2c + CR 109.4 + CR 115.1: whether the nearest player-referent
-/// clause earlier in this same chain names a TARGETED player — a `Choose`
-/// with a targeted chooser ("target opponent chooses self or others") or a
-/// player-typed `TargetOnly`. When true, a later "that player" / "the player"
-/// anaphor names that announced target (`ParentTarget`), not the trigger
-/// event's player (`TriggeringPlayer`).
-///
-/// Sibling of `chain_prior_chosen_target` (which answers the OBJECT question
-/// for Emry-style grants): same walk skeleton, player-oriented decision, kept
-/// separate so grant routing never observes choice clauses. Opaque through
-/// conditions (mirrors the sibling); transparent through `ParentTarget`
-/// carriers (they continue the referent). Stops false at:
-/// - a `Choose` naming a mid-resolution CHOSEN player (`Player`/`Opponent`
-///   choice types — Gluntch/Tempt class, bound by `ChosenPlayer` machinery),
-/// - a newer non-targeted `Choose` (the controller's own choice shadows),
-/// - an object-typed `TargetOnly` or any other typed referent ("that player"
-///   cannot name a chosen object — falls back to the event).
 /// CR 115.1 + CR 608.2c: a prior `TargetOnly` naming an object controlled
 /// by an announced opponent proves the announced player for a later anaphor
 /// exactly as a player-typed `TargetOnly` does. Teferi, Temporal Pilgrim's
@@ -27108,6 +27091,23 @@ fn target_filter_announces_opponent(target: &TargetFilter) -> bool {
     }
 }
 
+/// CR 608.2c + CR 109.4 + CR 115.1: whether the nearest player-referent
+/// clause earlier in this same chain names a TARGETED player — a `Choose`
+/// with a targeted chooser ("target opponent chooses self or others") or a
+/// player-typed `TargetOnly`. When true, a later "that player" / "the player"
+/// anaphor names that announced target (`ParentTarget`), not the trigger
+/// event's player (`TriggeringPlayer`).
+///
+/// Sibling of `chain_prior_chosen_target` (which answers the OBJECT question
+/// for Emry-style grants): same walk skeleton, player-oriented decision, kept
+/// separate so grant routing never observes choice clauses. Opaque through
+/// conditions (mirrors the sibling); transparent through `ParentTarget`
+/// carriers (they continue the referent). Stops false at:
+/// - a `Choose` naming a mid-resolution CHOSEN player (`Player`/`Opponent`
+///   choice types — Gluntch/Tempt class, bound by `ChosenPlayer` machinery),
+/// - a newer non-targeted `Choose` (the controller's own choice shadows),
+/// - an object-typed `TargetOnly` or any other typed referent ("that player"
+///   cannot name a chosen object — falls back to the event).
 fn chain_prior_targeted_player(clauses: &[ClauseIr]) -> bool {
     for prev in clauses.iter().rev() {
         if let Some(cond) = &prev.condition {
