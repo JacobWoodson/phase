@@ -1578,6 +1578,7 @@ mod typhoon_per_opponent_island_count;
 mod tyvar_activate_as_though_haste;
 mod ultimate_nullification;
 mod ultimate_spider_man_mass_counter_double;
+mod unbound_flourishing;
 mod unholy_citadel_legendary_color_banding_grant;
 mod unique_player_property_leader_condition;
 mod unlicensed_hearse_linked_exile;
