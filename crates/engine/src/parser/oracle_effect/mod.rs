@@ -27086,6 +27086,28 @@ fn chain_prior_chosen_target(clauses: &[ClauseIr]) -> Option<&TargetFilter> {
 /// - a newer non-targeted `Choose` (the controller's own choice shadows),
 /// - an object-typed `TargetOnly` or any other typed referent ("that player"
 ///   cannot name a chosen object — falls back to the event).
+/// CR 115.1 + CR 608.2c: a prior `TargetOnly` naming an object controlled
+/// by an announced opponent proves the announced player for a later anaphor
+/// exactly as a player-typed `TargetOnly` does. Teferi, Temporal Pilgrim's
+/// −12 ("Target opponent chooses a permanent …") lowers the choice to a
+/// `TargetOnly` permanent carrying a `TargetOpponent` controller, so the
+/// later "they shuffle …" names that announced opponent. Restricted to
+/// `TargetOpponent`: a `TargetPlayer` controller-ref can also name an
+/// event-bound player with no announced target (Gornog's "target creature
+/// that player controls"), which must not prove. No `Not` descent (fail
+/// closed); no uniqueness gate (mirrors the sibling player-typed arm).
+fn target_filter_announces_opponent(target: &TargetFilter) -> bool {
+    match target {
+        TargetFilter::Typed(tf) => {
+            matches!(tf.controller, Some(ControllerRef::TargetOpponent))
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(target_filter_announces_opponent)
+        }
+        _ => false,
+    }
+}
+
 fn chain_prior_targeted_player(clauses: &[ClauseIr]) -> bool {
     for prev in clauses.iter().rev() {
         if let Some(cond) = &prev.condition {
@@ -27120,7 +27142,9 @@ fn chain_prior_targeted_player(clauses: &[ClauseIr]) -> bool {
             );
         }
         if let Effect::TargetOnly { target } = &prev.parsed.effect {
-            return target_filter_can_target_player(target) && !target.is_context_ref();
+            return (target_filter_can_target_player(target)
+                || target_filter_announces_opponent(target))
+                && !target.is_context_ref();
         }
         if has_typed_target_widened(&prev.parsed.effect) {
             return false;
@@ -29420,17 +29444,21 @@ fn player_filter_as_controller_ref(filter: &TargetFilter) -> Option<ControllerRe
         // surfaces a player target slot and `resolve_sacrifice_scope` reads the
         // chosen player at resolution — identical to the "target opponent" path.
         TargetFilter::Player => Some(ControllerRef::TargetPlayer),
-        // CR 115.1 + CR 701.21a + CR 608.2c: A "that player" / "the player"
-        // anaphor subject ("If that player chooses self, the player sacrifices
-        // two creatures" — Feed the Machine) lowers to the unit
-        // `TargetFilter::ParentTarget`, which otherwise fell through to `None`
-        // and dropped the controller scope, so the edict defaulted to the
-        // ability's controller (the archenemy sacrifices their own creatures).
-        // The anaphor names the announced player target, so promote it to
-        // `TargetPlayer` exactly as the `ChangeZoneAll` injection below does —
-        // the engine surfaces no new slot and `resolve_sacrifice_scope` reads
-        // the announced player from the ability's targets at resolution time.
-        TargetFilter::ParentTarget => Some(ControllerRef::TargetPlayer),
+        // CR 115.1 + CR 701.21a + CR 608.2c: NO unit-`ParentTarget` arm.
+        // A bare anaphor subject proves nothing by itself: "the player" after
+        // an announced target (Feed the Machine), "they" after an object
+        // target (Isildur's Fateful Strike), and "they" with no antecedent at
+        // all (My Forces Are Innumerable) all lower to the same unit filter.
+        // Promoting it unconditionally minted invented player targets (My
+        // Forces) and silently empty continuations (Isildur). `TargetPlayer`
+        // is therefore minted only for a proven player antecedent, carried as
+        // `inherits_parent` on the subject (the announced-target "that
+        // player" arm in `subject.rs`, the `Declared` player carry, and the
+        // proven "they" site — all the Din of the Fireherd shape); see
+        // `proven_subject_player_ref` below. An unproven anaphor falls
+        // through to `None` here, and the Sacrifice/ChangeZone injection
+        // arms fail it closed to an explicit `UNBOUND_SUBJECT_GAP` rather
+        // than a fail-open controller scope.
         // CR 508.5 + CR 701.21a: A bare "defending player" subject on an
         // attack-trigger edict ("Whenever ~ attacks, defending player
         // sacrifices an artifact of their choice" — Kibo, Uktabi Prince). Like
@@ -29444,6 +29472,27 @@ fn player_filter_as_controller_ref(filter: &TargetFilter) -> Option<ControllerRe
         TargetFilter::DefendingPlayer => Some(ControllerRef::DefendingPlayer),
         _ => None,
     }
+}
+
+/// CR 115.1 + CR 608.2c (R1/R2 proof channel): the Sacrifice/ChangeZone
+/// injection arms read the subject through this gate rather than through
+/// `player_filter_as_controller_ref` directly. A unit-`ParentTarget`
+/// subject mints `TargetPlayer` ONLY with the `inherits_parent` proof —
+/// the Din of the Fireherd `Declared`-carry shape, also emitted by the
+/// announced-target "that player" arm and the proven "they" site in
+/// `subject.rs`. Every other filter maps exactly as before. Soundness
+/// note: on a Sacrifice/ChangeZone clause the subject is grammatically a
+/// player, so an inherited unit anaphor always inherits a player
+/// referent; the same shape from an object anaphor ("the other creature")
+/// cannot grammatically head these verbs.
+fn proven_subject_player_ref(
+    subject_filter: &TargetFilter,
+    inherits_parent: bool,
+) -> Option<ControllerRef> {
+    player_filter_as_controller_ref(subject_filter).or_else(|| {
+        (subject_filter == &TargetFilter::ParentTarget && inherits_parent)
+            .then_some(ControllerRef::TargetPlayer)
+    })
 }
 
 /// CR 115.1a/c/d: Preserve whether a targeted sacrifice subject is
@@ -30319,6 +30368,33 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, origin
     let Some(subject_filter) = subject.target.clone().or_else(|| subject.affected.clone()) else {
         return;
     };
+    // CR 115.1 + CR 701.21a (R1 honest gap): a Sacrifice/ChangeZone whose
+    // subject is a bare, unproven `ParentTarget` anaphor (no
+    // `inherits_parent` proof — My Forces Are Innumerable's collective
+    // "they", which names no announced target, or Last-Minute Chopping's
+    // "they", whose announcer is itself unparsed) names no player the engine
+    // can scope to. Fail closed to an explicit gap rather than the old
+    // fail-open controller default (the archenemy sacrificing its own
+    // creatures) or an invented `TargetPlayer` slot. Proven anaphors carry
+    // the inherited `Declared`-carry shape and never reach this arm, and an
+    // effect whose target already names its object explicitly ("they put
+    // it onto the battlefield" — Chaos Warp, Audacious Swap) keeps its
+    // pre-change shape: the subject scope is not load-bearing there.
+    let bare_anaphor_subject = subject_filter == TargetFilter::ParentTarget
+        && subject.target.is_none()
+        && !subject.inherits_parent;
+    if bare_anaphor_subject {
+        let gap_effect = matches!(effect, Effect::Sacrifice { .. } | Effect::ChangeZone { .. });
+        let explicitly_anchored = matches!(
+            effect,
+            Effect::Sacrifice { target, .. } | Effect::ChangeZone { target, .. }
+            if subject::is_single_object_ref(target)
+        );
+        if gap_effect && !explicitly_anchored {
+            *effect = Effect::unimplemented(subject::UNBOUND_SUBJECT_GAP, original_clause);
+            return;
+        }
+    }
     // The carried player is a player by construction, though `ParentTarget` can
     // also name an object and so fails the shared predicate.
     let subject_names_player = target_filter_can_target_player(&subject_filter)
@@ -30592,9 +30668,11 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, origin
         // Also rewrite "they control" refs inside the count expression so
         // the dynamic count resolves against the targeted player's board.
         Effect::Sacrifice { target, count, .. }
-            if player_filter_as_controller_ref(&subject_filter).is_some() =>
+            if proven_subject_player_ref(&subject_filter, subject.inherits_parent).is_some() =>
         {
-            if let Some(ctrl) = player_filter_as_controller_ref(&subject_filter) {
+            if let Some(ctrl) =
+                proven_subject_player_ref(&subject_filter, subject.inherits_parent)
+            {
                 let effective_ctrl =
                     sacrifice_subject_controller(ctrl, subject.target.is_some());
                 force_controller(target, effective_ctrl.clone());
@@ -30625,9 +30703,11 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, origin
         // this inject. This rebind is a no-op when `effective_ctrl` is itself
         // `ScopedPlayer` (the untargeted "each player"/Braids case).
         Effect::ChangeZone { target, .. }
-            if player_filter_as_controller_ref(&subject_filter).is_some() =>
+            if proven_subject_player_ref(&subject_filter, subject.inherits_parent).is_some() =>
         {
-            if let Some(ctrl) = player_filter_as_controller_ref(&subject_filter) {
+            if let Some(ctrl) =
+                proven_subject_player_ref(&subject_filter, subject.inherits_parent)
+            {
                 let effective_ctrl = if subject.target.is_some() {
                     ControllerRef::TargetPlayer
                 } else {

@@ -17007,8 +17007,17 @@ fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefi
     // `archenemy::resolve_pending_as_set_in_motion_choices` before the
     // scheme's "when" triggers collect. The persist post-pass in
     // `lower_trigger_ir` still stores the choice for the scheme's linked
-    // "the chosen player" abilities (CR 607.2d).
-    if matches!(lower, "as you set this scheme in motion") {
+    // "the chosen player" abilities (CR 607.2d). Composed per-axis
+    // (temporal-prefix × subject × event) in the neighboring planeswalk
+    // tuple's style, all-consuming so a qualified variant never binds here.
+    if all_consuming((
+        tag::<_, _, OracleError<'_>>("as "),
+        tag("you "),
+        tag("set this scheme in motion"),
+    ))
+    .parse(lower)
+    .is_ok()
+    {
         def.mode = TriggerMode::AsSetInMotion;
         return Some((TriggerMode::AsSetInMotion, def));
     }

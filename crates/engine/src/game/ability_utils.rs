@@ -940,21 +940,6 @@ pub fn parent_target_owner(ability: &ResolvedAbility, state: &GameState) -> Opti
         .map(|snapshot| snapshot.lki.owner)
 }
 
-/// CR 115.1 + CR 608.2c: The first player target of the resolving ability —
-/// the player-target sibling of `parent_target_controller` /
-/// `parent_target_owner`. Reads the propagation-fed `ability.targets`
-/// directly; parent-target propagation feeds sub-ability targets before
-/// sub-resolution. Unlike the object-target siblings there is no LKI fallback:
-/// players never leave the game silently mid-resolution (CR 104.5 eliminates
-/// them, and eliminated players are filtered by every consumer), so a missing
-/// player target is a fail-closed `None`, never a stale read.
-pub fn parent_target_player(ability: &ResolvedAbility) -> Option<PlayerId> {
-    ability.targets.iter().find_map(|t| match t {
-        TargetRef::Player(pid) => Some(*pid),
-        TargetRef::Object(_) => None,
-    })
-}
-
 pub fn target_constraints_from_modal(modal: &ModalChoice) -> Vec<TargetSelectionConstraint> {
     modal
         .constraints

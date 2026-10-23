@@ -27,6 +27,7 @@ use super::super::oracle_util::{parse_comparison_suffix, parse_subtype, TextPair
 #[cfg(test)]
 use super::parse_effect_chain;
 use super::sequence::parse_dig_from_among;
+use super::subject;
 use super::{parse_effect_clause_inner, scan_contains_phrase, ParseContext};
 use crate::parser::oracle_ir::ast::{parsed_clause, ContinuationAst};
 use crate::parser::oracle_ir::context::TriggerZoneChangeProvenance;
@@ -341,6 +342,42 @@ impl LeadingConditionRoute {
     }
 }
 
+/// CR 608.2c + CR 109.4 (R2 object-controller binding): a leading
+/// conditional whose actor is the parent target's controller or owner ("If
+/// its controller has more than four cards in hand, they exile …" —
+/// Isildur's Fateful Strike) introduces that player for the body's
+/// anaphors. Seed `relative_player_scope` so the existing "they" /
+/// "that player" arms bind it, even when the gate itself never lowers to a
+/// typed condition. Never clobbers an established scope, and only
+/// object-controller actors seed: a "you" / "opponent" actor must not
+/// capture a later "they" (the nearest-mention reading would be wrong
+/// there). The actor is read through the single subject-grammar authority
+/// (`parse_leading_subject_application`), not a text match.
+fn seed_object_controller_scope_from_condition(condition_fragment: &str, ctx: &mut ParseContext) {
+    if ctx.relative_player_scope.is_some() {
+        return;
+    }
+    let condition_lower = condition_fragment.to_lowercase();
+    // Strip the guard prefix through the single prefix authority (same
+    // ASCII-indexing idiom as `parse_clause_ast`: the prefixes are ASCII so
+    // the byte count maps back onto the original-case fragment).
+    let Some(after_prefix) = parse_leading_conditional_prefix(&condition_lower) else {
+        return;
+    };
+    let actor_text = condition_fragment[condition_fragment.len() - after_prefix.len()..].trim();
+    let mut probe_ctx = ctx.clone_throwaway();
+    let actor = subject::parse_leading_subject_application(actor_text, &mut probe_ctx);
+    match actor.as_ref().map(|app| &app.affected) {
+        Some(TargetFilter::ParentTargetController) => {
+            ctx.relative_player_scope = Some(ControllerRef::ParentTargetController);
+        }
+        Some(TargetFilter::ParentTargetOwner) => {
+            ctx.relative_player_scope = Some(ControllerRef::ParentTargetOwner);
+        }
+        _ => {}
+    }
+}
+
 /// [`strip_leading_general_conditional`], also naming the recognizer family
 /// ([`LeadingConditionRoute`]) that produced the stripped gate. Same grammar and
 /// precedence: the route only labels which recognizer claimed the condition.
@@ -367,6 +404,11 @@ pub(crate) fn strip_routed_leading_general_conditional(
         return (Some((condition, LeadingConditionRoute::General)), body);
     }
     if let Some((condition_fragment, body)) = split_leading_conditional(text) {
+        // CR 608.2c + CR 109.4 (R2 object-controller binding): seed BEFORE
+        // the typed dispatch — the gate below may never lower (Isildur's
+        // hand-size comparison stays an honest `Condition_If` gap), but its
+        // actor still introduces the body's anaphor referent.
+        seed_object_controller_scope_from_condition(&condition_fragment, ctx);
         let condition_lower = condition_fragment.to_lowercase();
         let cond_text = nom_on_lower(&condition_fragment, &condition_lower, |i| {
             value(

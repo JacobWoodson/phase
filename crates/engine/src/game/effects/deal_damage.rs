@@ -2189,42 +2189,6 @@ pub fn resolve_all(
 /// CR 120.3: Collect non-eliminated players matching the filter for simultaneous
 /// damage from a single source. Mirrors the filter evaluation used by
 /// `resolve_each_player` but returns only the matching ids.
-/// CR 115.1 + CR 608.2c + CR 109.4: ability-aware player-filter predicate
-/// for the `DamageEachPlayer` resolver's exclusion anchors. The generic
-/// `matches_player_scope` predicate cannot resolve ability-target-dependent
-/// anchors (it carries no `ability.targets`), so this wrapper intercepts the
-/// anchor-bearing combinators and the `TargetPlayer` leaf, resolving them
-/// against the resolving ability, and recurses through nested combinators. Every
-/// other filter delegates to the generic predicate — written as `if let`
-/// interceptions plus fallthrough (not a `match` with a wildcard arm) so a
-/// future variant still fails to compile at the exhaustive authority.
-fn player_filter_matches_with_ability(
-    state: &GameState,
-    player: PlayerId,
-    filter: &PlayerFilter,
-    ability: &ResolvedAbility,
-) -> bool {
-    if let PlayerFilter::TargetPlayer = filter {
-        return crate::game::filter::target_player_from_ability_or_root(state, Some(ability))
-            .is_some_and(|pid| pid == player);
-    }
-    if let PlayerFilter::AllExcept { exclude, relation } = filter {
-        return crate::game::players::matches_relation(
-            state,
-            player,
-            ability.controller,
-            *relation,
-        ) && !player_filter_matches_with_ability(state, player, exclude, ability);
-    }
-    crate::game::effects::matches_player_scope(
-        state,
-        player,
-        filter,
-        ability.controller,
-        ability.source_id,
-    )
-}
-
 fn collect_matching_players(
     state: &GameState,
     player_filter: PlayerFilter,
@@ -2524,6 +2488,19 @@ pub fn resolve_each_player(
     let ctx = DamageContext::from_source(state, ability.source_id)
         .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller));
 
+    // CR 115.1 + CR 608.2c + CR 109.4 (R3): resolve an `AllExcept`
+    // exclusion through the shared `players_for_filter` authority once,
+    // ahead of recipient selection, and reuse the result per player —
+    // recursive unions, declared-target fallback, and parent-object
+    // anchors included. No ability-blind fallback and no duplicate
+    // TargetPlayer/AllExcept reading beside the authority.
+    let excluded: Vec<PlayerId> = match &player_filter {
+        PlayerFilter::AllExcept { exclude, .. } => {
+            crate::game::effects::speed_effects::players_for_filter(state, exclude, ability)
+        }
+        _ => Vec::new(),
+    };
+
     // Collect matching player IDs first to avoid borrow issues.
     let player_ids: Vec<PlayerId> = state
         .players
@@ -2534,17 +2511,15 @@ pub fn resolve_each_player(
                     PlayerFilter::Controller => p.id == ability.controller,
                     PlayerFilter::All => true,
                     // CR 608.2c + CR 109.4: players matching the base
-                    // `relation` except the anchor's set. The anchor resolves
-                    // ability-aware so a declared-target anchor reads this
-                    // resolving ability's targets; every other anchor falls
-                    // through to the generic predicate there.
-                    PlayerFilter::AllExcept { exclude, relation } => {
+                    // `relation` except the anchor's set, resolved once
+                    // through the shared authority above.
+                    PlayerFilter::AllExcept { relation, .. } => {
                         crate::game::players::matches_relation(
                             state,
                             p.id,
                             ability.controller,
                             *relation,
-                        ) && !player_filter_matches_with_ability(state, p.id, exclude, ability)
+                        ) && !excluded.contains(&p.id)
                     }
                     // CR 102.1 + CR 608.2c: the union of the members, answered
                     // member by member by the generic predicate authority.

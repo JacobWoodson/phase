@@ -3494,7 +3494,25 @@ fn parse_subject_application_for(
                 // player-denoting shape the physical-contest binder and the
                 // other static subject checks require; `ParentTarget` here
                 // would strand them on an object-typed back-reference.
-                TargetFilter::ParentTarget
+                //
+                // CR 115.1 (R1/R2 proof channel): the announced player target
+                // is PROVEN here, so inherit it (`inherits_parent`, the Din
+                // of the Fireherd `Declared`-carry shape). The injection
+                // mints `TargetPlayer` for an inherited unit `ParentTarget`
+                // and fails an uninherited one closed; `target` stays `None`
+                // so no `TargetOnly` wrapper is minted for a target the head
+                // clause already announced. With two or more declared player
+                // slots the singular anaphor is ambiguous, so it keeps the
+                // pre-change bare shape (and fails closed downstream on
+                // scope-bearing verbs) instead of binding one slot.
+                let singular = declared_player_slot_indexes(ctx).len() < 2;
+                return Some(SubjectApplication {
+                    affected: TargetFilter::ParentTarget,
+                    target: None,
+                    multi_target: None,
+                    inherits_parent: singular,
+                    is_optional,
+                });
             } else if ctx.subject.is_some() {
                 ctx_filter
             } else {
@@ -3875,15 +3893,45 @@ fn parse_subject_application_for(
         let names_created_tokens = consumer == AnaphorConsumer::AffectedObject
             && ctx.token_created_in_chain
             && ctx.chain_prior_mass_population.is_none();
+        let affected = if names_created_tokens {
+            TargetFilter::LastCreated
+        } else {
+            resolve_they_pronoun(ctx, consumer)
+        };
+        // CR 115.1 + CR 608.2c (R1/R2 proof channel): a subject-position
+        // "they" resolving to the bare anaphor while the chain proves an
+        // announced player target (Teferi, Temporal Pilgrim's −12: "Target
+        // opponent chooses a permanent … Then they shuffle …") names that
+        // announced player — inherit it, the `Declared`-carry shape.
+        // Restricted to subject position (a grant-object "they" keeps its
+        // object binding), to the bare-anaphor shape (a scope-bound or
+        // slot-bound `affected` already names its referent), to unset
+        // scope (a nearer seeded scope — e.g. an "its controller" guard —
+        // wins, mirroring the "that player" arm's ordering below), and to
+        // fewer than two declared player slots (see below).
+        // `target` stays `None`: the head clause already announced the
+        // target, so no `TargetOnly` wrapper may be minted here.
+        //
+        // CR 608.2c distributive plural: with two or more declared player
+        // slots ("two target players … They each …" — Parker Luck), "they"
+        // names the announced players distributively — proven as a group,
+        // unbindable as a single. Mark it with a `ParentTarget` target
+        // (a context-ref, so no `TargetOnly` wrapper is minted) and no
+        // inheritance: the injection neither stamps a singular scope nor
+        // gap-marks, preserving the per-target fan-out exactly.
+        let multi_distributive = consumer == AnaphorConsumer::Other
+            && affected == TargetFilter::ParentTarget
+            && declared_player_slot_indexes(ctx).len() >= 2;
+        let proven_player = consumer == AnaphorConsumer::Other
+            && affected == TargetFilter::ParentTarget
+            && ctx.relative_player_scope.is_none()
+            && ctx.chain_prior_targeted_player
+            && !multi_distributive;
         return Some(SubjectApplication {
-            affected: if names_created_tokens {
-                TargetFilter::LastCreated
-            } else {
-                resolve_they_pronoun(ctx, consumer)
-            },
-            target: None,
+            affected,
+            target: multi_distributive.then_some(TargetFilter::ParentTarget),
             multi_target: None,
-            inherits_parent: false,
+            inherits_parent: proven_player,
             is_optional,
         });
     }
@@ -4326,6 +4374,25 @@ fn strip_possessive_subject_suffix(subject: &str) -> &str {
 /// ref (e.g., `controller: Opponent`). For object-type subjects, "they" refers
 /// to the triggering source. Without trigger context, "they" is an anaphoric
 /// reference to previously mentioned objects (`ParentTarget`).
+/// Declared player-typed target slot indexes ("two target players").
+/// Shared by the unique-slot binder in `resolve_they_pronoun` (exactly one
+/// binds `ParentTargetSlot`) and the "they" application site (two or more
+/// marks the distributive multi shape, which names the announced players
+/// without binding — or gap-marking — any single one).
+fn declared_player_slot_indexes(ctx: &ParseContext) -> Vec<usize> {
+    ctx.declared_target_slots
+        .iter()
+        .enumerate()
+        .filter_map(|(index, slot)| {
+            let is_player = match slot {
+                TargetFilter::Player | TargetFilter::Opponent => true,
+                filter => filter.is_player_scope(),
+            };
+            is_player.then_some(index)
+        })
+        .collect()
+}
+
 fn resolve_they_pronoun(ctx: &mut ParseContext, consumer: AnaphorConsumer) -> TargetFilter {
     // CR 608.2c + CR 611.2c: an iterated-player frame (a fan-out vote body, an
     // each-player or each-upkeep scope) is the referent of a bare "they" unless
@@ -4399,23 +4466,10 @@ fn resolve_they_pronoun(ctx: &mut ParseContext, consumer: AnaphorConsumer) -> Ta
     // unique earlier player slot even when a later object slot intervenes.
     // Bind by the declared slot's typed player shape, never by card text or
     // position alone; zero or multiple player slots remain ambiguous and fall
-    // through to the established pronoun rules below.
-    let mut declared_player_slot = None;
-    for (index, slot) in ctx.declared_target_slots.iter().enumerate() {
-        let is_player = match slot {
-            TargetFilter::Player | TargetFilter::Opponent => true,
-            filter => filter.is_player_scope(),
-        };
-        if is_player {
-            if declared_player_slot.is_some() {
-                declared_player_slot = None;
-                break;
-            }
-            declared_player_slot = Some(index);
-        }
-    }
-    if let Some(index) = declared_player_slot {
-        return TargetFilter::ParentTargetSlot { index };
+    // through to the established pronoun rules below (multiple slots take
+    // the distributive shape at the application site).
+    if let [index] = declared_player_slot_indexes(ctx).as_slice() {
+        return TargetFilter::ParentTargetSlot { index: *index };
     }
     match &ctx.subject {
         // Player-type trigger subject: no type_filters, has controller ref
