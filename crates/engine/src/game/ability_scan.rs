@@ -316,6 +316,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         replacement_applied: _,          // replacement provenance set, no dynamic read
         sub_link: _,                     // SubAbilityLink kind tag
         target_reads: _, // TargetReadOrigin tag; `Target` reads are classified on condition/effect
+        entry_onset: _,  // ContinuousEffectOnset tag, no dynamic read
         sibling_condition: _, // SiblingCondition replication marker, no dynamic read
         distribute: _,   // announcement unit tag/string, no resolution-time dynamic read
         parent_target_missing_reason: _, // seam flag
@@ -3811,6 +3812,15 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
             history: HistoryReads::NONE,
         },
         TargetFilter::DefendingPlayer => Axes::NONE,
+        // CR 506.3: reads the bound attack event (event) and live combat and
+        // battlefield state (a planeswalker's loyalty is changed by the damage it
+        // receives, so a sibling trigger can interact: sibling). Not DefendingPlayer's NONE.
+        TargetFilter::AttackedPlayerOrPlaneswalker => Axes {
+            event: true,
+            sibling: true,
+            projected: false,
+            history: HistoryReads::NONE,
+        },
         TargetFilter::HasChosenName => Axes::NONE,
         TargetFilter::ChosenDamageSource { filter } => {
             let mut acc = Axes {
@@ -4400,6 +4410,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
         }
         TriggerCondition::TributeNotPaid => Axes::NONE,
         TriggerCondition::CastDuringPhase { phases: _ } => Axes::NONE,
+        TriggerCondition::CurrentPhaseIs { phases: _ } => Axes::NONE,
         TriggerCondition::CastTimingPermission { permission: _ } => {
             Axes::history_of(HistoryMember::TurnNumber)
         }
@@ -5012,6 +5023,11 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
         FilterProp::PtComparison { value, .. } => scan_quantity_expr(value, mode),
 
         // --- Box<TargetFilter>-bearing: recurse (a nested Typed could be projected).
+        // CR 701.3a: the filter-matched host axis nests its own `TargetFilter`, so
+        // any player-resource read it carries is reached by the same recursion.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { filter },
+        } => scan_target_filter(filter, FilterReadContext::LiveBoardCensus, mode),
         FilterProp::CanEnchant { target } => scan_target_filter(target, FilterReadContext::LiveBoardCensus, mode),
         FilterProp::DifferentNameFrom { filter } => scan_target_filter(filter, FilterReadContext::LiveBoardCensus, mode),
         FilterProp::DistinctFrom { reference } => scan_target_filter(reference, FilterReadContext::LiveBoardCensus, mode),
@@ -5658,6 +5674,7 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
         target_selection_mode: _,
         sub_link: _,
         target_reads: _, // TargetReadOrigin tag; `Target` reads are classified on condition/effect
+        entry_onset: _,  // ContinuousEffectOnset tag, no dynamic read
         iteration_kind_binding: _,
         sibling_condition: _,
         // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every
@@ -5805,6 +5822,7 @@ fn scan_ability_cost(cost: &AbilityCost, mode: ScanMode) -> Axes {
             selection: _,
             self_scope: _,
         } => scan_quantity_expr(count, mode),
+        AbilityCost::Reveal { count, filter: _ } => scan_quantity_expr(count, mode),
         AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => costs
             .iter()
             .fold(Axes::NONE, |acc, c| acc.or(scan_ability_cost(c, mode))),
@@ -5835,7 +5853,6 @@ fn scan_ability_cost(cost: &AbilityCost, mode: ScanMode) -> Axes {
         | AbilityCost::Mill { .. }
         | AbilityCost::Exert
         | AbilityCost::Blight { .. }
-        | AbilityCost::Reveal { .. }
         | AbilityCost::Behold { .. }
         | AbilityCost::Waterbend { .. }
         | AbilityCost::NinjutsuFamily { .. }
@@ -9652,6 +9669,13 @@ mod tests {
                  zones (CR 601.2f); battlefield path is source/ParentTarget-bounded",
             ),
             (
+                "stickers.rs",
+                false,
+                "bounded recipient selection: recipient_ids enumerates candidates for one \
+                 bound object; count/up-to placements retain that SpecificObject, not every \
+                 matching object",
+            ),
+            (
                 "token_copy.rs",
                 false,
                 "CopyTokenOf source_filter is scanned as a live census by its own scan_effect \
@@ -11541,5 +11565,27 @@ mod tests {
                 .or(HistoryReads::of(HistoryMember::ExileCastPermissionsUsed))
         );
         assert_eq!(history("Aang, Swift Savior", 0), HistoryReads::ALL);
+    }
+}
+
+#[cfg(test)]
+mod attacked_referent_scan_tests {
+    use super::*;
+
+    /// CR 506.3: reads the bound attack event and live battlefield state; a sibling
+    /// trigger's damage changes planeswalker loyalty. Not DefendingPlayer's NONE.
+    #[test]
+    fn attacked_referent_scan_axes() {
+        let f = TargetFilter::AttackedPlayerOrPlaneswalker;
+        for mode in [ScanMode::Conservative, ScanMode::LoopFirewall] {
+            let axes = scan_target_filter(&f, FilterReadContext::SnapshotOrEvent, mode);
+            assert!(axes.event && axes.sibling && !axes.projected, "{mode:?}");
+            let none = scan_target_filter(
+                &TargetFilter::DefendingPlayer,
+                FilterReadContext::SnapshotOrEvent,
+                mode,
+            );
+            assert!(!none.event && !none.sibling, "contrast: {mode:?}");
+        }
     }
 }
