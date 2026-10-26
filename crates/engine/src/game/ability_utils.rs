@@ -6768,6 +6768,7 @@ fn filter_binds_player(
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
         | TargetFilter::EventTarget

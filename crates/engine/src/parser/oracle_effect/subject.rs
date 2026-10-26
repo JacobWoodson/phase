@@ -2292,6 +2292,7 @@ fn try_parse_subject_restriction_clause(
                     return Some(ParsedEffectClause {
                         optional_targeting: false,
                         unlowered_guard: None,
+                        entry_onset: ContinuousEffectOnset::WhenFollowed,
                         effect: Effect::ForceAttack {
                             target: TargetFilter::ParentTarget,
                             required_defender,
@@ -3647,6 +3648,7 @@ fn parse_subject_application_for(
                     target: None,
                     multi_target: None,
                     inherits_parent: singular,
+                    player_anaphor: None,
                     is_optional,
                 });
             } else if ctx.subject.is_some() {

@@ -1509,6 +1509,7 @@ fn filter_zone_truth(filter: &TargetFilter, zone: Zone) -> SourceZoneTruth {
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AllPlayers => SourceZoneTruth::Undetermined,
     }
 }

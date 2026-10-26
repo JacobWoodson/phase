@@ -5002,6 +5002,9 @@ fn effect_enters_battlefield(effect: &Effect) -> bool {
         Effect::Encore => false,
         // not a co-entry ContinuationStep: it selects cards and moves nothing itself.
         Effect::ChooseFromZone { .. } => false,
+        // not a co-entry ContinuationStep: abandoning turns a scheme face
+        // down (or returns it to the scheme deck), never onto the battlefield.
+        Effect::AbandonScheme => false,
         Effect::StartYourEngines { .. }
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }

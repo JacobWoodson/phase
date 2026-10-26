@@ -13273,6 +13273,7 @@ fn is_player_axis_filter(filter: &TargetFilter) -> bool {
         // rather than admitting it through the object default.
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AllPlayers => true,
         TargetFilter::Not { filter } => is_player_axis_filter(filter),
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
