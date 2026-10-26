@@ -2000,7 +2000,11 @@ fn apply_combat_survivors(
 ///   gates) WITHOUT applying any damage yet.
 /// - **Phase B (Batch replace):** pass the whole proposed-event slice through
 ///   `replace_combat_damage_batch`, which runs the replacement pipeline per
-///   event but aggregates each `Prevention::All` shield's prevented amount.
+///   event but aggregates continuous all-damage and one-shot prevention riders.
+///   `ShieldKind::PreventionOneShot` (Awe Strike) emits real source/recipient
+///   `DamagePrevented` events per portion. `Prevention { All }` with
+///   `consume_on_apply` (Impulsive Maneuvers' lose branch) uses the continuous-All
+///   path and emits its aggregate event at the rider boundary.
 /// - **Phase C (Apply + bookkeeping):** apply each surviving post-replacement
 ///   event via `apply_damage_after_replacement`, then run the player-batching
 ///   and commander-damage bookkeeping. Afterward, fire each prevention shield's
@@ -2387,7 +2391,10 @@ pub(crate) enum BatchRiderDrainOutcome {
 ///
 /// Each `DamagePrevented` event for the batch is emitted here (the per-source
 /// applier suppressed them so the rider sees one un-fragmented amount), ONE per
-/// (shield, recipient). CR 615.13 and CR 120.3 pull in different directions and
+/// (shield, recipient) — except `ShieldKind::PreventionOneShot`, which already
+/// emitted real per-portion events in the applier (merge #5, upstream #10215)
+/// and only aggregates its rider amount here. CR 615.13 and CR 120.3 pull in
+/// different directions and
 /// both are honored: the prevention APPLICATION is the trigger unit and the
 /// CR 615.5 rider unit, so the rider fires once per shield against the batch
 /// total, while the RECIPIENT is a per-event property, so a shield that
@@ -2481,6 +2488,14 @@ pub(crate) fn fire_batch_prevention_riders(
                         | crate::types::ability::PreventionAmount::AllBut(_)
                 }
             );
+        // CR 615.13 + CR 615.5 (merge #5, upstream #10215): a
+        // `ShieldKind::PreventionOneShot` already emitted real per-portion
+        // source/recipient events in the applier -- skip the aggregate
+        // emission below (but still run the rider against the total).
+        let one_shot_emitted_per_portion = matches!(
+            repl_def.shield_kind,
+            crate::types::ability::ShieldKind::PreventionOneShot
+        );
 
         // CR 615.5 + CR 609.7: A rider referencing the prevented damage's source
         // ("that source's controller" — New Way Forward) resolves
@@ -2494,7 +2509,10 @@ pub(crate) fn fire_batch_prevention_riders(
             .and_then(shield_specific_source);
         let runtime = repl_def.runtime_execute.clone();
 
-        push_prevented_events(group, rid.source, events);
+        // Merge #5 (upstream #10215): one-shots already emitted per portion.
+        if !one_shot_emitted_per_portion {
+            push_prevented_events(group, rid.source, events);
+        }
 
         // CR 615.5: Resolve the prevention's additional effect ("for each 1
         // damage prevented this way, create a token"). Stamp the aggregate

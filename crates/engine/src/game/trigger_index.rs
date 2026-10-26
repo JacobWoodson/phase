@@ -991,6 +991,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::SkipNextStep
         | EffectKind::AdditionalPhase
         | EffectKind::Double
+        | EffectKind::ModifyAnnouncedX
         | EffectKind::RuntimeHandled
         | EffectKind::Learn
         | EffectKind::Forage
