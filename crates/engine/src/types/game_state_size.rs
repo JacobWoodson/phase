@@ -81,6 +81,16 @@
 //! ChooseOneOfBranch more than 200 B apart, so `WaitingFor` carries an intentional
 //! `#[allow(clippy::large_enum_variant)]`; the GameState ceiling above is the bound.
 //!
+//! `GameState` re-measured on x86_64-pc-windows-msvc (`nightly-2026-04-19`) at
+//! 14,928 B at the PR-9867/upstream merge (80 B over the old ceiling). The
+//! union adds only small fields — two 48 B `HashMap`s (`combat_prevention_tally`,
+//! `attacked_players_directly_this_turn`), a 24 B batch `Vec`, id/owner stamps,
+//! and upstream's onset/ingress/policy markers — while the large paused-combat
+//! record rides boxed (`Option<Box<PendingCombatDamageBatch>>`, 8 B inline).
+//! `WaitingFor` grew 1,632 -> 1,672 B and `TriggerSourceContext` 1,496 ->
+//! 1,536 B. Nothing large went inline, so the ceiling moves to
+//! 14,928.next_multiple_of(256) + 256 = 15,360.
+//!
 //! When one of these fires, re-run the measurement above and change the number
 //! deliberately — do not widen a ceiling to make a build pass.
 //!
@@ -90,7 +100,7 @@
 const _: () = {
     use core::mem::size_of;
     assert!(
-        size_of::<crate::types::game_state::GameState>() <= 14_848,
+        size_of::<crate::types::game_state::GameState>() <= 15_360,
         "GameState grew past its stack budget. It is moved by value through the \
          phase-server action + AI path, so an overrun is an uncatchable \
          guard-page abort, not a panic. Re-run the -Zprint-type-sizes command in \

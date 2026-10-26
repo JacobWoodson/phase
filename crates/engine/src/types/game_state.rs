@@ -52952,6 +52952,8 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: policy,
+            each_source_batch_owner: None,
+            combat_pause_slot: None,
         }
     }
 

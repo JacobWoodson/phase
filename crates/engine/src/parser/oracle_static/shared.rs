@@ -1216,6 +1216,7 @@ impl<'a> ZoneConditionNode<'a> {
             | StaticCondition::WasStartingPlayer { .. }
             | StaticCondition::SpellCastWithVariantThisTurn { .. }
             | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+            | StaticCondition::PlayerAttackedPlayer { .. }
             | StaticCondition::OpponentPoisonAtLeast { .. }
             | StaticCondition::UnlessPay { .. }
             | StaticCondition::Unrecognized { .. }

@@ -19883,6 +19883,7 @@ mod tests {
             delivery_boundary: None,
             each_source_batch_owner: None,
             combat_pause_slot: None,
+            unrepresentable_life_change: Default::default(),
         };
         let json = serde_json::to_string(&pending).expect("pending choice serializes");
         assert!(

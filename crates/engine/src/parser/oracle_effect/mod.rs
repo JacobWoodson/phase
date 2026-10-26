@@ -6726,6 +6726,8 @@ fn try_parse_you_cant_attack_targeted_player_prohibition(
         optional_targeting: false,
         // A prohibition clause, not an ownership-candidate guard.
         unlowered_guard: None,
+        // A prohibition clause, not a continuous "is/has" effect.
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
