@@ -3012,7 +3012,7 @@ mod tests {
             AbilityCost::Exert => AbilityCost::Exert,
             AbilityCost::Blight { .. } => AbilityCost::Blight { count: 1 },
             AbilityCost::Reveal { .. } => AbilityCost::Reveal {
-                count: 1,
+                count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
             },
             AbilityCost::Behold { .. } => AbilityCost::Behold {
@@ -3135,7 +3135,7 @@ mod tests {
             AbilityCost::Exert,
             AbilityCost::Blight { count: 0 },
             AbilityCost::Reveal {
-                count: 0,
+                count: QuantityExpr::Fixed { value: 0 },
                 filter: None,
             },
             AbilityCost::Behold {
