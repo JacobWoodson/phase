@@ -10274,10 +10274,15 @@ pub(super) fn try_parse_damage(lower: &str, text: &str, ctx: &mut ParseContext) 
     if rest == "and" {
         return None;
     }
-    let Some(tail) = rest.strip_prefix("and ") else {
+    // Pattern 1 (optional fixed prefix): strip one "and " connector; without
+    // it the remainder is a comma trailer or clean terminator and accepts.
+    let tail = preceded(tag::<_, _, OracleError<'_>>("and "), nom::combinator::rest)
+        .parse(rest)
+        .ok()
+        .map(|(_, tail)| tail.trim_start());
+    let Some(tail) = tail else {
         return Some(effect);
     };
-    let tail = tail.trim_start();
     if tail.is_empty() || damage_leg_head(&tail.to_lowercase()) {
         return None;
     }
@@ -10294,14 +10299,22 @@ pub(super) fn try_parse_damage(lower: &str, text: &str, ctx: &mut ParseContext) 
 /// upstream parity) and possessives (no "and its/their ..." damage leg exists
 /// in the 6006-card damage corpus; possessive-headed instructions are common).
 fn damage_leg_head(tail_lower: &str) -> bool {
-    tail_lower == "each"
-        || tail_lower.starts_with("each ")
-        || tail_lower.starts_with("target ")
-        || tail_lower.starts_with("any ")
-        || tail_lower.starts_with("all ")
-        || tail_lower.starts_with("that ")
-        || tail_lower.starts_with("those ")
-        || tail_lower.starts_with("x ")
+    // Bare "each" (truncated input) fails closed; no arm is a prefix of
+    // another, so `alt` needs no longest-first ordering.
+    if tail_lower == "each" {
+        return true;
+    }
+    alt((
+        tag::<_, _, OracleError<'_>>("each "),
+        tag("target "),
+        tag("any "),
+        tag("all "),
+        tag("that "),
+        tag("those "),
+        tag("x "),
+    ))
+    .parse(tail_lower)
+    .is_ok()
         || tail_lower
             .as_bytes()
             .first()
