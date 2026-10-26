@@ -358,13 +358,17 @@ fn seed_object_controller_scope_from_condition(condition_fragment: &str, ctx: &m
         return;
     }
     let condition_lower = condition_fragment.to_lowercase();
-    // Strip the guard prefix through the single prefix authority (same
-    // ASCII-indexing idiom as `parse_clause_ast`: the prefixes are ASCII so
-    // the byte count maps back onto the original-case fragment).
+    // Strip the guard prefix through the single prefix authority. The
+    // prefix byte length is measured on the LOWERCASED side (both lengths
+    // below come from `condition_lower`, so no cross-case subtraction can
+    // underflow on length-changing case folds like U+0130); the prefixes
+    // themselves are ASCII, so that length is a safe cut point into the
+    // original-case fragment (same idiom as `parse_clause_ast`).
     let Some(after_prefix) = parse_leading_conditional_prefix(&condition_lower) else {
         return;
     };
-    let actor_text = condition_fragment[condition_fragment.len() - after_prefix.len()..].trim();
+    let prefix_len = condition_lower.len() - after_prefix.len();
+    let actor_text = condition_fragment[prefix_len..].trim();
     let mut probe_ctx = ctx.clone_throwaway();
     let actor = subject::parse_leading_subject_application(actor_text, &mut probe_ctx);
     match actor.as_ref().map(|app| &app.affected) {

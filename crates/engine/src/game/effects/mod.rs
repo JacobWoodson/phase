@@ -33092,6 +33092,62 @@ mod tests {
         assert_eq!(state.players[1].life, life_before - 2);
     }
 
+    /// CR 102.2 + CR 108.3: the player-scope fan-out driver routes
+    /// `AllExcept` through the ability-aware authority, so the owner-anchor
+    /// `Opponent` relation holds end to end: departed owner P0 excluded,
+    /// caster P1 not their own opponent, only P2 pays. Dropping `relation`
+    /// in the helper fans out to P1 too.
+    #[test]
+    fn owner_anchor_opponent_scope_fans_out_only_to_opponents() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 0);
+        let moved = ObjectId(7);
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: moved,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord {
+                owner: PlayerId(0),
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: PlayerId(0),
+                    controller: PlayerId(1),
+                },
+                controller: PlayerId(1),
+                ..ZoneChangeRecord::test_minimal(moved, Some(Zone::Battlefield), Zone::Graveyard)
+            }),
+        });
+        let mut ability = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: None,
+            },
+            Vec::new(),
+            ObjectId(900),
+            PlayerId(1),
+        );
+        ability.player_scope = Some(PlayerFilter::AllExcept {
+            exclude: Box::new(PlayerFilter::ParentObjectTargetOwner),
+            relation: PlayerRelation::Opponent,
+        });
+        let life_before: Vec<i32> = state.players.iter().map(|p| p.life).collect();
+        let mut events = Vec::new();
+        let progress = resolve_chain_body(&mut state, &ability, &mut events, 0, None)
+            .expect("scoped fan-out resolves");
+        assert!(
+            matches!(progress, ResolutionProgress::Complete),
+            "no prompt expected, got {progress:?}"
+        );
+        assert_eq!(state.players[0].life, life_before[0], "owner excluded");
+        assert_eq!(
+            state.players[1].life, life_before[1],
+            "caster is not their own opponent"
+        );
+        assert_eq!(
+            state.players[2].life,
+            life_before[2] - 1,
+            "only the non-owner opponent pays"
+        );
+    }
+
     #[test]
     fn random_reflexive_materializes_on_stack_before_effect() {
         let mut state = GameState::new_two_player(42);
