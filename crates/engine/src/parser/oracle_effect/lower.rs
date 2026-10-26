@@ -10252,21 +10252,60 @@ pub(super) fn try_parse_damage(lower: &str, text: &str, ctx: &mut ParseContext) 
     let (effect, remainder) = try_parse_damage_with_remainder(text, lower, ctx)?;
     // CR 608.2c: fail-closed guard — an "and" connector trailing a
     // single-target damage parse means a continuation instruction the
-    // splitters never consumed ("and each creature they control", "and 2
-    // damage to you"). Accepting the primary alone would silently drop half
-    // the damage (Which of You Burns Brightest?, The Great Work ch.I).
-    // Decline so the clause falls through to an honest Unimplemented instead
-    // of a half-wrong DealDamage. Deliberately "and"-only: comma trailers are
-    // a mixed class — ", where X is ..." is a live amount binding (Basalt
-    // Ravager, Minsc & Boo, Mana Cannons) that must keep accepting, and the
-    // wrapper cannot tell it from a chain-loop abort. Punctuation-only
-    // remainders (".", ",") are the clean terminator and still accept.
+    // splitters never consumed. When the tail is a further DAMAGE leg
+    // ("and each creature they control", "and 2 damage to you", "and that
+    // much damage to ...", "and that player ..."), accepting the primary
+    // alone would silently drop half the damage (Which of You Burns
+    // Brightest?, The Great Work ch.I, Disorder, Dragonspark Reactor,
+    // Friendly Fire) — decline so the clause falls through to an honest
+    // Unimplemented instead of a half-wrong DealDamage. Any other tail is a
+    // verb-led instruction the splitter owns ("and the other can't block",
+    // "and the damage can't be prevented") — the wrapper accepts the primary
+    // and drops it, exactly the upstream behavior the chain tests pin (Trial
+    // of Agony; complement-anaphor binding is out of scope here). Bare
+    // "and" / empty tails stay declined (malformed input fails closed).
+    // Deliberately "and"-only: comma trailers are a mixed class — ", where
+    // X is ..." is a live amount binding (Basalt Ravager, Minsc & Boo, Mana
+    // Cannons) that must keep accepting, and the wrapper cannot tell it from
+    // a chain-loop abort. Punctuation-only remainders (".", ",") are the
+    // clean terminator and still accept.
     let rest = remainder.trim_start_matches([',', ' ', '.']);
     // allow-noncombinator: structural conjunction-boundary scan on a post-parse remainder, not parsing dispatch.
-    if rest == "and" || rest.starts_with("and ") {
+    if rest == "and" {
+        return None;
+    }
+    let Some(tail) = rest.strip_prefix("and ") else {
+        return Some(effect);
+    };
+    let tail = tail.trim_start();
+    if tail.is_empty() || damage_leg_head(&tail.to_lowercase()) {
         return None;
     }
     Some(effect)
+}
+
+/// CR 608.2c: damage-leg heads for the `try_parse_damage` compound-connector
+/// guard — the closed recipient-phrase class that extends the damage ("each
+/// ...", "target ...", "any ...", "all ...", anaphoric "that/those ...",
+/// numeral/"X damage to ..."). Heads are lowercased by the caller; matching is
+/// prefix-structural, not parsing dispatch. Deliberately NOT heads: "the ..."
+/// (Trial of Agony's "the other can't block", Arrow Storm's "the damage can't
+/// be prevented" — verb-led instructions the splitter owns, accepted for
+/// upstream parity) and possessives (no "and its/their ..." damage leg exists
+/// in the 6006-card damage corpus; possessive-headed instructions are common).
+fn damage_leg_head(tail_lower: &str) -> bool {
+    tail_lower == "each"
+        || tail_lower.starts_with("each ")
+        || tail_lower.starts_with("target ")
+        || tail_lower.starts_with("any ")
+        || tail_lower.starts_with("all ")
+        || tail_lower.starts_with("that ")
+        || tail_lower.starts_with("those ")
+        || tail_lower.starts_with("x ")
+        || tail_lower
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_digit)
 }
 
 /// CR 608.2c: Bind a bare "those cards" aggregate only to its typed chain antecedent.

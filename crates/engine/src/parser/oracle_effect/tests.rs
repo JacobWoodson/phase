@@ -6657,6 +6657,35 @@ fn try_parse_damage_declines_on_unconsumed_compound_connector() {
         .is_some(),
         "empty remainder must accept"
     );
+    // Anaphoric damage legs still decline: the shared amount extends over the
+    // connector, so accepting would drop half the damage (Dragonspark
+    // Reactor's "that much damage to ...", Friendly Fire's "that player").
+    for tail in [
+        "deals damage equal to the number of charge counters on it to target player and that much damage to up to one target creature.",
+        "deals damage to that creature and that player equal to the revealed card's mana value.",
+    ] {
+        assert!(
+            try_parse_damage(tail, tail, &mut ParseContext::default()).is_none(),
+            "anaphoric damage leg must decline: {tail}"
+        );
+    }
+}
+
+/// CR 608.2c: verb-led "and <instruction>" tails accept (upstream parity) —
+/// the splitter owns conjunct splitting, and complement-anaphor binding ("the
+/// other") is out of scope, so the wrapper keeps the primary and drops the
+/// tail exactly as upstream does (Trial of Agony's last sentence).
+#[test]
+fn try_parse_damage_accepts_verb_led_instruction_tail() {
+    for tail in [
+        "deals 5 damage to that creature, and the other can't block this turn.",
+        "deals 5 damage to that permanent or player and the damage can't be prevented.",
+    ] {
+        assert!(
+            try_parse_damage(tail, tail, &mut ParseContext::default()).is_some(),
+            "verb-led instruction tail must accept (upstream parity): {tail}"
+        );
+    }
 }
 
 #[test]
