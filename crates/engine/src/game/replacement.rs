@@ -25,10 +25,10 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CombatPreventionTally, DrainStatus, GameState, LiminalEntry, LiminalEntryKind,
     NamedChoiceSource, NamedChoiceSourceBinding, PayableResource, PendingReplacement,
-    PostReplacementDrain,
-    ReplacementAutoChoiceId, ReplacementAutoChoiceIdentity, ReplacementAutoChoiceKey,
-    ReplacementAutoChoiceRecord, ReplacementAutoChoiceTail, ReplacementCandidateSummary,
-    ReplacementChoiceKind, ReplacementIndexEntry, ResidentDrainPolicy, WaitingFor,
+    PostReplacementDrain, ReplacementAutoChoiceId, ReplacementAutoChoiceIdentity,
+    ReplacementAutoChoiceKey, ReplacementAutoChoiceRecord, ReplacementAutoChoiceTail,
+    ReplacementCandidateSummary, ReplacementChoiceKind, ReplacementIndexEntry, ResidentDrainPolicy,
+    WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::{
@@ -13389,7 +13389,7 @@ pub fn replace_event(
 /// player-choice path is not modeled — the shields apply per-event in pipeline
 /// order instead.
 ///
- /// Returns [`CombatDamageReplacementOutcome`]: either every event's survivor
+/// Returns [`CombatDamageReplacementOutcome`]: either every event's survivor
 /// Returns [`CombatDamageReplacementOutcome`]: either every event's survivor
 /// Phase C to apply; `None` means that source's damage was fully prevented)
 /// plus the per-shield-AND-per-recipient aggregate prevented amount (CR 120.3
