@@ -17783,7 +17783,26 @@ mod issue_4548_full_create_tests {
             .await;
             assert_eq!(created_code(reply), "BOTRS2");
 
-            assert!(!app_state.connections.lock().await["BOTRS2"].contains_key(&PlayerId(1)));
+            // The AI-create path sends GameCreated before the host routes
+            // reinstall (bootstrap precedes route publication), so indexing
+            // the map immediately races the handler's install and flakes
+            // under load ("no entry found for key"). Poll for the entry
+            // instead: the install is unconditional once GameCreated was
+            // sent, so a missing entry here only ever means "not yet".
+            let deadline = std::time::Instant::now() + Duration::from_millis(500);
+            loop {
+                let guard = app_state.connections.lock().await;
+                if let Some(routes) = guard.get("BOTRS2") {
+                    assert!(!routes.contains_key(&PlayerId(1)));
+                    break;
+                }
+                drop(guard);
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "BOTRS2 routes never installed"
+                );
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
         })
         .await;
         server.abort();
