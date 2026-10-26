@@ -43,10 +43,10 @@ use crate::types::ability::{
     DamageChannel, DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope,
     ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition, MultiTargetSpec,
     NameStickerSet, ObjectProperty, ObjectScope, PermissionGrantee, PlayerFilter, PlayerRelation,
-    PreventionAmount,
-    PreventionScope, PropertyAggregate, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope,
-    RoundingMode, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
-    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetSelectionMode, TypeFilter, TypedFilter,
+    PreventionAmount, PreventionScope, PropertyAggregate, PtValue, QuantityExpr, QuantityRef,
+    RestrictionPlayerScope, RoundingMode, SpellStackToGraveyardReplacement, StaticCondition,
+    StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetSelectionMode,
+    TypeFilter, TypedFilter,
 };
 use crate::types::ability_visit::nodes_mut::visit_ability_def;
 use crate::types::ability_visit::DefinitionNodeMut;

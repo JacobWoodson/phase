@@ -15,8 +15,7 @@ use crate::parser::oracle_util::TextPair;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChoiceType, ContinuousEffectOnset, ContinuousModification,
     ControllerRef, Duration, Effect, StaticDefinition, TargetFilter, TargetSelectionMode,
-    TextSubstitution,
-    TextSubstitutionSpec, TextWordDomain,
+    TextSubstitution, TextSubstitutionSpec, TextWordDomain,
 };
 
 /// CR 612.2: the word class named by "one <class> with another".
