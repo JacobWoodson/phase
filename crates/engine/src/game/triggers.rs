@@ -2,19 +2,20 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 
 use crate::database::synthesis::KeywordTriggerInstaller;
+#[cfg(test)]
+use crate::types::ability::TapStateChange;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCostOrigin,
     AttachmentReferent, BounceSelection, CardTypeSetSource, CastManaSpentMetric, ChosenAttribute,
     CommanderOwnership, ControllerRef, CopyRetargetPermission, DamageAmountScope,
     DamageAmountThreshold, DelayedAbilityOrigin, DelayedTriggerCondition, DurationEvent, Effect,
-    FilterProp, ModalChoice, NameStickerSet, ObjectScope, OriginConstraint, PlayerFilter,
-    PlayerScope, QuantityExpr, QuantityRef, RenownSubject, ResolvedAbility, SacrificeCost,
-    StaticCondition, TargetFilter, TargetRef, TributeOutcome, TriggerCondition,
-    TriggerConditionAnchor, TriggerConstraint, TriggerDefinition, TriggerDefinitionOccurrenceRef,
-    TriggerDefinitionRef, TriggerEntry, TriggerGrantProducerKey, TypeFilter, TypedFilter,
+    EffectScope, FilterProp, ModalChoice, NameStickerSet, ObjectScope, OriginConstraint,
+    PlayerFilter, PlayerScope, PreventionAmount, QuantityExpr, QuantityRef, RenownSubject,
+    ResolvedAbility, SacrificeCost, StaticCondition, TargetFilter, TargetRef, TributeOutcome,
+    TriggerCondition, TriggerConditionAnchor, TriggerConstraint, TriggerDefinition,
+    TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry, TriggerGrantProducerKey,
+    TypeFilter, TypedFilter,
 };
-#[cfg(test)]
-use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
@@ -3393,6 +3394,14 @@ fn collect_matching_triggers_inner(
                     pending_ability
                         .set_effect_context_object_recursive(tapped_snapshot.as_ref().clone());
                 }
+                let later_equal_in_batch =
+                    count_later_equal_damage_events_in_batch(event_batch, event, &trigger_event);
+                seed_damage_event_recipient_pin(
+                    state,
+                    &mut pending_ability,
+                    Some(&trigger_event),
+                    later_equal_in_batch,
+                );
                 pending.push(MatchedTrigger {
                     trig_idx,
                     definition_ref: definition_ref.clone(),
@@ -7214,7 +7223,7 @@ fn dispatch_collected_triggers(state: &mut GameState, pending: Vec<PendingTrigge
 /// objects in other zones (a fizzled spell that has left the stack, an object
 /// that bounced) since their cast provenance is no longer meaningful, and is
 /// cleared on battlefield exit by `reset_for_battlefield_exit`.
-fn clear_post_collection_transients(state: &mut GameState) {
+pub(super) fn clear_post_collection_transients(state: &mut GameState) {
     state.objects.update_where(
         |_, obj| {
             obj.mana_spent_to_cast
@@ -8982,6 +8991,123 @@ fn effect_uses_parent_target(effect: &Effect) -> bool {
     }
 }
 
+fn ability_uses_event_target_prevent_damage(ability: &ResolvedAbility) -> bool {
+    matches!(
+        &ability.effect,
+        Effect::PreventDamage {
+            target: TargetFilter::EventTarget,
+            ..
+        }
+    ) || ability
+        .sub_ability
+        .as_deref()
+        .is_some_and(ability_uses_event_target_prevent_damage)
+        || ability
+            .else_ability
+            .as_deref()
+            .is_some_and(ability_uses_event_target_prevent_damage)
+}
+
+fn count_later_equal_damage_events_in_batch(
+    event_batch: &[GameEvent],
+    current_event: &GameEvent,
+    trigger_event: &GameEvent,
+) -> usize {
+    let GameEvent::DamageDealt {
+        source_id,
+        target,
+        amount,
+        is_combat,
+        source_incarnation,
+        ..
+    } = trigger_event
+    else {
+        return 0;
+    };
+    let Some(pos) = event_batch
+        .iter()
+        .position(|e| std::ptr::eq(e, current_event))
+    else {
+        return 0;
+    };
+    event_batch[pos + 1..]
+        .iter()
+        .filter(|later| {
+            matches!(
+                later,
+                GameEvent::DamageDealt {
+                    source_id: s,
+                    target: t,
+                    amount: a,
+                    is_combat: c,
+                    source_incarnation: si,
+                    ..
+                } if s == source_id
+                    && t == target
+                    && a == amount
+                    && c == is_combat
+                    && si == source_incarnation
+            )
+        })
+        .count()
+}
+
+fn damage_event_recipient_pin(
+    state: &GameState,
+    trigger_event: Option<&GameEvent>,
+    later_equal_in_batch: usize,
+) -> Option<ObjectIncarnationRef> {
+    let GameEvent::DamageDealt {
+        source_id,
+        target: TargetRef::Object(target_id),
+        amount,
+        is_combat,
+        source_incarnation,
+        ..
+    } = trigger_event?
+    else {
+        return None;
+    };
+    let incarnation = state
+        .damage_dealt_this_turn
+        .iter()
+        .rev()
+        .filter(|record| {
+            record.source_id == *source_id
+                && record.source_incarnation == *source_incarnation
+                && record.target == TargetRef::Object(*target_id)
+                && record.amount == *amount
+                && record.is_combat == *is_combat
+        })
+        .nth(later_equal_in_batch)
+        .and_then(|record| record.target_incarnation)
+        .or_else(|| state.objects.get(target_id).map(|obj| obj.incarnation))?;
+    Some(ObjectIncarnationRef::of(*target_id, incarnation))
+}
+
+/// CR 400.7 + CR 608.2k + CR 120.1: Pin the exact damage recipient incarnation
+/// on an ability chain that resolves `TargetFilter::EventTarget` into a
+/// prevention shield (`Effect::PreventDamage`). Captured when the trigger is
+/// collected / placed on the stack so that if the recipient leaves the
+/// battlefield and returns before the trigger resolves — even if the same
+/// dealer deals an equal amount of damage to the returned incarnation before
+/// the original trigger resolves — the original trigger remains bound to its
+/// own event's recipient incarnation and does not shield the new object.
+pub(crate) fn seed_damage_event_recipient_pin(
+    state: &GameState,
+    ability: &mut ResolvedAbility,
+    trigger_event: Option<&GameEvent>,
+    later_equal_in_batch: usize,
+) {
+    if !ability.target_incarnations.is_empty() || !ability_uses_event_target_prevent_damage(ability)
+    {
+        return;
+    }
+    if let Some(pin) = damage_event_recipient_pin(state, trigger_event, later_equal_in_batch) {
+        ability.set_target_incarnations_recursive(vec![pin]);
+    }
+}
+
 pub(crate) fn push_pending_trigger_to_stack_with_event_batch(
     state: &mut GameState,
     trigger: PendingTrigger,
@@ -9059,6 +9185,7 @@ fn push_pending_trigger_to_stack_with_firing_and_duration_events(
         trigger_event.as_ref(),
         EventContextSeedTiming::StackPush,
     );
+    seed_damage_event_recipient_pin(state, &mut ability, trigger_event.as_ref(), 0);
 
     let entry_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
@@ -9342,6 +9469,7 @@ fn assign_pending_trigger_entry_ability(
     // push time (`push_pending_trigger_to_stack_with_firing_and_duration_events`)
     // for "that spell" / self-cast "this spell".
     assigned_ability.context.triggering_spell = triggering_spell_pin(state, trigger_event);
+    seed_damage_event_recipient_pin(state, &mut assigned_ability, trigger_event, 0);
 
     let Some(entry) = state
         .stack
@@ -9354,6 +9482,12 @@ fn assign_pending_trigger_entry_ability(
     let ability = entry
         .ability_mut()
         .expect("pending_trigger_entry must reference a TriggeredAbility stack entry");
+    if assigned_ability.target_incarnations.is_empty()
+        && !ability.target_incarnations.is_empty()
+        && ability_uses_event_target_prevent_damage(&assigned_ability)
+    {
+        assigned_ability.set_target_incarnations_recursive(ability.target_incarnations.clone());
+    }
     *ability = assigned_ability;
     true
 }
@@ -17701,10 +17835,32 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
     // ("each Dwarf you control deals 1 damage to any target", Princess Snowfall)
     // is the same "any target" player-chosen slot as `DealDamage` — surface it so
     // the cast/trigger-time target slot is built.
+    // CR 115.1a/c/d + CR 115.4 + CR 615.7: `PreventDamage` with a declared `Single`
+    // recipient, `TargetFilter::Any`, and no `damage_source_filter` ("prevent the
+    // next 2 damage that would be dealt to any target this turn", Aven Redeemer,
+    // Healing Salve) is a player-chosen target slot over creatures, planeswalkers,
+    // and players. When `damage_source_filter` is present (Awe Strike, Maze of Ith),
+    // the target slot is carried by the source filter and `Any` is an untargeted
+    // broadcast recipient that must not mint a slot. When `amount` is `All`
+    // (Fog, Sewers of Estark), it is an untargeted mass prevention effect that must
+    // not mint a slot.
     if effect.target_filter() == Some(&TargetFilter::Any)
         && !matches!(
             effect,
-            Effect::DealDamage { .. } | Effect::EachSourceDealsDamage { .. }
+            Effect::DealDamage { .. }
+                | Effect::EachSourceDealsDamage { .. }
+                | Effect::PreventDamage {
+                    recipient_scope: EffectScope::Single,
+                    damage_source_filter: None,
+                    amount: PreventionAmount::Next(_),
+                    ..
+                }
+                | Effect::PreventDamage {
+                    recipient_scope: EffectScope::Single,
+                    damage_source_filter: None,
+                    amount_dynamic: Some(_),
+                    ..
+                }
         )
     {
         return None;
@@ -24029,6 +24185,7 @@ pub mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
         );
 
@@ -35188,6 +35345,65 @@ pub mod tests {
         assert!(
             extract_target_filter_from_effect(&effect).is_some(),
             "GenericEffect with a typed target must still generate a target slot"
+        );
+    }
+
+    /// CR 115.1c + CR 115.4 + CR 615.7: `PreventDamage { recipient_scope: Single, target: Any }`
+    /// ("prevent the next 2 damage that would be dealt to any target this turn", Aven Redeemer)
+    /// is a declared target over creatures, players, and planeswalkers — must generate a slot.
+    #[test]
+    fn extract_target_keeps_prevent_damage_with_any_target_and_single_recipient_scope() {
+        let effect = Effect::PreventDamage {
+            amount: crate::types::ability::PreventionAmount::Next(2),
+            amount_dynamic: None,
+            target: TargetFilter::Any,
+            recipient_scope: EffectScope::Single,
+            scope: crate::types::ability::PreventionScope::AllDamage,
+            damage_source_filter: None,
+            prevention_duration: None,
+        };
+        assert!(
+            extract_target_filter_from_effect(&effect).is_some(),
+            "PreventDamage with Single recipient_scope and Any target must generate a target slot"
+        );
+    }
+
+    /// CR 115.10a + CR 615.1: `PreventDamage { recipient_scope: All, target: Any }`
+    /// ("prevent all combat damage that would be dealt this turn", Fog) is an untargeted
+    /// mass effect — must NOT generate a slot.
+    #[test]
+    fn extract_target_skips_prevent_damage_with_all_recipient_scope() {
+        let effect = Effect::PreventDamage {
+            amount: crate::types::ability::PreventionAmount::All,
+            amount_dynamic: None,
+            target: TargetFilter::Any,
+            recipient_scope: EffectScope::All,
+            scope: crate::types::ability::PreventionScope::CombatDamage,
+            damage_source_filter: None,
+            prevention_duration: None,
+        };
+        assert!(
+            extract_target_filter_from_effect(&effect).is_none(),
+            "PreventDamage with All recipient_scope must not generate a target slot"
+        );
+    }
+
+    /// CR 115.10a + CR 615.1: `PreventDamage { recipient_scope: Single, target: Any, amount: All }`
+    /// (unconstrained mass prevention like Fog or Sewers of Estark) is untargeted — must NOT generate a slot.
+    #[test]
+    fn extract_target_skips_prevent_damage_with_all_amount() {
+        let effect = Effect::PreventDamage {
+            amount: crate::types::ability::PreventionAmount::All,
+            amount_dynamic: None,
+            target: TargetFilter::Any,
+            recipient_scope: EffectScope::Single,
+            scope: crate::types::ability::PreventionScope::CombatDamage,
+            damage_source_filter: None,
+            prevention_duration: None,
+        };
+        assert!(
+            extract_target_filter_from_effect(&effect).is_none(),
+            "PreventDamage with All amount must not generate a target slot even with Single recipient_scope"
         );
     }
 
