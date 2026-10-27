@@ -11396,6 +11396,7 @@ mod tests {
                     phase_a_tally: Vec::new(),
                     phase_b_tally: Vec::new(),
                     outer_tally: None,
+                    one_shot_applications: Vec::new(),
                     batch_events: Vec::new(),
                     lives_before: vec![20, 20],
                     sub_step: crate::types::game_state::CombatDamageSubStep::Regular,

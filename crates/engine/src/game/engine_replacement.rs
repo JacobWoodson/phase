@@ -300,6 +300,18 @@ pub(super) fn handle_replacement_choice(
     } else {
         None
     };
+    // CR 616.1 + CR 700.1/615.8 (Matt R15): the parked batch also owns this
+    // answer's one-shot applications — the paused event's own consumption
+    // joins the same ledger its later portions read. Install the parked
+    // ledger as the live ledger (preferring a live one when present, exactly
+    // like the tally window above); the snapshot below writes it back on
+    // EVERY return with a record parked, so the live ledger exists ONLY
+    // during the inner handler.
+    if state.combat_one_shot_applications.is_none() {
+        if let Some(record) = state.pending_combat_damage.as_ref() {
+            state.combat_one_shot_applications = Some(record.one_shot_applications.clone());
+        }
+    }
     // A record stamped for rejection came from an action-ingress life change.
     // Resume it inside an ingress window so every life settlement the handler
     // reaches (a substitute's drain, post-replacement continuations, nested
@@ -334,6 +346,16 @@ pub(super) fn handle_replacement_choice(
             }
         }
         state.combat_prevention_tally = outer_tally;
+        // CR 616.1 + CR 700.1/615.8 (Matt R15): snapshot the answer's
+        // one-shot applications back into the parked record — the same
+        // lifecycle as the tally above. The live ledger dedups by key, and
+        // the record is overwritten (not extended), so neither the install
+        // nor a 616.1f repeat can duplicate an entry.
+        if let Some(live) = state.combat_one_shot_applications.take() {
+            if let Some(record) = state.pending_combat_damage.as_mut() {
+                record.one_shot_applications = live;
+            }
+        }
     }
     // CR 615.13 + CR 616.1e: a resumed prevention batch whose continuation is
     // empty (single source, no downstream) completes with no drain at all, so

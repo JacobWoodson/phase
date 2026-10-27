@@ -18827,6 +18827,14 @@ pub struct PendingCombatDamageBatch {
     /// the restore is exact (`Some` vs `None` decides accumulate-vs-emit for
     /// later prevention).
     pub outer_tally: Option<Vec<PreventedDamageEntry>>,
+    /// CR 616.1 + CR 700.1/615.8 (Matt R15): the one-shot ledger as of the
+    /// park — pre-pause same-source eligibility spans the pause, and the
+    /// live ledger is `#[serde(skip)]`, so a mid-pause save/load would drop
+    /// it without this write-back. Restored as the live ledger on resume
+    /// (re-pauses re-park it); empty on batches that never touched a
+    /// one-shot, and defaulted for older saves.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub one_shot_applications: Vec<(AppliedReplacementKey, ObjectId)>,
     /// CR 510.2 + CR 603.3b: every event this batch has produced, so
     /// completion emits ONE batch to `process_combat_damage_triggers`.
     pub batch_events: Vec<GameEvent>,
@@ -25374,11 +25382,10 @@ declare_game_state! {
     /// during independent follow-ups, then restored before the next portion;
     /// the prevention tally remains active. Excluded from serialization and
     /// equality like the prevention tally.
-    /// NOTE: intentionally unparked across a combat pause (see
-    /// `replace_combat_damage_batch`'s merge note) -- a mid-pause save/load
-    /// drops pre-pause same-source eligibility; parking it in
-    /// `PendingCombatDamageBatch` is the prescribed hardening if review
-    /// wants that edge closed.
+    /// Parked across a combat pause in
+    /// `PendingCombatDamageBatch::one_shot_applications` (Matt R15) — the
+    /// live ledger stays `#[serde(skip)]`, but a mid-pause save/load
+    /// restores pre-pause same-source eligibility from the record.
     #[serde(skip)]
     pub(crate) combat_one_shot_applications: Option<Vec<(AppliedReplacementKey, ObjectId)>>,
 
@@ -40641,6 +40648,7 @@ mod tests {
                 amount: 2,
             }],
             outer_tally: None,
+            one_shot_applications: Vec::new(),
             batch_events: vec![persisted_zone_change_event(record)],
             lives_before: vec![20, 20],
             sub_step: CombatDamageSubStep::Regular,

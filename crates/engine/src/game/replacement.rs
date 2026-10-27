@@ -3336,11 +3336,6 @@ fn damage_done_applier(
                     applied,
                 });
             }
-            events.push(GameEvent::DamagePrevented {
-                source_id,
-                target: target.clone(),
-                amount: dmg,
-            });
             // Merge #5: route through the shared per-(shield,recipient)
             // accumulator (tuple key + parked-record write-back), not the
             // bare-key inline tally upstream's fork uses.
@@ -3349,8 +3344,21 @@ fn damage_done_applier(
             } else {
                 false
             };
-            // CR 615.13 + CR 615.5: Keep real source/recipient provenance above;
-            // only the runtime rider's amount is aggregated, without emitting a
+            // CR 615.13 (Matt R15): inside a batch, the aggregate publisher
+            // owns the public event — one per (shield, recipient) — so a
+            // per-portion emit here would fragment the application into one
+            // trigger per portion. Emit per portion only outside a batch
+            // (no aggregate publisher runs there), exactly like Branch 2.
+            if !accumulated_in_batch {
+                events.push(GameEvent::DamagePrevented {
+                    source_id,
+                    target: target.clone(),
+                    amount: dmg,
+                });
+            }
+            // CR 615.13 + CR 615.5: only the runtime rider's amount is
+            // aggregated; the aggregate publisher derives rider provenance
+            // from the shield's resolved source filter, without emitting a
             // second, sentinel-source prevention event at the rider boundary.
             if !accumulated_in_batch || shield_has_per_event_execute_followup(state, rid) {
                 state.last_effect_count = Some(dmg as i32);
@@ -13568,10 +13576,12 @@ pub fn replace_event(
 /// The batch-local one-shot ledger keeps a successfully consumed replacement
 /// eligible only for the same damage source's remaining portions (CR 700.1 +
 /// CR 615.8). Definitions stay consumed immediately; a later damage batch
-/// starts empty. `ShieldKind::PreventionOneShot` (Awe Strike) emits real
-/// per-recipient source/recipient `DamagePrevented` events. `Prevention { All }`
-/// with `consume_on_apply` (Impulsive Maneuvers' lose branch) uses the
-/// continuous-All path, whose aggregate event is emitted at the rider boundary.
+/// starts empty. `ShieldKind::PreventionOneShot` (Awe Strike) accumulates
+/// like every other arm and publishes one aggregate `DamagePrevented` per
+/// (shield, recipient) at the rider boundary (Matt R15).
+/// `Prevention { All }` with `consume_on_apply` (Impulsive Maneuvers' lose
+/// branch) uses the continuous-All path, whose aggregate event is emitted at
+/// the rider boundary.
 /// `Prevention::Next(N)` retains sequential depletion, with no ledger membership.
 ///
 /// `// strict-failure: CR 615.7 multi-source Next(N) prevention requires a
@@ -13690,10 +13700,10 @@ pub(crate) fn replace_combat_damage_batch(
     // resident here); restoring it would leak same-source eligibility into a
     // later batch, whose keys can collide (rid-based, not event-specific).
     // Initial calls took None, so unpaused batches behave exactly as upstream.
-    // Known edge (disclosed, not silently kept): a mid-pause save/load drops
-    // the live ledger (#[serde(skip)], unparked), so post-load same-source
-    // portions lose pre-pause eligibility -- parking it in the batch record
-    // is the prescribed hardening if review wants it closed.
+    // (Matt R15): a mid-pause save/load no longer drops the live ledger --
+    // the park sites carry it in
+    // `PendingCombatDamageBatch::one_shot_applications` and the resume
+    // reinstalls it before re-entering here.
     state.combat_one_shot_applications = None;
     CombatDamageReplacementOutcome::Complete { survivors, tally }
 }

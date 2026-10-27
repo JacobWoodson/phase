@@ -4109,7 +4109,7 @@ fn apnap_rank(order: &[PlayerId], controller: PlayerId) -> usize {
         .unwrap_or(order.len())
 }
 
-fn trigger_apnap_rank(state: &GameState, controller: PlayerId) -> usize {
+pub(crate) fn trigger_apnap_rank(state: &GameState, controller: PlayerId) -> usize {
     if state.format_config.topology().has_shared_team_turns() {
         super::topology::apnap_team_rank(state, controller)
     } else {

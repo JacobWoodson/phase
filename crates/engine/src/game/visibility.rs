@@ -12147,6 +12147,7 @@ mod tests {
                 phase_a_tally: Vec::new(),
                 phase_b_tally: Vec::new(),
                 outer_tally: None,
+                one_shot_applications: Vec::new(),
                 batch_events: vec![GameEvent::ZoneChanged {
                     object_id: hidden,
                     from: Some(Zone::Library),

@@ -1906,7 +1906,7 @@ mod tests {
     }
 
     fn applied_with(index: usize) -> HashSet<AppliedReplacementKey> {
-        HashSet::from([AppliedReplacementKey::object(ObjectId(9), index)])
+        HashSet::from([AppliedReplacementKey::object(ObjectId(9), index as u64)])
     }
 
     fn compound(primary: &str, appended: Vec<TokenBatch>) -> ProposedEvent {

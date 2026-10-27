@@ -535,6 +535,12 @@ pub(crate) fn resume_pending_combat_damage(
         *live.entry(key).or_insert(0) += amount;
     }
     state.combat_prevention_tally = Some(live);
+    // CR 616.1 + CR 700.1/615.8 (Matt R15): reinstall the parked one-shot
+    // ledger as the live ledger — pre-pause same-source eligibility spans
+    // the pause, and a mid-pause save/load dropped the live (`#[serde(skip)]`)
+    // copy. The re-entered batch keeps a resident ledger (see
+    // `replace_combat_damage_batch`), and a re-pause re-parks it below.
+    state.combat_one_shot_applications = Some(std::mem::take(&mut record.one_shot_applications));
     let sub_step = record.sub_step;
     match replacement::replace_combat_damage_batch(
         state,
@@ -651,6 +657,12 @@ pub(crate) fn resume_pending_combat_damage(
                 phase_a_tally: Vec::new(),
                 phase_b_tally: tally_entries_for_record(&combined),
                 outer_tally: outer_entries,
+                // CR 616.1 + CR 700.1/615.8 (Matt R15): re-park the live
+                // one-shot ledger — same lifecycle as the tally above.
+                one_shot_applications: state
+                    .combat_one_shot_applications
+                    .take()
+                    .unwrap_or_default(),
                 batch_events: std::mem::take(&mut record.batch_events),
                 lives_before: std::mem::take(&mut record.lives_before),
                 sub_step: record.sub_step,
@@ -2006,10 +2018,11 @@ fn apply_combat_survivors(
 /// - **Phase B (Batch replace):** pass the whole proposed-event slice through
 ///   `replace_combat_damage_batch`, which runs the replacement pipeline per
 ///   event but aggregates continuous all-damage and one-shot prevention riders.
-///   `ShieldKind::PreventionOneShot` (Awe Strike) emits real source/recipient
-///   `DamagePrevented` events per portion. `Prevention { All }` with
-///   `consume_on_apply` (Impulsive Maneuvers' lose branch) uses the continuous-All
-///   path and emits its aggregate event at the rider boundary.
+///   Every shield — `ShieldKind::PreventionOneShot` (Awe Strike) included —
+///   publishes one `DamagePrevented` per (shield, recipient) at the aggregate
+///   boundary (Matt R15). `Prevention { All }` with `consume_on_apply`
+///   (Impulsive Maneuvers' lose branch) uses the continuous-All path and
+///   emits its aggregate event at the rider boundary.
 /// - **Phase C (Apply + bookkeeping):** apply each surviving post-replacement
 ///   event via `apply_damage_after_replacement`, then run the player-batching
 ///   and commander-damage bookkeeping. Afterward, fire each prevention shield's
@@ -2132,6 +2145,21 @@ pub(crate) fn apply_combat_damage(
         }
     }
 
+    // CR 101.4 + CR 616.1 (Matt R15): simultaneous replacement prompts are
+    // made in APNAP order, not attack-declaration order. Stable-sort the
+    // parallel batch vecs by the affected player's APNAP rank — ties keep
+    // declaration order, and same-player events were already correctly
+    // sequenced. The reordering happens before Phase B, so decided /
+    // remaining / survivor indices, parks, and resumes all stay aligned.
+    {
+        let mut paired: Vec<(BatchEntry, ProposedEvent)> =
+            entries.into_iter().zip(proposed_events).collect();
+        paired.sort_by_key(|(_, proposed)| {
+            super::triggers::trigger_apnap_rank(state, proposed.affected_player(state))
+        });
+        (entries, proposed_events) = paired.into_iter().unzip();
+    }
+
     // --- Phase B: Batch replacement (CR 510.2 + CR 615.7) ---
     match replacement::replace_combat_damage_batch(state, &mut events, proposed_events) {
         replacement::CombatDamageReplacementOutcome::Complete {
@@ -2220,6 +2248,13 @@ pub(crate) fn apply_combat_damage(
                 phase_a_tally,
                 phase_b_tally,
                 outer_tally: outer_entries,
+                // CR 616.1 + CR 700.1/615.8 (Matt R15): park the live
+                // one-shot ledger — a mid-pause save/load would otherwise
+                // drop pre-pause same-source eligibility.
+                one_shot_applications: state
+                    .combat_one_shot_applications
+                    .take()
+                    .unwrap_or_default(),
                 batch_events: events,
                 lives_before,
                 sub_step,
@@ -2396,10 +2431,9 @@ pub(crate) enum BatchRiderDrainOutcome {
 ///
 /// Each `DamagePrevented` event for the batch is emitted here (the per-source
 /// applier suppressed them so the rider sees one un-fragmented amount), ONE per
-/// (shield, recipient) — except `ShieldKind::PreventionOneShot`, which already
-/// emitted real per-portion events in the applier (merge #5, upstream #10215)
-/// and only aggregates its rider amount here. CR 615.13 and CR 120.3 pull in
-/// different directions and
+/// (shield, recipient) — `ShieldKind::PreventionOneShot` included (Matt R15:
+/// the applier suppresses its per-portion emit inside a batch). CR 615.13 and
+/// CR 120.3 pull in different directions and
 /// both are honored: the prevention APPLICATION is the trigger unit and the
 /// CR 615.5 rider unit, so the rider fires once per shield against the batch
 /// total, while the RECIPIENT is a per-event property, so a shield that
@@ -2493,15 +2527,6 @@ pub(crate) fn fire_batch_prevention_riders(
                         | crate::types::ability::PreventionAmount::AllBut(_)
                 }
             );
-        // CR 615.13 + CR 615.5 (merge #5, upstream #10215): a
-        // `ShieldKind::PreventionOneShot` already emitted real per-portion
-        // source/recipient events in the applier -- skip the aggregate
-        // emission below (but still run the rider against the total).
-        let one_shot_emitted_per_portion = matches!(
-            repl_def.shield_kind,
-            crate::types::ability::ShieldKind::PreventionOneShot
-        );
-
         // CR 615.5 + CR 609.7: A rider referencing the prevented damage's source
         // ("that source's controller" — New Way Forward) resolves
         // `PostReplacementSourceController` against the drain's event source. The
@@ -2514,10 +2539,11 @@ pub(crate) fn fire_batch_prevention_riders(
             .and_then(shield_specific_source);
         let runtime = repl_def.runtime_execute.clone();
 
-        // Merge #5 (upstream #10215): one-shots already emitted per portion.
-        if !one_shot_emitted_per_portion {
-            push_prevented_events(group, rid.source, events);
-        }
+        // CR 615.13 (Matt R15): one per (shield, recipient) — one-shots
+        // publish here like every other shield (the applier suppresses its
+        // per-portion emit inside a batch), so one application covering
+        // several simultaneous portions is one trigger, not one per portion.
+        push_prevented_events(group, rid.source, events);
 
         // CR 615.5: Resolve the prevention's additional effect ("for each 1
         // damage prevented this way, create a token"). Stamp the aggregate
