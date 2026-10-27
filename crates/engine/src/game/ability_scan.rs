@@ -6759,6 +6759,7 @@ fn replacement_definition_axes(
         destination_zone: _,
         active_zones: _,
         damage_target_filter: _,
+        target_recipient_incarnation: _,
         combat_scope: _,
         draw_scope: _,
         die_ignore_rule: _,
