@@ -390,6 +390,18 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
 pub(crate) const UNPAIRED_READS: CharacteristicKinds =
     CharacteristicKinds::CONTROLLER.union(CharacteristicKinds::CARD_TYPES);
 
+/// CR 303.4 + CR 702.103b + CR 702.103f: whether a source's "enchanted creature"
+/// is relative to the source itself. True for an Aura, and for a bestow card:
+/// CR 702.103b makes a bestowed spell and the permanent it becomes an Aura, and
+/// CR 702.103f ends that bestowed status when it becomes unattached, leaving a
+/// creature rather than an Aura. Its "enchanted creature" static still refers
+/// only to the creature it is attached to, never to creatures enchanted by
+/// other Auras.
+fn source_is_aura_or_bestow(subtypes: &[String], keywords: &[Keyword]) -> bool {
+    subtypes.iter().any(|subtype| subtype == "Aura")
+        || keywords.iter().any(|k| matches!(k, Keyword::Bestow(_)))
+}
+
 /// CR 301.5f + CR 303.4: true when every object `filter` admits must stand in an
 /// attachment relation — be what the source is attached to, or carry an
 /// attachment — because it requires `EquippedBy`/`EnchantedBy` on every branch.
@@ -7821,6 +7833,7 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
         // `FilterProp::Prepared` reads last known information for a departed
         // source's intervening-if recheck (CR 603.4).
         was_prepared: lki.was_prepared,
+        departure: crate::types::game_state::ZoneDeparture::Moved,
     };
     matches_target_filter_on_zone_change_record(state, &record, filter, ctx)
 }
@@ -10578,7 +10591,7 @@ fn source_context_from_filter<'a>(
                 Vec::new(),
             )
         };
-    let source_is_aura = lki.subtypes.iter().any(|subtype| subtype == "Aura");
+    let source_is_aura = source_is_aura_or_bestow(&lki.subtypes, &lki.keywords);
     let source_is_equipment = lki.subtypes.iter().any(|subtype| subtype == "Equipment");
     let chosen_creature_type = lki
         .chosen_attributes
@@ -12876,7 +12889,9 @@ fn object_shared_quality_values(
     )
 }
 
-fn lki_shared_quality_values(
+/// CR 608.2h: the values of `quality` read from an object's last known
+/// information.
+pub(crate) fn lki_shared_quality_values(
     lki: &LKISnapshot,
     quality: &SharedQuality,
     all_creature_types: &[String],
@@ -12897,7 +12912,10 @@ fn lki_shared_quality_values(
     )
 }
 
-fn quality_sets_overlap(left: &HashSet<String>, right: &HashSet<String>) -> bool {
+/// CR 608.2c + CR 201.2a: two value sets share a quality only when both are
+/// non-empty and intersect. The comparator for every shared-quality test,
+/// including `AbilityCondition::ObjectsShareQuality`.
+pub(crate) fn quality_sets_overlap(left: &HashSet<String>, right: &HashSet<String>) -> bool {
     !left.is_empty() && !right.is_empty() && !left.is_disjoint(right)
 }
 
@@ -13022,7 +13040,7 @@ fn source_context_from_spell_filter(context: SpellFilterContext<'_>) -> SourceCo
         trigger_source: None,
         attached_to: source_obj.and_then(|o| o.attached_to),
         source_is_aura: source_obj
-            .is_some_and(|o| o.card_types.subtypes.iter().any(|s| s == "Aura")),
+            .is_some_and(|o| source_is_aura_or_bestow(&o.card_types.subtypes, &o.keywords)),
         source_is_equipment: source_obj
             .is_some_and(|o| o.card_types.subtypes.iter().any(|s| s == "Equipment")),
         saddled_by: source_obj.map_or_else(Vec::new, |o| o.saddled_by.clone()),
@@ -13340,26 +13358,6 @@ fn most_prevalent_creature_types_in_zone(
 /// For "creature type": all objects must share at least one creature subtype.
 /// For "color": all objects must share at least one color.
 /// For "card type": all objects must share at least one card type.
-/// CR 608.2c + CR 201.2: True when two objects share at least one value of the
-/// named quality. Used by `AbilityCondition::ObjectsShareQuality`.
-pub fn objects_share_quality(
-    state: &GameState,
-    left: ObjectId,
-    right: ObjectId,
-    quality: &SharedQuality,
-) -> bool {
-    let Some(left_obj) = state.objects.get(&left) else {
-        return false;
-    };
-    let Some(right_obj) = state.objects.get(&right) else {
-        return false;
-    };
-    let left_vals = object_shared_quality_values(left_obj, quality, &state.all_creature_types);
-    let right_vals = object_shared_quality_values(right_obj, quality, &state.all_creature_types);
-    !left_vals.is_disjoint(&right_vals)
-}
-
-/// CR 608.2b: Validate that all targeted objects share at least one value of the named quality.
 pub fn validate_shares_quality(
     state: &GameState,
     targets: &[TargetRef],
@@ -13372,15 +13370,29 @@ pub fn validate_shares_quality(
             TargetRef::Player(_) => None,
         })
         .collect();
+    objects_have_common_quality_value(state, &obj_ids, quality)
+}
 
+/// Whether some value of `quality` is common to every object in `ids`
+/// (group form; contrast the pairwise `quality_sets_overlap`).
+/// Vacuously true for fewer than two ids, decided before any lookup; with
+/// two or more ids, false if any id is missing from `state.objects`,
+/// otherwise true iff the objects' value sets have a non-empty intersection.
+/// Shared group core for target validation (`validate_shares_quality`) and
+/// library-search selection (`search_library::selection_satisfies_constraint`).
+pub fn objects_have_common_quality_value(
+    state: &GameState,
+    ids: &[ObjectId],
+    quality: &SharedQuality,
+) -> bool {
     // Fewer than 2 objects — constraint is trivially satisfied.
-    if obj_ids.len() < 2 {
+    if ids.len() < 2 {
         return true;
     }
 
     let mut sets = Vec::new();
-    for id in obj_ids {
-        let Some(obj) = state.objects.get(&id) else {
+    for id in ids {
+        let Some(obj) = state.objects.get(id) else {
             return false;
         };
         sets.push(object_shared_quality_values(
@@ -18887,17 +18899,24 @@ mod tests {
         ));
     }
 
+    /// CR 608.2c + CR 201.2: the comparator `AbilityCondition::ObjectsShareQuality`
+    /// uses, over per-object quality values.
     #[test]
-    fn objects_share_quality_matches_shared_card_type() {
+    fn quality_sets_overlap_matches_shared_card_type() {
+        let card_types = |state: &GameState, id: ObjectId| {
+            super::object_shared_quality_values(
+                &state.objects[&id],
+                &SharedQuality::CardType,
+                &state.all_creature_types,
+            )
+        };
         let mut state = setup();
         let creature_a = add_creature(&mut state, PlayerId(0), "Creature A");
         let creature_b = add_creature(&mut state, PlayerId(0), "Creature B");
 
-        assert!(super::objects_share_quality(
-            &state,
-            creature_a,
-            creature_b,
-            &SharedQuality::CardType,
+        assert!(super::quality_sets_overlap(
+            &card_types(&state, creature_a),
+            &card_types(&state, creature_b),
         ));
         let instant = create_object(
             &mut state,
@@ -18927,17 +18946,13 @@ mod tests {
             .card_types
             .core_types
             .push(CoreType::Land);
-        assert!(!super::objects_share_quality(
-            &state,
-            creature_a,
-            land,
-            &SharedQuality::CardType,
+        assert!(!super::quality_sets_overlap(
+            &card_types(&state, creature_a),
+            &card_types(&state, land),
         ));
-        assert!(!super::objects_share_quality(
-            &state,
-            creature_a,
-            instant,
-            &SharedQuality::CardType,
+        assert!(!super::quality_sets_overlap(
+            &card_types(&state, creature_a),
+            &card_types(&state, instant),
         ));
     }
 
@@ -24334,6 +24349,7 @@ mod tests {
             recorded_turn_number: 0,
             is_suspected: false,
             was_prepared: false,
+            departure: crate::types::game_state::ZoneDeparture::Moved,
         };
         let goblin_filter = make_subtype_filter("Goblin");
         let plains_filter = make_subtype_filter("Plains");
@@ -25549,6 +25565,43 @@ mod tests {
 
     fn equipped_creature() -> TargetFilter {
         TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy]))
+    }
+
+    /// CR 303.4 + CR 702.103b: a bestow card on the battlefield as an unattached
+    /// creature (Nyxborn Rollicker) has "enchanted creature gets +1/+1" that
+    /// refers only to what it is attached to — creatures enchanted by other
+    /// Auras are not "enchanted creature" for it.
+    #[test]
+    fn unattached_bestow_creature_enchanted_by_matches_nothing() {
+        let mut state = setup();
+        let rollicker = add_creature(&mut state, PlayerId(0), "Nyxborn Rollicker");
+        state
+            .objects
+            .get_mut(&rollicker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Bestow(crate::types::keywords::BestowCost::Mana(
+                ManaCost::zero(),
+            )));
+        let bear = add_creature(&mut state, PlayerId(0), "Bear");
+        let other_aura = add_artifact(&mut state, "Other Aura", &["Aura"]);
+        attach(&mut state, other_aura, bear);
+        let filter =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]));
+
+        // Positive guard: the bear really is enchanted, by a different Aura.
+        assert!(matches_target_filter(&state, bear, &filter, other_aura));
+        // Unattached bestow creature: nothing is enchanted by it.
+        assert!(!matches_target_filter(&state, bear, &filter, rollicker));
+        assert!(!matches_target_filter(
+            &state, rollicker, &filter, rollicker
+        ));
+
+        // Attached (Aura form): only its host qualifies.
+        let host = add_creature(&mut state, PlayerId(0), "Host");
+        attach(&mut state, rollicker, host);
+        assert!(matches_target_filter(&state, host, &filter, rollicker));
+        assert!(!matches_target_filter(&state, bear, &filter, rollicker));
     }
 
     /// CR 301.5f: `attachment_relation_rejects` proves rejection only for an

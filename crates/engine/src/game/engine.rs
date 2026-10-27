@@ -9397,6 +9397,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::LoyaltyActivation { .. }
                     | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
                     | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
+                    | PendingCostMoveResume::TurnFaceUpCostMove { .. }
             )
         ),
         // CR 606.4 + CR 616.1: a fully-prevented loyalty counter add (e.g. an
@@ -9425,18 +9426,23 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::LoyaltyActivation { .. }
                     | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
                     | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
+                    | PendingCostMoveResume::TurnFaceUpCostMove { .. }
             )
         ),
-        CostMoveDrainBoundary::PriorityBoundary => matches!(
-            state.pending_cost_move_resume,
-            Some(
-                PendingCostMoveResume::Cast {
-                    completion: PendingCostMoveCompletion::FinalizeDelvedCast { .. },
-                    ..
-                } | PendingCostMoveResume::ManaAbilityPayment { .. }
-                    | PendingCostMoveResume::CounterCostRemovalPayment { .. }
-            )
-        ),
+        CostMoveDrainBoundary::PriorityBoundary => {
+            state.pending_replacement.is_none()
+                && matches!(
+                    state.pending_cost_move_resume,
+                    Some(
+                        PendingCostMoveResume::Cast {
+                            completion: PendingCostMoveCompletion::FinalizeDelvedCast { .. },
+                            ..
+                        } | PendingCostMoveResume::ManaAbilityPayment { .. }
+                            | PendingCostMoveResume::CounterCostRemovalPayment { .. }
+                            | PendingCostMoveResume::TurnFaceUpCostMove { .. }
+                    )
+                )
+        }
     };
     if !eligible {
         return Ok(None);
@@ -9512,6 +9518,11 @@ pub(crate) fn drain_pending_cost_move_resume(
         // returns a replacement choice; the delivered boundary resumes the
         // payment through its already-authorized paid epilogue.
         engine_payment_choices::resume_random_discard_unless_payment(state, events)?
+    } else if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::TurnFaceUpCostMove { .. })
+    ) {
+        super::morph::resume_turn_face_up_cost_move(state, events, action_event_start)?
     } else {
         unreachable!("eligible cost-move root must remain parked")
     };
@@ -10061,6 +10072,20 @@ fn drain_pending_deferred_life_cost_resume(
                     state, player, *resume, events,
                 )
             }
+            crate::types::game_state::DeferredLifeCostResume::TurnFaceUp {
+                player,
+                source,
+                cost_source,
+                resume_at_resolution_depth: _,
+                remaining_cost,
+            } => super::morph::finish_or_continue_turn_face_up(
+                state,
+                player,
+                source,
+                cost_source,
+                remaining_cost,
+                events,
+            ),
         }
     })();
     if result.is_err()
@@ -12168,10 +12193,11 @@ fn apply_action(
     // CR 104.3a: A player may concede at any time. Concede bypasses the WaitingFor
     // dispatch entirely — there is no priority/state check. Eliminating the player
     // performs CR 800.4a object cleanup and advances `waiting_for` if the conceder
-    // owned it (see `eliminate_player`).
+    // owned it (see `elimination::concede`), and queues what the departure triggered
+    // (CR 603.6c), since no pipeline scans this action's events.
     if let GameAction::Concede { player_id } = action {
         let mut events = Vec::new();
-        super::elimination::eliminate_player(state, player_id, &mut events);
+        super::elimination::concede(state, player_id, &mut events);
         return Ok(ActionResult::applied(events, state.waiting_for.clone()));
     }
 
@@ -13549,9 +13575,9 @@ fn apply_non_priority_pass_action(
                     "Counter-cost distribution is not valid for mana abilities".to_string(),
                 ));
             }
-            CostResume::Resolution => {
+            CostResume::Resolution | CostResume::TurnFaceUp { .. } => {
                 return Err(EngineError::InvalidAction(
-                    "Counter-cost distribution is not valid for resolution costs".to_string(),
+                    "Counter-cost distribution is not valid for this cost".to_string(),
                 ));
             }
         },
@@ -13894,6 +13920,84 @@ fn apply_non_priority_pass_action(
                     ));
                 }
             },
+            CostResume::TurnFaceUp {
+                source,
+                cost_source,
+                remaining_cost,
+            } => {
+                if chosen.len() != *count {
+                    return Err(EngineError::InvalidAction(format!(
+                        "Must choose exactly {} permanent(s)/card(s)",
+                        count
+                    )));
+                }
+                // CR 118.1 + CR 118.3 + CR 702.37e: Multi-object cost payment requires distinct IDs
+                let mut seen = std::collections::HashSet::new();
+                for &id in chosen.iter() {
+                    if !seen.insert(id) {
+                        return Err(EngineError::InvalidAction(
+                            "Selected cards/permanents must be distinct".into(),
+                        ));
+                    }
+                    if !choices.contains(&id) {
+                        return Err(EngineError::InvalidAction(
+                            "Selected card or permanent is not eligible".to_string(),
+                        ));
+                    }
+                }
+                match kind {
+                    PayCostKind::ReturnToHand | PayCostKind::Discard | PayCostKind::Sacrifice => {
+                        use crate::types::game_state::TurnFaceUpMoveKind;
+                        let move_kind = match kind {
+                            PayCostKind::ReturnToHand => TurnFaceUpMoveKind::ReturnToHand,
+                            PayCostKind::Discard => TurnFaceUpMoveKind::Discard,
+                            _ => TurnFaceUpMoveKind::Sacrifice,
+                        };
+                        // CR 702.37e + CR 118.3: the selected objects move together as
+                        // one cost component through the shared turn-face-up move loop.
+                        let cost_event_start = events.len();
+                        super::morph::move_turn_face_up_cost_objects(
+                            state,
+                            super::morph::TurnFaceUpCostMoveRequest {
+                                player: *player,
+                                source: *source,
+                                cost_source: *cost_source,
+                                move_kind,
+                                chosen: chosen.clone(),
+                                start_at_index: 0,
+                                remaining_cost: remaining_cost.clone(),
+                            },
+                            super::casting_costs::CostMoveLedger::default(),
+                            cost_event_start,
+                            &mut events,
+                        )?
+                    }
+                    PayCostKind::Reveal => {
+                        let revealed_names = chosen
+                            .iter()
+                            .filter_map(|id| state.objects.get(id).map(|o| o.name.clone()))
+                            .collect();
+                        events.push(GameEvent::CardsRevealed {
+                            player: *player,
+                            card_ids: chosen.to_vec(),
+                            card_names: revealed_names,
+                        });
+                        super::morph::finish_or_continue_turn_face_up(
+                            state,
+                            *player,
+                            *source,
+                            *cost_source,
+                            remaining_cost.clone(),
+                            &mut events,
+                        )?
+                    }
+                    _ => {
+                        return Err(EngineError::InvalidAction(
+                            "Cost kind cannot resume a turn-face-up PayCost".into(),
+                        ));
+                    }
+                }
+            }
         },
         // CR 601.2: Player backed out of a cost-payment choice. Only spell
         // casts can be cancelled; mana-ability cost payment has no cancel path.
@@ -13912,6 +14016,17 @@ fn apply_non_priority_pass_action(
             },
             GameAction::CancelCast,
         ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
+        (
+            WaitingFor::PayCost {
+                player,
+                resume: CostResume::TurnFaceUp { .. },
+                ..
+            },
+            GameAction::CancelCast,
+        ) => {
+            state.waiting_for = WaitingFor::Priority { player: *player };
+            state.waiting_for.clone()
+        }
         // CR 118.3: Player selected permanents to sacrifice as cost.
         (
             WaitingFor::ActivationCostOneOfChoice {
@@ -16681,16 +16796,8 @@ fn apply_non_priority_pass_action(
                 state.waiting_for.clone()
             }
         }
-        // CR 608.2c: ChooseObjectsIntoTrackedSet — player submitted their
-        // battlefield-permanent selection. Publish a fresh tracked set so the
-        // downstream `PayCost { ScaledMana }` and the `IfYouDo`/`Untap` tail
-        // resolve against exactly this selection, then resume the chain.
-        //
-        // CR 115.10a + CR 608.2d: the same prompt also carries a described
-        // damage recipient ("a creature or player", no "target") — see
-        // `effects::deal_damage::parked_recipient_pool`. That pick is bound to
-        // the parked damage instruction instead of being published, and may be a
-        // player.
+        // CR 608.2c + CR 608.2d: the published answer to an object selection —
+        // see `apply_choose_objects_selection`.
         (
             WaitingFor::ChooseObjectsSelection {
                 player,
@@ -16700,98 +16807,44 @@ fn apply_non_priority_pass_action(
                 trigger_event,
             },
             GameAction::SelectTargets { targets },
-        ) => {
-            let p = *player;
-            let eligible_set = eligible.clone();
-            let pending_event = trigger_event.clone();
-            let selected_count = targets.len();
-            if selected_count < *min as usize
-                || max.is_some_and(|maximum| selected_count > maximum as usize)
-            {
-                return Err(EngineError::InvalidAction(format!(
-                    "Object selection must choose at least {min}{} distinct objects, got {selected_count}",
-                    max.map_or(String::new(), |maximum| format!(" and at most {maximum}"))
-                )));
-            }
-            // The prompt belongs to a parked described damage instruction only when
-            // the active continuation is that instruction, still holding exactly
-            // the pool this prompt offers. A tracked-set producer's prompt never
-            // matches: its parked continuation is some other instruction, even one
-            // whose own candidate set would be identical.
-            let recipient_pool = state
-                .active_ability_continuation()
-                .and_then(|continuation| {
-                    effects::deal_damage::parked_recipient_pool(&continuation.chain)
-                })
-                .filter(|pool| *pool == eligible_set);
-            // Validate all selected targets are distinct members of the eligible set;
-            // a player is a legal pick only for a damage recipient.
-            let mut selected: HashSet<TargetRef> = HashSet::with_capacity(selected_count);
-            for t in &targets {
-                if !eligible_set.contains(t) {
-                    return Err(EngineError::InvalidAction(
-                        "Selected target not eligible for object selection".to_string(),
-                    ));
-                }
-                if recipient_pool.is_none() && matches!(t, TargetRef::Player(_)) {
-                    return Err(EngineError::InvalidAction(
-                        "Object selection accepts battlefield objects only".to_string(),
-                    ));
-                }
-                if !selected.insert(t.clone()) {
-                    return Err(EngineError::InvalidAction(
-                        "Duplicate object in object selection".to_string(),
-                    ));
-                }
-            }
-            if recipient_pool.is_some() {
-                // CR 608.2d: the pick is chosen while the instruction is applied, so
-                // it is bound unpinned (never announced as a target) as the parked
-                // damage node's recipient. Nothing is published: this is not a
-                // tracked-set selection.
-                if let Some(frame) = state.active_ability_continuation_frame_mut() {
-                    frame.pending.chain.set_unpinned_targets(targets);
-                }
-            } else {
-                let ids: Vec<ObjectId> = targets
-                    .iter()
-                    .map(|target| match target {
-                        TargetRef::Object(id) => *id,
-                        TargetRef::Player(_) => unreachable!("validated as objects above"),
-                    })
-                    .collect();
-                // CR 608.2c: Always allocate a fresh tracked set — a player-chosen
-                // "those creatures" set is a new resolution scope. An empty
-                // selection yields an empty fresh set (size 0).
-                effects::publish_fresh_tracked_set(state, ids);
-                events.push(GameEvent::EffectResolved {
-                    kind: crate::types::ability::EffectKind::ChooseObjectsIntoTrackedSet,
-                    source_id: ObjectId(0), // Source not tracked through choice state
-                    subject: None,
-                });
-            }
-            state.waiting_for = WaitingFor::Priority { player: p };
-            state.priority_player = p;
-            // CR 608.2: restore the triggering event so the stashed
-            // `PayCost { ScaledMana, payer: TriggeringPlayer }` continuation
-            // resolves the payer correctly — the trigger's resolution is still
-            // in flight.
-            // CR 603.2c + CR 608.2: the batched-trigger subject count is also
-            // part of the trigger's resolution scope — mirror its save/restore
-            // so an `EventContextAmount` inside the resumed continuation reads
-            // the original "that many" instead of `None`.
-            let previous_trigger_event = state.current_trigger_event.clone();
-            let previous_trigger_match_count = state.current_trigger_match_count;
-            state.current_trigger_event = pending_event;
-            state.current_trigger_match_count = state
-                .active_ability_continuation()
-                .and_then(|continuation| continuation.trigger_context.as_ref())
-                .and_then(|context| context.match_count);
-            resume_pending_continuation_if_priority(state, &mut events)?;
-            state.current_trigger_event = previous_trigger_event;
-            state.current_trigger_match_count = previous_trigger_match_count;
-            state.waiting_for.clone()
-        }
+        ) => apply_choose_objects_selection(
+            state,
+            &mut events,
+            ChooseObjectsSubmission {
+                player: *player,
+                eligible,
+                min: *min,
+                max: *max,
+                trigger_event: trigger_event.clone(),
+                targets,
+            },
+        )?,
+        // CR 608.2d + CR 115.10a: a single-pick resolution choice (`max == Some(1)`) may be
+        // answered by one board/HUD click. The pick is chosen while the effect is applied and is
+        // not a target, so it forwards to the same authority as `SelectTargets` — never to target
+        // legality — and announces nothing a ward or becomes-target trigger could see. `None` is
+        // an empty selection, legal only when `min == 0`. Other cardinalities keep `SelectTargets`.
+        (
+            WaitingFor::ChooseObjectsSelection {
+                player,
+                eligible,
+                min,
+                max: max @ Some(1),
+                trigger_event,
+            },
+            GameAction::ChooseTarget { target },
+        ) => apply_choose_objects_selection(
+            state,
+            &mut events,
+            ChooseObjectsSubmission {
+                player: *player,
+                eligible,
+                min: *min,
+                max: *max,
+                trigger_event: trigger_event.clone(),
+                targets: target.into_iter().collect(),
+            },
+        )?,
         // CR 707.10c / CR 601.2c: one position of the copy target walk. The
         // pick is answerable only when the engine-derived walk admits it (a
         // keep only where keeping completes; a choice only where it has a
@@ -17594,6 +17647,131 @@ fn apply_retarget(
     state.waiting_for = WaitingFor::Priority { player };
     state.priority_player = player;
     resume_pending_continuation_if_priority(state, events)?;
+    Ok(state.waiting_for.clone())
+}
+
+struct ChooseObjectsSubmission<'a> {
+    player: PlayerId,
+    eligible: &'a [TargetRef],
+    min: u32,
+    max: Option<u32>,
+    trigger_event: Option<GameEvent>,
+    targets: Vec<TargetRef>,
+}
+
+/// CR 608.2c + CR 608.2d: apply a player's answer to a
+/// `WaitingFor::ChooseObjectsSelection` prompt, then resume the parked chain.
+/// Single authority for both `ChooseObjectsSelection` entry points — the
+/// published `SelectTargets` answer and the single-pick board-click
+/// `ChooseTarget` (`max == Some(1)`) — so eligibility, cardinality and recipient
+/// binding can never drift apart.
+///
+/// CR 608.2c: ChooseObjectsIntoTrackedSet — player submitted their
+/// battlefield-permanent selection. Publish a fresh tracked set so the
+/// downstream `PayCost { ScaledMana }` and the `IfYouDo`/`Untap` tail
+/// resolve against exactly this selection, then resume the chain.
+///
+/// CR 115.10a + CR 608.2d: the same prompt also carries a described
+/// damage recipient ("a creature or player", no "target") — see
+/// `effects::deal_damage::parked_recipient_pool`. That pick is bound to
+/// the parked damage instruction instead of being published, and may be a
+/// player.
+fn apply_choose_objects_selection(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    submission: ChooseObjectsSubmission<'_>,
+) -> Result<WaitingFor, EngineError> {
+    let ChooseObjectsSubmission {
+        player: p,
+        eligible: eligible_set,
+        min,
+        max,
+        trigger_event: pending_event,
+        targets,
+    } = submission;
+    let selected_count = targets.len();
+    if selected_count < min as usize || max.is_some_and(|maximum| selected_count > maximum as usize)
+    {
+        return Err(EngineError::InvalidAction(format!(
+            "Object selection must choose at least {min}{} distinct objects, got {selected_count}",
+            max.map_or(String::new(), |maximum| format!(" and at most {maximum}"))
+        )));
+    }
+    // The prompt belongs to a parked described damage instruction only when
+    // the active continuation is that instruction, still holding exactly
+    // the pool this prompt offers. A tracked-set producer's prompt never
+    // matches: its parked continuation is some other instruction, even one
+    // whose own candidate set would be identical.
+    let recipient_pool = state
+        .active_ability_continuation()
+        .and_then(|continuation| effects::deal_damage::parked_recipient_pool(&continuation.chain))
+        .filter(|pool| pool.as_slice() == eligible_set);
+    // Validate all selected targets are distinct members of the eligible set;
+    // a player is a legal pick only for a damage recipient.
+    let mut selected: HashSet<TargetRef> = HashSet::with_capacity(selected_count);
+    for t in &targets {
+        if !eligible_set.contains(t) {
+            return Err(EngineError::InvalidAction(
+                "Selected target not eligible for object selection".to_string(),
+            ));
+        }
+        if recipient_pool.is_none() && matches!(t, TargetRef::Player(_)) {
+            return Err(EngineError::InvalidAction(
+                "Object selection accepts battlefield objects only".to_string(),
+            ));
+        }
+        if !selected.insert(t.clone()) {
+            return Err(EngineError::InvalidAction(
+                "Duplicate object in object selection".to_string(),
+            ));
+        }
+    }
+    if recipient_pool.is_some() {
+        // CR 608.2d: the pick is chosen while the instruction is applied, so
+        // it is bound unpinned (never announced as a target) as the parked
+        // damage node's recipient. Nothing is published: this is not a
+        // tracked-set selection.
+        if let Some(frame) = state.active_ability_continuation_frame_mut() {
+            frame.pending.chain.set_unpinned_targets(targets);
+        }
+    } else {
+        let ids: Vec<ObjectId> = targets
+            .iter()
+            .map(|target| match target {
+                TargetRef::Object(id) => *id,
+                TargetRef::Player(_) => unreachable!("validated as objects above"),
+            })
+            .collect();
+        // CR 608.2c: Always allocate a fresh tracked set — a player-chosen
+        // "those creatures" set is a new resolution scope. An empty
+        // selection yields an empty fresh set (size 0).
+        effects::publish_fresh_tracked_set(state, ids);
+        events.push(GameEvent::EffectResolved {
+            kind: crate::types::ability::EffectKind::ChooseObjectsIntoTrackedSet,
+            source_id: ObjectId(0), // Source not tracked through choice state
+            subject: None,
+        });
+    }
+    state.waiting_for = WaitingFor::Priority { player: p };
+    state.priority_player = p;
+    // CR 608.2: restore the triggering event so the stashed
+    // `PayCost { ScaledMana, payer: TriggeringPlayer }` continuation
+    // resolves the payer correctly — the trigger's resolution is still
+    // in flight.
+    // CR 603.2c + CR 608.2: the batched-trigger subject count is also
+    // part of the trigger's resolution scope — mirror its save/restore
+    // so an `EventContextAmount` inside the resumed continuation reads
+    // the original "that many" instead of `None`.
+    let previous_trigger_event = state.current_trigger_event.clone();
+    let previous_trigger_match_count = state.current_trigger_match_count;
+    state.current_trigger_event = pending_event;
+    state.current_trigger_match_count = state
+        .active_ability_continuation()
+        .and_then(|continuation| continuation.trigger_context.as_ref())
+        .and_then(|context| context.match_count);
+    resume_pending_continuation_if_priority(state, events)?;
+    state.current_trigger_event = previous_trigger_event;
+    state.current_trigger_match_count = previous_trigger_match_count;
     Ok(state.waiting_for.clone())
 }
 
@@ -18426,6 +18604,145 @@ fn record_land_played_from_zone(
         .push_back(LandPlayRecord { from_zone: zone });
 }
 
+/// CR 305.2a + CR 305.2b + CR 805.4c: whether `player` may play one more land
+/// this turn — no "can't play lands" static, no temporary prohibition on this
+/// land, and the allowance not yet reached. The single allowance authority read
+/// by the special action (`handle_play_land`) and the resolution-time play
+/// ([`resolution_land_play_is_legal`]); CR 305.2a counts lands played during
+/// resolution against the same allowance.
+fn land_play_allowance_refusal(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Result<(), EngineError> {
+    // CR 305.2: "Can't play lands" suppresses the play-land special action outright.
+    if super::static_abilities::player_has_static_other(state, player, "CantPlayLand") {
+        return Err(EngineError::ActionNotAllowed(
+            "Player is under a CantPlayLand static (CR 305.2)".to_string(),
+        ));
+    }
+    // CR 116.2a + CR 305.1: The shared restriction gate covers both temporary
+    // play-from-zone and per-land prohibitions for every legal source zone.
+    if let Some(obj) = state.objects.get(&object_id) {
+        if !super::casting::land_play_is_permitted_by_restrictions(state, player, obj) {
+            return Err(EngineError::ActionNotAllowed(
+                "A temporary effect prevents playing this land (CR 305.1)".to_string(),
+            ));
+        }
+    }
+    let additional = super::static_abilities::additional_land_drops(state, player);
+    let effective_limit = state.max_lands_per_turn.saturating_add(additional);
+    // CR 805.4c: per-player land count under team turns (each teammate has
+    // their own allowance); the legacy single-counter `lands_played_this_turn`
+    // is correct outside team-based formats, where only the active player
+    // ever plays lands during their own turn.
+    let lands_played = if state.format_config.topology().has_shared_team_turns() {
+        state
+            .players
+            .iter()
+            .find(|p| p.id == player)
+            .map(|p| p.lands_played_this_turn)
+            .unwrap_or(0)
+    } else {
+        state.lands_played_this_turn
+    };
+    if lands_played >= effective_limit {
+        return Err(EngineError::ActionNotAllowed(
+            "Already played maximum lands this turn".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// CR 712.12: a modal double-faced card offers a land-face election when its
+/// back face is a land. The single predicate shared by the special action's
+/// face prompt (`handle_play_land`) and the resolution-time play route
+/// (`cast_from_zone::resolution_play_route`). A transform DFC with a land back
+/// face is not modal and offers no election (CR 712.8a: it is played by its
+/// front face).
+pub(crate) fn modal_land_face_election_available(
+    obj: &crate::game::game_object::GameObject,
+) -> bool {
+    obj.back_face.as_ref().is_some_and(|bf| {
+        bf.layout_kind == Some(crate::types::card::LayoutKind::Modal)
+            && bf
+                .card_types
+                .core_types
+                .contains(&crate::types::card_type::CoreType::Land)
+    })
+}
+
+/// CR 305.2a + CR 305.2b + CR 305.3 + CR 305.9 + CR 805.4c: whether an effect
+/// that instructs `player` to play `object_id` as it resolves can be followed:
+/// the object is a land card outside the battlefield and stack, it is that
+/// player's turn (or their team's turn under shared team turns), and the
+/// allowance permits one more land. No main-phase, empty-stack or priority gate
+/// applies — those belong to the special action (CR 305.1); a play during
+/// resolution is an instruction of the resolving ability (CR 701.18b).
+pub(crate) fn resolution_land_play_is_legal(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return false;
+    };
+    if matches!(obj.zone, Zone::Battlefield | Zone::Stack)
+        || !obj
+            .card_types
+            .core_types
+            .contains(&crate::types::card_type::CoreType::Land)
+    {
+        return false;
+    }
+    // CR 305.3: a player can't play a land, for any reason, if it isn't their
+    // turn. CR 805.4c: each player on a team may play a land during each of
+    // that team's turns.
+    let is_players_turn = state.active_player == player
+        || (state.format_config.topology().has_shared_team_turns()
+            && super::topology::team_members(state, state.active_player).contains(&player));
+    is_players_turn && land_play_allowance_refusal(state, player, object_id).is_ok()
+}
+
+/// CR 701.18b + CR 305.2a + CR 116.2a: play `object_id` as a land while the
+/// instructing ability resolves, putting it onto the battlefield from the zone
+/// it is in under `player`'s control (CR 110.2a). `None` is the CR 305.2b /
+/// CR 305.3 "ignore any part of an effect that instructs a player to do so":
+/// nothing happens and nothing is counted.
+///
+/// No CR 712.12 face prompt is opened here: a land//land modal card bound
+/// outside the graveyard never reaches here from a Play instruction —
+/// `cast_from_zone::resolution_play_route` keeps it on the lingering grant,
+/// whose PlayLand authority (its front face is a Land) opens `ModalFaceChoice`.
+/// A spell//land MDFC never reaches here either: it is cast by its front face
+/// (CR 712.8a). The `CastFromZone` graveyard route is excluded from that
+/// fallback because base takes the immediate graveyard route there and never
+/// lingers; a graveyard land//land plays its front face (no printed carrier;
+/// CR 712.12 election is the follow-up's). Resolution-owned face election,
+/// including the spell//land land face, is a tracked follow-up.
+pub(crate) fn play_land_during_resolution(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Option<LandPlayCommit> {
+    if !resolution_land_play_is_legal(state, player, object_id) {
+        return None;
+    }
+    // CR 116.2a: the land is put onto the battlefield from the zone it was in.
+    let origin_zone = state.objects.get(&object_id)?.zone;
+    Some(commit_land_play(
+        state,
+        player,
+        object_id,
+        origin_zone,
+        None,
+        None,
+        None,
+        events,
+    ))
+}
+
 fn handle_play_land(
     state: &mut GameState,
     acting_player: PlayerId,
@@ -18472,42 +18789,7 @@ fn handle_play_land(
     } else {
         turn_control::turn_resource_owner(state)
     };
-    // CR 305.2: "Can't play lands" suppresses the play-land special action outright.
-    if super::static_abilities::player_has_static_other(state, player, "CantPlayLand") {
-        return Err(EngineError::ActionNotAllowed(
-            "Player is under a CantPlayLand static (CR 305.2)".to_string(),
-        ));
-    }
-    // CR 116.2a + CR 305.1: The shared restriction gate covers both temporary
-    // play-from-zone and per-land prohibitions for every legal source zone.
-    if let Some(obj) = state.objects.get(&object_id) {
-        if !super::casting::land_play_is_permitted_by_restrictions(state, player, obj) {
-            return Err(EngineError::ActionNotAllowed(
-                "A temporary effect prevents playing this land (CR 305.1)".to_string(),
-            ));
-        }
-    }
-    let additional = super::static_abilities::additional_land_drops(state, player);
-    let effective_limit = state.max_lands_per_turn.saturating_add(additional);
-    // CR 805.4c: per-player land count under team turns (each teammate has
-    // their own allowance); the legacy single-counter `lands_played_this_turn`
-    // is correct outside team-based formats, where only the active player
-    // ever plays lands during their own turn.
-    let lands_played = if state.format_config.topology().has_shared_team_turns() {
-        state
-            .players
-            .iter()
-            .find(|p| p.id == player)
-            .map(|p| p.lands_played_this_turn)
-            .unwrap_or(0)
-    } else {
-        state.lands_played_this_turn
-    };
-    if lands_played >= effective_limit {
-        return Err(EngineError::ActionNotAllowed(
-            "Already played maximum lands this turn".to_string(),
-        ));
-    }
+    land_play_allowance_refusal(state, player, object_id)?;
 
     // Validate that object_id exists in hand or graveyard (with permission)
     // or on top of library (with TopOfLibraryCastPermission { play_mode: Play })
@@ -18650,22 +18932,14 @@ fn handle_play_land(
         // CR 712.12 + CR 601.2b (#7565): the face prompt is offered only while
         // this cast's choice is still open — `cast_face_committed` suppresses
         // the re-entry re-prompt (layout_kind itself stays untouched).
-        let is_modal = !obj.cast_face_committed
-            && obj
-                .back_face
-                .as_ref()
-                .is_some_and(|bf| bf.layout_kind == Some(crate::types::card::LayoutKind::Modal));
+        let land_face_election =
+            !obj.cast_face_committed && modal_land_face_election_available(obj);
         let front_is_land = obj
             .card_types
             .core_types
             .contains(&crate::types::card_type::CoreType::Land);
-        let back_is_land = obj.back_face.as_ref().is_some_and(|bf| {
-            bf.card_types
-                .core_types
-                .contains(&crate::types::card_type::CoreType::Land)
-        });
 
-        if is_modal && front_is_land && back_is_land {
+        if land_face_election && front_is_land {
             // Both faces are lands — player must choose which face to put into play.
             // The land path never consumes payment_mode (lands cost no mana), but
             // the field is required; Auto is the inert default.
@@ -18678,7 +18952,7 @@ fn handle_play_land(
             });
         }
 
-        if is_modal && !front_is_land && back_is_land {
+        if land_face_election && !front_is_land {
             // CR 712.12: Only back face is a land — auto-swap (player already chose "play as land")
             let obj = state.objects.get_mut(&object_id).unwrap();
             super::printed_cards::swap_object_faces(obj);
@@ -18701,6 +18975,57 @@ fn handle_play_land(
         Zone::Library
     };
 
+    match commit_land_play(
+        state,
+        player,
+        object_id,
+        origin_zone,
+        gy_permission_grant,
+        exile_play_authorization,
+        library_permission_src,
+        events,
+    ) {
+        // Player retains priority after playing a land
+        LandPlayCommit::Entered => Ok(WaitingFor::Priority { player }),
+        LandPlayCommit::AwaitingEntryChoice(waiting_for) => Ok(*waiting_for),
+        LandPlayCommit::Prevented => Ok(WaitingFor::Priority {
+            player: state.priority_player,
+        }),
+    }
+}
+
+/// CR 305.1 + CR 614.1 + CR 614.12a: how a committed land play ended — the
+/// single answer [`commit_land_play`] gives both the special action
+/// (`handle_play_land`) and the resolution-time play
+/// ([`play_land_during_resolution`]).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum LandPlayCommit {
+    /// The land entered the battlefield and the play was finalized.
+    Entered,
+    /// CR 614.12a: the play is committed, but an entry replacement or delivery
+    /// choice is pending; the carried `WaitingFor` is that prompt. Boxed to
+    /// keep the enum small (clippy::large_enum_variant).
+    AwaitingEntryChoice(Box<WaitingFor>),
+    /// CR 614.1: a replacement prevented the land from entering; nothing was
+    /// counted.
+    Prevented,
+}
+
+/// CR 305.1 + CR 116.2a + CR 614.1: move a land the caller already authorized
+/// from `origin_zone` onto the battlefield through the replacement pipeline and
+/// finalize the play. The single land-play commit authority shared by the
+/// special action and the resolution-time play.
+#[allow(clippy::too_many_arguments)]
+fn commit_land_play(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    origin_zone: Zone,
+    gy_permission_grant: Option<(ObjectId, Option<CastFrequency>)>,
+    exile_play_authorization: Option<casting::ExileLandPlayAuthorization>,
+    library_permission_src: Option<(ObjectId, CastFrequency)>,
+    events: &mut Vec<GameEvent>,
+) -> LandPlayCommit {
     // Route through the replacement pipeline (handles ETB replacements like shock lands)
     let mut proposed = crate::types::proposed_event::ProposedEvent::zone_change(
         object_id,
@@ -18755,7 +19080,7 @@ fn handle_play_land(
     // "Each land played this way enters tapped."). Seed the tap state on the
     // proposed event so the replacement pipeline applies it like any other
     // ETB-tapped land. Only the exile-play path can carry this grant field.
-    if in_exile_with_permission {
+    if exile_play_authorization.is_some() {
         let enters_tapped = state
             .objects
             .get(&object_id)
@@ -18829,7 +19154,9 @@ fn handle_play_land(
                         // pause drops the `LandPlayed` occurrence emitted above,
                         // so park a clone for the resume to replay (issue #8738).
                         park_land_played_for_deferred_entry(state, player, object_id, origin_zone);
-                        return Ok(state.waiting_for.clone());
+                        return LandPlayCommit::AwaitingEntryChoice(Box::new(
+                            state.waiting_for.clone(),
+                        ));
                     }
                 }
                 // CR 305.1 + CR 400.7i: stamp land-play provenance ("where it
@@ -18883,16 +19210,14 @@ fn handle_play_land(
                         events,
                     )
                 {
-                    return Ok(next_waiting_for);
+                    return LandPlayCommit::AwaitingEntryChoice(Box::new(next_waiting_for));
                 }
-                return Ok(WaitingFor::Priority { player });
+                return LandPlayCommit::Entered;
             }
         }
         super::replacement::ReplacementResult::Prevented => {
             // Land play was prevented — don't increment counters
-            return Ok(WaitingFor::Priority {
-                player: state.priority_player,
-            });
+            return LandPlayCommit::Prevented;
         }
         super::replacement::ReplacementResult::NeedsChoice(player) => {
             // A replacement needs player choice (e.g., shock land "pay 2 life?").
@@ -18913,8 +19238,8 @@ fn handle_play_land(
             // resume to replay once the land actually enters (issue #8738).
             park_land_played_for_deferred_entry(state, player, object_id, origin_zone);
 
-            return Ok(super::replacement::replacement_choice_waiting_for(
-                player, state,
+            return LandPlayCommit::AwaitingEntryChoice(Box::new(
+                super::replacement::replacement_choice_waiting_for(player, state),
             ));
         }
     }
@@ -18931,7 +19256,7 @@ fn handle_play_land(
     );
 
     // Player retains priority after playing a land
-    Ok(WaitingFor::Priority { player })
+    LandPlayCommit::Entered
 }
 
 pub(super) fn handle_tap_land_for_mana(
@@ -21215,7 +21540,7 @@ mod priority_principal_tests {
             object.base_card_types = object.card_types.clone();
             object.mana_cost = ManaCost::generic(8);
             object.base_mana_cost = object.mana_cost.clone();
-            object.keywords = vec![Keyword::Morph(ManaCost::generic(5))];
+            object.keywords = vec![Keyword::morph(ManaCost::generic(5))];
             object.base_keywords = object.keywords.clone();
         }
         let sibling_spell = zones::create_object(

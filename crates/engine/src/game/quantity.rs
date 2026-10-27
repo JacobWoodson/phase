@@ -5320,7 +5320,7 @@ fn resolve_ref(
         //
         // Lifts the legacy `ObjectCountDistinctNames` resolver onto the same
         // `Vec<SharedQuality>` axis used by
-        // `SearchSelectionConstraint::DistinctQualities`. Both sides share
+        // `SearchSelectionConstraint::SharesQualities` (`DoesNotShare`). Both sides share
         // the `crate::game::filter::object_shared_quality_values` extractor,
         // keeping the count-expression and constraint vocabularies aligned.
         QuantityRef::ObjectCountDistinct { filter, qualities } => {
@@ -25957,6 +25957,7 @@ mod tests {
             rolled_any: true,
             forced_ignored: Vec::new(),
             chain_root_targets: root.context.chain_root_targets.clone(),
+            trigger_context: None,
         };
 
         let mut events = Vec::new();
@@ -26040,6 +26041,7 @@ mod tests {
             kind: crate::types::resolution::PendingCoinFlipKind::Exactly { remaining: 0 },
             chain_root_targets: root.context.chain_root_targets.clone(),
             branch_context: crate::types::resolution::FlipBranchContext::default(),
+            trigger_context: None,
         };
 
         let mut events = Vec::new();
