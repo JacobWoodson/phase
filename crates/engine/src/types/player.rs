@@ -395,9 +395,11 @@ mod tests {
         assert_eq!(back.cards_drawn_last_turn, 0);
         assert_eq!(back.opponent_spells_cast_since_own_last_turn, 0);
 
-        let mut live = Player::default();
-        live.cards_drawn_last_turn = 3;
-        live.opponent_spells_cast_since_own_last_turn = 1;
+        let live = Player {
+            cards_drawn_last_turn: 3,
+            opponent_spells_cast_since_own_last_turn: 1,
+            ..Player::default()
+        };
         let json = serde_json::to_value(&live).expect("serialize");
         assert_eq!(json["cards_drawn_last_turn"], 3);
         assert_eq!(json["opponent_spells_cast_since_own_last_turn"], 1);
