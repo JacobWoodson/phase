@@ -313,9 +313,9 @@ fn answer_from_second_park(fixture: &mut Fixture, candidates: &[ReplacementCandi
         a,
         b,
         giant_a,
-        giant_b,
+        giant_b: _giant_b,
     } = fixture;
-    let (a, b, giant_a, giant_b) = (*a, *b, *giant_a, *giant_b);
+    let (a, b, giant_a, _giant_b) = (*a, *b, *giant_a, *_giant_b);
 
     // Park #2's answer (Salve) fully prevents A's 2. The stamp must settle the
     // paused slot even though the parked event names Giant A, not P1.
