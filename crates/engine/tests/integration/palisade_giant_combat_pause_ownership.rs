@@ -2,9 +2,10 @@
 //! not strand the paused batch member when a second choice parks.
 //!
 //! Two unblocked attackers (A 2/2, B 4/4 lifelink) hit P1, who controls two
-//! Palisade Giants plus a Healing Salve shield. A's event pauses twice: park
-//! #1 orders the two Giant redirects plus the Salve (names P1, the original
-//! recipient — the Salve shield presents unscoped); answering with Giant A's
+//! Palisade Giants plus a Healing Salve shield bound to Giant A. A's event
+//! pauses twice: park #1 orders the two Giant redirects (names P1, the
+//! original recipient — the Salve's any-target slot binds it to Giant A per
+//! upstream #10119, so it joins only Giant-A parks); answering with Giant A's
 //! redirect rewrites the event to Giant A, and the CR 616.1f repeat over
 //! Giant B's redirect + the Salve parks #2 naming Giant A. Reconstructing
 //! ownership from the original assignment target (P1) strands park #2's
@@ -92,7 +93,8 @@ struct Fixture {
 
 /// Two attackers for P0 (B has lifelink), two Giants for P1, and a Salve
 /// shield — cast up front so CR 615.4 is satisfied before combat. The Salve
-/// is aimed at Giant A, but the shield presents unscoped (see park #1).
+/// is aimed at Giant A, and the any-target slot binds the shield to Giant A
+/// (upstream #10119), so it joins only Giant-A parks (see park #1).
 fn setup() -> Fixture {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -198,14 +200,13 @@ fn index_of_source(candidates: &[ReplacementCandidateSummary], source: ObjectId)
         .unwrap_or_else(|| panic!("no candidate from {source:?} in {candidates:?}"))
 }
 
-fn index_of_salve(
-    candidates: &[ReplacementCandidateSummary],
-    giant_a: ObjectId,
-    giant_b: ObjectId,
-) -> usize {
+/// The Salve door, told apart by description: the any-target slot hosts
+/// the shield on the chosen Giant (upstream #10119), so source exclusion no
+/// longer identifies it.
+fn index_of_salve(candidates: &[ReplacementCandidateSummary]) -> usize {
     candidates
         .iter()
-        .position(|c| c.source_id != giant_a && c.source_id != giant_b)
+        .position(|c| c.description == "Prevent damage")
         .unwrap_or_else(|| panic!("no Salve candidate in {candidates:?}"))
 }
 
@@ -222,16 +223,16 @@ fn drive_to_redirected_second_park(fixture: &mut Fixture) -> Vec<ReplacementCand
     } = fixture;
     let (a, b, giant_a) = (*a, *b, *giant_a);
 
-    // Park #1: A's event, pre-redirect — names P1. Three candidates: the
-    // Salve shield presents unscoped (offered for damage to P1 as well as to
-    // Giant A), so it joins the ordering. The test does not depend on Salve
-    // scoping either way — it needs the Salve applicable post-redirect, which
-    // holds regardless.
+    // Park #1: A's event, pre-redirect — names P1. Two candidates: the
+    // Salve's any-target slot binds it to Giant A (upstream #10119), so it
+    // is not offered for P1's damage and joins only at park #2. The test
+    // does not depend on Salve scoping either way — it needs the Salve
+    // applicable post-redirect, which holds regardless.
     let candidates = drive_to_choice(runner, a, b);
     assert_eq!(
         candidates.len(),
-        3,
-        "park #1 must offer the two Giant redirects plus the Salve, got {candidates:?}"
+        2,
+        "park #1 must offer exactly the two Giant redirects, got {candidates:?}"
     );
     assert_eq!(
         candidates
@@ -318,7 +319,7 @@ fn answer_from_second_park(fixture: &mut Fixture, candidates: &[ReplacementCandi
 
     // Park #2's answer (Salve) fully prevents A's 2. The stamp must settle the
     // paused slot even though the parked event names Giant A, not P1.
-    answer(runner, index_of_salve(candidates, giant_a, giant_b));
+    answer(runner, index_of_salve(candidates));
     let record = runner
         .state()
         .pending_combat_damage
@@ -341,8 +342,8 @@ fn answer_from_second_park(fixture: &mut Fixture, candidates: &[ReplacementCandi
     };
     assert_eq!(
         candidates.len(),
-        3,
-        "park #3 must offer the two Giant redirects plus the Salve remainder, got {candidates:?}"
+        2,
+        "park #3 must offer exactly the two Giant redirects (the Salve remainder stays bound to Giant A), got {candidates:?}"
     );
     assert_eq!(
         parked_damage(runner),
@@ -390,7 +391,7 @@ fn answer_from_second_park(fixture: &mut Fixture, candidates: &[ReplacementCandi
 
     // The Salve's remainder prevents 1 of B's 4; Giant B's redirect then
     // applies unopposed and 3 lands on Giant B.
-    answer(runner, index_of_salve(&candidates, giant_a, giant_b));
+    answer(runner, index_of_salve(&candidates));
     for _ in 0..60 {
         if matches!(
             runner.state().phase,
