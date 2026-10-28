@@ -8752,10 +8752,26 @@ fn filter_inner_for_object(
                 triggering_object,
                 granting_object,
             );
-            let linked = if trigger_source.is_some() {
-                source_ctx.linked_exile_snapshot
-            } else {
-                crate::game::players::linked_exile_cards_for_source(state, source_id).to_vec()
+            let linked = match trigger_source {
+                // CR 607.2a + CR 707.10b + CR 607.3: a copy of the linked ability
+                // that resolves after the departure has the same source; its exile
+                // is kept in the departed incarnation's linked-exile LKI, not in
+                // the snapshot frozen at departure.
+                Some(source) => {
+                    let departed = (source.identity.reference.object_id == source_id)
+                        .then_some(source.identity.reference.incarnation);
+                    let mut linked = source_ctx.linked_exile_snapshot;
+                    linked.extend(departed.into_iter().flat_map(|incarnation| {
+                        crate::game::exile_links::lki_snapshots_for_reader(
+                            state,
+                            source_id,
+                            Some(incarnation),
+                        )
+                        .cloned()
+                    }));
+                    linked
+                }
+                None => crate::game::players::linked_exile_cards_for_source(state, source_id),
             };
             linked
                 .iter()
@@ -9239,13 +9255,50 @@ fn zone_change_filter_inner(
                 })
             },
         ),
+        TargetFilter::TrackedSet { id } => {
+            let set_id = if id.0 == 0 {
+                crate::game::targeting::resolve_tracked_set_id(state)
+            } else {
+                Some(*id)
+            };
+            set_id
+                .and_then(|sid| state.tracked_object_sets.get(&sid))
+                .is_some_and(|set| set.contains(&record.object_id))
+        }
+        TargetFilter::TrackedSetFiltered {
+            id,
+            filter: inner,
+            caused_by,
+        } => {
+            let set_id = if id.0 == 0 {
+                crate::game::targeting::resolve_tracked_set_id(state)
+            } else {
+                Some(*id)
+            };
+            // CR 608.2c + CR 614.6: mirror the live-object arm — an action-bound
+            // consumer matches only members whose recorded producer action
+            // equals the bound cause; `None` keeps the "any member" behavior.
+            let in_set = set_id.is_some_and(|sid| {
+                state
+                    .tracked_object_sets
+                    .get(&sid)
+                    .is_some_and(|set| set.contains(&record.object_id))
+                    && match caused_by {
+                        None => true,
+                        Some(cause) => state
+                            .tracked_set_member_causes
+                            .get(&sid)
+                            .and_then(|causes| causes.get(&record.object_id))
+                            .is_some_and(|member_cause| member_cause == cause),
+                    }
+            });
+            in_set && zone_change_filter_inner(state, record, licensed, inner, ctx)
+        }
         TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
         | TargetFilter::CostPaidObject
         | TargetFilter::AmassedArmy
-        | TargetFilter::TrackedSet { .. }
-        | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
