@@ -398,6 +398,17 @@ pub(super) fn handle_replacement_choice(
     // parked for the next answer; only a settled round trip may close the batch.
     // Nothing is left behind on this path — the anchor is a local that dies here.
     if !matches!(waiting_for, WaitingFor::Priority { .. }) {
+        // CR 616.1 + CR 616.1f: the answer may have re-parked the paused
+        // combat member for a later APNAP seat (a redirection rewrote its
+        // recipient) while better-ranked members still wait — serve those
+        // first instead of the fresh prompt.
+        if let Some(resumed) = super::combat_damage::reschedule_redirected_combat_batch(
+            state,
+            action_event_start,
+            events,
+        ) {
+            return Ok(resumed);
+        }
         // CR 510.2 + CR 603.3b: EVERY non-Priority answer's events join the ONE
         // batch (CR 616.1f repeats AND sub-drain fresh prompts) — fold them
         // into the damage record AND claim them, so no answer's inline-rider

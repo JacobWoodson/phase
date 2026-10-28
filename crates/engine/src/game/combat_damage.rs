@@ -511,7 +511,6 @@ pub(crate) fn resume_pending_combat_damage(
     record
         .batch_events
         .extend_from_slice(&events[action_event_start..]);
-    let owed_from = record.batch_events.len();
     // The answer stashed the paused slot (or the guard/discharge settled it):
     // `decided` now covers `entries[..=paused_entry]`.
     debug_assert_eq!(
@@ -519,6 +518,21 @@ pub(crate) fn resume_pending_combat_damage(
         record.paused_entry + 1,
         "a resumed batch must carry its paused slot's stash"
     );
+    run_remaining_combat_batch(state, record, action_event_start, events)
+}
+
+/// CR 510.2 + CR 616.1: run a parked record's remaining members through the
+/// APNAP-scheduled batch loop, then complete or park fresh. Shared by the
+/// answer-stash resume above and the redirect rescheduler below: both hand
+/// over a record whose `decided` covers a settled prefix and whose `remaining`
+/// still needs processing.
+fn run_remaining_combat_batch(
+    state: &mut GameState,
+    mut record: Box<PendingCombatDamageBatch>,
+    action_event_start: usize,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
+    let owed_from = record.batch_events.len();
     // Install the parked prefix as the live window so the remaining run
     // accumulates onto it. `outer_tally` (the pre-batch window) is restored
     // by the shared tail on completion, or now on re-pause. The live window
@@ -542,23 +556,24 @@ pub(crate) fn resume_pending_combat_damage(
     // `replace_combat_damage_batch`), and a re-pause re-parks it below.
     state.combat_one_shot_applications = Some(std::mem::take(&mut record.one_shot_applications));
     let sub_step = record.sub_step;
-    match replacement::replace_combat_damage_batch(
+    let mut tally_accum = CombatPreventionTally::new();
+    let unfinished = std::mem::take(&mut record.remaining);
+    match run_apnap_scheduled_batch(
         state,
         &mut record.batch_events,
-        std::mem::take(&mut record.remaining),
+        &mut record.entries,
+        &mut record.decided,
+        &mut tally_accum,
+        unfinished,
     ) {
-        replacement::CombatDamageReplacementOutcome::Complete {
-            survivors: rest,
-            tally,
-        } => {
+        ScheduledBatchTail::Finished => {
             if let Some(live) = state.combat_prevention_tally.as_mut() {
-                for (key, amount) in tally {
+                for (key, amount) in tally_accum {
                     *live.entry(key).or_insert(0) += amount;
                 }
             }
             let combined = state.combat_prevention_tally.take().unwrap_or_default();
-            let mut survivors = std::mem::take(&mut record.decided);
-            survivors.extend(rest);
+            let survivors = std::mem::take(&mut record.decided);
             let hydrated: Vec<HydratedCombatEntry> = record
                 .entries
                 .into_iter()
@@ -624,12 +639,7 @@ pub(crate) fn resume_pending_combat_damage(
                 }
             }
         }
-        replacement::CombatDamageReplacementOutcome::Paused {
-            decided: rest_decided,
-            remaining: rest_remaining,
-            tally,
-            player,
-        } => {
+        ScheduledBatchTail::Parked { player, remaining } => {
             // CR 616.1f: a LATER event needed its own ordering choice.
             // Snapshot the live window back into ONE field (clearing Phase A
             // so reinstall is unambiguous), restore the outer window, and park
@@ -638,22 +648,21 @@ pub(crate) fn resume_pending_combat_damage(
             // park re-establishes `decided.len() == paused_entry`, re-arming
             // the answer-stash gate by construction.
             if let Some(live) = state.combat_prevention_tally.as_mut() {
-                for (key, amount) in tally {
+                for (key, amount) in tally_accum {
                     *live.entry(key).or_insert(0) += amount;
                 }
             }
             let combined = state.combat_prevention_tally.take().unwrap_or_default();
             let outer_entries = outer_tally.as_ref().map(tally_entries_for_record);
             state.combat_prevention_tally = outer_tally;
-            let mut decided = std::mem::take(&mut record.decided);
-            decided.extend(rest_decided);
+            let decided = std::mem::take(&mut record.decided);
             let paused_entry = decided.len();
             let fresh = PendingCombatDamageBatch {
                 entries: std::mem::take(&mut record.entries),
                 decided,
                 paused_entry,
                 paused_entry_pruned: false,
-                remaining: rest_remaining,
+                remaining,
                 phase_a_tally: Vec::new(),
                 phase_b_tally: tally_entries_for_record(&combined),
                 outer_tally: outer_entries,
@@ -692,6 +701,65 @@ pub(crate) fn resume_pending_combat_damage(
             Some(waiting_for)
         }
     }
+}
+
+/// CR 616.1 + CR 616.1f: redirect rescheduler (the answer boundary). When the
+/// answered choice re-parked the paused combat member for a later APNAP seat —
+/// a redirection rewrote its recipient (same damage SOURCE, new affected
+/// player) — while remaining members rank better, the fresh prompt must NOT be
+/// served yet: drop it (its candidates recompute live once the better-ranked
+/// members settle), APNAP-sort the unfinished suffix with entry contexts
+/// carried along, and run the scheduled batch. Returns `None` when no
+/// reschedule applies (no combat record, no fresh park, a nested child's
+/// prompt, or no inversion) so the caller serves the fresh prompt as before.
+///
+/// Same-event gated on the damage source: redirects rewrite only the
+/// recipient, so a nested child event's choice (a reflection rider, a gain
+/// rider) names a different source and keeps current behavior.
+pub(crate) fn reschedule_redirected_combat_batch(
+    state: &mut GameState,
+    action_event_start: usize,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
+    let record = state.pending_combat_damage.as_ref()?;
+    let fresh = state.pending_replacement.as_ref()?;
+    let ProposedEvent::Damage { source_id, .. } = &fresh.proposed else {
+        return None;
+    };
+    let paused = record.entries.get(record.paused_entry)?;
+    if paused.ctx.source_id != *source_id {
+        return None;
+    }
+    // The paused slot must be unstashed: a re-park settles nothing, so
+    // `decided` still covers exactly the strict prefix.
+    if record.decided.len() != record.paused_entry {
+        return None;
+    }
+    let order = apnap_reschedule_order(state, &fresh.proposed, &record.remaining)?;
+    // Inversion confirmed: rewrite the record and run the scheduled batch.
+    let mut record = state.pending_combat_damage.take()?;
+    record
+        .batch_events
+        .extend_from_slice(&events[action_event_start..]);
+    let fresh_proposed = state
+        .pending_replacement
+        .take()
+        .map(|pending| pending.proposed)?;
+    let paused_entry = record.paused_entry;
+    permute_unfinished(&mut record.entries, paused_entry, &order);
+    let mut all: Vec<Option<ProposedEvent>> = std::iter::once(fresh_proposed)
+        .chain(std::mem::take(&mut record.remaining))
+        .map(Some)
+        .collect();
+    record.remaining = order
+        .iter()
+        .map(|&index| {
+            all[index]
+                .take()
+                .expect("the reschedule order covers the unfinished window")
+        })
+        .collect();
+    run_remaining_combat_batch(state, record, action_event_start, events)
 }
 
 /// CR 510.2 + CR 603.2c: a combat-damage batch parked for a CR 616.1 choice
@@ -2066,6 +2134,158 @@ impl CombatDamageBatch {
     }
 }
 
+/// CR 616.1 + CR 616.1f: APNAP rank of an unfinished batch member's CURRENT
+/// affected player. A redirection answered (or auto-applied) since the batch
+/// was sorted rewrites the recipient, so the rank is re-read here — never
+/// cached from the pre-sort.
+fn apnap_reschedule_order(
+    state: &GameState,
+    paused_proposed: &ProposedEvent,
+    remaining: &[ProposedEvent],
+) -> Option<Vec<usize>> {
+    let mut order: Vec<usize> = (0..remaining.len() + 1).collect();
+    // Stable: rank ties keep current relative order (same-player events were
+    // already correctly sequenced by the initial sort).
+    order.sort_by_key(|&index| {
+        let proposed = if index == 0 {
+            paused_proposed
+        } else {
+            &remaining[index - 1]
+        };
+        triggers::trigger_apnap_rank(state, proposed.affected_player(state))
+    });
+    let identity = order
+        .iter()
+        .enumerate()
+        .all(|(position, &index)| position == index);
+    (!identity).then_some(order)
+}
+
+/// Applies an [`apnap_reschedule_order`] permutation to a parallel entry vec's
+/// unfinished window, so members stay aligned with their contexts.
+fn permute_unfinished<T>(entries: &mut Vec<T>, decided_len: usize, order: &[usize]) {
+    debug_assert_eq!(
+        entries.len() - decided_len,
+        order.len(),
+        "the order covers exactly the unfinished window"
+    );
+    let mut window: Vec<Option<T>> = entries
+        .split_off(decided_len)
+        .into_iter()
+        .map(Some)
+        .collect();
+    let reordered: Vec<T> = order
+        .iter()
+        .map(|&index| {
+            window[index]
+                .take()
+                .expect("the reschedule order covers the unfinished window")
+        })
+        .collect();
+    entries.extend(reordered);
+}
+
+/// Outcome of [`run_apnap_scheduled_batch`]: either the batch parked on a
+/// prompt with no APNAP inversion left, or it ran to completion.
+enum ScheduledBatchTail {
+    Parked {
+        player: PlayerId,
+        remaining: Vec<ProposedEvent>,
+    },
+    Finished,
+}
+
+/// CR 616.1 + CR 616.1f: run `replace_combat_damage_batch` over `unfinished`,
+/// re-running with an APNAP-resorted unfinished suffix whenever the parked
+/// event's CURRENT affected player ranks behind a remaining member. A
+/// redirection answered (or auto-applied) since the last sort moved the parked
+/// event to a later seat; the better-ranked members' outstanding choices come
+/// first ("choices are made in APNAP order", CR 616.1), and their pipelines
+/// consume shared shields before the moved event re-parks.
+///
+/// The decided prefix is never reordered (its members were first-ranked when
+/// processed, and a later redirect cannot unrank them); only the unfinished
+/// suffix moves, with entry contexts carried along positionally. The dropped
+/// park's candidates recompute live on re-run — deterministically identical
+/// when nothing settled in between (a park re-derives itself: no applies
+/// precede it), and correctly re-read once better-ranked members settle.
+/// Each re-run strictly consumes redirect applications (every application
+/// marks its replacement applied, CR 614.6), so the loop terminates.
+fn run_apnap_scheduled_batch<T>(
+    state: &mut GameState,
+    batch_events: &mut Vec<GameEvent>,
+    entries: &mut Vec<T>,
+    decided: &mut Vec<Option<ProposedEvent>>,
+    tally: &mut CombatPreventionTally,
+    mut unfinished: Vec<ProposedEvent>,
+) -> ScheduledBatchTail {
+    // CR 616.1f backstop (mirrors `continue_replacement`): a dropped park's
+    // life policy rides onto the re-derived park, never downgraded.
+    let mut dropped_life_policy = None;
+    loop {
+        match replacement::replace_combat_damage_batch(state, batch_events, unfinished) {
+            replacement::CombatDamageReplacementOutcome::Complete {
+                survivors,
+                tally: partial,
+            } => {
+                for (key, amount) in partial {
+                    *tally.entry(key).or_insert(0) += amount;
+                }
+                decided.extend(survivors);
+                return ScheduledBatchTail::Finished;
+            }
+            replacement::CombatDamageReplacementOutcome::Paused {
+                decided: partial,
+                remaining,
+                tally: partial_tally,
+                player,
+            } => {
+                for (key, amount) in partial_tally {
+                    *tally.entry(key).or_insert(0) += amount;
+                }
+                decided.extend(partial);
+                let parked_proposed = state
+                    .pending_replacement
+                    .as_ref()
+                    .map(|pending| pending.proposed.clone());
+                let order = parked_proposed
+                    .as_ref()
+                    .and_then(|proposed| apnap_reschedule_order(state, proposed, &remaining));
+                let Some(order) = order else {
+                    if let (Some(policy), Some(reparked)) =
+                        (dropped_life_policy, state.pending_replacement.as_mut())
+                    {
+                        reparked.inherit_unrepresentable_life_change(policy);
+                    }
+                    return ScheduledBatchTail::Parked { player, remaining };
+                };
+                if dropped_life_policy.is_none() {
+                    dropped_life_policy = state
+                        .pending_replacement
+                        .as_ref()
+                        .map(|pending| pending.unrepresentable_life_change);
+                }
+                state.pending_replacement = None;
+                permute_unfinished(entries, decided.len(), &order);
+                let parked_proposed =
+                    parked_proposed.expect("the order derived from a parked event");
+                let mut all: Vec<Option<ProposedEvent>> = std::iter::once(parked_proposed)
+                    .chain(remaining)
+                    .map(Some)
+                    .collect();
+                unfinished = order
+                    .iter()
+                    .map(|&index| {
+                        all[index]
+                            .take()
+                            .expect("the reschedule order covers the unfinished window")
+                    })
+                    .collect();
+            }
+        }
+    }
+}
+
 pub(crate) fn apply_combat_damage(
     state: &mut GameState,
     assignments: &[(ObjectId, DamageAssignment)],
@@ -2151,6 +2371,8 @@ pub(crate) fn apply_combat_damage(
     // declaration order, and same-player events were already correctly
     // sequenced. The reordering happens before Phase B, so decided /
     // remaining / survivor indices, parks, and resumes all stay aligned.
+    // A redirection answered mid-batch re-ranks by CURRENT recipient instead
+    // (see `run_apnap_scheduled_batch` / `reschedule_redirected_combat_batch`).
     {
         let mut paired: Vec<(BatchEntry, ProposedEvent)> =
             entries.into_iter().zip(proposed_events).collect();
@@ -2161,11 +2383,21 @@ pub(crate) fn apply_combat_damage(
     }
 
     // --- Phase B: Batch replacement (CR 510.2 + CR 615.7) ---
-    match replacement::replace_combat_damage_batch(state, &mut events, proposed_events) {
-        replacement::CombatDamageReplacementOutcome::Complete {
-            survivors,
-            tally: phase_b_tally,
-        } => {
+    // CR 616.1: the APNAP-scheduled loop re-sorts the unfinished suffix
+    // whenever a redirection moves the parked event to a later seat, so
+    // outstanding choices are served in current-recipient APNAP order.
+    let mut decided: Vec<Option<ProposedEvent>> = Vec::with_capacity(proposed_events.len());
+    let mut phase_b_tally = CombatPreventionTally::new();
+    match run_apnap_scheduled_batch(
+        state,
+        &mut events,
+        &mut entries,
+        &mut decided,
+        &mut phase_b_tally,
+        proposed_events,
+    ) {
+        ScheduledBatchTail::Finished => {
+            let survivors = decided;
             let phase_a_tally = state.combat_prevention_tally.take().unwrap_or_default();
             let hydrated: Vec<HydratedCombatEntry> = entries
                 .into_iter()
@@ -2188,12 +2420,7 @@ pub(crate) fn apply_combat_damage(
                 events,
             )
         }
-        replacement::CombatDamageReplacementOutcome::Paused {
-            decided,
-            remaining,
-            tally: phase_b_tally,
-            player,
-        } => {
+        ScheduledBatchTail::Parked { player, remaining } => {
             // CR 616.1: one event's pipeline needs an ordering choice. NOTHING
             // has been applied yet (Phase C never ran) — park the whole
             // pre-application batch and prompt the affected player. The paused
@@ -6801,9 +7028,9 @@ mod tests {
                 record.decided.len(),
                 record.remaining.len()
             ),
-            (0, 0, 1),
-            "the overlap pauses first (empty decided prefix); the blocker's \
-             return damage waits in remaining"
+            (1, 1, 0),
+            "APNAP order decides the active player's return damage first; \
+             the overlap pauses second with nothing left in remaining"
         );
         assert!(
             state.pending_replacement.is_some(),
@@ -7065,9 +7292,9 @@ mod tests {
                 record.decided.len(),
                 record.remaining.len()
             ),
-            (1, 1, 1),
-            "the lifelinker is decided; the overlap pauses second; the \
-             blocker's return damage waits in remaining"
+            (2, 2, 0),
+            "APNAP order decides the P0 return strike and the lifelinker \
+             first; the overlap pauses last with nothing left in remaining"
         );
 
         state.waiting_for = waiting.clone();
@@ -7119,7 +7346,11 @@ mod tests {
         paint(&mut state, attacker, vec![ManaColor::Red, ManaColor::Green]);
         install_next_shield(&mut state, attacker, 2, "Ward of Embers", false);
         install_next_shield(&mut state, attacker, 1, "Ward of Thorns", false);
-        let blocker = create_creature(&mut state, PlayerId(1), "Warded Bear", 2, 2);
+        // APNAP fixture: the blocker assigns no combat damage, so the batch
+        // holds only E — the return strike would otherwise pause first under
+        // APNAP order (its recipient is the active player's attacker, which
+        // carries the same two-shield overlap N needs).
+        let blocker = create_creature(&mut state, PlayerId(1), "Warded Bear", 0, 2);
         install_protection_overlap(
             &mut state,
             TargetRef::Object(blocker),
@@ -7172,10 +7403,11 @@ mod tests {
         assert!(state.combat.as_ref().unwrap().regular_damage_done);
 
         // (b) nested delivery: 5 reflected − 2 − 1 = 2, exactly once —
-        // plus the blocker's 2 return damage (remaining), for 4 marked.
+        // the only damage the attacker takes (the fixture blocker assigns
+        // none, so there is no return leg).
         assert_eq!(
-            state.objects[&attacker].damage_marked, 4,
-            "reflection 2 + blocker return 2"
+            state.objects[&attacker].damage_marked, 2,
+            "reflection 2, delivered exactly once"
         );
         assert_eq!(
             state.objects[&blocker].damage_marked, 0,
@@ -7195,9 +7427,9 @@ mod tests {
             .collect();
         assert_eq!(
             dealt_to_attacker,
-            vec![(2, false), (2, true)],
-            "the nested (noncombat) damage is delivered exactly once, ahead of \
-             the blocker's (combat) return damage, got {events:?}"
+            vec![(2, false)],
+            "the nested (noncombat) damage is delivered exactly once (the \
+             fixture blocker assigns no return damage), got {events:?}"
         );
         // (a) no overflow past the paused slot: E's prevention is shield-keyed
         // (source = the reflector's host), never protection-keyed.
@@ -7325,14 +7557,15 @@ mod tests {
         let record = state.pending_combat_damage.as_ref().unwrap();
         assert_eq!(
             (record.paused_entry, record.decided.len()),
-            (0, 1),
-            "E's Execute survivor is stashed while N is open"
+            (1, 2),
+            "APNAP order decides the P0 return strike first; E's Execute \
+             survivor is stashed (slot 1) while N is open"
         );
         assert!(
-            matches!(&record.decided[0], Some(ProposedEvent::Damage { amount, .. })
+            matches!(&record.decided[1], Some(ProposedEvent::Damage { amount, .. })
                 if *amount == 2),
             "E's stash carries the 2 surviving damage, got {:?}",
-            record.decided[0]
+            record.decided[1]
         );
 
         // Answer N: the gain applies inline (modified exactly once); the
@@ -7691,8 +7924,9 @@ mod tests {
         );
         assert_eq!(
             (record.paused_entry, record.decided.len()),
-            (1, 1),
-            "event 1 decided (its prevention tallied); event 2 paused"
+            (3, 3),
+            "APNAP order decides both P0 return strikes plus event 1 (its \
+             prevention tallied); event 2 paused"
         );
         assert!(
             record
@@ -8080,8 +8314,9 @@ mod tests {
         let record = state.pending_combat_damage.as_ref().unwrap();
         assert_eq!(
             (record.paused_entry, record.decided.len()),
-            (0, 0),
-            "still unstashed after the prune"
+            (1, 1),
+            "APNAP order decides the P0 return strike first; the overlap is \
+             still unstashed after the prune"
         );
         assert!(
             record.paused_entry_pruned,
@@ -8092,9 +8327,14 @@ mod tests {
         settle_orphaned_combat_damage_choice(&mut state);
         let record = state.pending_combat_damage.as_ref().unwrap();
         assert_eq!(
-            record.decided,
-            vec![None],
-            "the paused choice died: stash None"
+            record.decided.len(),
+            2,
+            "the decided return strike plus the paused slot"
+        );
+        assert!(
+            record.decided[1].is_none(),
+            "the paused choice died: stash None, got {:?}",
+            record.decided[1]
         );
         assert!(
             !record.paused_entry_pruned,
@@ -8192,7 +8432,11 @@ mod tests {
         paint(&mut state, attacker, vec![ManaColor::Red, ManaColor::Green]);
         install_next_shield(&mut state, attacker, 2, "Ward of Embers", false);
         install_next_shield(&mut state, attacker, 1, "Ward of Thorns", false);
-        let blocker = create_creature(&mut state, PlayerId(1), "Warded Bear", 2, 2);
+        // APNAP fixture: the blocker assigns no combat damage, so the batch
+        // holds only E — the return strike would otherwise pause first under
+        // APNAP order (its recipient is the active player's attacker, which
+        // carries the same two-shield overlap N needs).
+        let blocker = create_creature(&mut state, PlayerId(1), "Warded Bear", 0, 2);
         install_protection_overlap(
             &mut state,
             TargetRef::Object(blocker),
@@ -8293,7 +8537,7 @@ mod tests {
             vec![(attacker_a, vec![blocker_a]), (attacker_b, vec![blocker_b])],
         );
 
-        // E1 parks first: both attackers' hits precede the blockers' returns.
+        // APNAP order: both P0 returns decide first, then E1 parks.
         let mut events = Vec::new();
         let waiting_e1 =
             resolve_combat_damage(&mut state, &mut events).expect("E1 pauses the batch");
@@ -8315,8 +8559,9 @@ mod tests {
                 record.decided.len(),
                 record.remaining.len()
             ),
-            (0, 0, 3),
-            "E1 pauses first; E2 plus both returns wait in remaining"
+            (2, 2, 1),
+            "APNAP order decides both P0 returns first; E1 pauses third and \
+             E2 waits in remaining"
         );
 
         // Answer E1: the resume hits E2's overlap and re-pauses with a FRESH
@@ -8338,11 +8583,11 @@ mod tests {
         let fresh = state.pending_combat_damage.as_ref().unwrap();
         assert_eq!(
             (fresh.paused_entry, fresh.decided.len()),
-            (1, 1),
+            (3, 3),
             "the fresh park re-arms the stash gate (decided.len() == paused_entry)"
         );
         assert_eq!(
-            fresh.decided[0], None,
+            fresh.decided[2], None,
             "E1's prevention stash carries into the fresh record"
         );
         assert!(
@@ -8451,8 +8696,9 @@ mod tests {
         let record = state.pending_combat_damage.as_ref().unwrap();
         assert_eq!(
             (record.paused_entry, record.decided.len()),
-            (0, 0),
-            "no stash on the repeat path: the paused slot settles exactly once"
+            (1, 1),
+            "APNAP order decides the P0 return strike first; no stash on the \
+             repeat path: the paused slot settles exactly once"
         );
 
         // Second answer: the event settles and the one batch completes.
@@ -8541,8 +8787,9 @@ mod tests {
         let record = state.pending_combat_damage.as_ref().unwrap();
         assert_eq!(
             (record.paused_entry, record.decided.len()),
-            (1, 1),
-            "the singly-protected hit is entry 0 (decided inline); the overlap pauses second"
+            (3, 3),
+            "APNAP order decides both P0 returns plus the singly-protected \
+             hit (entry 2, decided inline); the overlap pauses last"
         );
         assert_eq!(
             record.phase_a_tally.len(),
@@ -8593,7 +8840,7 @@ mod tests {
                 state.objects[&rg_attacker].damage_marked
             ),
             (2, 2),
-            "both returns (remaining) still land"
+            "both returns (decided prefix) still land"
         );
     }
 
