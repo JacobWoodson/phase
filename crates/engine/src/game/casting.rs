@@ -19960,7 +19960,7 @@ pub(crate) fn requires_additional_cost_declaration_before_targets(
             if matches!(
                 sub_ability.condition,
                 Some(AbilityCondition::AdditionalCostPaidInstead)
-            ) && crate::game::triggers::extract_target_filter_from_effect(&sub_ability.effect)
+            ) && crate::types::ability::extract_target_filter_from_effect(&sub_ability.effect)
                 .is_some()
             {
                 return true;
@@ -26800,7 +26800,7 @@ pub(crate) fn find_eligible_sacrifice_targets_for_scope(
     filter: &TargetFilter,
     scope: Option<&super::costs::PaymentScope>,
 ) -> Vec<ObjectId> {
-    let skip_cant_sacrifice = matches!(scope, Some(super::costs::PaymentScope::TurnFaceUp { .. }));
+    let is_turn_face_up = matches!(scope, Some(super::costs::PaymentScope::TurnFaceUp { .. }));
     state
         .battlefield
         .iter()
@@ -26812,12 +26812,16 @@ pub(crate) fn find_eligible_sacrifice_targets_for_scope(
             if obj.controller != player {
                 return false;
             }
+            // CR 702.37e: the permanent being turned face up is not excluded — the rule
+            // only requires paying the morph cost, so a face-down permanent matching the
+            // cost's filter may pay it with itself unless the cost says "another", which
+            // the filter carries.
             // CR 701.21a: A permanent with "can't be sacrificed" cannot be sacrificed
             // for any cost regardless of payment scope (e.g. Assault Suit).
             if super::static_abilities::object_has_static_other(state, id, "CantBeSacrificed") {
                 return false;
             }
-            if !skip_cant_sacrifice
+            if !is_turn_face_up
                 && super::static_abilities::player_cant_sacrifice_as_cost(state, player, id)
             {
                 return false;

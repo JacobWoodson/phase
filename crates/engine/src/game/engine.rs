@@ -4710,7 +4710,7 @@ fn entry_announces(
     // `bounded_cycle_pin_slots_requires_a_single_mandatory_announcement_slot`, the third by
     // `bounded_cycle_pin_slots_legal_set_comes_from_the_announcement_authority`:
     // * `len() == 1` — a chained second "target" (2 slots) or an effect whose filter the
-    //   SLOT BUILDER declines (0 slots: `triggers::extract_target_filter_from_effect`
+    //   SLOT BUILDER declines (0 slots: `types::ability::extract_target_filter_from_effect`
     //   carves out `Sacrifice`/`UnattachAll`/… for which `Effect::target_filter()` still
     //   returns `Some`, and `target_choice_timing == Resolution` surfaces no stack slot at
     //   all) would leave the published `min/max_targets: 1` contradicting the announcement.
@@ -13844,80 +13844,18 @@ fn apply_non_priority_pass_action(
                 source,
                 cost_source,
                 remaining_cost,
-            } => {
-                if chosen.len() != *count {
-                    return Err(EngineError::InvalidAction(format!(
-                        "Must choose exactly {} permanent(s)/card(s)",
-                        count
-                    )));
-                }
-                // CR 118.1 + CR 118.3 + CR 702.37e: Multi-object cost payment requires distinct IDs
-                let mut seen = std::collections::HashSet::new();
-                for &id in chosen.iter() {
-                    if !seen.insert(id) {
-                        return Err(EngineError::InvalidAction(
-                            "Selected cards/permanents must be distinct".into(),
-                        ));
-                    }
-                    if !choices.contains(&id) {
-                        return Err(EngineError::InvalidAction(
-                            "Selected card or permanent is not eligible".to_string(),
-                        ));
-                    }
-                }
-                match kind {
-                    PayCostKind::ReturnToHand | PayCostKind::Discard | PayCostKind::Sacrifice => {
-                        use crate::types::game_state::TurnFaceUpMoveKind;
-                        let move_kind = match kind {
-                            PayCostKind::ReturnToHand => TurnFaceUpMoveKind::ReturnToHand,
-                            PayCostKind::Discard => TurnFaceUpMoveKind::Discard,
-                            _ => TurnFaceUpMoveKind::Sacrifice,
-                        };
-                        // CR 702.37e + CR 118.3: the selected objects move together as
-                        // one cost component through the shared turn-face-up move loop.
-                        let cost_event_start = events.len();
-                        super::morph::move_turn_face_up_cost_objects(
-                            state,
-                            super::morph::TurnFaceUpCostMoveRequest {
-                                player: *player,
-                                source: *source,
-                                cost_source: *cost_source,
-                                move_kind,
-                                chosen: chosen.clone(),
-                                start_at_index: 0,
-                                remaining_cost: remaining_cost.clone(),
-                            },
-                            super::casting_costs::CostMoveLedger::default(),
-                            cost_event_start,
-                            &mut events,
-                        )?
-                    }
-                    PayCostKind::Reveal => {
-                        let revealed_names = chosen
-                            .iter()
-                            .filter_map(|id| state.objects.get(id).map(|o| o.name.clone()))
-                            .collect();
-                        events.push(GameEvent::CardsRevealed {
-                            player: *player,
-                            card_ids: chosen.to_vec(),
-                            card_names: revealed_names,
-                        });
-                        super::morph::finish_or_continue_turn_face_up(
-                            state,
-                            *player,
-                            *source,
-                            *cost_source,
-                            remaining_cost.clone(),
-                            &mut events,
-                        )?
-                    }
-                    _ => {
-                        return Err(EngineError::InvalidAction(
-                            "Cost kind cannot resume a turn-face-up PayCost".into(),
-                        ));
-                    }
-                }
-            }
+            } => super::morph::handle_turn_face_up_cost_selection(
+                state,
+                *player,
+                kind,
+                choices,
+                *count,
+                &chosen,
+                *source,
+                *cost_source,
+                remaining_cost.clone(),
+                &mut events,
+            )?,
         },
         // CR 601.2: Player backed out of a cost-payment choice. Only spell
         // casts can be cancelled; mana-ability cost payment has no cancel path.
@@ -13936,6 +13874,10 @@ fn apply_non_priority_pass_action(
             },
             GameAction::CancelCast,
         ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
+        // CR 116.2b + CR 702.37e: A turn-face-up special action is only backed out
+        // before any cost component is paid. `supported_for_turn_face_up` admits
+        // single-leaf costs only (Composite is rejected at the scope gate in
+        // `costs.rs`), so this prompt is always the first and only payment step.
         (
             WaitingFor::PayCost {
                 player,
