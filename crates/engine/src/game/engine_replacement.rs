@@ -254,7 +254,6 @@ pub(super) fn handle_replacement_choice(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let action_event_start = events.len();
-<<<<<<< HEAD
     // CR 615.13 + CR 616.1e (Matt M1): the answered prompt may be an
     // `EachSourceDealsDamage` batch's own boundary — a Phase-B pause whose
     // tail was empty parks no continuation, so no drain will ever run for it.
