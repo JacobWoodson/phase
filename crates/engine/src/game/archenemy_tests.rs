@@ -1256,6 +1256,175 @@ fn fate_of_the_flammable_others_choice_hits_other_opponents() {
     assert_eq!(after.players[0].life, life_before[0], "archenemy untouched");
 }
 
+/// CR 608.2c + CR 607.2d: the SAME scheme object resolving twice with opposite
+/// answers follows the CURRENT answer each time — never the first answer ever
+/// given. Resolution 1 answers Self (6 to P1); resolution 2 — against the same
+/// object, whose persisted labels still lead with "Self" exactly as after a
+/// recycle (the recycle reset clears only chosen PLAYERS, `archenemy.rs`) —
+/// answers Others and must deal 3 to P2/P3 while P1 takes no further damage.
+///
+/// DISCRIMINATING: fails if `AbilityCondition::ChosenLabelIs` reads the
+/// persisted first label instead of the named-choice continuation (resolution 2
+/// then re-fires the Self branch: P1 takes 6 more, P2/P3 nothing).
+#[test]
+fn fate_of_the_flammable_recycled_scheme_follows_current_answer() {
+    use crate::game::scenario::GameRunner;
+    use crate::types::actions::GameAction;
+    use crate::types::phase::Phase;
+
+    const ORACLE: &str = "When you set this scheme in motion, target opponent chooses self or others. If that player chooses self, this scheme deals 6 damage to that player. If the player chooses others, this scheme deals 3 damage to each of your other opponents.";
+
+    let mut state = GameState::new(crate::types::FormatConfig::archenemy_commander(), 4, 7);
+    let arch = PlayerId(0);
+    let p1 = PlayerId(1);
+    state.active_player = arch;
+
+    let parsed = crate::parser::parse_oracle_text(
+        ORACLE,
+        "The Fate of the Flammable",
+        &[],
+        &["Scheme".to_string()],
+        &[],
+    );
+    let trigger = parsed.triggers[0].clone();
+    let body = trigger.execute.as_deref().expect("Fate trigger has a body");
+    let face = synthesized_scheme_face(vec![trigger.clone()], vec![], vec![]);
+    let scheme_id = setup_active_scheme(&mut state, arch, "The Fate of the Flammable", &face);
+
+    let push_instance = |state: &mut GameState, entry_id: u64| {
+        let ability = super::ability_utils::build_resolved_from_def_with_targets(
+            body,
+            scheme_id,
+            arch,
+            vec![TargetRef::Player(p1)],
+        );
+        state.stack.push_back(StackEntry {
+            id: ObjectId(entry_id),
+            source_id: scheme_id,
+            controller: arch,
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: scheme_id,
+                ability: Box::new(ability),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: "The Fate of the Flammable".to_string(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+    };
+
+    // Resolution 1: P1 answers Self → 6 to P1.
+    push_instance(&mut state, 99_991);
+    let life_before = [
+        state.players[0].life,
+        state.players[1].life,
+        state.players[2].life,
+        state.players[3].life,
+    ];
+    state.phase = Phase::PreCombatMain;
+    state.priority_player = arch;
+    state.waiting_for = WaitingFor::Priority { player: arch };
+    state.priority_passes.clear();
+    state.priority_pass_count = 0;
+    let mut runner = GameRunner::from_state(state);
+    for _ in 0..6 {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            break;
+        }
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::NamedChoice { .. }),
+        "expected the self-or-others prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Self".to_string(),
+        })
+        .unwrap();
+    let after_first = runner.state();
+    assert_eq!(
+        after_first.players[1].life,
+        life_before[1] - 6,
+        "resolution 1: P1 takes 6 from the Self branch"
+    );
+    assert_eq!(
+        after_first.players[2].life, life_before[2],
+        "resolution 1: P2 untouched"
+    );
+    assert_eq!(
+        after_first.players[3].life, life_before[3],
+        "resolution 1: P3 untouched"
+    );
+    // Trap precondition: the persisted first label is now "Self" — exactly the
+    // stale state a recycled scheme carries into its next resolution.
+    assert_eq!(
+        after_first.objects[&scheme_id].chosen_label(),
+        Some("Self"),
+        "resolution 1 must persist the Self label on the scheme"
+    );
+    let life_after_first = [
+        after_first.players[0].life,
+        after_first.players[1].life,
+        after_first.players[2].life,
+        after_first.players[3].life,
+    ];
+
+    // Resolution 2: the SAME object, the SAME target, the OPPOSITE answer.
+    {
+        let live = runner.state_mut();
+        live.priority_player = arch;
+        live.waiting_for = WaitingFor::Priority { player: arch };
+        live.priority_passes.clear();
+        live.priority_pass_count = 0;
+    }
+    push_instance(runner.state_mut(), 99_992);
+    for _ in 0..6 {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            break;
+        }
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::NamedChoice { .. }),
+        "expected the second self-or-others prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Others".to_string(),
+        })
+        .unwrap();
+
+    let after = runner.state();
+    assert_eq!(
+        after.players[1].life, life_after_first[1],
+        "resolution 2: P1 chose Others and must take no further damage"
+    );
+    assert_eq!(
+        after.players[2].life,
+        life_after_first[2] - 3,
+        "resolution 2: P2 takes 3 from the Others branch"
+    );
+    assert_eq!(
+        after.players[3].life,
+        life_after_first[3] - 3,
+        "resolution 2: P3 takes 3 from the Others branch"
+    );
+    // The stale trap was live the whole time: persistence still leads with the
+    // first answer, so only the named-choice continuation can explain the
+    // Others branch firing.
+    assert_eq!(
+        after.objects[&scheme_id].chosen_label(),
+        Some("Self"),
+        "persisted labels must still lead with the first answer"
+    );
+}
+
 /// CR 102.2 + CR 608.2c + CR 109.4: Surrender Your Thoughts' Others branch
 /// ("each of your other opponents discards two cards") fans out through the
 /// player_scope driver with the `OpponentExcept { ParentPlayerTarget }` scope —

@@ -1269,6 +1269,16 @@ pub(crate) enum TargetedImperativeAst {
     UntapAll {
         target: TargetFilter,
     },
+    /// CR 118.12 + CR 601.2f: "tap any number of <target> with total power
+    /// <power> or greater" — an aggregate tap COST paid at resolution (Bow to
+    /// My Command's end-step leg; Crew CR 702.122a grammar in resolution
+    /// position). Lowers to `Effect::PayCost(TapCreatures(total_power_at_least))`
+    /// so the cost authority enforces the aggregate — never to a bare Tap,
+    /// which would drop the restriction.
+    TapAggregate {
+        target: TargetFilter,
+        power: i32,
+    },
     Goad {
         target: TargetFilter,
     },

@@ -2409,6 +2409,20 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         if let Some(ability) = execute.as_deref_mut() {
             if ability.optional_player.is_none() && ability.optional_for.is_none() {
                 ability.optional_player = Some(optional_player.clone());
+                // CR 608.2d + CR 118.12: the stamped announcer is also the payer
+                // when the head is a still-default-payer `PayCost` — the "they
+                // may <cost>" shape in a trigger whose subject names no player
+                // (Bow to My Command's "they may tap … with total power 8 or
+                // greater" under a phase head). Subject injection never rebound
+                // the payer there (no player `affected`), so without this the
+                // stamped opponent would announce whether the CONTROLLER pays.
+                // Heads whose payer subject injection already bound (Horn of
+                // Plenty, Wandering Archaic: TriggeringPlayer) are untouched.
+                if let Effect::PayCost { payer, .. } = ability.effect.as_mut() {
+                    if matches!(payer, TargetFilter::Controller) {
+                        *payer = optional_player.clone();
+                    }
+                }
             }
         }
     }

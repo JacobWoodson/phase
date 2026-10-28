@@ -24330,6 +24330,19 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub named_color_this_resolution: Option<crate::types::mana::ManaColor>,
 
+    /// CR 607.2d + CR 608.2c: the label the current resolution's most recent
+    /// labeled choice named, persisting or not ("target opponent chooses self
+    /// or others. If that player chooses self, …"). The named-choice
+    /// continuation for `AbilityCondition::ChosenLabelIs`: unlike the source's
+    /// `ChosenAttribute::Label` history (which CR 607.2d readers own and which
+    /// accumulates across resolutions, so a recycled scheme's first answer
+    /// would shadow every later one), this slot answers "what did the choice
+    /// earlier in THESE instructions name". Cleared at every top-level
+    /// resolution; a gate whose own resolution named no label reads `None`
+    /// and fails closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub named_label_this_resolution: Option<String>,
+
     /// CR 608.2c + CR 123.1: the sticker the current resolution's most recent
     /// PutSticker instruction placed ("that sticker"). Cleared at every
     /// top-level resolution and at the start of every PutSticker instruction,
@@ -32048,6 +32061,7 @@ impl GameState {
             chosen_counter_kind_this_resolution: None,
             chosen_color_this_resolution: None,
             named_color_this_resolution: None,
+            named_label_this_resolution: None,
             placed_sticker_this_resolution: None,
             noted_numbers_this_resolution: Vec::new(),
             last_chosen_damage_source: None,
@@ -33170,6 +33184,7 @@ impl GameState {
         self.chosen_counter_kind_this_resolution.hash(&mut h);
         self.chosen_color_this_resolution.hash(&mut h);
         self.named_color_this_resolution.hash(&mut h);
+        self.named_label_this_resolution.hash(&mut h);
         // CR 608.2c: "that sticker" can change what a following instruction
         // reads (phase-2 quantity), so distinct live values must not share a
         // loop pre-filter fingerprint.
@@ -35132,6 +35147,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         chosen_counter_kind_this_resolution: _,
         chosen_color_this_resolution: _,
         named_color_this_resolution: _,
+        named_label_this_resolution: _,
         placed_sticker_this_resolution: _,
         noted_numbers_this_resolution: _,
         last_chosen_damage_source: _,
@@ -35527,6 +35543,7 @@ impl PartialEq for GameState {
                 == other.chosen_counter_kind_this_resolution
             && self.chosen_color_this_resolution == other.chosen_color_this_resolution
             && self.named_color_this_resolution == other.named_color_this_resolution
+            && self.named_label_this_resolution == other.named_label_this_resolution
             && self.placed_sticker_this_resolution == other.placed_sticker_this_resolution
             && self.noted_numbers_this_resolution == other.noted_numbers_this_resolution
             && self.last_revealed_ids == other.last_revealed_ids

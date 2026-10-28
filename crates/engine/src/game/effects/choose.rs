@@ -55,8 +55,9 @@ pub fn resolve(
         // CR 609.3: no eligible chooser (e.g. the targeted player left the
         // game) — the choice does nothing, mirroring the empty-options path
         // below and `OpponentGuess`'s missing-guesser no-op. No label is
-        // persisted, so `ChosenLabelIs` gates downstream read a missing anchor
-        // and neither branch fires (fail-closed at resolution).
+        // bound, so `ChosenLabelIs` gates downstream read an empty
+        // resolution slot and neither branch fires (fail-closed at
+        // resolution).
         state.cost_payment_failed_flag = true;
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
@@ -288,6 +289,13 @@ pub(crate) fn bind_named_choice(
     // of choice comes between (`named_color_this_resolution`).
     if let Some(ChoiceValue::Color(color)) = ChoiceValue::from_choice(choice_type, choice) {
         state.named_color_this_resolution = Some(color);
+    }
+    // CR 607.2d + CR 608.2c: "that label" later in this resolution names this
+    // answer, whether or not the chooser persists it (self-or-others scheme
+    // branch gates). Gated on the LABELED choice type — a Word/Artist answer
+    // also decodes to `ChoiceValue::Label` but names no anchor word.
+    if matches!(choice_type, ChoiceType::Labeled { .. }) {
+        state.named_label_this_resolution = Some(choice.to_string());
     }
     let updated_context = source.as_deref_mut().and_then(|source| {
         let context = source.context.as_mut()?;

@@ -128,6 +128,7 @@ mod borg_queen_assimilate;
 mod bounce_destination_redirect;
 mod bound_by_moonsilver_sacrifice_source_relative_6017;
 mod bow_to_my_command_as_choice;
+mod bow_to_my_command_end_step;
 mod braids_arisen_nightmare_decline;
 mod brainspoil;
 mod bramble_elemental_aura_attach;

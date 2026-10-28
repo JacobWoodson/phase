@@ -61,9 +61,9 @@ use crate::types::ability::{
     ObjectSelectionEligibility, OutsideGameSourcePool, PerPlayerScope, PlayerFilter,
     PlayerRelation, PlayerScope, PossessionAxis, PreventionAmount, PreventionScope, PtStat,
     PtValue, QuantityExpr, QuantityRef, ReassembleControlMode, ReturnResultReadSpec,
-    SearchSelectionConstraint, StaticDefinition, StickerTicketCostPayment, TapStateChange,
-    TargetChoiceTiming, TargetFilter, TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter,
-    ZoneChoiceCandidateSource, ZoneOwner, ZoneRef,
+    SearchSelectionConstraint, StaticDefinition, StickerTicketCostPayment, TapCreaturesRequirement,
+    TapStateChange, TargetChoiceTiming, TargetFilter, TargetSelectionMode, ThisWayCause,
+    TypeFilter, TypedFilter, ZoneChoiceCandidateSource, ZoneOwner, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
@@ -1746,6 +1746,33 @@ pub(super) fn aggregate_return_choice_cardinality(
     .then_some(cardinality)
 }
 
+/// CR 118.12 + CR 601.2f: parse a trailing "with total power N or greater"
+/// tap-cost restriction (Bow to My Command's end-step leg; Crew CR 702.122a
+/// grammar in resolution position). All-consuming over the lowered target
+/// remainder — a longer or differently worded restriction is not this floor.
+fn parse_tap_total_power_floor(rem_lower: &str) -> Option<i32> {
+    all_consuming(terminated(
+        preceded(
+            (space0, tag("with total power ")),
+            nom_primitives::parse_number,
+        ),
+        (space0, tag("or greater"), opt(tag(".")), space0),
+    ))
+    .parse(rem_lower)
+    .ok()
+    .and_then(|(_, floor)| i32::try_from(floor).ok())
+}
+
+/// CR 118.12: does a tap/untap target remainder carry a total-power
+/// restriction in ANY wording? The fail-closed companion of
+/// `parse_tap_total_power_floor`: a remainder it cannot parse must decline
+/// the Tap lowering rather than silently drop the restriction.
+fn tap_remainder_mentions_total_power(rem_lower: &str) -> bool {
+    take_until::<_, _, OracleError<'_>>("total power")
+        .parse(rem_lower)
+        .is_ok()
+}
+
 pub(super) fn parse_targeted_action_ast(
     text: &str,
     lower: &str,
@@ -1963,9 +1990,29 @@ pub(super) fn parse_targeted_action_ast(
         let target = if ctx.subject.is_some() && is_bare_object_pronoun(target_text.trim()) {
             resolve_it_pronoun(ctx)
         } else {
-            let (target, _rem) = parse_target_with_ctx(target_text, ctx);
+            let (target, rem) = parse_target_with_ctx(target_text, ctx);
+            // CR 118.12 + CR 601.2f: "tap any number of <target> with total
+            // power N or greater" is an aggregate tap COST paid at resolution
+            // (Bow to My Command's end-step leg), not a tap action — route it
+            // to the cost authority so the aggregate is enforced. A
+            // total-power remainder in any other wording fails closed rather
+            // than dropping the restriction into a bare Tap.
+            let rem_lower = lower
+                .len()
+                .checked_sub(rem.len())
+                .and_then(|start| lower.get(start..))
+                .unwrap_or("");
+            if let Some(power) = parse_tap_total_power_floor(rem_lower) {
+                if !matches!(state, TapStateChange::Tap) {
+                    return None;
+                }
+                return Some(TargetedImperativeAst::TapAggregate { target, power });
+            }
+            if tap_remainder_mentions_total_power(rem_lower) {
+                return None;
+            }
             #[cfg(debug_assertions)]
-            assert_no_compound_remainder(_rem, text);
+            assert_no_compound_remainder(rem, text);
             target
         };
         return Some(match state {
@@ -2744,6 +2791,20 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             target,
             scope: EffectScope::All,
             state: TapStateChange::Untap,
+        },
+        // CR 118.12 + CR 601.2f: the aggregate tap cost lowers to a
+        // resolution-time `PayCost(TapCreatures)` — the same cost authority
+        // Crew/Saddle pay through — so the total-power floor is enforced on
+        // the selected subset. The parsed target carries the payer-relative
+        // filter (`controller: You` resolves to the payer via the
+        // payer-adjusted ability); subject injection rebinds `payer` below.
+        TargetedImperativeAst::TapAggregate { target, power } => Effect::PayCost {
+            cost: AbilityCost::TapCreatures {
+                requirement: TapCreaturesRequirement::total_power_at_least(power),
+                filter: target,
+            },
+            scale: None,
+            payer: TargetFilter::Controller,
         },
         TargetedImperativeAst::Goad { target } => Effect::Goad { target },
         TargetedImperativeAst::GoadAll { target } => Effect::GoadAll { target },

@@ -6448,9 +6448,10 @@ pub(crate) fn static_condition_to_ability_condition(
             Some(AbilityCondition::CompletedDungeon { specific: None })
         }
         // CR 607.2d + CR 608.2c: the sequential if-chose gate ("If [that|the]
-        // player chooses <label>") — the same persisted-label anchor the
-        // static/trigger mirrors read, evaluated at resolution against the
-        // ability source (self-or-others scheme class).
+        // player chooses <label>") — evaluated at resolution against the
+        // named-choice continuation (the label THIS resolution's `Choose {
+        // Labeled }` head named), not the persisted anchor the
+        // static/trigger mirrors read (self-or-others scheme class).
         StaticCondition::ChosenLabelIs { label } => {
             Some(AbilityCondition::ChosenLabelIs {
                 label: label.clone(),

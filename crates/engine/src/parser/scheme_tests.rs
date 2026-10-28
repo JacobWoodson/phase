@@ -125,7 +125,10 @@ fn fate_of_the_flammable_binds_targeted_chooser() {
         &ControllerRef::TargetOpponent,
         "chooser must be the announced target opponent, got {chooser:?}"
     );
-    assert!(persist, "label must persist for the branch gates");
+    assert!(
+        persist,
+        "label must persist as the anchor record (branch gates read the named-choice continuation)"
+    );
 }
 
 /// CR 607.2d + CR 608.2c + CR 115.1: both Fate branches carry their label
@@ -245,7 +248,10 @@ fn assert_self_or_others_head(name: &str, oracle_text: &str) {
         &ControllerRef::TargetOpponent,
         "{name}: chooser must be the announced target opponent, got {chooser:?}"
     );
-    assert!(persist, "{name}: label must persist for the branch gates");
+    assert!(
+        persist,
+        "{name}: label must persist as the anchor record (branch gates read the named-choice continuation)"
+    );
 }
 
 #[test]
@@ -830,5 +836,92 @@ fn mine_is_the_only_truth_is_supported() {
     assert!(
         found,
         "Mine Is the Only Truth: no conditioned Effect::AbandonScheme in any trigger body"
+    );
+}
+
+/// CR 118.12 + CR 608.2c: Bow to My Command's end-step leg — "they may tap any
+/// number of untapped creatures they control with total power 8 or greater. If
+/// they do, abandon this scheme." The tap head is a resolution-time cost
+/// (CR 118.12: "a cost, paid when the spell or ability resolves"), so it must
+/// lower to an optional `PayCost(TapCreatures(total_power_at_least(8)))` paid
+/// by the triggering opponent — never to a bare `SetTapState`, which would
+/// drop the total-power restriction and abandon unconditionally — with the
+/// abandon riding the "If they do" performed-rider.
+#[test]
+fn bow_to_my_command_end_step_enforces_total_power_eight() {
+    use crate::types::ability::{
+        AbilityCondition, AbilityCost, ControllerRef, Effect, EffectOutcomeSignal,
+        TapCreaturesRequirement, TargetFilter, TypeFilter,
+    };
+
+    let oracle = "(An ongoing scheme remains face up until it's abandoned.)\nAs you set this scheme in motion, choose an opponent.\nCreatures the chosen player controls can't attack you or planeswalkers you control.\nAt the beginning of your opponents' end step, they may tap any number of untapped creatures they control with total power 8 or greater. If they do, abandon this scheme.";
+    assert_scheme_clean("Bow to My Command", oracle);
+    let (types, subtypes) = scheme_types();
+    let parsed = parse_oracle_text(oracle, "Bow to My Command", &[], &types, &subtypes);
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| {
+            t.execute
+                .as_deref()
+                .is_some_and(|e| e.optional && matches!(&*e.effect, Effect::PayCost { .. }))
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "Bow: end-step head must be an optional PayCost, got {:?}",
+                parsed
+                    .triggers
+                    .iter()
+                    .filter_map(|t| t.execute.as_deref().map(|e| &*e.effect))
+                    .collect::<Vec<_>>()
+            )
+        });
+    let head = trigger.execute.as_deref().expect("Bow: trigger has a body");
+    let Effect::PayCost { cost, payer, .. } = &*head.effect else {
+        panic!("Bow: head must be PayCost, got {:?}", head.effect);
+    };
+    let AbilityCost::TapCreatures {
+        requirement,
+        filter,
+    } = cost
+    else {
+        panic!("Bow: cost must be TapCreatures, got {cost:?}");
+    };
+    assert_eq!(
+        requirement,
+        &TapCreaturesRequirement::total_power_at_least(8),
+        "Bow: cost must require total power 8 or greater, got {requirement:?}"
+    );
+    assert!(
+        matches!(
+            filter,
+            TargetFilter::Typed(tf)
+                if tf.controller == Some(ControllerRef::You)
+                    && tf.type_filters.contains(&TypeFilter::Creature)
+        ),
+        "Bow: cost filter must be the payer's creatures, got {filter:?}"
+    );
+    assert_eq!(
+        payer,
+        &TargetFilter::TriggeringPlayer,
+        "Bow: the triggering opponent pays, got {payer:?} (mode {:?}, player_scope {:?}, optional_player {:?}, optional_for {:?})",
+        trigger.mode,
+        head.player_scope,
+        head.optional_player,
+        head.optional_for,
+    );
+    let rider = head.sub_ability.as_deref().expect("Bow: If-they-do rider");
+    assert_eq!(
+        rider.condition,
+        Some(AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::OptionalEffectPerformed,
+        }),
+        "Bow: rider must be the If-they-do gate, got {:?}",
+        rider.condition
+    );
+    assert!(
+        matches!(*rider.effect, Effect::AbandonScheme),
+        "Bow: rider must abandon the scheme, got {:?}",
+        rider.effect
     );
 }

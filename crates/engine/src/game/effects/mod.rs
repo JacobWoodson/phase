@@ -20855,6 +20855,10 @@ fn reset_top_level_resolution_state(state: &mut GameState) {
     state.chosen_color_this_resolution = None;
     // CR 608.2c: nor a prior resolution's "that color".
     state.named_color_this_resolution = None;
+    // CR 607.2d + CR 608.2c: nor a prior resolution's "that label" — a
+    // recycled self-or-others scheme's fresh answer must not inherit the label
+    // an earlier resolution named.
+    state.named_label_this_resolution = None;
     // CR 608.2c: "that sticker" names a sticker this resolution's own PutSticker
     // instruction placed; a new top-level resolution cannot inherit a prior one's.
     state.placed_sticker_this_resolution = None;
@@ -26706,14 +26710,18 @@ pub(crate) fn evaluate_condition(
             .resolution_coin_flip
             .is_some_and(|f| f.flipper == ability.controller && f.result == *result),
         // CR 607.2d + CR 608.2c: "If [that|the] player chooses <label>" — the
-        // source's persisted label matches the anchor word (case-insensitive).
-        // The preceding `Choose { Labeled, persist }` wrote the label onto the
-        // same source object earlier in this resolution (self-or-others
-        // scheme class); shares the `eval_chosen_label_is` authority with the
-        // static/trigger mirrors.
-        AbilityCondition::ChosenLabelIs { label } => {
-            crate::game::conditions::eval_chosen_label_is(state, ability.source_id, label)
-        }
+        // label THIS resolution's labeled choice named matches the anchor word
+        // (case-insensitive). Reads the named-choice continuation
+        // (`named_label_this_resolution`, written by the preceding `Choose {
+        // Labeled }` head's bind), NOT the source's persisted label history:
+        // labels accumulate across resolutions, so a recycled scheme's first
+        // answer would otherwise shadow every later one (CR 608.2c: follow
+        // the instructions in the order written). The static/trigger mirrors
+        // keep reading the persisted anchor via `eval_chosen_label_is`.
+        AbilityCondition::ChosenLabelIs { label } => state
+            .named_label_this_resolution
+            .as_deref()
+            .is_some_and(|chosen| chosen.eq_ignore_ascii_case(label)),
         // CR 603.12: A reflexive triggered ability ("when you do") triggers
         // "based on whether the trigger event or events occurred earlier during
         // the resolution" of the parent. Two independent ways the parent event

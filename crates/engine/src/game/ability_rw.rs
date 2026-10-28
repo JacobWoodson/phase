@@ -6978,15 +6978,16 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
         // CR 705.2: reads resolution-local `state.resolution_coin_flip` — a live
         // in-resolution signal, same read-bucket as `EventOutcomeWon`.
         AbilityCondition::CoinFlipOutcome { result: _ } => reads_event_live(),
-        // CR 607.2d: reads the source's persisted `ChosenAttribute::Label` via
-        // `eval_chosen_label_is` — the same anchor, evaluator, and profile as
-        // the `StaticCondition` / `TriggerCondition` mirrors (both
-        // `RwProfile::empty()`). NOT `reads_event_live`: the write→read is
-        // intra-chain (the preceding `Choose { Labeled, persist }` sub-ability
-        // of the same resolving ability, CR 608.2c in-order steps), and the
-        // same-event gate orders DISTINCT abilities — no other ability writes
-        // this source's label on the same event. An event-live read would
-        // spuriously pair against every event-object writer (damage, counters).
+        // CR 607.2d + CR 608.2c: reads the named-choice continuation
+        // (`named_label_this_resolution`), written by the preceding `Choose {
+        // Labeled }` head's bind — NOT the source's persisted
+        // `ChosenAttribute::Label` history the `StaticCondition` /
+        // `TriggerCondition` mirrors read. Still `RwProfile::empty()`: the
+        // write→read is intra-chain (same resolving ability, CR 608.2c
+        // in-order steps), and the same-event gate orders DISTINCT abilities
+        // — no other ability writes this resolution's label. An event-live
+        // read would spuriously pair against every event-object writer
+        // (damage, counters).
         AbilityCondition::ChosenLabelIs { label: _ } => RwProfile::empty(),
         // Both `AbilityUseCountThisTurn` tallies read a per-turn journal keyed
         // by this ability's own `(source_id, ability_index)` — the same read
