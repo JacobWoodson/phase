@@ -7913,7 +7913,7 @@ pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerC
                 binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
             },
         ),
-        // CR 505.1 + CR 603.7a: Symmetric to the prefix form at
+        // CR 513.2 + CR 603.7a: Symmetric to the prefix form at
         // `strip_temporal_prefix`. Greasefang's "return it to its owner's hand
         // at the beginning of your next end step" uses this suffix shape; the
         // player placeholder is rewritten to `ability.controller` at resolve
