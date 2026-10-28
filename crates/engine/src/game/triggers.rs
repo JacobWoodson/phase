@@ -46105,6 +46105,7 @@ pub mod tests {
             granting_object: None,
             duration_event_source: None,
             source_name: "Keyword Granter".to_string(),
+            bound_actor: None,
         }
     }
 
