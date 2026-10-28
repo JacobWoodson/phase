@@ -1852,6 +1852,9 @@ fn has_enough_tap_creatures(
             stat: TapCreaturesAggregateStat::TotalPower,
             comparator,
             value,
+            // Activation pays singular; `collective` is a resolution-only
+            // flag the parser never stamps on activatable costs.
+            ..
         } => {
             let total_positive_power: i32 = eligible
                 .filter_map(|id| state.objects.get(&id))

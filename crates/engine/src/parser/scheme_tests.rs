@@ -889,8 +889,13 @@ fn bow_to_my_command_end_step_enforces_total_power_eight() {
     };
     assert_eq!(
         requirement,
-        &TapCreaturesRequirement::total_power_at_least(8),
-        "Bow: cost must require total power 8 or greater, got {requirement:?}"
+        &TapCreaturesRequirement::Aggregate {
+            stat: crate::types::ability::TapCreaturesAggregateStat::TotalPower,
+            comparator: crate::types::ability::Comparator::GE,
+            value: 8,
+            collective: true,
+        },
+        "Bow: cost must require total power 8 or greater paid collectively, got {requirement:?}"
     );
     assert!(
         matches!(

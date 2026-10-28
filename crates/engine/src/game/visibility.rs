@@ -4207,9 +4207,13 @@ fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet
                 redact_pending_mana_ability_payment(mana_ability, hidden_ids);
             }
             // The spell resumes are the `pending_cast_mut()` call above.
+            // `TeamTapPayment` carries only battlefield creature ids (public
+            // board state, already surfaced as prompt `choices`) plus the
+            // advertised threshold — nothing to redact.
             CostResume::Spell { .. }
             | CostResume::SpellCost { .. }
             | CostResume::Resolution
+            | CostResume::TeamTapPayment { .. }
             | CostResume::TurnFaceUp { .. } => {}
         },
         WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_mut() {

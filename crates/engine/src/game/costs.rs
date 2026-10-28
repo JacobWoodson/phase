@@ -185,6 +185,226 @@ fn find_eligible_tap_creatures_targets(
         .collect()
 }
 
+/// CR 805.4 + CR 805.6: Team-wide eligibility for a COLLECTIVE aggregate
+/// tap-creatures cost. Each teammate matches the cost filter under their own
+/// controller binding (`FilterContext::from_ability_with_controller` — the
+/// cost text's "you control" means each hero in turn), unioned in seat
+/// order. Per-hero prompts slice the union by controller; the slices are
+/// disjoint (one controller per creature) and static across the session
+/// because no resolution interleaves between prompts.
+fn find_eligible_team_tap_creatures_targets(
+    state: &GameState,
+    members: &[PlayerId],
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    let mut eligible = Vec::new();
+    for &member in members {
+        let ctx = FilterContext::from_ability_with_controller(ability, member);
+        eligible.extend(state.battlefield.iter().copied().filter(|id| {
+            state.objects.get(id).is_some_and(|obj| {
+                obj.controller == member
+                    && !obj.tapped
+                    && super::filter::matches_target_filter(state, obj.id, filter, &ctx)
+            })
+        }));
+    }
+    eligible
+}
+
+/// Slice a collective session's gate-time eligible set to one hero's
+/// creatures. Static across the session (controllers don't change
+/// mid-payment).
+fn hero_tap_slice(state: &GameState, eligible: &[ObjectId], hero: PlayerId) -> Vec<ObjectId> {
+    eligible
+        .iter()
+        .copied()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|obj| obj.controller == hero)
+        })
+        .collect()
+}
+
+/// CR 805.4 + CR 805.6 + CR 118.12: Open a collective tap-creatures payment.
+/// Gates the TEAM-wide eligible set against the aggregate, then prompts the
+/// first hero holding creatures. The caller guarantees a multi-seat team.
+fn pay_collective_tap_creatures_cost(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+    aggregate: crate::types::ability::TapCreaturesAggregate,
+    members: &[PlayerId],
+) -> Result<PaymentOutcome, EngineError> {
+    let eligible = find_eligible_team_tap_creatures_targets(state, members, ability, filter);
+    // The gate sums positive-only power as its upper bound: if even the
+    // clamped team total falls short, no subset can satisfy the threshold
+    // (any signed subset total is <= its clamped twin). The final combined
+    // check re-sums SIGNED power (CR 107.1b).
+    let total_positive_power = super::casting_costs::tap_creatures_total_power(state, &eligible);
+    if !aggregate.satisfied_by(total_positive_power) {
+        return Ok(payment_failed(
+            "eligible creatures do not satisfy tap-creatures aggregate cost",
+        ));
+    }
+    // Creatureless heroes are skipped, never prompted: with no creatures
+    // they have no contribution decision to make.
+    let first = members.iter().position(|&hero| {
+        eligible.iter().any(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|obj| obj.controller == hero)
+        })
+    });
+    let Some(index) = first else {
+        // Unreachable: the gate passed, so at least one eligible creature —
+        // hence at least one contributing hero — exists. Fail closed rather
+        // than prompting an empty seat.
+        return Ok(payment_failed(
+            "eligible creatures do not satisfy tap-creatures aggregate cost",
+        ));
+    };
+    let hero = members[index];
+    let choices = hero_tap_slice(state, &eligible, hero);
+    state.waiting_for = WaitingFor::PayCost {
+        player: hero,
+        kind: PayCostKind::TapCreatures {
+            mode: crate::types::ability::TapCreaturesSelectionMode::VariableX,
+        },
+        count: choices.len(),
+        min_count: 0,
+        choices,
+        resume: CostResume::TeamTapPayment {
+            aggregate,
+            eligible,
+            selected: Vec::new(),
+            remaining: members[index + 1..].to_vec(),
+        },
+    };
+    Ok(PaymentOutcome::Paused {
+        remaining_cost: None,
+    })
+}
+
+/// CR 805.6 + CR 118.12 + CR 107.1b: Complete one hero's contribution to a
+/// collective tap-creatures payment. Validates the hero's selection
+/// (membership + no duplicates, mirroring `pay_tap_creatures_selection`'s
+/// shared checks — but NOT the aggregate threshold, which only the COMBINED
+/// total must meet), accumulates it untapped, and either prompts the next
+/// contributing hero or settles the session: the combined SIGNED power
+/// decides; on success every selected creature taps simultaneously, on
+/// failure nothing taps and the resolving chain takes its didn't-pay branch
+/// (`cost_payment_failed_flag`, exactly like the gate path).
+///
+/// `VariableX` on the per-hero prompts is a selection-semantics vehicle only
+/// (any subset, including empty = pass): this completion never stamps X.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn handle_team_tap_payment_selection(
+    state: &mut GameState,
+    hero: PlayerId,
+    kind: &PayCostKind,
+    choices: &[ObjectId],
+    chosen: &[ObjectId],
+    aggregate: crate::types::ability::TapCreaturesAggregate,
+    eligible: &[ObjectId],
+    selected: &[ObjectId],
+    remaining: &[PlayerId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    // Fail closed on a prompt/session mismatch: session prompts are always
+    // built as VariableX any-subset selections by
+    // `pay_collective_tap_creatures_cost`.
+    if !matches!(
+        kind,
+        PayCostKind::TapCreatures {
+            mode: crate::types::ability::TapCreaturesSelectionMode::VariableX,
+        }
+    ) {
+        return Err(EngineError::InvalidAction(
+            "Collective tap-creatures payment expects a per-hero subset selection".to_string(),
+        ));
+    }
+    // Mirror `pay_tap_creatures_selection`'s membership + dedup checks (CR
+    // 118.3 + CR 601.2h: one creature pays once). Cross-hero duplicates are
+    // impossible (disjoint controllers) but refused anyway.
+    for (index, id) in chosen.iter().enumerate() {
+        if !choices.contains(id) {
+            return Err(EngineError::InvalidAction(
+                "Selected creature not eligible for tapping".to_string(),
+            ));
+        }
+        if chosen[..index].contains(id) || selected.contains(id) {
+            return Err(EngineError::InvalidAction(
+                "Cannot tap the same creature twice for a tap-creatures cost".to_string(),
+            ));
+        }
+    }
+    let mut selected: Vec<ObjectId> = selected.to_vec();
+    selected.extend(chosen.iter().copied());
+    // Advance past creatureless heroes (skipped, never prompted) to the next
+    // contributor, if any.
+    let still_remaining: Vec<PlayerId> = remaining.iter().copied().filter(|&p| p != hero).collect();
+    if let Some(next_hero) = still_remaining.iter().copied().find(|&next_hero| {
+        eligible.iter().any(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|obj| obj.controller == next_hero)
+        })
+    }) {
+        let after: Vec<PlayerId> = still_remaining
+            .into_iter()
+            .skip_while(|&p| p != next_hero)
+            .skip(1)
+            .collect();
+        let choices = hero_tap_slice(state, eligible, next_hero);
+        state.waiting_for = WaitingFor::PayCost {
+            player: next_hero,
+            kind: PayCostKind::TapCreatures {
+                mode: crate::types::ability::TapCreaturesSelectionMode::VariableX,
+            },
+            count: choices.len(),
+            min_count: 0,
+            choices,
+            resume: CostResume::TeamTapPayment {
+                aggregate,
+                eligible: eligible.to_vec(),
+                selected,
+                remaining: after,
+            },
+        };
+        return Ok(state.waiting_for.clone());
+    }
+    // No heroes left: the combined SIGNED power (CR 107.1b — negative power
+    // counts) decides, exactly like the single-payer validator.
+    let combined = super::casting_costs::tap_creatures_signed_total_power(state, &selected);
+    if !aggregate.satisfied_by(combined) {
+        // The team selected short of the threshold: nothing taps (selections
+        // were never executed) and the chain takes its didn't-pay branch.
+        state.cost_payment_failed_flag = true;
+        if matches!(state.waiting_for, WaitingFor::PayCost { .. }) {
+            state.waiting_for = WaitingFor::Priority { player: hero };
+        }
+        super::effects::drain_pending_continuation(state, events);
+        return Ok(state.waiting_for.clone());
+    }
+    // CR 701.26a + CR 508.1f: tap every selected creature simultaneously,
+    // routed through the single authority — the same tap loop as
+    // `pay_tap_creatures_selection`.
+    for &id in &selected {
+        crate::game::restrictions::tap_permanent_for_cost(state, id, events)?;
+    }
+    state.last_effect_count = Some(selected.len() as i32);
+    if matches!(state.waiting_for, WaitingFor::PayCost { .. }) {
+        state.waiting_for = WaitingFor::Priority { player: hero };
+    }
+    super::effects::drain_pending_continuation(state, events);
+    Ok(state.waiting_for.clone())
+}
+
 /// Selects the payment regime for `pay_ability_cost_inner`. The two variants
 /// capture the only CR-confirmed differences between activation-time and
 /// resolution-time payment (unification plan §2):
@@ -1509,12 +1729,25 @@ fn pay_ability_cost_inner(
                     stat,
                     comparator,
                     value,
+                    collective,
                 } => {
                     let aggregate = crate::types::ability::TapCreaturesAggregate {
                         stat: *stat,
                         comparator: *comparator,
                         value: *value,
                     };
+                    // CR 805.6: a collective cost is paid by the payer's whole
+                    // team — but only when the team actually holds several
+                    // seats. A one-seat team pays through the ordinary single
+                    // prompt below, so solo formats never observe the session.
+                    if *collective {
+                        let members = super::topology::team_members(state, player);
+                        if members.len() > 1 {
+                            return pay_collective_tap_creatures_cost(
+                                state, ability, filter, aggregate, &members,
+                            );
+                        }
+                    }
                     let total_positive_power =
                         super::casting_costs::tap_creatures_total_power(state, &eligible);
                     if !aggregate.satisfied_by(total_positive_power) {
@@ -2980,7 +3213,20 @@ fn can_pay_resolution(
             requirement,
             filter,
         } => {
-            let eligible = find_eligible_tap_creatures_targets(state, payer, ability, filter);
+            // CR 805.6: a collective cost is payable when the TEAM-wide
+            // eligible set meets the threshold — the same population the
+            // payment path gates, so the optional-feasibility probe and the
+            // payment gate can never disagree.
+            let collective = matches!(
+                requirement,
+                crate::types::ability::TapCreaturesRequirement::Aggregate { collective: true, .. }
+            );
+            let eligible = if collective {
+                let members = super::topology::team_members(state, payer);
+                find_eligible_team_tap_creatures_targets(state, &members, ability, filter)
+            } else {
+                find_eligible_tap_creatures_targets(state, payer, ability, filter)
+            };
             match requirement {
                 crate::types::ability::TapCreaturesRequirement::Count { count } => {
                     // CR 107.3a: route the floor through the single bounds
@@ -2996,6 +3242,7 @@ fn can_pay_resolution(
                     stat,
                     comparator,
                     value,
+                    ..
                 } => {
                     let aggregate = crate::types::ability::TapCreaturesAggregate {
                         stat: *stat,
@@ -4976,10 +5223,10 @@ mod tests {
     }
 
     /// CR 118.3 + CR 601.2h: the aggregate arm is the case the dedup guard
-    /// actually protects. `tap_creatures_total_power` sums `chosen` with NO
-    /// dedup, so a repeated id double-counts its power: `[c0, c0]` on a
-    /// 1-power creature sums to 2 and spuriously satisfies "total power >= 2"
-    /// with only ONE real creature. Without the guard in
+    /// actually protects. `tap_creatures_signed_total_power` sums `chosen`
+    /// with NO dedup, so a repeated id double-counts its power: `[c0, c0]` on
+    /// a 1-power creature sums to 2 and spuriously satisfies "total power >=
+    /// 2" with only ONE real creature. Without the guard in
     /// `pay_tap_creatures_selection` this returns `Ok(())` and taps a single
     /// 1-power creature to pay a 2-power crew-shaped cost.
     #[test]
@@ -5015,13 +5262,16 @@ mod tests {
         // can only be the dedup guard firing, not "does not satisfy".
         let single = [choices[0]];
         assert_eq!(
-            crate::game::casting_costs::tap_creatures_total_power(&scenario.state, &single),
+            crate::game::casting_costs::tap_creatures_signed_total_power(&scenario.state, &single),
             1,
             "reach guard: one eligible creature contributes only 1 power"
         );
         let duplicated = vec![choices[0], choices[0]];
         assert_eq!(
-            crate::game::casting_costs::tap_creatures_total_power(&scenario.state, &duplicated),
+            crate::game::casting_costs::tap_creatures_signed_total_power(
+                &scenario.state,
+                &duplicated
+            ),
             2,
             "reach guard: the duplicate double-counts to exactly the threshold, so the aggregate \
              check cannot be what rejects this submission"

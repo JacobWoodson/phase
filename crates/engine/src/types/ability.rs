@@ -17733,9 +17733,10 @@ impl TapCreaturesAggregate {
 /// set must satisfy, for a `TapCreatures` cost.
 ///
 /// `Count { count }` is the fixed-number form (Conspire's "tap two creatures",
-/// Convoke-style "tap N creatures"). `Aggregate { stat, comparator, value }` is
-/// the "tap any number of creatures with total power N or greater" form used by
-/// Crew (CR 702.122a), Saddle (CR 702.171a), and Teamwork (CR 702.194a).
+/// Convoke-style "tap N creatures"). `Aggregate { stat, comparator, value,
+/// collective }` is the "tap any number of creatures with total power N or
+/// greater" form used by Crew (CR 702.122a), Saddle (CR 702.171a), and
+/// Teamwork (CR 702.194a).
 /// Mirrors `SacrificeRequirement` so the two cost families share one
 /// parameterization shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -17750,6 +17751,19 @@ pub enum TapCreaturesRequirement {
         stat: TapCreaturesAggregateStat,
         comparator: Comparator,
         value: i32,
+        /// CR 805.6: the threshold is met COLLECTIVELY by the payer's team —
+        /// each teammate selects their own untapped creatures in seat order
+        /// and the combined total is checked once at the end (Bow to My
+        /// Command's "they may tap … with total power 8 or greater" under a
+        /// shared team turn; 2017-06-13 ruling). Stamped only by the
+        /// phase-head "they may" trigger arm; every other producer parses a
+        /// singular payer. Read only by the resolution-time payment
+        /// authority (`game::costs`); cast-time and activation scopes always
+        /// pay singular and ignore it. Defaults to `false` so costs
+        /// serialized before the flag existed reload as singular, which is
+        /// what they were.
+        #[serde(default)]
+        collective: bool,
     },
 }
 
@@ -17789,12 +17803,15 @@ impl TapCreaturesRequirement {
     }
 
     /// "Tap any number of creatures you control with total power `value` or
-    /// greater" (Crew/Saddle/Teamwork).
+    /// greater" (Crew/Saddle/Teamwork). Always singular: the payer taps their
+    /// own creatures. Collective costs start here and are stamped by the
+    /// phase-head "they may" trigger arm.
     pub fn total_power_at_least(value: i32) -> Self {
         Self::Aggregate {
             stat: TapCreaturesAggregateStat::TotalPower,
             comparator: Comparator::GE,
             value,
+            collective: false,
         }
     }
 
@@ -17825,6 +17842,12 @@ impl TapCreaturesRequirement {
                 stat,
                 comparator,
                 value,
+                // Collective-ness selects the payment PATH (team session vs
+                // single prompt), never the selection MODE: a one-seat team
+                // pays a collective cost through the ordinary Aggregate
+                // prompt, and a multi-seat team's per-hero prompts are built
+                // directly as VariableX by the payment authority.
+                ..
             } => TapCreaturesSelectionMode::Aggregate(TapCreaturesAggregate {
                 stat: *stat,
                 comparator: *comparator,

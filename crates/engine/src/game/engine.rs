@@ -13470,7 +13470,9 @@ fn apply_non_priority_pass_action(
                     "Counter-cost distribution is not valid for mana abilities".to_string(),
                 ));
             }
-            CostResume::Resolution | CostResume::TurnFaceUp { .. } => {
+            CostResume::Resolution
+            | CostResume::TeamTapPayment { .. }
+            | CostResume::TurnFaceUp { .. } => {
                 return Err(EngineError::InvalidAction(
                     "Counter-cost distribution is not valid for this cost".to_string(),
                 ));
@@ -13815,6 +13817,26 @@ fn apply_non_priority_pass_action(
                     ));
                 }
             },
+            // CR 805.6: one hero's contribution to a collective tap-creatures
+            // payment. The cost authority accumulates it and either prompts
+            // the next hero or settles the session.
+            CostResume::TeamTapPayment {
+                aggregate,
+                eligible,
+                selected,
+                remaining,
+            } => super::costs::handle_team_tap_payment_selection(
+                state,
+                *player,
+                kind,
+                choices,
+                &chosen,
+                *aggregate,
+                eligible,
+                selected,
+                remaining,
+                &mut events,
+            )?,
             CostResume::TurnFaceUp {
                 source,
                 cost_source,

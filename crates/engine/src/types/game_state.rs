@@ -12067,6 +12067,31 @@ pub enum CostResume {
     /// CR 118.12: Resume a resolution-time `Effect::PayCost` after the payer
     /// selects objects for an interactive cost such as tapping creatures.
     Resolution,
+    /// CR 805.6 + CR 118.12: Resume a COLLECTIVE resolution-time
+    /// `TapCreatures` aggregate cost (Bow to My Command) after one hero
+    /// selects their contribution. Each teammate is prompted in seat order
+    /// for any subset (possibly empty) of their own untapped creatures; the
+    /// selections accumulate untapped and tap simultaneously only once the
+    /// combined signed power satisfies `aggregate` — mirroring the
+    /// single-payer path's validate-before-execute atomicity, so a shortfall
+    /// taps nothing. `remaining` holds the heroes still to prompt AFTER the
+    /// current prompt's player; creatureless heroes are skipped, never
+    /// prompted. Like `Resolution`, the resolving chain owns this payment's
+    /// rider (no `PendingCast`/`PendingManaAbility` rides along).
+    TeamTapPayment {
+        aggregate: crate::types::ability::TapCreaturesAggregate,
+        /// Team-wide gate-time eligible set (each member matched under
+        /// their own controller binding). Per-hero prompts slice this by
+        /// controller; the set is static across the session because no
+        /// resolution interleaves between prompts.
+        eligible: Vec<crate::types::identifiers::ObjectId>,
+        /// Accumulated selections from heroes who already answered, still
+        /// untapped until the combined check passes.
+        selected: Vec<crate::types::identifiers::ObjectId>,
+        /// Living teammates still to prompt after the current player, in
+        /// seat order.
+        remaining: Vec<crate::types::player::PlayerId>,
+    },
     /// CR 702.37e + CR 116.2b + CR 118.1 + CR 118.3: Resumption context after paying a non-mana cost
     /// (e.g. ReturnToHand, Discard, PayLife, Reveal, Sacrifice) to turn a face-down permanent face up.
     TurnFaceUp {
@@ -19699,6 +19724,7 @@ impl WaitingFor {
                 } => Some(pending_cast),
                 CostResume::ManaAbility { .. }
                 | CostResume::Resolution
+                | CostResume::TeamTapPayment { .. }
                 | CostResume::TurnFaceUp { .. } => None,
             },
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_ref() {
@@ -19737,6 +19763,7 @@ impl WaitingFor {
                 } => Some(pending_cast),
                 CostResume::ManaAbility { .. }
                 | CostResume::Resolution
+                | CostResume::TeamTapPayment { .. }
                 | CostResume::TurnFaceUp { .. } => None,
             },
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_mut() {
@@ -19992,6 +20019,7 @@ impl WaitingFor {
                 CostResume::Spell { .. }
                 | CostResume::SpellCost { .. }
                 | CostResume::Resolution
+                | CostResume::TeamTapPayment { .. }
                 | CostResume::TurnFaceUp { .. } => None,
             },
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_ref() {
@@ -26251,7 +26279,9 @@ fn visit_cost_resume_chains<'a>(
             visit_pending_mana_ability_chains(mana_ability, f)
         }
         // The resolving chain itself owns this payment's rider.
-        CostResume::Resolution | CostResume::TurnFaceUp { .. } => Ok(()),
+        CostResume::Resolution
+        | CostResume::TeamTapPayment { .. }
+        | CostResume::TurnFaceUp { .. } => Ok(()),
     }
 }
 

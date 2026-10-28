@@ -16,26 +16,51 @@
 //! * eight: P1's creatures total exactly 8 — P1 is prompted, pays by tapping
 //!   both, and Bow is abandoned (face down to the scheme-deck bottom).
 //!
-//! Both rows seat a 10-power P0 creature as a reach guard: with the wrong
+//! Two collective rows in a 4-player Archenemy game (P0 archenemy, P1/P2/P3
+//! heroes sharing one end step per CR 805.4). The heroes pay Bow's tap cost
+//! together (2017-06-13 ruling): each hero taps any number of their own
+//! untapped creatures in seat order, and the COMBINED total must reach 8:
+//! * split-eight: P1 taps a 4-power creature and P2 taps a 4-power creature
+//!   (P3 passes with a 2-power creature on board) — combined 8 abandons Bow.
+//! * split-seven: P1 holds 4 and P2 holds 3 — the team-wide 7 can't reach 8,
+//!   so no may is offered at all, nothing taps, and Bow stays face up.
+//! * partial-seven: P1 holds 4+4 and P2 holds 3 — the may IS offered (team
+//!   total 11), but P1 contributes only one 4, so the combined 7 fails,
+//!   NOTHING taps (selections tap simultaneously only once the combined
+//!   total passes), and Bow stays face up.
+//!
+//! One signed-power row (CR 107.1b): P1 controls 4, 4 and −1 power. The
+//! prompt is still offered (the can-pay gate sums positive-only power as an
+//! upper bound: 8), but submitting all three is refused (signed total 7)
+//! while submitting just the two 4s pays and abandons.
+//!
+//! Every row seats a 10-power P0 creature as a reach guard: with the wrong
 //! payer (the archenemy) the aggregate prompt would offer it, and the
 //! below-eight row would become payable.
 //!
 //! Revert-to-red: lower the head back to `SetTapState` — the below-eight row
 //! abandons Bow unconditionally. Rebind the payer to the controller — the
-//! eight row offers P0's creature instead of P1's.
+//! eight row offers P0's creature instead of P1's. Drop the collective flag —
+//! the split-eight row offers only P1's 4 power and never abandons.
 
 use engine::database::synthesis::synthesize_archenemy;
 use engine::game::deck_loading::create_scheme_deck_card;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
-use engine::types::ability::TapCreaturesSelectionMode;
+use engine::types::ability::{
+    AbilityCost, Effect, TapCreaturesRequirement, TapCreaturesSelectionMode, TargetFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
 use engine::types::card_type::{CoreType, Supertype};
 use engine::types::format::FormatConfig;
-use engine::types::game_state::{PayCostKind, WaitingFor};
+use engine::types::game_state::{CostResume, PayCostKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
+
+const P2: PlayerId = PlayerId(2);
+const P3: PlayerId = PlayerId(3);
 
 const BOW_TO_MY_COMMAND: &str = "(An ongoing scheme remains face up until it's abandoned.)\nAs you set this scheme in motion, choose an opponent.\nCreatures the chosen player controls can't attack you or planeswalkers you control.\nAt the beginning of your opponents' end step, they may tap any number of untapped creatures they control with total power 8 or greater. If they do, abandon this scheme.";
 
@@ -58,19 +83,19 @@ fn scheme_face(name: &str, oracle: &str) -> CardFace {
 }
 
 /// Shared setup: Bow set in motion with P1 chosen, P1's creatures on the
-/// battlefield at the given powers, a P0 10/10 reach guard, P1 active in
-/// precombat main. Returns the runner, Bow's id, P1's creatures, and P0's
-/// beater.
-fn setup_end_step_game(p1_powers: &[i32]) -> (GameRunner, ObjectId, Vec<ObjectId>, ObjectId) {
+/// battlefield at the given (power, toughness) pairs, a P0 10/10 reach
+/// guard, P1 active in precombat main. Returns the runner, Bow's id, P1's
+/// creatures, and P0's beater.
+fn setup_end_step_game(p1_pts: &[(i32, i32)]) -> (GameRunner, ObjectId, Vec<ObjectId>, ObjectId) {
     let mut format = FormatConfig::archenemy();
     format.archenemy_player = Some(P0);
     let mut scenario = GameScenario::new_with_format(format, 2, 42);
     scenario.at_phase(Phase::Draw);
     let mut p1_creatures = Vec::new();
-    for (i, power) in p1_powers.iter().enumerate() {
+    for (i, (power, toughness)) in p1_pts.iter().enumerate() {
         p1_creatures.push(
             scenario
-                .add_creature(P1, &format!("Hero Bear {i}"), *power, *power)
+                .add_creature(P1, &format!("Hero Bear {i}"), *power, *toughness)
                 .id(),
         );
     }
@@ -151,7 +176,7 @@ fn advance_to_p1_end_step(runner: &mut GameRunner) {
 /// nothing taps, and Bow stays face up.
 #[test]
 fn bow_end_step_below_eight_offers_no_payment_and_keeps_bow_face_up() {
-    let (mut runner, bow, p1_creatures, beater) = setup_end_step_game(&[4, 3]);
+    let (mut runner, bow, p1_creatures, beater) = setup_end_step_game(&[(4, 4), (3, 3)]);
     advance_to_p1_end_step(&mut runner);
 
     let mut saw_trigger = false;
@@ -233,7 +258,7 @@ fn bow_end_step_below_eight_offers_no_payment_and_keeps_bow_face_up() {
 /// prompted, taps both through the aggregate payment, and Bow is abandoned.
 #[test]
 fn bow_end_step_at_eight_taps_and_abandons() {
-    let (mut runner, bow, p1_creatures, beater) = setup_end_step_game(&[4, 4]);
+    let (mut runner, bow, p1_creatures, beater) = setup_end_step_game(&[(4, 4), (4, 4)]);
     advance_to_p1_end_step(&mut runner);
 
     let mut reached_optional = false;
@@ -280,7 +305,7 @@ fn bow_end_step_at_eight_taps_and_abandons() {
                     "expected Aggregate selection semantics, got {kind:?}"
                 );
                 assert!(
-                    matches!(resume, engine::types::game_state::CostResume::Resolution),
+                    matches!(resume, CostResume::Resolution),
                     "expected a resolution-time payment, got {resume:?}"
                 );
                 // Reach guard: exactly P1's untapped creatures are offered —
@@ -347,4 +372,580 @@ fn bow_end_step_at_eight_taps_and_abandons() {
         "clean drain back to priority, got {:?}",
         runner.state().waiting_for
     );
+}
+
+/// Shared 4-player setup: P0 archenemy with the 10/10 reach guard, P1/P2/P3
+/// heroes with the given (power, toughness) pairs, Bow set in motion with P1
+/// chosen, P1 active in precombat main. Returns the runner, Bow's id, each
+/// hero's creatures in seat order, and P0's beater.
+fn setup_end_step_game_4p(
+    p1_pts: &[(i32, i32)],
+    p2_pts: &[(i32, i32)],
+    p3_pts: &[(i32, i32)],
+) -> (GameRunner, ObjectId, Vec<Vec<ObjectId>>, ObjectId) {
+    let mut format = FormatConfig::archenemy();
+    format.archenemy_player = Some(P0);
+    let mut scenario = GameScenario::new_with_format(format, 4, 42);
+    scenario.at_phase(Phase::Draw);
+    let mut heroes = Vec::new();
+    for (hero, pts) in [(P1, p1_pts), (P2, p2_pts), (P3, p3_pts)] {
+        let mut creatures = Vec::new();
+        for (i, (power, toughness)) in pts.iter().enumerate() {
+            creatures.push(
+                scenario
+                    .add_creature(hero, &format!("Hero {hero:?} Bear {i}"), *power, *toughness)
+                    .id(),
+            );
+        }
+        heroes.push(creatures);
+    }
+    let beater = scenario.add_creature(P0, "Archenemy Beater", 10, 10).id();
+    for i in 0..7 {
+        scenario.add_card_to_library_top(P0, &format!("P0 Filler {i}"));
+        scenario.add_card_to_library_top(P1, &format!("P1 Filler {i}"));
+        scenario.add_card_to_library_top(P2, &format!("P2 Filler {i}"));
+        scenario.add_card_to_library_top(P3, &format!("P3 Filler {i}"));
+    }
+    let mut runner = scenario.build();
+
+    let face = scheme_face("Bow to My Command", BOW_TO_MY_COMMAND);
+    create_scheme_deck_card(runner.state_mut(), &face, P0);
+    runner.state_mut().archenemy = Some(P0);
+    runner.state_mut().active_player = P0;
+
+    // CR 904.9: entering the archenemy's precombat main sets Bow in motion.
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::NamedChoice { .. }),
+        "expected the as-choice prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "1".to_string(),
+        })
+        .expect("choosing P1 must be accepted");
+    runner.advance_to_priority_window();
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "as-choice must drain to priority, got {:?}",
+        runner.state().waiting_for
+    );
+
+    let bow = *runner
+        .state()
+        .command_zone
+        .iter()
+        .find(|id| runner.state().objects[*id].name == "Bow to My Command")
+        .expect("Bow must be face up in the command zone");
+    assert!(
+        !runner.state().objects[&bow].face_down,
+        "Bow must be face up after being set in motion"
+    );
+
+    // Hand P1 the shared heroes' turn at precombat main; the tests drive to
+    // the heroes' shared end step.
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+    (runner, bow, heroes, beater)
+}
+
+/// CR 805.4 + 2017-06-13 ruling: two heroes each tap a 4-power creature and
+/// a third hero passes — the COMBINED 8 abandons Bow. Each hero is prompted
+/// separately for their own creatures only; the archenemy's beater is never
+/// offered.
+#[test]
+fn bow_end_step_split_power_across_heroes_abandons() {
+    let (mut runner, bow, heroes, beater) = setup_end_step_game_4p(&[(4, 4)], &[(4, 4)], &[(2, 2)]);
+    advance_to_p1_end_step(&mut runner);
+    let (p1_creatures, p2_creatures, p3_creatures) = (&heroes[0], &heroes[1], &heroes[2]);
+
+    let mut reached_optional = false;
+    let mut prompted = [false, false, false];
+    for _ in 0..60 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .unwrap();
+            }
+            WaitingFor::OptionalEffectChoice { player, .. } => {
+                reached_optional = true;
+                assert_eq!(
+                    player, P1,
+                    "the active hero announces the team may, got {player:?}"
+                );
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .unwrap();
+            }
+            WaitingFor::PayCost {
+                player,
+                kind,
+                choices,
+                resume,
+                ..
+            } => {
+                assert!(
+                    matches!(
+                        kind,
+                        PayCostKind::TapCreatures {
+                            mode: TapCreaturesSelectionMode::VariableX
+                        }
+                    ),
+                    "each hero taps any subset of their own creatures, got {kind:?}"
+                );
+                assert!(
+                    matches!(resume, CostResume::TeamTapPayment { .. }),
+                    "expected the collective-payment session, got {resume:?}"
+                );
+                let (mine, slot, pass) = match player {
+                    p if p == P1 => (p1_creatures, 0, false),
+                    p if p == P2 => (p2_creatures, 1, false),
+                    p if p == P3 => (p3_creatures, 2, true),
+                    other => panic!("only heroes pay, got {other:?}"),
+                };
+                prompted[slot] = true;
+                assert_eq!(
+                    choices.len(),
+                    mine.len(),
+                    "only {player:?}'s own creatures are offered, got {choices:?}"
+                );
+                for id in mine.iter() {
+                    assert!(
+                        choices.contains(id),
+                        "{player:?}'s creature {id:?} must be offered, got {choices:?}"
+                    );
+                }
+                assert!(
+                    !choices.contains(&beater),
+                    "the archenemy's creature must not be offered, got {choices:?}"
+                );
+                let cards = if pass { vec![] } else { mine.clone() };
+                runner.act(GameAction::SelectCards { cards }).unwrap();
+            }
+            WaitingFor::Priority { .. } => {
+                if runner.state().stack.is_empty() {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            other => panic!("unexpected prompt {other:?}"),
+        }
+    }
+
+    assert!(reached_optional, "the team may must be offered");
+    assert!(
+        prompted == [true, true, true],
+        "every hero with creatures must be prompted, got {prompted:?}"
+    );
+    for id in p1_creatures.iter().chain(p2_creatures.iter()) {
+        assert!(
+            runner.state().objects[id].tapped,
+            "contributing heroes' creatures must be tapped"
+        );
+    }
+    for id in p3_creatures {
+        assert!(
+            !runner.state().objects[id].tapped,
+            "the passing hero's creature must stay untapped"
+        );
+    }
+    assert!(
+        !runner.state().objects[&beater].tapped,
+        "the archenemy's creature must stay untapped"
+    );
+    assert!(
+        !runner.state().command_zone.contains(&bow),
+        "Bow must leave the command zone once abandoned"
+    );
+    assert!(
+        runner.state().objects[&bow].face_down,
+        "abandoned Bow must be face down"
+    );
+    assert!(
+        runner.state().scheme_deck.contains(&bow),
+        "abandoned Bow must be back in the scheme deck"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "clean drain back to priority, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// CR 805.4 + 2017-06-13 ruling: P1 holds 4 and P2 holds 3 — the team-wide
+/// 7 can't reach 8, so the trigger fires and drains with NO may prompt
+/// (unpayable, so the optional is suppressed), nothing taps, and Bow stays
+/// face up. Mirrors the 2-player below-eight row at team scale.
+#[test]
+fn bow_end_step_split_power_below_eight_taps_nothing_and_keeps_bow() {
+    let (mut runner, bow, heroes, beater) = setup_end_step_game_4p(&[(4, 4)], &[(3, 3)], &[]);
+    advance_to_p1_end_step(&mut runner);
+    let (p1_creatures, p2_creatures) = (&heroes[0], &heroes[1]);
+    assert!(heroes[2].is_empty());
+
+    let mut saw_trigger = false;
+    let mut reached_optional = false;
+    let mut reached_prompt = false;
+    for _ in 0..60 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                saw_trigger = true;
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .unwrap();
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                // Bug path: decline to drain, but the row still fails below.
+                reached_optional = true;
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: false })
+                    .unwrap();
+            }
+            WaitingFor::PayCost { .. } => {
+                // Bug path: record and stop draining; the row fails below.
+                reached_prompt = true;
+                break;
+            }
+            WaitingFor::Priority { .. } => {
+                if !runner.state().stack.is_empty() {
+                    saw_trigger = true;
+                }
+                if runner.state().stack.is_empty() {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            other => panic!("unexpected prompt {other:?}"),
+        }
+    }
+
+    assert!(
+        saw_trigger,
+        "Bow's end-step trigger must fire (else the row is vacuous)"
+    );
+    assert!(
+        !reached_optional,
+        "below eight team-wide power, no team may may be offered"
+    );
+    assert!(
+        !reached_prompt,
+        "below eight team-wide power, no tap-creatures prompt may appear"
+    );
+    assert!(
+        runner.state().command_zone.contains(&bow),
+        "Bow must stay face up in the command zone"
+    );
+    assert!(
+        !runner.state().objects[&bow].face_down,
+        "Bow must stay face up"
+    );
+    for id in p1_creatures.iter().chain(p2_creatures.iter()) {
+        assert!(
+            !runner.state().objects[id].tapped,
+            "nothing may tap when the floor is unreachable"
+        );
+    }
+    assert!(
+        !runner.state().objects[&beater].tapped,
+        "the archenemy's creature must never be touched"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "clean drain back to priority, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// CR 805.6: P1 holds 4+4 and P2 holds 3 — the may IS offered (team-wide 11
+/// clears the gate), both heroes are prompted, but P1 contributes only one
+/// 4, so the combined 7 fails. NOTHING taps — selections tap simultaneously
+/// only once the combined total passes — and Bow stays face up. P3 controls
+/// nothing and is skipped without a prompt.
+#[test]
+fn bow_end_step_partial_selection_below_eight_taps_nothing() {
+    let (mut runner, bow, heroes, beater) =
+        setup_end_step_game_4p(&[(4, 4), (4, 4)], &[(3, 3)], &[]);
+    advance_to_p1_end_step(&mut runner);
+    let (p1_creatures, p2_creatures) = (&heroes[0], &heroes[1]);
+    assert!(heroes[2].is_empty());
+
+    let mut reached_optional = false;
+    let mut prompted_p1 = false;
+    let mut prompted_p2 = false;
+    for _ in 0..60 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .unwrap();
+            }
+            WaitingFor::OptionalEffectChoice { player, .. } => {
+                reached_optional = true;
+                assert_eq!(
+                    player, P1,
+                    "the active hero announces the team may, got {player:?}"
+                );
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .unwrap();
+            }
+            WaitingFor::PayCost {
+                player,
+                kind,
+                choices,
+                resume,
+                ..
+            } => {
+                assert!(
+                    matches!(
+                        kind,
+                        PayCostKind::TapCreatures {
+                            mode: TapCreaturesSelectionMode::VariableX
+                        }
+                    ),
+                    "each hero taps any subset of their own creatures, got {kind:?}"
+                );
+                assert!(
+                    matches!(resume, CostResume::TeamTapPayment { .. }),
+                    "expected the collective-payment session, got {resume:?}"
+                );
+                // P1 deliberately under-contributes: one 4 of two.
+                let cards = match player {
+                    p if p == P1 => {
+                        prompted_p1 = true;
+                        assert_eq!(
+                            choices.len(),
+                            p1_creatures.len(),
+                            "both of P1's creatures are offered, got {choices:?}"
+                        );
+                        vec![p1_creatures[0]]
+                    }
+                    p if p == P2 => {
+                        prompted_p2 = true;
+                        assert_eq!(
+                            choices.len(),
+                            p2_creatures.len(),
+                            "only P2's own creatures are offered, got {choices:?}"
+                        );
+                        p2_creatures.clone()
+                    }
+                    other => panic!("only P1/P2 hold creatures, got {other:?}"),
+                };
+                assert!(
+                    !choices.contains(&beater),
+                    "the archenemy's creature must not be offered, got {choices:?}"
+                );
+                runner.act(GameAction::SelectCards { cards }).unwrap();
+            }
+            WaitingFor::Priority { .. } => {
+                if runner.state().stack.is_empty() {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            other => panic!("unexpected prompt {other:?}"),
+        }
+    }
+
+    assert!(reached_optional, "the team may must be offered");
+    assert!(
+        prompted_p1 && prompted_p2,
+        "both contributing heroes must be prompted"
+    );
+    for id in p1_creatures.iter().chain(p2_creatures.iter()) {
+        assert!(
+            !runner.state().objects[id].tapped,
+            "a failed combined payment must tap nothing"
+        );
+    }
+    assert!(
+        !runner.state().objects[&beater].tapped,
+        "the archenemy's creature must stay untapped"
+    );
+    assert!(
+        runner.state().command_zone.contains(&bow),
+        "Bow must stay face up in the command zone"
+    );
+    assert!(
+        !runner.state().objects[&bow].face_down,
+        "Bow must stay face up"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "clean drain back to priority, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// CR 107.1b: P1 controls 4, 4 and −1 power. The prompt is still offered
+/// (the can-pay gate sums positive-only power as its upper bound: 8), but
+/// submitting all three is refused (their signed total power is 7) while
+/// submitting just the two 4s pays and abandons.
+#[test]
+fn bow_end_step_negative_power_counts_against_the_total() {
+    let (mut runner, bow, p1_creatures, beater) = setup_end_step_game(&[(4, 4), (4, 4), (-1, 1)]);
+    advance_to_p1_end_step(&mut runner);
+    let (pair, weakling) = (&p1_creatures[0..2], p1_creatures[2]);
+
+    let mut reached_optional = false;
+    let mut reached_prompt = false;
+    for _ in 0..60 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .unwrap();
+            }
+            WaitingFor::OptionalEffectChoice { player, .. } => {
+                reached_optional = true;
+                assert_eq!(player, P1, "P1 announces the may, got {player:?}");
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .unwrap();
+            }
+            WaitingFor::PayCost {
+                player,
+                kind,
+                choices,
+                ..
+            } => {
+                reached_prompt = true;
+                assert_eq!(player, P1, "P1 pays, got {player:?}");
+                assert!(
+                    matches!(
+                        kind,
+                        PayCostKind::TapCreatures {
+                            mode: TapCreaturesSelectionMode::Aggregate(_)
+                        }
+                    ),
+                    "expected Aggregate selection semantics, got {kind:?}"
+                );
+                assert_eq!(
+                    choices.len(),
+                    3,
+                    "every untapped creature is offered, got {choices:?}"
+                );
+                // CR 107.1b: 4 + 4 + (−1) is 7 — refused.
+                let err = runner
+                    .act(GameAction::SelectCards {
+                        cards: p1_creatures.clone(),
+                    })
+                    .unwrap_err();
+                assert!(
+                    format!("{err:?}").contains('7'),
+                    "the refusal must cite the signed total 7, got {err:?}"
+                );
+                // 4 + 4 is 8 — pays.
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: pair.to_vec(),
+                    })
+                    .unwrap();
+            }
+            WaitingFor::Priority { .. } => {
+                if runner.state().stack.is_empty() {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            other => panic!("unexpected prompt {other:?}"),
+        }
+    }
+
+    assert!(reached_optional, "the optional payment must be offered");
+    assert!(reached_prompt, "the tap-creatures prompt must appear");
+    for id in pair {
+        assert!(
+            runner.state().objects[id].tapped,
+            "the paid creatures must be tapped"
+        );
+    }
+    assert!(
+        !runner.state().objects[&weakling].tapped,
+        "the refused creature must stay untapped"
+    );
+    assert!(
+        !runner.state().objects[&beater].tapped,
+        "the archenemy's creature must stay untapped"
+    );
+    assert!(
+        !runner.state().command_zone.contains(&bow),
+        "Bow must leave the command zone once abandoned"
+    );
+    assert!(
+        runner.state().scheme_deck.contains(&bow),
+        "abandoned Bow must be back in the scheme deck"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "clean drain back to priority, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// Parse pin: Bow's end-step "they may tap … with total power 8 or greater"
+/// lowers to a COLLECTIVE aggregate cost (paid by the team, CR 805.6),
+/// announced by the triggering player.
+#[test]
+fn bow_end_step_payment_parses_collective() {
+    let parsed = parse_oracle_text(
+        BOW_TO_MY_COMMAND,
+        "Bow to My Command",
+        &[],
+        &["Scheme".to_string()],
+        &[],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| {
+            t.execute.as_ref().is_some_and(|d| {
+                matches!(
+                    &*d.effect,
+                    Effect::PayCost {
+                        cost: AbilityCost::TapCreatures { .. },
+                        ..
+                    }
+                )
+            })
+        })
+        .expect("Bow's end-step trigger must carry the tap-creatures cost");
+    let def = trigger.execute.as_ref().expect("trigger has a body");
+    match &*def.effect {
+        Effect::PayCost {
+            cost: AbilityCost::TapCreatures { requirement, .. },
+            payer,
+            ..
+        } => {
+            assert_eq!(
+                *payer,
+                TargetFilter::TriggeringPlayer,
+                "the active hero announces the team may, got {payer:?}"
+            );
+            match requirement {
+                TapCreaturesRequirement::Aggregate {
+                    value, collective, ..
+                } => {
+                    assert_eq!(*value, 8, "the threshold must stay 8");
+                    assert!(
+                        *collective,
+                        "the phase-head 'they may' tap cost must be collective"
+                    );
+                }
+                other => panic!("expected the aggregate requirement, got {other:?}"),
+            }
+        }
+        other => panic!("expected the PayCost head, got {other:?}"),
+    }
 }

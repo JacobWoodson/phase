@@ -2418,9 +2418,39 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
                 // stamped opponent would announce whether the CONTROLLER pays.
                 // Heads whose payer subject injection already bound (Horn of
                 // Plenty, Wandering Archaic: TriggeringPlayer) are untouched.
-                if let Effect::PayCost { payer, .. } = ability.effect.as_mut() {
+                if let Effect::PayCost { payer, cost, .. } = ability.effect.as_mut() {
                     if matches!(payer, TargetFilter::Controller) {
                         *payer = optional_player.clone();
+                        // CR 805.4 + CR 805.6: under a phase head, "they" is the
+                        // team whose turn it is — not the singular active seat
+                        // `TriggeringPlayer` resolves to. The stamped announcer
+                        // still announces the may, but a tap-aggregate cost
+                        // head is paid COLLECTIVELY: each teammate selects
+                        // their own creatures and the combined total is
+                        // checked once (Bow to My Command, 2017-06-13
+                        // ruling). Gated to phase heads because every other
+                        // event records a genuinely singular player, where
+                        // "they" stays singular. In single-seat teams this
+                        // flag is behavior-neutral (the one seat pays through
+                        // the ordinary single prompt).
+                        if def.mode == TriggerMode::Phase {
+                            if let AbilityCost::TapCreatures { requirement, .. } = cost {
+                                if let TapCreaturesRequirement::Aggregate {
+                                    stat,
+                                    comparator,
+                                    value,
+                                    ..
+                                } = *requirement
+                                {
+                                    *requirement = TapCreaturesRequirement::Aggregate {
+                                        stat,
+                                        comparator,
+                                        value,
+                                        collective: true,
+                                    };
+                                }
+                            }
+                        }
                     }
                 }
             }
