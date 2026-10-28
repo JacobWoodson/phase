@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::cell::OnceCell;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::num::NonZeroU32;
@@ -23,12 +24,12 @@ use super::ability::{
     ContinuousModification, ControlWindow, CopiableValues, CopyChooseScope, CopyScale,
     CopyTargetPurpose, CostPaidObjectSnapshot, CounterCostSelection, DamageContextSnapshot,
     DelayedTriggerCondition, DelayedTriggerKind, DigRestOrder, DigRestSplitScope, Duration,
-    EffectKind, FaceDownProfile, GameRestriction, KeywordAction, KickerVariant, LibraryPosition,
-    ModalChoice, PermanentEntryMode, PileSource, QuantityExpr, ResolvedAbility, ReturnResultId,
-    SearchDestinationSplit, SearchOrderingHint, SearchSelectionConstraint, StackAbilityKind,
-    StaticCondition, TapCreaturesSelectionMode, TargetFilter, TargetRef, ThisWayCause,
-    TriggerBaseSetInstanceRef, TriggerCondition, TriggerDefinition, TriggerDefinitionOccurrenceRef,
-    TriggerDefinitionRef, TriggerEntry,
+    EffectKind, EntryAttackDestination, FaceDownProfile, GameRestriction, KeywordAction,
+    KickerVariant, LibraryPosition, ModalChoice, PermanentEntryMode, PileSource, QuantityExpr,
+    ResolvedAbility, ReturnResultId, SearchDestinationSplit, SearchOrderingHint,
+    SearchSelectionConstraint, StackAbilityKind, StaticCondition, TapCreaturesSelectionMode,
+    TargetFilter, TargetRef, ThisWayCause, TriggerBaseSetInstanceRef, TriggerCondition,
+    TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry,
 };
 use super::actions::{DebugCardCreationKind, GameAction, ResolveAllScope};
 use super::attribution::ObjectAttribution;
@@ -41,9 +42,9 @@ use super::events::{
 };
 use super::format::{FormatConfig, ZoneScope};
 use super::identifiers::{
-    CardId, DelayedInstallIdentity, DelayedTriggerOrigin, ExtraPhaseId, LogicalZoneChangeGroupId,
-    ObjectId, ObjectIdentityBinding, ObjectIncarnationRef, ResolutionCastOfferId, TrackedSetId,
-    TriggerFiring,
+    CardId, DelayedInstallIdentity, DelayedTriggerOrigin, EpicEffectId, ExtraPhaseId,
+    LogicalZoneChangeGroupId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef,
+    ResolutionCastOfferId, TrackedSetId, TriggerFiring,
 };
 use super::interaction::{ActiveInteractionSlot, InteractionSessionId};
 use super::keywords::{Keyword, KeywordKind};
@@ -7672,6 +7673,9 @@ pub struct PendingTokenBattlefieldEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CopyTokenEntryTail {
     pub owner: PlayerId,
+    /// Its `attack_request` is already advanced past the tokens created so far,
+    /// this one included, because the remaining tokens are resumed counting from
+    /// zero.
     pub copy: Box<CopyTokenSpec>,
     pub enter_tapped: EtbTapState,
     pub enter_with_counters: Vec<(CounterType, u32)>,
@@ -7681,6 +7685,12 @@ pub struct CopyTokenEntryTail {
     pub etb_counters: Vec<(CounterType, u32)>,
     /// How many tokens of this batch are still unstarted after this one.
     pub remaining_count: u32,
+    /// CR 508.4: this token's own destination.
+    #[serde(
+        default,
+        skip_serializing_if = "EntryAttackDestination::is_any_defender"
+    )]
+    pub attack_destination: EntryAttackDestination,
 }
 
 /// CR 614.1a + CR 616.1f + CR 608.2c: a batch of one compound CreateToken
@@ -7769,6 +7779,9 @@ pub enum PendingCounterPostAction {
     },
     ContinueTokenCreation {
         owner: PlayerId,
+        /// Its `attack_request` is already advanced past the tokens created so far,
+        /// this one included, because the remaining tokens are resumed counting from
+        /// zero.
         spec: Box<TokenSpec>,
         enter_tapped: EtbTapState,
         remaining_count: u32,
@@ -7782,6 +7795,12 @@ pub enum PendingCounterPostAction {
         object_id: ObjectId,
         name: String,
         enters_attacking: bool,
+        /// CR 508.4: this token's own destination.
+        #[serde(
+            default,
+            skip_serializing_if = "EntryAttackDestination::is_any_defender"
+        )]
+        attack_destination: EntryAttackDestination,
         source_id: ObjectId,
         controller: PlayerId,
     },
@@ -7796,6 +7815,12 @@ pub enum PendingCounterPostAction {
         object_id: ObjectId,
         name: String,
         enters_attacking: bool,
+        /// CR 508.4: this token's own destination.
+        #[serde(
+            default,
+            skip_serializing_if = "EntryAttackDestination::is_any_defender"
+        )]
+        attack_destination: EntryAttackDestination,
         source_id: ObjectId,
         controller: PlayerId,
         remaining_modifications: Vec<ContinuousModification>,
@@ -7838,6 +7863,12 @@ pub enum PendingCounterPostAction {
         source_id: ObjectId,
         controller: PlayerId,
         enters_attacking: bool,
+        /// CR 508.4: this token's own destination.
+        #[serde(
+            default,
+            skip_serializing_if = "EntryAttackDestination::is_any_defender"
+        )]
+        attack_destination: EntryAttackDestination,
         attach_to: Option<AttachTarget>,
         sacrifice_at: Option<Duration>,
         created_ids: Vec<ObjectId>,
@@ -8146,9 +8177,51 @@ pub struct EpicEffect {
     /// upkeep copy clones. `None`-equivalent handling lives in the resolver:
     /// if the object has left the game the copy is a no-op (last-known-info).
     pub prototype_id: ObjectId,
-    /// Snapshot of the Epic spell's resolved ability, replayed as the body of
-    /// each upkeep copy.
+    /// Snapshot of the Epic spell's resolved ability, the one home of the
+    /// spell each upkeep copy resolves; the copy's `Effect::EpicCopy` trigger
+    /// names it by handle (`EpicEffectId`).
     pub spell: Box<ResolvedAbility>,
+}
+
+/// CR 702.50a + CR 707.10: the first position before `index` whose snapshot
+/// resolves identically to `named` (the snapshot at `index`), or `index`
+/// itself. `epic_effects` only grows and its entries never change, so the
+/// answer for an entry is fixed for the rest of the game.
+fn first_equal_epic_position<'a>(
+    snapshots: impl IntoIterator<Item = &'a ResolvedAbility>,
+    named: &ResolvedAbility,
+    index: usize,
+) -> usize {
+    snapshots
+        .into_iter()
+        .take(index)
+        .position(|earlier| earlier.resolves_identically_to(named))
+        .unwrap_or(index)
+}
+
+impl GameState {
+    /// CR 702.50a: the Epic effect an `Effect::EpicCopy` handle names.
+    pub fn epic_effect(&self, id: EpicEffectId) -> Option<&EpicEffect> {
+        let effect = usize::try_from(id.0)
+            .ok()
+            .and_then(|index| self.epic_effects.get(index));
+        debug_assert!(effect.is_some(), "EpicCopy names no Epic effect: {id:?}");
+        effect
+    }
+
+    /// CR 702.50a: the handle the upkeep synthesis gives the Epic effect at
+    /// `index`: the first position whose snapshot resolves identically to its
+    /// own, so equal snapshots share one handle and their upkeep copies compare,
+    /// order and serialize as one.
+    pub fn canonical_epic_effect_id(&self, index: usize) -> EpicEffectId {
+        let named = &self.epic_effects[index].spell;
+        let first = first_equal_epic_position(
+            self.epic_effects.iter().map(|effect| &*effect.spell),
+            named,
+            index,
+        );
+        EpicEffectId(first as u64)
+    }
 }
 
 fn default_copy_retarget_effect_kind() -> EffectKind {
@@ -14720,6 +14793,53 @@ fn legacy_mana_target_role(card_name: &str) -> Option<(&'static str, &'static st
             Some(("CountSource", "count_source"))
         }
         _ => None,
+    }
+}
+
+/// CR 702.50a: every `Effect::EpicCopy` handle in a serialized state, recognized
+/// by the variant's serialized shape (its `"type"` tag and its `"epic"` field)
+/// wherever it appears, so a carrier added later is covered with no edit. The
+/// legacy inline shape (`"spell"`, no `"epic"`) contributes nothing and is
+/// refused by the typed decode.
+fn collect_serialized_epic_effect_handles(value: &serde_json::Value) -> BTreeSet<u64> {
+    fn walk(value: &serde_json::Value, handles: &mut BTreeSet<u64>) {
+        match value {
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    walk(value, handles);
+                }
+            }
+            serde_json::Value::Object(object) => {
+                if object.get("type").and_then(serde_json::Value::as_str) == Some("EpicCopy") {
+                    if let Some(handle) = object.get("epic").and_then(serde_json::Value::as_u64) {
+                        handles.insert(handle);
+                    }
+                }
+                for value in object.values() {
+                    walk(value, handles);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut handles = BTreeSet::new();
+    walk(value, &mut handles);
+    handles
+}
+
+/// CR 702.50a: refuse a decoded state in which an `Effect::EpicCopy` handle
+/// names no `epic_effects` entry. Positions are dense, so checking the largest
+/// handle checks them all.
+fn reject_dangling_epic_effect_handles(
+    state: &GameState,
+    handles: &BTreeSet<u64>,
+) -> Result<(), String> {
+    let recorded = state.epic_effects.len();
+    match handles.last() {
+        Some(&max) if max >= recorded as u64 => Err(format!(
+            "serialized EpicCopy names Epic effect {max}, but the state records {recorded}"
+        )),
+        _ => Ok(()),
     }
 }
 
@@ -22483,6 +22603,12 @@ pub struct LiminalEntry {
     pub source_id: ObjectId,
     pub controller: PlayerId,
     pub enters_attacking: bool,
+    /// CR 508.4: this token's own destination.
+    #[serde(
+        default,
+        skip_serializing_if = "EntryAttackDestination::is_any_defender"
+    )]
+    pub attack_destination: EntryAttackDestination,
     pub attach_to: Option<AttachTarget>,
     pub sacrifice_at: Option<Duration>,
     pub remaining_count: u32,
@@ -25205,7 +25331,8 @@ declare_game_state! {
     /// normal delayed-trigger path in `check_delayed_triggers`). Persistent —
     /// never cleared, never purged at cleanup — so the effect lasts the whole
     /// game. Mirrors the rest-of-game collections `city_blessing` /
-    /// `paradigm_primed`.
+    /// `paradigm_primed`. Append-only: entries are never removed or reordered,
+    /// because `Effect::EpicCopy` names an entry by its position (`EpicEffectId`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub epic_effects: Vec<EpicEffect>,
 
@@ -27183,6 +27310,10 @@ impl GameStateDecode {
         if !value.is_object() {
             return Err("persisted game state must be a JSON object".to_string());
         }
+        // Collected before any part of the value is split off or consumed:
+        // `ResolutionStateWire` removes `resolution_frames` before the state
+        // materializes, and a frame can carry an `EpicCopy` handle.
+        let epic_effect_handles = collect_serialized_epic_effect_handles(&value);
         crate::types::resolution::reject_wire_projection_marker(&value)?;
         match mode {
             // An UNVERSIONED raw payload carries no resolution-wire
@@ -27238,6 +27369,7 @@ impl GameStateDecode {
         validate_owed_spell_final_part_coherence(&state)?;
         validate_return_result_occurrence_coherence(&state)?;
         reject_zero_bound_shortcut_offer(&state)?;
+        reject_dangling_epic_effect_handles(&state, &epic_effect_handles)?;
         #[cfg(debug_assertions)]
         debug_assert_runtime_resolution_invariants(&state);
         Ok(state)
@@ -27247,6 +27379,8 @@ impl GameStateDecode {
         mut value: serde_json::Value,
         mode: GameStateDecodeMode,
     ) -> Result<GameState, String> {
+        // Like the CR 732.2a bound check below, hosted on both entry points.
+        let epic_effect_handles = collect_serialized_epic_effect_handles(&value);
         reject_legacy_exploit_event_evidence(&value)?;
         reject_legacy_raw_prompt_authority(&value)?;
         reject_legacy_deferred_spell_delivery(&value)?;
@@ -27291,6 +27425,7 @@ impl GameStateDecode {
         // is about a value no wire should ever carry; it does NOT extend to the
         // projection marker, which the transport wire carries on purpose.
         reject_zero_bound_shortcut_offer(&state)?;
+        reject_dangling_epic_effect_handles(&state, &epic_effect_handles)?;
         #[cfg(debug_assertions)]
         debug_assert_runtime_resolution_invariants(&state);
         Ok(state)
@@ -34127,16 +34262,47 @@ impl GameState {
         // `Priority` at the post-pipeline loop-sample point and `priority_yields`
         // latches its `YieldTarget::ThisObject { incarnation }` once at
         // registration — both are loop-stable and carry no growing epoch.)
+        //
+        // CR 104.4b + CR 702.50a: an in-flight Epic upkeep copy names its
+        // snapshot by handle. Stack carriers compare their payloads with the
+        // cast coordinates' journal index zeroed, so each handle is renamed to
+        // the first position whose journal-free snapshot resolves identically
+        // to the one it names. Trigger carriers compare their payloads raw,
+        // which the handle interned at synthesis already gives them. Built
+        // from the un-normalized `self`, and only when a stack handle asks.
+        let journal_free_epic_snapshots = OnceCell::new();
+        let rename_stack_epic_handle = |id: EpicEffectId| {
+            let table: &Vec<ResolvedAbility> = journal_free_epic_snapshots.get_or_init(|| {
+                self.epic_effects
+                    .iter()
+                    .map(|effect| {
+                        let mut spell = (*effect.spell).clone();
+                        spell.normalize_cast_occurrence_for_loop_recursive();
+                        spell
+                    })
+                    .collect()
+            });
+            usize::try_from(id.0)
+                .ok()
+                .and_then(|index| {
+                    table
+                        .get(index)
+                        .map(|named| first_equal_epic_position(table, named, index))
+                })
+                .map_or(id, |first| EpicEffectId(first as u64))
+        };
         for entry in clone.stack.iter_mut() {
             if let Some(ability) = entry.ability_mut() {
                 ability.clear_trigger_identity_recursive();
                 ability.normalize_cast_occurrence_for_loop_recursive();
+                ability.rename_epic_effect_handles_recursive(&rename_stack_epic_handle);
             }
         }
         if let Some(entry) = clone.resolving_stack_entry.as_mut() {
             if let Some(ability) = entry.ability_mut() {
                 ability.clear_trigger_identity_recursive();
                 ability.normalize_cast_occurrence_for_loop_recursive();
+                ability.rename_epic_effect_handles_recursive(&rename_stack_epic_handle);
             }
         }
         // `PendingTrigger::timestamp` is a live CR 603.3b ordering key. It is
@@ -34186,9 +34352,12 @@ impl GameState {
                     crate::types::resolved_commands::SettlementNodeOrdinal(0),
                 );
         }
-        for epic in clone.epic_effects.iter_mut() {
-            epic.spell.clear_trigger_identity_recursive();
-        }
+        // CR 104.4b: stored Epic snapshots compare raw. Clearing their trigger
+        // identity would let a twice-normalized state (a ring prior the
+        // resource projection normalizes again) build the stack rename's table
+        // from cleared snapshots and merge handles a once-normalized state
+        // keeps apart; entries are append-only and immutable, so two samples
+        // of one game hold equal entries at every common position anyway.
 
         clone.retain_carrier_referenced_lki();
         // CR 104.4b + CR 608.2h: last-known copiable values no ability can still
@@ -37491,6 +37660,119 @@ mod tests {
     use crate::types::resolved_commands::ResolvedDelayedTriggerCommand;
     use crate::types::triggers::TriggerMode;
 
+    fn exact_destination() -> EntryAttackDestination {
+        EntryAttackDestination::Exact {
+            target: crate::game::combat::AttackTarget::Player(PlayerId(2)),
+        }
+    }
+
+    /// A per-entrant destination is omitted from the wire at its default, a
+    /// payload without the key reads as `AnyDefender`, and a chosen
+    /// destination round-trips, on every carrier that holds one.
+    #[test]
+    fn per_entrant_attack_destination_wire_shape_is_additive() {
+        fn check<T>(
+            build: impl Fn(EntryAttackDestination) -> T,
+            read: impl Fn(&T) -> EntryAttackDestination,
+        ) where
+            T: Serialize + serde::de::DeserializeOwned,
+        {
+            let plain = serde_json::to_value(build(EntryAttackDestination::AnyDefender))
+                .expect("serializes");
+            assert!(
+                !plain.to_string().contains("attack_destination"),
+                "the default is omitted: {plain}"
+            );
+            let back: T = serde_json::from_value(plain).expect("reads without the key");
+            assert_eq!(read(&back), EntryAttackDestination::AnyDefender);
+
+            let chosen = serde_json::to_value(build(exact_destination())).expect("serializes");
+            assert!(
+                chosen.to_string().contains("attack_destination"),
+                "a chosen destination is written: {chosen}"
+            );
+            let back: T = serde_json::from_value(chosen).expect("round-trips");
+            assert_eq!(read(&back), exact_destination());
+        }
+
+        let mut state = GameState::new_two_player(42);
+        let object_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        let projection = TokenProjection::materialize(state.objects[&object_id].clone());
+        check(
+            |attack_destination| LiminalEntry {
+                object: LiminalEntrant::Token(projection.clone()),
+                name: "Goblin".to_string(),
+                source_id: object_id,
+                controller: PlayerId(0),
+                enters_attacking: true,
+                attack_destination,
+                attach_to: None,
+                sacrifice_at: None,
+                remaining_count: 0,
+                created_ids: Vec::new(),
+                copy_resume: None,
+                spec_resume: None,
+                enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+                enter_with_counters: Vec::new(),
+                kind: Default::default(),
+                replacement_applied: Default::default(),
+            },
+            |entry| entry.attack_destination.clone(),
+        );
+        let copy = Box::new(crate::types::proposed_event::CopyTokenSpec {
+            values: Box::new(crate::game::printed_cards::intrinsic_copiable_values(
+                &state.objects[&object_id],
+            )),
+            display: crate::game::game_object::DisplayIdentity {
+                display_source: crate::game::game_object::DisplaySource::Token,
+                ..Default::default()
+            },
+            extra_keywords: Vec::new(),
+            additional_modifications: Vec::new(),
+            tapped: true,
+            enters_attacking: true,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
+            sacrifice_at: None,
+            source_id: object_id,
+            controller: PlayerId(0),
+            donor: None,
+        });
+        check(
+            |attack_destination| CopyTokenEntryTail {
+                owner: PlayerId(0),
+                copy: copy.clone(),
+                enter_tapped: crate::types::proposed_event::EtbTapState::Tapped,
+                enter_with_counters: Vec::new(),
+                etb_counters: Vec::new(),
+                remaining_count: 0,
+                attack_destination,
+            },
+            |tail| tail.attack_destination.clone(),
+        );
+        check(
+            |attack_destination| PendingCounterPostAction::FinalizeCopyTokenEntry {
+                object_id,
+                name: "Goblin".to_string(),
+                enters_attacking: true,
+                attack_destination,
+                source_id: object_id,
+                controller: PlayerId(0),
+            },
+            |action| match action {
+                PendingCounterPostAction::FinalizeCopyTokenEntry {
+                    attack_destination, ..
+                } => attack_destination.clone(),
+                other => panic!("unexpected post-action {other:?}"),
+            },
+        );
+    }
+
     /// SHAPE (serialized resume state): the compound token-event cursor rides a
     /// counter-additions completion across a pause, so it must round-trip.
     #[test]
@@ -37512,6 +37794,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: ObjectId(3),
             controller: PlayerId(0),
@@ -37734,6 +38017,8 @@ mod tests {
                         additional_modifications: vec![],
                         tapped: false,
                         enters_attacking: false,
+                        attack_request:
+                            crate::types::proposed_event::TokenAttackRequest::Unspecified,
                         sacrifice_at: None,
                         source_id: ObjectId(42),
                         controller: PlayerId(0),
@@ -42716,6 +43001,349 @@ mod tests {
         state
     }
 
+    /// An Epic effect armed for P0 whose prototype is a graveyard card, so a
+    /// handle naming position 0 is in range.
+    fn armed_epic_state() -> GameState {
+        let mut state = GameState::new_two_player(42);
+        let prototype = create_object(
+            &mut state,
+            CardId(9_401),
+            PlayerId(0),
+            "Epic Prototype".to_string(),
+            Zone::Graveyard,
+        );
+        crate::game::effects::epic::arm_epic(
+            &mut state,
+            prototype,
+            PlayerId(0),
+            ResolvedAbility::new(Effect::NoOp, Vec::new(), prototype, PlayerId(0)),
+        );
+        state
+    }
+
+    /// Carrier A: the armed effect's upkeep trigger fired onto the stack.
+    fn epic_copy_on_stack_state() -> GameState {
+        let mut state = armed_epic_state();
+        state.active_player = PlayerId(0);
+        state.phase = Phase::Upkeep;
+        crate::game::triggers::check_delayed_triggers(
+            &mut state,
+            &[GameEvent::PhaseChanged {
+                phase: Phase::Upkeep,
+            }],
+        );
+        state
+    }
+
+    /// Carrier B: a planted `delayed_triggers` entry carrying the handle.
+    fn epic_copy_delayed_trigger_state() -> GameState {
+        let mut state = armed_epic_state();
+        let trigger = crate::game::effects::epic::epic_upkeep_trigger(
+            EpicEffectId(0),
+            &state.epic_effects[0],
+        );
+        state.delayed_triggers.push(trigger);
+        state
+    }
+
+    /// Carrier C: `parked_continuation_fixture(None)` with a second parked
+    /// continuation frame whose chain carries an `EpicCopy` sub-ability.
+    fn epic_copy_continuation_state() -> GameState {
+        let mut state = parked_continuation_fixture(None);
+        let prototype = create_object(
+            &mut state,
+            CardId(9_402),
+            PlayerId(0),
+            "Epic Prototype".to_string(),
+            Zone::Graveyard,
+        );
+        let epic = crate::game::effects::epic::arm_epic(
+            &mut state,
+            prototype,
+            PlayerId(0),
+            ResolvedAbility::new(Effect::NoOp, Vec::new(), prototype, PlayerId(0)),
+        );
+        let mut chain = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            prototype,
+            PlayerId(0),
+        );
+        chain.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::EpicCopy { epic },
+            Vec::new(),
+            prototype,
+            PlayerId(0),
+        )));
+        let pending = PendingContinuation::new(Box::new(chain), &state);
+        state
+            .resolution_stack
+            .push_ability_continuation(AbilityContinuationFrame {
+                pending,
+                choose_zone_trigger_context: None,
+            });
+        state
+    }
+
+    /// Every `Effect::EpicCopy` handle anywhere in `state`'s serialization.
+    fn epic_handles_of(state: &GameState) -> BTreeSet<u64> {
+        collect_serialized_epic_effect_handles(&serde_json::to_value(state).unwrap())
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum EpicIngress {
+        BareGameState,
+        PersistedRaw,
+        TrustedEnvelope,
+    }
+
+    impl EpicIngress {
+        fn encode(self, state: &GameState) -> serde_json::Value {
+            match self {
+                EpicIngress::BareGameState => serde_json::to_value(state),
+                EpicIngress::PersistedRaw => {
+                    serde_json::to_value(PersistedGameState::Raw(Box::new(state.clone())))
+                }
+                EpicIngress::TrustedEnvelope => {
+                    serde_json::to_value(PersistedGameState::capture(state.clone()))
+                }
+            }
+            .expect("the fixture serializes")
+        }
+
+        /// The value's game-state object (a trusted envelope nests it under `state`).
+        fn state_value(self, value: &mut serde_json::Value) -> &mut serde_json::Value {
+            match self {
+                EpicIngress::TrustedEnvelope => value
+                    .get_mut("state")
+                    .expect("trusted envelope contains state"),
+                EpicIngress::BareGameState | EpicIngress::PersistedRaw => value,
+            }
+        }
+
+        fn decode(self, value: serde_json::Value) -> Result<GameState, String> {
+            match self {
+                EpicIngress::BareGameState => {
+                    serde_json::from_value::<GameState>(value).map_err(|error| error.to_string())
+                }
+                EpicIngress::PersistedRaw | EpicIngress::TrustedEnvelope => {
+                    serde_json::from_value::<PersistedGameState>(value)
+                        .map_err(|error| error.to_string())?
+                        .into_game_state()
+                        .map_err(|error| format!("{error:?}"))
+                }
+            }
+        }
+    }
+
+    /// V11 (CR 702.50a): the handle collector reads the real serialization of
+    /// `Effect::EpicCopy`, so a renamed field or tag fails here instead of
+    /// silently disabling the decode check.
+    #[test]
+    fn epic_handle_collector_matches_the_serialized_variant() {
+        let effect = serde_json::to_value(Effect::EpicCopy {
+            epic: EpicEffectId(3),
+        })
+        .unwrap();
+        assert_eq!(
+            collect_serialized_epic_effect_handles(&effect),
+            BTreeSet::from([3])
+        );
+
+        let state = epic_copy_on_stack_state();
+        assert!(
+            matches!(
+                state
+                    .stack
+                    .back()
+                    .and_then(StackEntry::ability)
+                    .map(|a| &a.effect),
+                Some(Effect::EpicCopy { .. })
+            ),
+            "reach-guard: the upkeep trigger is on the stack"
+        );
+        assert_eq!(
+            collect_serialized_epic_effect_handles(&serde_json::to_value(&state).unwrap()),
+            BTreeSet::from([0])
+        );
+
+        let legacy = serde_json::json!({
+            "type": "EpicCopy",
+            "spell": serde_json::to_value(&*state.epic_effects[0].spell).unwrap(),
+        });
+        assert!(collect_serialized_epic_effect_handles(&legacy).is_empty());
+    }
+
+    /// V12 (CR 702.50a): a handle naming no `epic_effects` entry is refused at
+    /// both `GameStateDecode` entry points, whichever carrier holds it, including
+    /// a parked frame under `resolution_frames`, which the persisted path splits
+    /// off before the state materializes. The unmutated values decode and keep
+    /// their entries and handles.
+    #[test]
+    fn dangling_epic_handle_is_refused_at_every_decode_ingress() {
+        use EpicIngress::{BareGameState, PersistedRaw, TrustedEnvelope};
+        let cells: [(&str, GameState, &[EpicIngress]); 3] = [
+            (
+                "stack trigger",
+                epic_copy_on_stack_state(),
+                &[BareGameState, PersistedRaw, TrustedEnvelope],
+            ),
+            (
+                "delayed trigger",
+                epic_copy_delayed_trigger_state(),
+                &[BareGameState, PersistedRaw, TrustedEnvelope],
+            ),
+            (
+                "continuation frame",
+                epic_copy_continuation_state(),
+                &[PersistedRaw, TrustedEnvelope],
+            ),
+        ];
+        for (carrier, state, ingresses) in cells {
+            assert_eq!(
+                epic_handles_of(&state),
+                BTreeSet::from([0]),
+                "reach-guard: the {carrier} carries handle 0"
+            );
+            for &ingress in ingresses {
+                let mut value = ingress.encode(&state);
+                if carrier == "continuation frame" {
+                    assert_eq!(
+                        collect_serialized_epic_effect_handles(
+                            &ingress.state_value(&mut value)["resolution_frames"]
+                        ),
+                        BTreeSet::from([0]),
+                        "reach-guard: {ingress:?} holds the handle under resolution_frames"
+                    );
+                }
+                let decoded = ingress
+                    .decode(value.clone())
+                    .unwrap_or_else(|error| panic!("{carrier} via {ingress:?} decodes: {error}"));
+                assert_eq!(
+                    decoded.epic_effects, state.epic_effects,
+                    "{carrier} {ingress:?}"
+                );
+                assert_eq!(
+                    epic_handles_of(&decoded),
+                    epic_handles_of(&state),
+                    "{carrier} {ingress:?}: the carrier keeps its handle"
+                );
+
+                ingress
+                    .state_value(&mut value)
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("epic_effects")
+                    .expect("reach-guard: the value records epic_effects");
+                let error = ingress
+                    .decode(value)
+                    .expect_err("a dangling EpicCopy handle must not decode");
+                assert!(
+                    error.contains("names Epic effect"),
+                    "{carrier} via {ingress:?}: expected the dangling-handle refusal, got {error}"
+                );
+            }
+        }
+
+        // Control: with no handle-bearing carrier, removing the entries decodes,
+        // so the refusal above is the handle check.
+        let state = armed_epic_state();
+        for ingress in [BareGameState, PersistedRaw, TrustedEnvelope] {
+            let mut value = ingress.encode(&state);
+            ingress
+                .state_value(&mut value)
+                .as_object_mut()
+                .unwrap()
+                .remove("epic_effects")
+                .expect("reach-guard: the value records epic_effects");
+            let decoded = ingress
+                .decode(value)
+                .unwrap_or_else(|error| panic!("control via {ingress:?} decodes: {error}"));
+            assert!(decoded.epic_effects.is_empty());
+        }
+    }
+
+    /// V13 (CR 702.50a): a save holding the pre-handle inline shape
+    /// (`{"type":"EpicCopy","spell":…}`) fails to decode at every ingress; it is
+    /// not migrated.
+    #[test]
+    fn legacy_inline_epic_copy_fails_to_decode() {
+        fn inline_snapshots(value: &mut serde_json::Value, spell: &serde_json::Value) -> usize {
+            match value {
+                serde_json::Value::Array(values) => values
+                    .iter_mut()
+                    .map(|value| inline_snapshots(value, spell))
+                    .sum(),
+                serde_json::Value::Object(object) => {
+                    if object.get("type").and_then(serde_json::Value::as_str) == Some("EpicCopy") {
+                        object.remove("epic");
+                        object.insert("spell".to_string(), spell.clone());
+                        return 1;
+                    }
+                    object
+                        .values_mut()
+                        .map(|value| inline_snapshots(value, spell))
+                        .sum()
+                }
+                _ => 0,
+            }
+        }
+        let state = epic_copy_on_stack_state();
+        let spell = serde_json::to_value(&*state.epic_effects[0].spell).unwrap();
+        for ingress in [
+            EpicIngress::BareGameState,
+            EpicIngress::PersistedRaw,
+            EpicIngress::TrustedEnvelope,
+        ] {
+            let mut value = ingress.encode(&state);
+            assert!(
+                inline_snapshots(&mut value, &spell) > 0,
+                "reach-guard: {ingress:?} carries an EpicCopy to rewrite"
+            );
+            let error = ingress
+                .decode(value)
+                .expect_err("the legacy inline shape must not decode");
+            assert!(
+                error.contains("missing field `epic`"),
+                "{ingress:?}: expected the missing-handle refusal, got {error}"
+            );
+        }
+    }
+
+    /// V14 (CR 702.50a): pins that a projected `EpicCopy` handle (here a planted
+    /// delayed-trigger carrier) still names an entry: a viewer projection keeps
+    /// `epic_effects` whole, so the handle decodes through the transport path. The
+    /// carrier is a delayed trigger: a projection clears `stack_trigger_firings`,
+    /// so a projected triggered stack entry of any kind fails the bare decode's
+    /// firing-coherence check before the handle check runs.
+    #[test]
+    fn projected_epic_copy_decodes_through_the_transport_path() {
+        let state = epic_copy_delayed_trigger_state();
+        let projection = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(1));
+        let value = serde_json::to_value(&projection).unwrap();
+        assert_eq!(
+            collect_serialized_epic_effect_handles(&value),
+            BTreeSet::from([0]),
+            "reach-guard: the projection carries the handle"
+        );
+        let decoded = serde_json::from_value::<GameState>(value)
+            .expect("the projection decodes through the bare GameState path");
+        assert_eq!(decoded.epic_effects, state.epic_effects);
+        assert_eq!(
+            decoded
+                .delayed_triggers
+                .iter()
+                .map(|trigger| &trigger.ability.effect)
+                .collect::<Vec<_>>(),
+            vec![&Effect::EpicCopy {
+                epic: EpicEffectId(0)
+            }]
+        );
+    }
+
     /// V14. Pins the legacy compatibility fingerprint: the four fields whose
     /// absence `declare_raw_resolution_wire` reads as an unmarked client-wire
     /// redaction are removed by `client_state_wire_value` and by nothing else.
@@ -45452,28 +46080,8 @@ mod tests {
     #[test]
     fn normalize_for_loop_canonicalizes_cast_coordinates_but_preserves_identity_shape() {
         fn ability_graph(occurrence: CastOccurrence) -> ResolvedAbility {
-            let mut epic =
+            let mut root =
                 ResolvedAbility::new(Effect::NoOp, Vec::new(), ObjectId(500), occurrence.caster);
-            epic.sub_ability = Some(Box::new(ResolvedAbility::new(
-                Effect::NoOp,
-                Vec::new(),
-                ObjectId(500),
-                occurrence.caster,
-            )));
-            epic.else_ability = Some(Box::new(ResolvedAbility::new(
-                Effect::NoOp,
-                Vec::new(),
-                ObjectId(500),
-                occurrence.caster,
-            )));
-            let mut root = ResolvedAbility::new(
-                Effect::EpicCopy {
-                    spell: Box::new(epic),
-                },
-                Vec::new(),
-                ObjectId(500),
-                occurrence.caster,
-            );
             root.sub_ability = Some(Box::new(ResolvedAbility::new(
                 Effect::NoOp,
                 Vec::new(),
@@ -45955,6 +46563,7 @@ mod tests {
             owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking: false,
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             tapped: false,
             count: QuantityExpr::Fixed { value: 1 },
             extra_keywords: vec![],

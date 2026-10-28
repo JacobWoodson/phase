@@ -422,7 +422,12 @@ pub(crate) fn target_filter_controller_scope(filter: &TargetFilter) -> Option<Co
     }
 }
 
-pub(crate) fn matches_player_scope(
+/// CR 608.2c + CR 102.2: whether `player` is a recipient of a `PlayerFilter`
+/// scope ("each player", "each opponent", ...) for an effect controlled by
+/// `controller` from `source_id`. Single authority for effect-recipient player
+/// scopes; `phase-ai` reads it to price non-targeted damage without
+/// re-deriving the scope rules.
+pub fn matches_player_scope(
     state: &GameState,
     player: PlayerId,
     scope: &PlayerFilter,
@@ -7800,18 +7805,21 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
             owner,
             attach_to,
             enters_attacking: _,
+            attack_destination,
             supertypes: _,
             static_abilities,
             enter_with_counters,
         } => (
             // A token's printed power, toughness and abilities could be defined
             // by what the gated action did ("an X/X token"); only a fixed,
-            // ability-free token is audited.
+            // ability-free token is audited. A named destination is not a
+            // `TargetFilter`, so this list cannot hold it.
             (pt_value_is_fixed(power)
                 && pt_value_is_fixed(toughness)
                 && keywords.is_empty()
                 && static_abilities.is_empty()
-                && enter_with_counters.is_empty())
+                && enter_with_counters.is_empty()
+                && attack_destination.is_controller_chooses())
             .then(|| std::iter::once(owner).chain(attach_to.as_ref()).collect()),
             match attach_to {
                 None => ParentTargetHandling::NamesNoObject,
@@ -32534,6 +32542,33 @@ mod tests {
         assert!(wrong.is_empty(), "{}", wrong.join("; "));
     }
 
+    /// A destination a token instruction names is not a `TargetFilter`, so the
+    /// audit's referent list cannot hold it; a fixed token that names one
+    /// is read as possibly depending on the gated action, while the same token
+    /// naming none still lists its referents.
+    #[test]
+    fn a_later_token_that_names_its_defender_is_not_audited_as_independent() {
+        use crate::types::ability::{NamedDefenderScope, TokenAttackDestination};
+
+        let token = r#"{"type":"Token","name":"Ally","power":{"type":"Fixed","value":1},"toughness":{"type":"Fixed","value":1},"types":["Creature","Ally"],"colors":["White"],"keywords":[],"tapped":false,"count":{"type":"Fixed","value":1},"owner":{"type":"Controller"},"enters_attacking":true,"supertypes":[],"static_abilities":[],"enter_with_counters":[]}"#;
+        let mut effect: Effect = serde_json::from_str(token).expect("effect must parse");
+        assert!(
+            audit_later_instruction(&effect).referents.is_some(),
+            "reach guard: a fixed token naming no defender lists its referents"
+        );
+        let Effect::Token {
+            attack_destination, ..
+        } = &mut effect
+        else {
+            panic!("expected a Token effect");
+        };
+        *attack_destination = TokenAttackDestination::Player {
+            player: ControllerRef::DefendingPlayer,
+            scope: NamedDefenderScope::Player,
+        };
+        assert!(audit_later_instruction(&effect).referents.is_none());
+    }
+
     /// Phase 7, J-3 (the building block): after a declined gate, each later
     /// instruction is kept or skipped on its own. (i) is a resolution step of the
     /// gate and (iii) names the token only the gated action creates, so both are
@@ -35167,6 +35202,7 @@ mod tests {
             owner: TargetFilter::OriginalController,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -36464,6 +36500,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -36601,6 +36639,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![(
@@ -38685,6 +38725,8 @@ mod tests {
                 owner: TargetFilter::ParentTargetController,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -43017,6 +43059,8 @@ mod tests {
                     owner: TargetFilter::Controller,
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
@@ -43477,6 +43521,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -43688,6 +43734,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -43774,6 +43822,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -43845,6 +43895,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -43927,6 +43979,8 @@ mod tests {
                 owner,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -48069,6 +48123,8 @@ mod tests {
         let make_chain = |child_effect: Effect, link: SubAbilityLink| {
             let mut token = ResolvedAbility::new(
                 Effect::Token {
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     name: "Fractal".to_string(),
                     power: PtValue::Fixed(0),
                     toughness: PtValue::Fixed(0),
@@ -48621,6 +48677,7 @@ mod tests {
     #[test]
     fn mark_co_scoped_created_referent_consumer_requires_the_matching_producer() {
         let token = || Effect::Token {
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             name: "Fractal".to_string(),
             power: PtValue::Fixed(0),
             toughness: PtValue::Fixed(0),
@@ -48722,6 +48779,7 @@ mod tests {
             end_cost: None,
         };
         let elemental = || Effect::Token {
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             name: "Elemental".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
@@ -49147,6 +49205,7 @@ mod tests {
             }))
         };
         let token = |static_abilities: Vec<StaticDefinition>| Effect::Token {
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             name: "Soldier".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
@@ -49510,6 +49569,7 @@ mod tests {
             end_cost: None,
         };
         let token = |static_def: StaticDefinition| Effect::Token {
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             name: "Soldier".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
@@ -50147,6 +50207,7 @@ mod tests {
             target: TargetFilter::LastCreated,
         };
         let token_attached = Effect::Token {
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             name: "Aura".to_string(),
             power: PtValue::Fixed(0),
             toughness: PtValue::Fixed(0),
@@ -50503,6 +50564,8 @@ mod tests {
             (
                 "Token keyword Protection(Filter)",
                 effect_row(Box::new(move |filter| Effect::Token {
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     name: "Soldier".to_string(),
                     power: PtValue::Fixed(1),
                     toughness: PtValue::Fixed(1),
@@ -52742,6 +52805,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -52900,6 +52965,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -54240,6 +54307,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -55996,6 +56065,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -57869,6 +57940,7 @@ mod tests {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -61998,6 +62070,8 @@ mod resolution_progress_contract_tests {
             );
             let effect = if token {
                 Effect::Token {
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     name: "Soldier".into(),
                     power: PtValue::Fixed(1),
                     toughness: PtValue::Fixed(1),

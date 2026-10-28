@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    ContinuousModification, Effect, LibraryPosition, QuantityExpr, ResolvedAbility, TargetFilter,
-    TargetRef,
+    ContinuousModification, Effect, EntryAttackDestination, LibraryPosition, QuantityExpr,
+    ResolvedAbility, TargetFilter, TargetRef, TokenAttackDestination,
 };
 use crate::types::action_rejection::ActionRejection;
 use crate::types::actions::{DebugAction, DebugCardCreationKind, DebugTokenRequest, GameAction};
@@ -16,7 +16,7 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::player::{PlayerCounterKind, PlayerId};
-use crate::types::proposed_event::{CopyTokenSpec, ProposedEvent};
+use crate::types::proposed_event::{CopyTokenSpec, ProposedEvent, TokenAttackRequest};
 use crate::types::resolved_commands::ResolvedPlayerEdit;
 use crate::types::zones::Zone;
 
@@ -653,6 +653,7 @@ pub fn apply_debug_action(
                 enter_with_counters,
                 tapped: false,
                 enters_attacking: false,
+                attack_request: TokenAttackRequest::Unspecified,
                 sacrifice_at: None,
                 source_id: ObjectId(0),
                 controller: owner,
@@ -730,6 +731,7 @@ pub fn apply_debug_action(
                     owner: TargetFilter::Controller,
                     source_filter: None,
                     enters_attacking: false,
+                    attack_destination: TokenAttackDestination::ControllerChooses,
                     tapped: false,
                     count: QuantityExpr::Fixed {
                         value: i32::try_from(count)
@@ -1074,6 +1076,7 @@ fn route_debug_token_to_battlefield(
         additional_modifications: Vec::new(),
         tapped: false,
         enters_attacking: false,
+        attack_request: TokenAttackRequest::Unspecified,
         sacrifice_at: None,
         source_id: object_id,
         controller: staged.controller,
@@ -1106,6 +1109,7 @@ fn route_debug_token_to_battlefield(
             source_id: object_id,
             controller: staged.controller,
             enters_attacking: false,
+            attack_destination: EntryAttackDestination::AnyDefender,
             attach_to,
             sacrifice_at: None,
             remaining_count: 0,
