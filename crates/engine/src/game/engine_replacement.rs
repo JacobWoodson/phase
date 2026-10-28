@@ -254,6 +254,7 @@ pub(super) fn handle_replacement_choice(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let action_event_start = events.len();
+<<<<<<< HEAD
     // CR 615.13 + CR 616.1e (Matt M1): the answered prompt may be an
     // `EachSourceDealsDamage` batch's own boundary — a Phase-B pause whose
     // tail was empty parks no continuation, so no drain will ever run for it.
@@ -312,11 +313,11 @@ pub(super) fn handle_replacement_choice(
             state.combat_one_shot_applications = Some(record.one_shot_applications.clone());
         }
     }
-    // A record stamped for rejection came from an action-ingress life change.
-    // Resume it inside an ingress window so every life settlement the handler
-    // reaches (a substitute's drain, post-replacement continuations, nested
-    // parks) is held to the same rule; the window closes before the combat
-    // lifelink batch resumes.
+    // A record stamped for rejection came from an action-ingress player-resource
+    // change. Resume it inside an ingress window so every life, player-counter
+    // and energy settlement the handler reaches (a substitute's drain,
+    // post-replacement continuations, nested parks) is held to the same rule;
+    // the window closes before the combat lifelink batch resumes.
     let parked_for_rejection = state.pending_replacement.as_ref().is_some_and(|pending| {
         pending.unrepresentable_life_change == UnrepresentablePolicy::Reject
     });
@@ -612,8 +613,9 @@ fn handle_replacement_choice_inner(
         .as_ref()
         .map(|pending| pending.lifelink_bonus)
         .unwrap_or(0);
-    // The life-change policy the parked record was stamped with, captured with
-    // the file's other `parked_*` reads before `continue_replacement` consumes it.
+    // The player-resource policy the parked record was stamped with, captured
+    // with the file's other `parked_*` reads before `continue_replacement`
+    // consumes it.
     let parked_life_policy = state
         .pending_replacement
         .as_ref()
@@ -932,6 +934,10 @@ fn handle_replacement_choice_inner(
                 }
                 // CR 122.1: Counter addition accepted after replacement choice (e.g.,
                 // Corpsejack Menace doubler on a prompted counter-placement).
+                // CR 122.1 + CR 616.1: a player or energy placement settles under
+                // the policy the parked record was stamped with: `Reject` fails
+                // the answer (the boundary restores the record and prompt),
+                // `IgnoreImpossible` records into the open window.
                 ProposedEvent::AddCounter {
                     placement, count, ..
                 } => match placement {
@@ -956,10 +962,17 @@ fn handle_replacement_choice_inner(
                         player_id,
                         counter_kind,
                         count,
+                        parked_life_policy,
                         events,
-                    ),
+                    )?,
                     CounterPlacement::Energy { player_id, .. } => {
-                        effects::energy::apply_energy_addition(state, player_id, count, events)
+                        effects::energy::apply_energy_addition(
+                            state,
+                            player_id,
+                            count,
+                            parked_life_policy,
+                            events,
+                        )?
                     }
                 },
                 // CR 122.1: Counter removal accepted after replacement choice.
