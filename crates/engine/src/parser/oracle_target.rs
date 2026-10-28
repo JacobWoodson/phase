@@ -11,10 +11,11 @@ use nom::Parser;
 use crate::types::ability::{
     AggregateFunction, AttachmentKind, AttachmentReferent, CardTypeSetSource, ChoiceType,
     CombatHistoryScope, CombatRelation, CombatRelationSubject, Comparator, ControllerRef,
-    CountScope, CrewRelation, DamageKindFilter, FilterProp, NameStickerSet, ObjectProperty,
-    ObjectScope, ParitySource, PlayerFilter, PlayerRelation, PropertyAggregate, PtStat,
-    PtValueScope, QuantityExpr, QuantityRef, SeatDirection, SharedQuality, SharedQualityRelation,
-    TargetFilter, TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter,
+    CostCategory, CountScope, CrewRelation, DamageKindFilter, FilterProp, NameStickerSet,
+    ObjectProperty, ObjectScope, ParitySource, PlayerFilter, PlayerRelation, PropertyAggregate,
+    PtStat, PtValueScope, QuantityExpr, QuantityRef, SeatDirection, SharedQuality,
+    SharedQualityRelation, TargetFilter, TargetSelectionMode, ThisWayCause, TypeFilter,
+    TypedFilter,
 };
 use crate::types::card_type::{noncreature_subtype_set, SubtypeSet, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -29,7 +30,7 @@ use super::oracle_effect::{
 };
 use super::oracle_ir::context::{bind_controller_phrase, ChosenColorQualifierScope, ParseContext};
 use super::oracle_ir::diagnostic::OracleDiagnostic;
-use super::oracle_nom::error::{OracleError, OracleResult};
+use super::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use super::oracle_nom::filter as nom_filter;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
@@ -2247,6 +2248,52 @@ pub(super) fn parse_definite_parent_reference<'a>(
     if slots.is_empty() {
         return None;
     }
+    let (rest, anaphor) = parse_definite_anaphor(input).ok()?;
+    // A possessive continuation ("the creature's controller") is a distinct
+    // anaphor class (controller/owner of the slot), not a bare slot reference —
+    // refuse it so the possessive arms downstream keep their bindings.
+    if tag::<_, _, OracleError<'_>>("'").parse(rest).is_ok() {
+        return None;
+    }
+    unique_slot_for_anaphor(&anaphor, slots)
+        .map(|index| (TargetFilter::ParentTargetSlot { index }, rest))
+}
+
+/// CR 601.2c + CR 608.2c: the noun phrase of a definite anaphor ("that
+/// creature", "the artifact card", "the creature you control"), shared by the
+/// bare slot binder and the cross-choice antecedent binder; a possessive
+/// continuation is left unconsumed in the remainder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct DefiniteAnaphor {
+    /// The printed noun ("creature", "Equipment").
+    pub(super) noun: AnaphorNoun,
+    /// Whether the noun names a battlefield permanent or, through a printed
+    /// "card"/"cards" qualifier, a card in another zone.
+    pub(super) zone_class: AnaphorZoneClass,
+    /// The controller qualifier of the noun phrase ("the creature you
+    /// control"). Always `None` for a possessive ("that creature's
+    /// controller"), whose continuation stays in the remainder.
+    pub(super) controller: Option<ControllerRef>,
+}
+
+impl DefiniteAnaphor {
+    /// CR 601.2c: whether this anaphor's noun phrase names the declared slot
+    /// `slot` — its controller qualifier, if any, agrees with the slot's, and
+    /// its noun and zone class match (`slot_matches_anaphor`).
+    pub(super) fn names_slot(&self, slot: &TargetFilter) -> bool {
+        let controller_matches = self.controller.as_ref().is_none_or(
+            |ctrl| matches!(slot, TargetFilter::Typed(tf) if tf.controller.as_ref() == Some(ctrl)),
+        );
+        controller_matches && slot_matches_anaphor(&self.noun, self.zone_class, slot)
+    }
+}
+
+/// CR 601.2c + CR 608.2c: parse the noun phrase of a definite anaphor at the
+/// start of lowercase `input` (see [`DefiniteAnaphor`]). A possessive ("that
+/// creature's controller") returns with the remainder at the apostrophe and no
+/// controller qualifier; the head of a compound type phrase ("the artifact
+/// creature") is not an anaphor and fails.
+pub(super) fn parse_definite_anaphor(input: &str) -> OracleResult<'_, DefiniteAnaphor> {
     // A definite determiner is REQUIRED — a bare type word ("creature") is a
     // fresh target, not a back-reference. Longest-match-first: "the chosen "
     // before "the ".
@@ -2255,9 +2302,8 @@ pub(super) fn parse_definite_parent_reference<'a>(
         tag("the "),
         tag("that "),
     ))
-    .parse(input)
-    .ok()?;
-    let (after_type_word, anaphor_type) = nom_target::parse_type_filter_word(rest).ok()?;
+    .parse(input)?;
+    let (after_type_word, anaphor_type) = nom_target::parse_type_filter_word(rest)?;
     // Optional trailing "card"/"cards" zone qualifier (Goblin Welder's "the
     // artifact card"). When present, the anaphor names a non-battlefield
     // (card-zone) slot.
@@ -2265,18 +2311,28 @@ pub(super) fn parse_definite_parent_reference<'a>(
         Ok((r, _)) => (r, AnaphorZoneClass::CardInNonBattlefieldZone),
         Err(_) => (after_type_word, AnaphorZoneClass::BattlefieldPermanent),
     };
-    // A possessive continuation ("the creature's controller") is a distinct
-    // anaphor class (controller/owner of the slot), not a bare slot reference —
-    // refuse it so the possessive arms downstream keep their bindings.
-    if tag::<_, _, OracleError<'_>>("'").parse(rest).is_ok() {
-        return None;
+    // CR 205.3: `parse_type_filter_word` yields only card types and subtypes, so
+    // this parser can never produce `AnaphorNoun::Token` — the token arm is
+    // reachable only from the demonstrative-route gate in `conditions.rs`.
+    let noun = AnaphorNoun::Type(anaphor_type);
+    // A possessive continuation ("the creature's controller") ends the noun
+    // phrase; leave it in the remainder for the caller to read or refuse.
+    if peek(tag::<_, _, OracleError<'_>>("'")).parse(rest).is_ok() {
+        return Ok((
+            rest,
+            DefiniteAnaphor {
+                noun,
+                zone_class,
+                controller: None,
+            },
+        ));
     }
     // Guard against consuming the head of a COMPOUND type phrase ("the artifact
     // creature") as an anaphor: if the remainder begins with another type word,
     // this is a fresh typed filter, not a slot back-reference.
     let tail = rest.trim_start();
     if !tail.is_empty() && nom_target::parse_type_filter_word(tail).is_ok() {
-        return None;
+        return Err(oracle_err(input));
     }
     // CR 601.2c + CR 608.2c: a controller qualifier belongs to the anaphor's
     // noun phrase ("the creature you control", "the chosen creature an opponent
@@ -2290,27 +2346,34 @@ pub(super) fn parse_definite_parent_reference<'a>(
             not(satisfy(|c: char| c.is_alphanumeric())),
         ),
     ))
-    .parse(rest)
-    .ok()?;
-    // CR 601.2c: each anaphor names exactly one earlier slot — bind only a
-    // UNIQUE match; zero or ≥2 matches fall through as `None`.
+    .parse(rest)?;
+    Ok((
+        rest,
+        DefiniteAnaphor {
+            noun,
+            zone_class,
+            controller,
+        },
+    ))
+}
+
+/// CR 601.2c: the index of the UNIQUE slot in `slots` that `anaphor` names
+/// ([`DefiniteAnaphor::names_slot`]); zero or ≥2 matches give `None`, so an
+/// anaphor is never bound on a guess.
+pub(super) fn unique_slot_for_anaphor(
+    anaphor: &DefiniteAnaphor,
+    slots: &[TargetFilter],
+) -> Option<usize> {
     let mut matched: Option<usize> = None;
-    // CR 205.3: `parse_type_filter_word` yields only card types and subtypes, so
-    // this call site can never produce `AnaphorNoun::Token` — the token arm is
-    // reachable only from the demonstrative-route gate in `conditions.rs`.
-    let anaphor_noun = AnaphorNoun::Type(anaphor_type);
     for (index, slot) in slots.iter().enumerate() {
-        let controller_matches = controller.as_ref().is_none_or(
-            |ctrl| matches!(slot, TargetFilter::Typed(tf) if tf.controller.as_ref() == Some(ctrl)),
-        );
-        if controller_matches && slot_matches_anaphor(&anaphor_noun, zone_class, slot) {
+        if anaphor.names_slot(slot) {
             if matched.is_some() {
                 return None;
             }
             matched = Some(index);
         }
     }
-    matched.map(|index| (TargetFilter::ParentTargetSlot { index }, rest))
+    matched
 }
 
 /// CR 205.3 + CR 111.1: the matching axis a demonstrative or definite anaphor's
@@ -2362,7 +2425,20 @@ pub(super) fn slot_matches_anaphor(
     let TargetFilter::Typed(tf) = slot else {
         return false;
     };
-    let type_ok = match noun {
+    if !typed_filter_admits_anaphor_noun(noun, tf) {
+        return false;
+    }
+    // CR 400.1: a bare demonstrative names a battlefield permanent; a printed
+    // "card" qualifier names a non-battlefield zone (Goblin Welder's graveyard
+    // slot). The two classes must agree.
+    slot_zone_class(slot) == zone_class
+}
+
+/// CR 205.3 + CR 111.1: whether a typed filter carries the anaphor noun's
+/// matching axis — core-type membership, subtype equality, or the token object
+/// property.
+fn typed_filter_admits_anaphor_noun(noun: &AnaphorNoun, tf: &TypedFilter) -> bool {
+    match noun {
         AnaphorNoun::Type(TypeFilter::Subtype(sub)) => tf
             .get_subtype()
             .is_some_and(|slot_sub| slot_sub.eq_ignore_ascii_case(sub)),
@@ -2370,14 +2446,7 @@ pub(super) fn slot_matches_anaphor(
         // slot carrying the token object property.
         AnaphorNoun::Token => tf.properties.iter().any(|p| matches!(p, FilterProp::Token)),
         AnaphorNoun::Type(other) => tf.type_filters.iter().any(|t| t == other),
-    };
-    if !type_ok {
-        return false;
     }
-    // CR 400.1: a bare demonstrative names a battlefield permanent; a printed
-    // "card" qualifier names a non-battlefield zone (Goblin Welder's graveyard
-    // slot). The two classes must agree.
-    slot_zone_class(slot) == zone_class
 }
 
 /// CR 201.2: Match a clause boundary that ends a card name in a board-filter
@@ -7623,7 +7692,7 @@ fn rebind_compound_slot_referent_in_prop(prop: &mut FilterProp) {
 /// leaves listed below, recursing through every `QuantityExpr` composition
 /// arm. This list is NOT exhaustive: it omits `Intensity`, which the parser
 /// only emits as `Intensity { Source }`. The exhaustive object-scope
-/// classification is `game::quantity::quantity_ref_object_scope_read`, which
+/// classification is `types::ability::quantity_ref_object_scope_read`, which
 /// backs `quantity_expr_contains_scope`.
 fn rebind_compound_slot_referent_in_quantity(expr: &mut QuantityExpr) {
     fn rebind_ref(qty: &mut QuantityRef) {
@@ -7828,24 +7897,52 @@ fn parse_mana_value_reference_qty(
 fn parse_cost_paid_mana_value_reference(
     input: &str,
 ) -> super::oracle_nom::error::OracleResult<'_, QuantityRef> {
-    let (rest, _) = opt(tag("the ")).parse(input)?;
-    let (rest, _) = alt((tag("discarded "), tag("sacrificed "))).parse(rest)?;
-    let (rest, _) = alt((
-        tag("creature"),
-        tag("card"),
-        tag("permanent"),
-        tag("artifact"),
-        tag("enchantment"),
-        tag("planeswalker"),
-        tag("land"),
-    ))
-    .parse(rest)?;
-    Ok((
-        rest,
+    value(
         QuantityRef::ObjectManaValue {
             scope: ObjectScope::CostPaidObject,
         },
+        parse_cost_paid_participle_object,
+    )
+    .parse(input)
+}
+
+/// CR 608.2k: the object noun of a cost participle phrase ("the sacrificed
+/// creature", "the discarded card"). The single vocabulary shared by every
+/// reader of an object paid for an ability's cost.
+pub(crate) fn parse_cost_paid_object_noun(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag("creature"),
+            tag("card"),
+            tag("permanent"),
+            tag("artifact"),
+            tag("enchantment"),
+            tag("planeswalker"),
+            tag("land"),
+        )),
+    )
+    .parse(input)
+}
+
+/// CR 608.2k + CR 701.9a + CR 701.21a: "the discarded <noun>" / "the
+/// sacrificed <noun>", returning the `CostCategory` of the cost that would
+/// have paid for the object (`Discards` / `SacrificesPermanent`). The phrase
+/// alone does not prove a cost: the same participles describe an effect's
+/// discard or sacrifice. The same-quality rider (`parse_same_quality_reference`)
+/// verifies the returned category against the enclosing ability's cost
+/// payment components (`ParseContext::current_ability_cost_components`);
+/// `parse_cost_paid_mana_value_reference` binds `ObjectScope::CostPaidObject`
+/// without that check.
+pub(crate) fn parse_cost_paid_participle_object(input: &str) -> OracleResult<'_, CostCategory> {
+    let (rest, _) = opt(tag("the ")).parse(input)?;
+    let (rest, category) = alt((
+        value(CostCategory::Discards, tag("discarded ")),
+        value(CostCategory::SacrificesPermanent, tag("sacrificed ")),
     ))
+    .parse(rest)?;
+    let (rest, _) = parse_cost_paid_object_noun(rest)?;
+    Ok((rest, category))
 }
 
 fn parse_bare_any_counter_suffix(input: &str) -> super::oracle_nom::error::OracleResult<'_, ()> {
@@ -8830,8 +8927,9 @@ pub(crate) fn parse_target_disjunction(input: &str) -> (TargetFilter, &str) {
 }
 
 /// CR 608.2k: "the sacrificed/exiled <noun>" — an untargeted reference to the
-/// object referred to by this ability's cost. "sacrificed" is always a cost
-/// participle. "exiled" is a cost participle ONLY when the enclosing ability
+/// object referred to by this ability's cost. "sacrificed" is bound without
+/// checking the ability's cost (see `parse_cost_paid_participle_object`).
+/// "exiled" is a cost participle ONLY when the enclosing ability
 /// carries a non-self exile cost (`ctx.current_ability_exile_cost_zone`);
 /// otherwise it is an effect participle and the combinator returns
 /// `nom::Err::Error`, so dispatch falls through to the `TRACKED_SET_PHRASES`
@@ -8841,24 +8939,35 @@ fn parse_cost_paid_object_reference<'a>(
     input: &'a str,
     ctx: &ParseContext,
 ) -> nom::IResult<&'a str, TargetFilter, OracleError<'a>> {
-    let (rest, _) = opt(tag("the ")).parse(input)?;
+    value(
+        TargetFilter::CostPaidObject,
+        alt((
+            value(
+                (),
+                (
+                    opt(tag("the ")),
+                    tag::<_, _, OracleError<'_>>("sacrificed "),
+                    parse_cost_paid_object_noun,
+                ),
+            ),
+            |i| parse_exile_cost_paid_object(i, ctx),
+        )),
+    )
+    .parse(input)
+}
+
+/// CR 608.2k: "the exiled <noun>" as a cost participle — accepted ONLY when
+/// the enclosing ability carries a non-self exile cost
+/// (`ctx.current_ability_exile_cost_zone`); otherwise `nom::Err::Error`, since
+/// "exiled" then describes an effect's exile.
+pub(crate) fn parse_exile_cost_paid_object<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, ()> {
     let exile_is_cost = ctx.current_ability_exile_cost_zone.is_some();
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("sacrificed "),
-        nom::combinator::verify(tag("exiled "), |_: &str| exile_is_cost),
-    ))
-    .parse(rest)?;
-    let (rest, _) = alt((
-        tag("creature"),
-        tag("card"),
-        tag("permanent"),
-        tag("artifact"),
-        tag("enchantment"),
-        tag("planeswalker"),
-        tag("land"),
-    ))
-    .parse(rest)?;
-    Ok((rest, TargetFilter::CostPaidObject))
+    let (rest, _) = opt(tag("the ")).parse(input)?;
+    let (rest, _) = nom::combinator::verify(tag("exiled "), |_: &str| exile_is_cost).parse(rest)?;
+    parse_cost_paid_object_noun(rest)
 }
 
 /// CR 400.7: The origin zone named by a "put there from <zone>" provenance
@@ -15176,6 +15285,79 @@ mod tests {
             parse_definite_parent_reference("the creature you controlled", &you_vs_opponent),
             None
         );
+    }
+
+    #[test]
+    fn definite_anaphor_leaves_possessive_continuation_in_remainder() {
+        // CR 608.2c: "that creature's controller" names the creature's
+        // controller; the noun phrase stops at the apostrophe so the
+        // cross-choice binder can read the noun, while the bare slot wrapper
+        // still refuses the possessive.
+        let (rest, anaphor) =
+            parse_definite_anaphor("that creature's controller").expect("possessive anaphor");
+        assert_eq!(rest, "'s controller");
+        assert_eq!(
+            anaphor,
+            DefiniteAnaphor {
+                noun: AnaphorNoun::Type(TypeFilter::Creature),
+                zone_class: AnaphorZoneClass::BattlefieldPermanent,
+                controller: None,
+            }
+        );
+        let creature = TargetFilter::Typed(TypedFilter::creature());
+        assert_eq!(
+            parse_definite_parent_reference("that creature's controller", &[creature]),
+            None
+        );
+    }
+
+    #[test]
+    fn definite_anaphor_card_qualifier_names_a_non_battlefield_card() {
+        // CR 400.1: a printed "card" qualifier names an object outside the
+        // battlefield.
+        let (rest, anaphor) = parse_definite_anaphor("the creature card").expect("card anaphor");
+        assert_eq!(rest, "");
+        assert_eq!(anaphor.noun, AnaphorNoun::Type(TypeFilter::Creature));
+        assert_eq!(
+            anaphor.zone_class,
+            AnaphorZoneClass::CardInNonBattlefieldZone
+        );
+        assert_eq!(anaphor.controller, None);
+    }
+
+    #[test]
+    fn definite_anaphor_consumes_controller_qualifier() {
+        let (rest, anaphor) = parse_definite_anaphor("that creature an opponent controls")
+            .expect("controller-qualified anaphor");
+        assert_eq!(rest, "");
+        assert_eq!(anaphor.noun, AnaphorNoun::Type(TypeFilter::Creature));
+        assert_eq!(anaphor.zone_class, AnaphorZoneClass::BattlefieldPermanent);
+        assert_eq!(anaphor.controller, Some(ControllerRef::Opponent));
+    }
+
+    #[test]
+    fn definite_anaphor_refuses_compound_type_phrase_head() {
+        // "the artifact creature" is a fresh compound type phrase, never an
+        // anaphor.
+        assert!(parse_definite_anaphor("the artifact creature").is_err());
+        // Positive reach-guard: the same determiner + head noun alone parses.
+        assert!(parse_definite_anaphor("the artifact").is_ok());
+    }
+
+    #[test]
+    fn unique_slot_for_anaphor_requires_exactly_one_named_slot() {
+        let (_, anaphor) = parse_definite_anaphor("that creature").expect("bare anaphor");
+        let creature = TargetFilter::Typed(TypedFilter::creature());
+        let artifact = TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact));
+        assert_eq!(
+            unique_slot_for_anaphor(&anaphor, &[artifact.clone(), creature.clone()]),
+            Some(1)
+        );
+        assert_eq!(
+            unique_slot_for_anaphor(&anaphor, &[creature.clone(), creature]),
+            None
+        );
+        assert_eq!(unique_slot_for_anaphor(&anaphor, &[artifact]), None);
     }
 
     #[test]

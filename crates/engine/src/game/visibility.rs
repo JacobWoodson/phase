@@ -1281,7 +1281,8 @@ fn redact_activation_records(filtered: &mut GameState) {
             | PendingCostMoveResume::UnlessBouncePayment { .. }
             | PendingCostMoveResume::ManaAbilityPayment { .. }
             | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
-            | PendingCostMoveResume::RandomDiscardUnlessPayment(_) => {}
+            | PendingCostMoveResume::RandomDiscardUnlessPayment(_)
+            | PendingCostMoveResume::TurnFaceUpCostMove { .. } => {}
         }
     }
     if let Some(resume) = filtered.pending_deferred_life_cost_resume.as_mut() {
@@ -1291,7 +1292,9 @@ fn redact_activation_records(filtered: &mut GameState) {
                     clear(pending);
                 }
             }
-            DeferredLifeCostResume::PayAmount { .. } | DeferredLifeCostResume::ManaRoot { .. } => {}
+            DeferredLifeCostResume::PayAmount { .. }
+            | DeferredLifeCostResume::ManaRoot { .. }
+            | DeferredLifeCostResume::TurnFaceUp { .. } => {}
         }
     }
     for entry in filtered.stack.iter_mut().chain(
@@ -2810,6 +2813,11 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         if !can_view_private_for_player(player) {
             // CR 400.2: redacted `choices` for the viewer, computed per `kind`.
             let redacted: Option<Vec<ObjectId>> = match kind {
+                // CR 400.2: Reveal / Discard candidate sets leak private hand contents
+                // (e.g. which cards match a required color or type, and how many matching
+                // cards are in hand). Drop candidate IDs and candidate set cardinality entirely
+                // for viewers without private access, preserving public required count metadata.
+                PayCostKind::Reveal | PayCostKind::Discard => Some(vec![]),
                 // Hand-pitch exile cost (Force of Will family): hand is hidden,
                 // so opaque every choice. Graveyard exile is public — no redaction.
                 PayCostKind::ExileFromZone {
@@ -4079,14 +4087,26 @@ fn redact_mana_ability_resume_payment(
         ManaAbilityResume::ManaAbilityManaPayment {
             pending_mana_ability,
         } => redact_pending_mana_ability_payment(pending_mana_ability, hidden_ids),
+        // CR 400.2 + CR 702.143a: a foretell card in hand is in a hidden zone,
+        // and its effective foretell cast cost is not public information. Zero
+        // it for viewers who cannot see the card; the {2} payment cost is public.
+        ManaAbilityResume::Foretell {
+            object_id, cost, ..
+        } if hidden_ids.contains(object_id) => {
+            *cost = crate::types::mana::ManaCost::generic(0);
+        }
         // Keep this complete rather than using a catch-all: a new resume must decide
         // whether it retains an ability. None of these holds one.
         ManaAbilityResume::Priority
         | ManaAbilityResume::CompanionToHand { .. }
+        | ManaAbilityResume::PlanarDieRoll { .. }
         | ManaAbilityResume::TurnFaceUp { .. }
         | ManaAbilityResume::EndContinuousEffect { .. }
+        | ManaAbilityResume::RoomUnlock { .. }
+        | ManaAbilityResume::Foretell { .. }
         | ManaAbilityResume::ManaPayment { .. }
         | ManaAbilityResume::ManaSourceSelection { .. }
+        | ManaAbilityResume::CombatTaxPayment { .. }
         | ManaAbilityResume::PhyrexianCastPayment { .. }
         | ManaAbilityResume::FinalizePendingManaPayment { .. } => {}
     }
@@ -4187,7 +4207,10 @@ fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet
                 redact_pending_mana_ability_payment(mana_ability, hidden_ids);
             }
             // The spell resumes are the `pending_cast_mut()` call above.
-            CostResume::Spell { .. } | CostResume::SpellCost { .. } | CostResume::Resolution => {}
+            CostResume::Spell { .. }
+            | CostResume::SpellCost { .. }
+            | CostResume::Resolution
+            | CostResume::TurnFaceUp { .. } => {}
         },
         WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_mut() {
             CollectEvidenceResume::Effect { pending_ability } => {
@@ -5497,6 +5520,7 @@ mod tests {
                     deferred_events: all_events.clone(),
                     ..Default::default()
                 },
+                resolving_entry: None,
             },
         );
         state.waiting_for = WaitingFor::TriggerTargetSelection {
@@ -7031,6 +7055,7 @@ mod tests {
                             remaining_players: Vec::new(),
                             selections: Vec::new(),
                             completion: Default::default(),
+                            resolving_entry: None,
                         });
                 }),
             ),

@@ -5516,6 +5516,7 @@ fn floating_replacement_can_name_object(
         runtime_execute,
         mode,
         valid_card,
+        triggering_spell,
         condition,
         damage_modification,
         damage_source_filter,
@@ -5558,6 +5559,8 @@ fn floating_replacement_can_name_object(
         || runtime_execute.is_some()
         || !matches!(mode, crate::types::ability::ReplacementMode::Mandatory)
         || valid_card.is_some()
+        // Conservatively retain object-naming authority carried by the pin.
+        || triggering_spell.is_some()
         || condition.is_some()
         || damage_modification.is_some()
         || damage_source_filter.is_some()
@@ -11184,7 +11187,7 @@ mod tests {
 
         // ── (b) ZERO announcement choices, two ways. `Effect::target_filter()` returns
         // `Some` for both, but the SLOT BUILDER surfaces no stack slot: CR 701.21a
-        // `Sacrifice` is carved out of `triggers::extract_target_filter_from_effect` (the
+        // `Sacrifice` is carved out of `types::ability::extract_target_filter_from_effect` (the
         // accessor the builder actually uses), and a CR 601.2c choice made at resolution
         // (`TargetChoiceTiming::Resolution`) is not announced at all.
         let zero_slot_cases: [(&str, ResolvedAbility); 2] = [

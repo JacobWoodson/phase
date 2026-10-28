@@ -839,94 +839,6 @@ fn ensure_assist_cancellation_is_allowed(state: &GameState) -> Result<(), Engine
     Ok(())
 }
 
-fn handle_unlock_room_door(
-    state: &mut GameState,
-    player: PlayerId,
-    object_id: ObjectId,
-    door: crate::game::game_object::RoomDoor,
-    events: &mut Vec<GameEvent>,
-) -> Result<WaitingFor, EngineError> {
-    if state.active_player != player
-        || !matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
-        || !state.stack.is_empty()
-    {
-        return Err(EngineError::ActionNotAllowed(
-            "Room doors can be unlocked only as a main-phase special action with an empty stack"
-                .to_string(),
-        ));
-    }
-
-    let cost = {
-        let obj = state
-            .objects
-            .get(&object_id)
-            .ok_or_else(|| EngineError::InvalidAction("Room not found".to_string()))?;
-        if obj.controller != player || obj.zone != Zone::Battlefield {
-            return Err(EngineError::ActionNotAllowed(
-                "Only the controller of a battlefield Room can unlock it".to_string(),
-            ));
-        }
-        if !obj
-            .card_types
-            .subtypes
-            .iter()
-            .any(|subtype| subtype == "Room")
-        {
-            return Err(EngineError::ActionNotAllowed(
-                "Object is not a Room".to_string(),
-            ));
-        }
-        if obj.room_unlocks.unwrap_or_default().is_unlocked(door) {
-            return Err(EngineError::ActionNotAllowed(
-                "That door is already unlocked".to_string(),
-            ));
-        }
-        // CR 709.5e + CR 707.2: the unlock cost is the locked HALF's mana cost,
-        // read from the EFFECTIVE halves (printed order) — the copied snapshot
-        // when a copy effect applies, else the object's own printed halves
-        // (whose orientation `room::own_room_halves` resolves through
-        // `live_face_door`, the same CR 709.5d mapping as before).
-        let halves = super::room::effective_room_halves(obj);
-        match door {
-            crate::game::game_object::RoomDoor::Left => halves.left.mana_cost.clone(),
-            crate::game::game_object::RoomDoor::Right => halves
-                .right
-                .as_ref()
-                .map(|half| half.mana_cost.clone())
-                .ok_or_else(|| {
-                    EngineError::ActionNotAllowed("Room has no second door face".to_string())
-                })?,
-        }
-    };
-
-    // CR 116.2m + CR 118.7a: Reduce the door's generic unlock cost by the
-    // player's active `ReduceActionCost { action: UnlockDoor }` statics
-    // (Inquisitive Glimmer — "Unlock costs you pay cost {1} less") before
-    // payment. Single authority shared with the plot path.
-    let cost = casting::apply_special_action_cost_reduction(
-        state,
-        player,
-        crate::types::mana::SpecialAction::UnlockDoor,
-        cost,
-    );
-
-    // CR 116.2m + CR 709.5e + CR 106.6: The unlock cost is a special action's
-    // mana cost. Route payment through `PaymentContext::SpecialAction(UnlockDoor)`
-    // so spend-restricted mana ("only to … unlock doors", Smoky Lounge) is
-    // eligible here and spell/activation-restricted mana is correctly rejected.
-    casting::pay_special_action_mana_cost(
-        state,
-        player,
-        Some(object_id),
-        &cost,
-        crate::types::mana::SpecialAction::UnlockDoor,
-        events,
-    )?;
-
-    super::room::unlock_door_designation(state, object_id, player, door, events);
-    Ok(WaitingFor::Priority { player })
-}
-
 /// Public engine entrypoint. Every caller must supply the `actor` — the
 /// `PlayerId` whose authenticated identity is making this action. The engine
 /// rejects any action whose `actor` does not match `authorized_submitter(state)`
@@ -4773,7 +4685,7 @@ fn entry_announces(
     // `bounded_cycle_pin_slots_requires_a_single_mandatory_announcement_slot`, the third by
     // `bounded_cycle_pin_slots_legal_set_comes_from_the_announcement_authority`:
     // * `len() == 1` — a chained second "target" (2 slots) or an effect whose filter the
-    //   SLOT BUILDER declines (0 slots: `triggers::extract_target_filter_from_effect`
+    //   SLOT BUILDER declines (0 slots: `types::ability::extract_target_filter_from_effect`
     //   carves out `Sacrifice`/`UnattachAll`/… for which `Effect::target_filter()` still
     //   returns `Some`, and `target_choice_timing == Resolution` surfaces no stack slot at
     //   all) would leave the published `min/max_targets: 1` contradicting the announcement.
@@ -9372,6 +9284,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::LoyaltyActivation { .. }
                     | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
                     | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
+                    | PendingCostMoveResume::TurnFaceUpCostMove { .. }
             )
         ),
         // CR 606.4 + CR 616.1: a fully-prevented loyalty counter add (e.g. an
@@ -9400,18 +9313,23 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::LoyaltyActivation { .. }
                     | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
                     | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
+                    | PendingCostMoveResume::TurnFaceUpCostMove { .. }
             )
         ),
-        CostMoveDrainBoundary::PriorityBoundary => matches!(
-            state.pending_cost_move_resume,
-            Some(
-                PendingCostMoveResume::Cast {
-                    completion: PendingCostMoveCompletion::FinalizeDelvedCast { .. },
-                    ..
-                } | PendingCostMoveResume::ManaAbilityPayment { .. }
-                    | PendingCostMoveResume::CounterCostRemovalPayment { .. }
-            )
-        ),
+        CostMoveDrainBoundary::PriorityBoundary => {
+            state.pending_replacement.is_none()
+                && matches!(
+                    state.pending_cost_move_resume,
+                    Some(
+                        PendingCostMoveResume::Cast {
+                            completion: PendingCostMoveCompletion::FinalizeDelvedCast { .. },
+                            ..
+                        } | PendingCostMoveResume::ManaAbilityPayment { .. }
+                            | PendingCostMoveResume::CounterCostRemovalPayment { .. }
+                            | PendingCostMoveResume::TurnFaceUpCostMove { .. }
+                    )
+                )
+        }
     };
     if !eligible {
         return Ok(None);
@@ -9487,6 +9405,11 @@ pub(crate) fn drain_pending_cost_move_resume(
         // returns a replacement choice; the delivered boundary resumes the
         // payment through its already-authorized paid epilogue.
         engine_payment_choices::resume_random_discard_unless_payment(state, events)?
+    } else if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::TurnFaceUpCostMove { .. })
+    ) {
+        super::morph::resume_turn_face_up_cost_move(state, events, action_event_start)?
     } else {
         unreachable!("eligible cost-move root must remain parked")
     };
@@ -10036,6 +9959,20 @@ fn drain_pending_deferred_life_cost_resume(
                     state, player, *resume, events,
                 )
             }
+            crate::types::game_state::DeferredLifeCostResume::TurnFaceUp {
+                player,
+                source,
+                cost_source,
+                resume_at_resolution_depth: _,
+                remaining_cost,
+            } => super::morph::finish_or_continue_turn_face_up(
+                state,
+                player,
+                source,
+                cost_source,
+                remaining_cost,
+                events,
+            ),
         }
     })();
     if result.is_err()
@@ -12143,10 +12080,11 @@ fn apply_action(
     // CR 104.3a: A player may concede at any time. Concede bypasses the WaitingFor
     // dispatch entirely — there is no priority/state check. Eliminating the player
     // performs CR 800.4a object cleanup and advances `waiting_for` if the conceder
-    // owned it (see `eliminate_player`).
+    // owned it (see `elimination::concede`), and queues what the departure triggered
+    // (CR 603.6c), since no pipeline scans this action's events.
     if let GameAction::Concede { player_id } = action {
         let mut events = Vec::new();
-        super::elimination::eliminate_player(state, player_id, &mut events);
+        super::elimination::concede(state, player_id, &mut events);
         return Ok(ActionResult::applied(events, state.waiting_for.clone()));
     }
 
@@ -12814,7 +12752,7 @@ fn apply_non_priority_pass_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
-            handle_unlock_room_door(state, *player, object_id, door, &mut events)?
+            super::room::handle_unlock_room_door(state, *player, object_id, door, &mut events)?
         }
         (WaitingFor::Priority { player }, GameAction::RollPlanarDie) => {
             if state.priority_player
@@ -12825,8 +12763,16 @@ fn apply_non_priority_pass_action(
             // CR 901.9 / CR 116.2i: Rolling the planar die as a special action
             // does not use the stack; the escalating cost is charged before the
             // roll and effect-caused rolls do not increment the counter.
-            crate::game::planechase::take_paid_planar_die_action(state, *player, &mut events)?;
-            WaitingFor::Priority { player: *player }
+            // CR 605.3b + CR 616.1: a paused cost move or pre-spend echo choice
+            // leaves the action uncommitted; the typed planar-die root returns
+            // its prompt and finishes the locked-cost roll once answered.
+            match crate::game::planechase::take_paid_planar_die_action(state, *player, &mut events)?
+            {
+                crate::game::planechase::PaidPlanarDieAction::Rolled(_) => {
+                    WaitingFor::Priority { player: *player }
+                }
+                crate::game::planechase::PaidPlanarDieAction::Paused => state.waiting_for.clone(),
+            }
         }
         // CR 715.3a: Player chooses creature or Adventure face.
         (
@@ -13524,9 +13470,9 @@ fn apply_non_priority_pass_action(
                     "Counter-cost distribution is not valid for mana abilities".to_string(),
                 ));
             }
-            CostResume::Resolution => {
+            CostResume::Resolution | CostResume::TurnFaceUp { .. } => {
                 return Err(EngineError::InvalidAction(
-                    "Counter-cost distribution is not valid for resolution costs".to_string(),
+                    "Counter-cost distribution is not valid for this cost".to_string(),
                 ));
             }
         },
@@ -13869,6 +13815,22 @@ fn apply_non_priority_pass_action(
                     ));
                 }
             },
+            CostResume::TurnFaceUp {
+                source,
+                cost_source,
+                remaining_cost,
+            } => super::morph::handle_turn_face_up_cost_selection(
+                state,
+                *player,
+                kind,
+                choices,
+                *count,
+                &chosen,
+                *source,
+                *cost_source,
+                remaining_cost.clone(),
+                &mut events,
+            )?,
         },
         // CR 601.2: Player backed out of a cost-payment choice. Only spell
         // casts can be cancelled; mana-ability cost payment has no cancel path.
@@ -13887,6 +13849,21 @@ fn apply_non_priority_pass_action(
             },
             GameAction::CancelCast,
         ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
+        // CR 116.2b + CR 702.37e: A turn-face-up special action is only backed out
+        // before any cost component is paid. `supported_for_turn_face_up` admits
+        // single-leaf costs only (Composite is rejected at the scope gate in
+        // `costs.rs`), so this prompt is always the first and only payment step.
+        (
+            WaitingFor::PayCost {
+                player,
+                resume: CostResume::TurnFaceUp { .. },
+                ..
+            },
+            GameAction::CancelCast,
+        ) => {
+            state.waiting_for = WaitingFor::Priority { player: *player };
+            state.waiting_for.clone()
+        }
         // CR 118.3: Player selected permanents to sacrifice as cost.
         (
             WaitingFor::ActivationCostOneOfChoice {
@@ -13988,7 +13965,9 @@ fn apply_non_priority_pass_action(
         ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         (
             WaitingFor::ChooseManaColor {
-                choice, context, ..
+                player: prompt_player,
+                choice,
+                context,
             },
             GameAction::ChooseManaColor {
                 choice: chosen,
@@ -14043,13 +14022,58 @@ fn apply_non_priority_pass_action(
                     wf
                 }
                 crate::types::game_state::ManaChoiceContext::ResolvingEffect(pending_effect) => {
-                    effects::mana::handle_choose_mana_effect(
+                    // CR 605.4a: a choice answered inside a paused accepted
+                    // triggered-mana occurrence resumes that fixed point (same
+                    // wrap the optional/opponent-may answers use). With no live
+                    // carrier both hooks are exact no-ops and this is the
+                    // historical immediate completion. The latched prompt
+                    // player travels as the recipient backstop so suspension
+                    // cannot misroute the deposit.
+                    let wf = super::triggers::with_accepted_triggered_mana_action_scope(
                         state,
-                        pending_effect,
-                        choice,
-                        chosen.clone(),
+                        |state| {
+                            effects::mana::handle_choose_mana_effect(
+                                state,
+                                pending_effect,
+                                *prompt_player,
+                                choice,
+                                chosen.clone(),
+                                &mut events,
+                            )
+                        },
+                    )?;
+                    if let super::triggers::TriggeredManaReadiness::Resumed {
+                        wait,
+                        settled_direct_priority_root,
+                    } = super::triggers::finish_accepted_triggered_mana_action(
+                        state,
                         &mut events,
-                    )?
+                        events_before,
+                    )? {
+                        // CR 117.5 + CR 605.4a (mirrors the opponent-may arm):
+                        // this reducer arm returns its `ActionResult` directly,
+                        // so the ordinary epilogue never runs. A resumed
+                        // direct `Priority` root with no live owner must
+                        // converge here, or ordinary deferred triggers from
+                        // its own settled batch (e.g. a Manabarbs observer on
+                        // the same tap) would sit undrained when priority
+                        // returns. Every other owner keeps its queue and
+                        // returns the frame's wait unchanged.
+                        let wait = *wait;
+                        let wait = if settled_direct_priority_root {
+                            engine_priority::run_post_action_pipeline_from_settled_priority(
+                                state,
+                                &mut events,
+                                events_before,
+                                &wait,
+                            )?
+                        } else {
+                            wait
+                        };
+                        state.waiting_for = wait.clone();
+                        return Ok(ActionResult::applied(events, wait));
+                    }
+                    wf
                 }
             };
             // CR 603.2c + CR 605.4a: A NON-mana `ResolvingEffect` colour choice
@@ -15472,7 +15496,10 @@ fn apply_non_priority_pass_action(
             {
                 waiting_for
             } else {
-                engine_combat::finish_declare_attackers(state, &mut events, false)?
+                // CR 508.1g + CR 701.43d: this action carries only the exert
+                // decision and the buffered declaration batch owns the events;
+                // the declaration span starts at this action's beginning.
+                engine_combat::finish_declare_attackers(state, &mut events, 0, false)?
             }
         }
         // CR 508.1g + CR 702.154a: the active player may tap up to one eligible
@@ -15507,7 +15534,10 @@ fn apply_non_priority_pass_action(
             {
                 waiting_for
             } else {
-                engine_combat::finish_declare_attackers(state, &mut events, false)?
+                // CR 508.1g + CR 702.154a: this action carries only the enlist
+                // decision and the buffered declaration batch owns the events;
+                // the declaration span starts at this action's beginning.
+                engine_combat::finish_declare_attackers(state, &mut events, 0, false)?
             }
         }
         (
@@ -16656,16 +16686,8 @@ fn apply_non_priority_pass_action(
                 state.waiting_for.clone()
             }
         }
-        // CR 608.2c: ChooseObjectsIntoTrackedSet — player submitted their
-        // battlefield-permanent selection. Publish a fresh tracked set so the
-        // downstream `PayCost { ScaledMana }` and the `IfYouDo`/`Untap` tail
-        // resolve against exactly this selection, then resume the chain.
-        //
-        // CR 115.10a + CR 608.2d: the same prompt also carries a described
-        // damage recipient ("a creature or player", no "target") — see
-        // `effects::deal_damage::parked_recipient_pool`. That pick is bound to
-        // the parked damage instruction instead of being published, and may be a
-        // player.
+        // CR 608.2c + CR 608.2d: the published answer to an object selection —
+        // see `apply_choose_objects_selection`.
         (
             WaitingFor::ChooseObjectsSelection {
                 player,
@@ -16675,98 +16697,44 @@ fn apply_non_priority_pass_action(
                 trigger_event,
             },
             GameAction::SelectTargets { targets },
-        ) => {
-            let p = *player;
-            let eligible_set = eligible.clone();
-            let pending_event = trigger_event.clone();
-            let selected_count = targets.len();
-            if selected_count < *min as usize
-                || max.is_some_and(|maximum| selected_count > maximum as usize)
-            {
-                return Err(EngineError::InvalidAction(format!(
-                    "Object selection must choose at least {min}{} distinct objects, got {selected_count}",
-                    max.map_or(String::new(), |maximum| format!(" and at most {maximum}"))
-                )));
-            }
-            // The prompt belongs to a parked described damage instruction only when
-            // the active continuation is that instruction, still holding exactly
-            // the pool this prompt offers. A tracked-set producer's prompt never
-            // matches: its parked continuation is some other instruction, even one
-            // whose own candidate set would be identical.
-            let recipient_pool = state
-                .active_ability_continuation()
-                .and_then(|continuation| {
-                    effects::deal_damage::parked_recipient_pool(&continuation.chain)
-                })
-                .filter(|pool| *pool == eligible_set);
-            // Validate all selected targets are distinct members of the eligible set;
-            // a player is a legal pick only for a damage recipient.
-            let mut selected: HashSet<TargetRef> = HashSet::with_capacity(selected_count);
-            for t in &targets {
-                if !eligible_set.contains(t) {
-                    return Err(EngineError::InvalidAction(
-                        "Selected target not eligible for object selection".to_string(),
-                    ));
-                }
-                if recipient_pool.is_none() && matches!(t, TargetRef::Player(_)) {
-                    return Err(EngineError::InvalidAction(
-                        "Object selection accepts battlefield objects only".to_string(),
-                    ));
-                }
-                if !selected.insert(t.clone()) {
-                    return Err(EngineError::InvalidAction(
-                        "Duplicate object in object selection".to_string(),
-                    ));
-                }
-            }
-            if recipient_pool.is_some() {
-                // CR 608.2d: the pick is chosen while the instruction is applied, so
-                // it is bound unpinned (never announced as a target) as the parked
-                // damage node's recipient. Nothing is published: this is not a
-                // tracked-set selection.
-                if let Some(frame) = state.active_ability_continuation_frame_mut() {
-                    frame.pending.chain.set_unpinned_targets(targets);
-                }
-            } else {
-                let ids: Vec<ObjectId> = targets
-                    .iter()
-                    .map(|target| match target {
-                        TargetRef::Object(id) => *id,
-                        TargetRef::Player(_) => unreachable!("validated as objects above"),
-                    })
-                    .collect();
-                // CR 608.2c: Always allocate a fresh tracked set — a player-chosen
-                // "those creatures" set is a new resolution scope. An empty
-                // selection yields an empty fresh set (size 0).
-                effects::publish_fresh_tracked_set(state, ids);
-                events.push(GameEvent::EffectResolved {
-                    kind: crate::types::ability::EffectKind::ChooseObjectsIntoTrackedSet,
-                    source_id: ObjectId(0), // Source not tracked through choice state
-                    subject: None,
-                });
-            }
-            state.waiting_for = WaitingFor::Priority { player: p };
-            state.priority_player = p;
-            // CR 608.2: restore the triggering event so the stashed
-            // `PayCost { ScaledMana, payer: TriggeringPlayer }` continuation
-            // resolves the payer correctly — the trigger's resolution is still
-            // in flight.
-            // CR 603.2c + CR 608.2: the batched-trigger subject count is also
-            // part of the trigger's resolution scope — mirror its save/restore
-            // so an `EventContextAmount` inside the resumed continuation reads
-            // the original "that many" instead of `None`.
-            let previous_trigger_event = state.current_trigger_event.clone();
-            let previous_trigger_match_count = state.current_trigger_match_count;
-            state.current_trigger_event = pending_event;
-            state.current_trigger_match_count = state
-                .active_ability_continuation()
-                .and_then(|continuation| continuation.trigger_context.as_ref())
-                .and_then(|context| context.match_count);
-            resume_pending_continuation_if_priority(state, &mut events)?;
-            state.current_trigger_event = previous_trigger_event;
-            state.current_trigger_match_count = previous_trigger_match_count;
-            state.waiting_for.clone()
-        }
+        ) => apply_choose_objects_selection(
+            state,
+            &mut events,
+            ChooseObjectsSubmission {
+                player: *player,
+                eligible,
+                min: *min,
+                max: *max,
+                trigger_event: trigger_event.clone(),
+                targets,
+            },
+        )?,
+        // CR 608.2d + CR 115.10a: a single-pick resolution choice (`max == Some(1)`) may be
+        // answered by one board/HUD click. The pick is chosen while the effect is applied and is
+        // not a target, so it forwards to the same authority as `SelectTargets` — never to target
+        // legality — and announces nothing a ward or becomes-target trigger could see. `None` is
+        // an empty selection, legal only when `min == 0`. Other cardinalities keep `SelectTargets`.
+        (
+            WaitingFor::ChooseObjectsSelection {
+                player,
+                eligible,
+                min,
+                max: max @ Some(1),
+                trigger_event,
+            },
+            GameAction::ChooseTarget { target },
+        ) => apply_choose_objects_selection(
+            state,
+            &mut events,
+            ChooseObjectsSubmission {
+                player: *player,
+                eligible,
+                min: *min,
+                max: *max,
+                trigger_event: trigger_event.clone(),
+                targets: target.into_iter().collect(),
+            },
+        )?,
         // CR 707.10c / CR 601.2c: one position of the copy target walk. The
         // pick is answerable only when the engine-derived walk admits it (a
         // keep only where keeping completes; a choice only where it has a
@@ -17569,6 +17537,131 @@ fn apply_retarget(
     state.waiting_for = WaitingFor::Priority { player };
     state.priority_player = player;
     resume_pending_continuation_if_priority(state, events)?;
+    Ok(state.waiting_for.clone())
+}
+
+struct ChooseObjectsSubmission<'a> {
+    player: PlayerId,
+    eligible: &'a [TargetRef],
+    min: u32,
+    max: Option<u32>,
+    trigger_event: Option<GameEvent>,
+    targets: Vec<TargetRef>,
+}
+
+/// CR 608.2c + CR 608.2d: apply a player's answer to a
+/// `WaitingFor::ChooseObjectsSelection` prompt, then resume the parked chain.
+/// Single authority for both `ChooseObjectsSelection` entry points — the
+/// published `SelectTargets` answer and the single-pick board-click
+/// `ChooseTarget` (`max == Some(1)`) — so eligibility, cardinality and recipient
+/// binding can never drift apart.
+///
+/// CR 608.2c: ChooseObjectsIntoTrackedSet — player submitted their
+/// battlefield-permanent selection. Publish a fresh tracked set so the
+/// downstream `PayCost { ScaledMana }` and the `IfYouDo`/`Untap` tail
+/// resolve against exactly this selection, then resume the chain.
+///
+/// CR 115.10a + CR 608.2d: the same prompt also carries a described
+/// damage recipient ("a creature or player", no "target") — see
+/// `effects::deal_damage::parked_recipient_pool`. That pick is bound to
+/// the parked damage instruction instead of being published, and may be a
+/// player.
+fn apply_choose_objects_selection(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    submission: ChooseObjectsSubmission<'_>,
+) -> Result<WaitingFor, EngineError> {
+    let ChooseObjectsSubmission {
+        player: p,
+        eligible: eligible_set,
+        min,
+        max,
+        trigger_event: pending_event,
+        targets,
+    } = submission;
+    let selected_count = targets.len();
+    if selected_count < min as usize || max.is_some_and(|maximum| selected_count > maximum as usize)
+    {
+        return Err(EngineError::InvalidAction(format!(
+            "Object selection must choose at least {min}{} distinct objects, got {selected_count}",
+            max.map_or(String::new(), |maximum| format!(" and at most {maximum}"))
+        )));
+    }
+    // The prompt belongs to a parked described damage instruction only when
+    // the active continuation is that instruction, still holding exactly
+    // the pool this prompt offers. A tracked-set producer's prompt never
+    // matches: its parked continuation is some other instruction, even one
+    // whose own candidate set would be identical.
+    let recipient_pool = state
+        .active_ability_continuation()
+        .and_then(|continuation| effects::deal_damage::parked_recipient_pool(&continuation.chain))
+        .filter(|pool| pool.as_slice() == eligible_set);
+    // Validate all selected targets are distinct members of the eligible set;
+    // a player is a legal pick only for a damage recipient.
+    let mut selected: HashSet<TargetRef> = HashSet::with_capacity(selected_count);
+    for t in &targets {
+        if !eligible_set.contains(t) {
+            return Err(EngineError::InvalidAction(
+                "Selected target not eligible for object selection".to_string(),
+            ));
+        }
+        if recipient_pool.is_none() && matches!(t, TargetRef::Player(_)) {
+            return Err(EngineError::InvalidAction(
+                "Object selection accepts battlefield objects only".to_string(),
+            ));
+        }
+        if !selected.insert(t.clone()) {
+            return Err(EngineError::InvalidAction(
+                "Duplicate object in object selection".to_string(),
+            ));
+        }
+    }
+    if recipient_pool.is_some() {
+        // CR 608.2d: the pick is chosen while the instruction is applied, so
+        // it is bound unpinned (never announced as a target) as the parked
+        // damage node's recipient. Nothing is published: this is not a
+        // tracked-set selection.
+        if let Some(frame) = state.active_ability_continuation_frame_mut() {
+            frame.pending.chain.set_unpinned_targets(targets);
+        }
+    } else {
+        let ids: Vec<ObjectId> = targets
+            .iter()
+            .map(|target| match target {
+                TargetRef::Object(id) => *id,
+                TargetRef::Player(_) => unreachable!("validated as objects above"),
+            })
+            .collect();
+        // CR 608.2c: Always allocate a fresh tracked set — a player-chosen
+        // "those creatures" set is a new resolution scope. An empty
+        // selection yields an empty fresh set (size 0).
+        effects::publish_fresh_tracked_set(state, ids);
+        events.push(GameEvent::EffectResolved {
+            kind: crate::types::ability::EffectKind::ChooseObjectsIntoTrackedSet,
+            source_id: ObjectId(0), // Source not tracked through choice state
+            subject: None,
+        });
+    }
+    state.waiting_for = WaitingFor::Priority { player: p };
+    state.priority_player = p;
+    // CR 608.2: restore the triggering event so the stashed
+    // `PayCost { ScaledMana, payer: TriggeringPlayer }` continuation
+    // resolves the payer correctly — the trigger's resolution is still
+    // in flight.
+    // CR 603.2c + CR 608.2: the batched-trigger subject count is also
+    // part of the trigger's resolution scope — mirror its save/restore
+    // so an `EventContextAmount` inside the resumed continuation reads
+    // the original "that many" instead of `None`.
+    let previous_trigger_event = state.current_trigger_event.clone();
+    let previous_trigger_match_count = state.current_trigger_match_count;
+    state.current_trigger_event = pending_event;
+    state.current_trigger_match_count = state
+        .active_ability_continuation()
+        .and_then(|continuation| continuation.trigger_context.as_ref())
+        .and_then(|context| context.match_count);
+    resume_pending_continuation_if_priority(state, events)?;
+    state.current_trigger_event = previous_trigger_event;
+    state.current_trigger_match_count = previous_trigger_match_count;
     Ok(state.waiting_for.clone())
 }
 
@@ -21337,7 +21430,7 @@ mod priority_principal_tests {
             object.base_card_types = object.card_types.clone();
             object.mana_cost = ManaCost::generic(8);
             object.base_mana_cost = object.mana_cost.clone();
-            object.keywords = vec![Keyword::Morph(ManaCost::generic(5))];
+            object.keywords = vec![Keyword::morph(ManaCost::generic(5))];
             object.base_keywords = object.keywords.clone();
         }
         let sibling_spell = zones::create_object(
