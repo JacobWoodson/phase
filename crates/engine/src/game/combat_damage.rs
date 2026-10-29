@@ -2764,7 +2764,7 @@ pub(crate) fn fire_batch_prevention_riders(
             .damage_source_filter
             .as_ref()
             .and_then(shield_specific_source);
-        let runtime = repl_def.runtime_execute.clone();
+        let runtime = state.replacement_rider(repl_def).cloned();
 
         // CR 615.13 (Matt R15): one per (shield, recipient) — one-shots
         // publish here like every other shield (the applier suppresses its
@@ -2793,7 +2793,7 @@ pub(crate) fn fire_batch_prevention_riders(
         // that by construction, where the old code had to remember to clear a
         // parallel field.
         state.install_ready_continuation(
-            crate::types::ability::PostReplacementContinuation::Resolved(runtime),
+            crate::types::ability::PostReplacementContinuation::Resolved(Box::new(runtime)),
         );
         if let Some(source) = event_source {
             if let Some(drain) = state
@@ -6908,6 +6908,8 @@ mod tests {
             host,
             controller,
         );
+        // #10392: riders live in the arena — install before the push borrows state.
+        let rider_id = state.install_replacement_continuation(rider);
         state
             .objects
             .get_mut(&host)
@@ -6917,7 +6919,7 @@ mod tests {
                 ReplacementDefinition::new(ReplacementEvent::DamageDone)
                     .prevention_shield(PreventionAmount::All)
                     .valid_card(TargetFilter::SelfRef)
-                    .runtime_execute(rider)
+                    .runtime_execute(rider_id)
                     .description("Comeuppance-class reflector".to_string()),
             );
     }
@@ -6938,7 +6940,8 @@ mod tests {
             .description(name.to_string());
         if reflecting {
             let controller = state.objects[&host].controller;
-            def = def.runtime_execute(ResolvedAbility::new(
+            // #10392: riders live in the arena — install, then link the id.
+            let rider = ResolvedAbility::new(
                 Effect::DealDamage {
                     amount: QuantityExpr::Ref {
                         qty: QuantityRef::EventContextAmount,
@@ -6950,7 +6953,9 @@ mod tests {
                 vec![],
                 host,
                 controller,
-            ));
+            );
+            let rider_id = state.install_replacement_continuation(rider);
+            def = def.runtime_execute(rider_id);
         }
         state
             .objects
@@ -7493,6 +7498,8 @@ mod tests {
             host,
             controller,
         );
+        // #10392: riders live in the arena — install before the push borrows state.
+        let rider_id = state.install_replacement_continuation(rider);
         state
             .objects
             .get_mut(&host)
@@ -7502,7 +7509,7 @@ mod tests {
                 ReplacementDefinition::new(ReplacementEvent::DamageDone)
                     .prevention_shield(PreventionAmount::Next(n))
                     .valid_card(TargetFilter::SelfRef)
-                    .runtime_execute(rider)
+                    .runtime_execute(rider_id)
                     .description(name.to_string()),
             );
     }
@@ -7869,6 +7876,8 @@ mod tests {
             squire,
             PlayerId(1),
         );
+        // #10392: riders live in the arena — install before the push borrows state.
+        let rider_id = state.install_replacement_continuation(rider);
         state
             .objects
             .get_mut(&squire)
@@ -7878,7 +7887,7 @@ mod tests {
                 ReplacementDefinition::new(ReplacementEvent::DamageDone)
                     .prevention_shield(PreventionAmount::Next(3))
                     .valid_card(TargetFilter::SelfRef)
-                    .runtime_execute(rider)
+                    .runtime_execute(rider_id)
                     .description("Awe-Strike-class shield".to_string()),
             );
         // Event 2: the protection overlap that pauses.

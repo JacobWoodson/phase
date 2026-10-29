@@ -2501,6 +2501,8 @@ fn typed_nested_batch_publishes_child_before_outer_tail() {
         filter: bear2_filter,
     });
     let rider = build_resolved_from_def(&rider_def, way_bear, P0);
+    // Arena-backed rider (upstream #10392): install the continuation, then link it.
+    let rider_id = runner.state_mut().install_replacement_continuation(rider);
     runner
         .state_mut()
         .pending_damage_replacements
@@ -2511,7 +2513,7 @@ fn typed_nested_batch_publishes_child_before_outer_tail() {
                 .is_some_and(|f| matches!(f, TargetFilter::SpecificObject { id } if *id == bear2))
         })
         .expect("NWF-Bear2's installed shield must exist")
-        .runtime_execute = Some(Box::new(rider));
+        .runtime_execute = Some(rider_id);
 
     // The typed outer batch: each Bear you control deals damage equal to its
     // power to its controller. Resolved directly (no printed card has this
@@ -2924,6 +2926,8 @@ fn typed_nested_batch_owned_tail_binds_child_owner() {
         filter: bear3_filter,
     });
     let rider = build_resolved_from_def(&rider_def, way_bear3, P0);
+    // Arena-backed rider (upstream #10392): install the continuation, then link it.
+    let rider_id = runner.state_mut().install_replacement_continuation(rider);
     runner
         .state_mut()
         .pending_damage_replacements
@@ -2934,7 +2938,7 @@ fn typed_nested_batch_owned_tail_binds_child_owner() {
                 .is_some_and(|f| matches!(f, TargetFilter::SpecificObject { id } if *id == bear3))
         })
         .expect("NWF-Bear3's installed shield must exist")
-        .runtime_execute = Some(Box::new(rider));
+        .runtime_execute = Some(rider_id);
 
     // The typed outer batch: each Bear (both players' — no controller
     // filter, the printed Rakdos Charm shape) deals damage equal to its
@@ -3478,6 +3482,8 @@ fn typed_nested_batch_second_ordering_retains_child_stamp() {
         filter: bear2_filter,
     });
     let rider = build_resolved_from_def(&rider_def, way_bear, P0);
+    // Arena-backed rider (upstream #10392): install the continuation, then link it.
+    let rider_id = runner.state_mut().install_replacement_continuation(rider);
     runner
         .state_mut()
         .pending_damage_replacements
@@ -3488,7 +3494,7 @@ fn typed_nested_batch_second_ordering_retains_child_stamp() {
                 .is_some_and(|f| matches!(f, TargetFilter::SpecificObject { id } if *id == bear2))
         })
         .expect("NWF-Bear2 installed shield must exist")
-        .runtime_execute = Some(Box::new(rider));
+        .runtime_execute = Some(rider_id);
     let outer_def = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::EachSourceDealsDamage {
