@@ -926,28 +926,29 @@ fn compound_subject_keyword_static_splits_four_item_oxford_list() {
     assert_eq!(defs[1].mode, StaticMode::Shroud);
 }
 
-// CR 611.3a + CR 604.3 + CR 613.4a: Angry Mob — a two-clause turn-window CDA. "During
+// CR 604.3a + CR 613.4b: conditional equality is an ordinary layer-7b setter.
+// SHAPE: Angry Mob has two complementary live turn-window statics. "During
 // your turn, ~'s power and toughness are each equal to 2 plus the number of
 // Swamps your opponents control. During turns other than yours, ~'s power and
-// toughness are each 2." Splits into two CDA statics: the on-turn clause is a
+// toughness are each 2." Splits into two conditional statics: the on-turn clause is a
 // dynamic P/T (2 + count) gated on DuringYourTurn; the off-turn clause is a
 // constant 2/2 gated on Not{DuringYourTurn}.
 #[test]
-fn static_angry_mob_two_clause_turn_window_cda() {
+fn static_angry_mob_two_clause_turn_window_setter() {
     let defs = parse_static_line_multi(
         "During your turn, Angry Mob's power and toughness are each equal to 2 plus the number of Swamps your opponents control. During turns other than yours, Angry Mob's power and toughness are each 2.",
     );
     assert_eq!(
         defs.len(),
         2,
-        "expected two turn-window CDA statics, got {defs:?}"
+        "expected two turn-window statics, got {defs:?}"
     );
 
     // On-turn: dynamic P/T (Offset over opponent Swamp count), gated DuringYourTurn.
     let on_turn = &defs[0];
     assert!(
-        on_turn.characteristic_defining,
-        "on-turn clause must be a CDA"
+        !on_turn.characteristic_defining,
+        "on-turn clause must be an ordinary setter"
     );
     assert_eq!(on_turn.condition, Some(StaticCondition::DuringYourTurn));
     // Prove the full quantity, not just that *some* dynamic power exists: both
@@ -969,22 +970,22 @@ fn static_angry_mob_two_clause_turn_window_cda() {
     assert_eq!(
         on_turn.modifications,
         vec![
-            ContinuousModification::SetDynamicPower {
+            ContinuousModification::SetPowerDynamic {
                 value: two_plus_opponent_swamps.clone(),
             },
-            ContinuousModification::SetDynamicToughness {
+            ContinuousModification::SetToughnessDynamic {
                 value: two_plus_opponent_swamps,
             },
         ],
-        "on-turn CDA must set BOTH power and toughness to (2 + opponent Swamp count): {:?}",
+        "on-turn static must set BOTH power and toughness to (2 + opponent Swamp count): {:?}",
         on_turn.modifications
     );
 
     // Off-turn: constant 2/2, gated Not{DuringYourTurn}.
     let off_turn = &defs[1];
     assert!(
-        off_turn.characteristic_defining,
-        "off-turn clause must be a CDA"
+        !off_turn.characteristic_defining,
+        "off-turn clause must be an ordinary setter"
     );
     assert_eq!(
         off_turn.condition,
@@ -29310,6 +29311,51 @@ fn effect_subject_prefix_word_boundary() {
     assert!(parse_effect_subject_prefix("eachother").is_err());
 }
 
+// SHAPE: the shared inverted normalizer recognizes exactly the possessive P/T
+// subjects, and preserves commas inside the condition before that subject.
+#[test]
+fn static_gaeas_liege_possessive_subject_boundaries() {
+    for effect in [
+        "its power and toughness are each equal to 2",
+        "its power is equal to 2",
+        "its toughness is equal to 2",
+    ] {
+        assert!(parse_effect_subject_prefix(effect).is_ok(), "{effect}");
+        let text = format!("As long as ~ is attacking, {effect}.");
+        let lower = text.to_lowercase();
+        let split = try_split_inverted_as_long_as(&TextPair::new(&text, &lower)).unwrap();
+        assert_eq!(split.condition_text, "~ is attacking");
+        assert_eq!(split.effect_text, effect);
+        assert_eq!(
+            split.canonical,
+            format!("{effect} as long as ~ is attacking")
+        );
+    }
+    for adjacent in [
+        "its controller has a creature",
+        "its mana value is 4",
+        "its powerful friend attacks",
+        "its toughnesses are equal",
+    ] {
+        assert!(parse_effect_subject_prefix(adjacent).is_err(), "{adjacent}");
+    }
+    for existing in ["it gets +1/+1", "~ has flying", "each creature gets +1/+1"] {
+        assert!(parse_effect_subject_prefix(existing).is_ok(), "{existing}");
+    }
+    let text = "As long as ~ is attacking, its controller has a creature, its power is equal to 2.";
+    let lower = text.to_lowercase();
+    let split = try_split_inverted_as_long_as(&TextPair::new(text, &lower)).unwrap();
+    assert_eq!(
+        split.condition_text,
+        "~ is attacking, its controller has a creature"
+    );
+    assert_eq!(split.effect_text, "its power is equal to 2");
+    assert_eq!(
+        split.canonical,
+        "its power is equal to 2 as long as ~ is attacking, its controller has a creature"
+    );
+}
+
 #[test]
 fn inverted_splits_auriok_condition_cleanly() {
     // The primary success criterion: the condition is separated from the effect clause.
@@ -35321,6 +35367,7 @@ fn subgoyf_cda_power_is_bare_count_toughness_is_count_plus_one() {
                 scope: CountScope::All,
             },
             exclude: SubtypeExclusion::CreatureTypes,
+            restrict: None,
         },
     };
 
@@ -40360,6 +40407,409 @@ fn for_each_creature_assign_damage_as_though_unblocked_declines_unmodeled_forms(
     }
 }
 
+// ---------------------------------------------------------------------------
+// CR 113.6c: a negated source-zone condition declares the complement zones.
+// ---------------------------------------------------------------------------
+
+const GRIST_STATIC_LINE: &str = "As long as ~ isn't on the battlefield, it's a 1/1 Insect creature in addition to its other types.";
+
+const NON_BATTLEFIELD_ZONES: [Zone; 6] = [
+    Zone::Library,
+    Zone::Hand,
+    Zone::Graveyard,
+    Zone::Stack,
+    Zone::Exile,
+    Zone::Command,
+];
+
+fn zones_derived_from(condition: StaticCondition) -> Vec<Zone> {
+    let mut def = crate::types::ability::StaticDefinition::continuous();
+    def.condition = Some(condition);
+    shared::populate_active_zones_from_condition(&mut def);
+    def.active_zones
+}
+
+fn in_zone(zone: Zone) -> StaticCondition {
+    StaticCondition::SourceInZone { zone }
+}
+
+fn negated(condition: StaticCondition) -> StaticCondition {
+    StaticCondition::Not {
+        condition: Box::new(condition),
+    }
+}
+
+fn non_zone_leaf() -> StaticCondition {
+    StaticCondition::IsPresent { filter: None }
+}
+
+/// CR 113.6c: Grist, the Hunger Tide's static declares every zone but the
+/// battlefield, and keeps its condition for runtime evaluation.
+#[test]
+fn grist_negated_battlefield_static_declares_every_other_zone() {
+    let def = parse_static_line(GRIST_STATIC_LINE).expect("Grist static must parse");
+    assert_eq!(def.active_zones, NON_BATTLEFIELD_ZONES.to_vec());
+    assert_eq!(def.condition, Some(negated(in_zone(Zone::Battlefield))));
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    for expected in [
+        ContinuousModification::SetPower { value: 1 },
+        ContinuousModification::SetToughness { value: 1 },
+        ContinuousModification::AddType {
+            core_type: crate::types::card_type::CoreType::Creature,
+        },
+        ContinuousModification::AddSubtype {
+            subtype: "Insect".to_string(),
+        },
+    ] {
+        assert!(
+            def.modifications.contains(&expected),
+            "missing {expected:?} in {:?}",
+            def.modifications
+        );
+    }
+
+    // Full-card dispatch: the same static, from the verbatim Oracle line.
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "As long as Grist isn't on the battlefield, it's a 1/1 Insect creature in addition to its other types.",
+        "Grist, the Hunger Tide",
+        &[],
+        &["Planeswalker".to_string()],
+        &["Grist".to_string()],
+    );
+    assert_eq!(
+        parsed.statics[0].active_zones,
+        NON_BATTLEFIELD_ZONES.to_vec()
+    );
+
+    // Paired affirmative sibling: the legacy derivation is untouched.
+    let sibling = parse_static_line(
+        "As long as ~ is in your graveyard, it's a 1/1 Insect creature in addition to its other types.",
+    )
+    .expect("affirmative sibling must parse");
+    assert_eq!(sibling.active_zones, vec![Zone::Graveyard]);
+    assert_eq!(sibling.condition, Some(in_zone(Zone::Graveyard)));
+}
+
+#[test]
+fn single_zone_condition_derivation_and_its_negation() {
+    assert_eq!(
+        zones_derived_from(in_zone(Zone::Graveyard)),
+        vec![Zone::Graveyard]
+    );
+    assert_eq!(
+        zones_derived_from(in_zone(Zone::Battlefield)),
+        Vec::<Zone>::new()
+    );
+    // Battlefield stays listed when the complement has more than one zone.
+    assert_eq!(
+        zones_derived_from(negated(in_zone(Zone::Graveyard))),
+        vec![
+            Zone::Library,
+            Zone::Hand,
+            Zone::Battlefield,
+            Zone::Stack,
+            Zone::Exile,
+            Zone::Command
+        ]
+    );
+}
+
+#[test]
+fn negated_disjunction_declares_the_complement() {
+    let expected = vec![
+        Zone::Library,
+        Zone::Hand,
+        Zone::Stack,
+        Zone::Exile,
+        Zone::Command,
+    ];
+    let from_text = parse_static_line(
+        "As long as ~ isn't in your graveyard or on the battlefield, it's a 1/1 Insect creature in addition to its other types.",
+    )
+    .expect("negated disjunction must parse");
+    assert_eq!(from_text.active_zones, expected);
+    let typed = StaticCondition::Or {
+        conditions: vec![in_zone(Zone::Graveyard), in_zone(Zone::Battlefield)],
+    };
+    assert_eq!(zones_derived_from(negated(typed)), expected);
+    // Paired: the unnegated disjunction keeps the legacy union, in written order.
+    let eminence = StaticCondition::Or {
+        conditions: vec![in_zone(Zone::Command), in_zone(Zone::Battlefield)],
+    };
+    assert_eq!(
+        zones_derived_from(eminence),
+        vec![Zone::Command, Zone::Battlefield]
+    );
+}
+
+#[test]
+fn double_negation_declares_the_inner_zone() {
+    let inner = in_zone(Zone::Hand);
+    assert_eq!(zones_derived_from(inner.clone()), vec![Zone::Hand]);
+    assert_eq!(
+        zones_derived_from(negated(negated(inner.clone()))),
+        vec![Zone::Hand]
+    );
+    assert_eq!(
+        zones_derived_from(negated(negated(negated(inner)))),
+        vec![
+            Zone::Library,
+            Zone::Battlefield,
+            Zone::Graveyard,
+            Zone::Stack,
+            Zone::Exile,
+            Zone::Command
+        ]
+    );
+}
+
+/// CR 113.6c: a negation that also tests a non-zone leaf declares every zone the
+/// source's zone alone does not rule out (a conservative superset); the runtime
+/// condition decides each one. A zone-independent negation states no zones.
+#[test]
+fn mixed_negation_declares_every_zone_it_can_hold_in() {
+    // not (in graveyard and P): true in every other zone, and in the graveyard
+    // whenever P is false — so it can hold in every zone.
+    let non_pure = negated(StaticCondition::And {
+        conditions: vec![in_zone(Zone::Graveyard), non_zone_leaf()],
+    });
+    assert_eq!(
+        zones_derived_from(non_pure),
+        vec![
+            Zone::Graveyard,
+            Zone::Library,
+            Zone::Hand,
+            Zone::Battlefield,
+            Zone::Stack,
+            Zone::Exile,
+            Zone::Command
+        ]
+    );
+    // not (in graveyard or P): false in the graveyard; elsewhere it holds when
+    // P is false.
+    let negated_disjunction = negated(StaticCondition::Or {
+        conditions: vec![in_zone(Zone::Graveyard), non_zone_leaf()],
+    });
+    assert_eq!(
+        zones_derived_from(negated_disjunction),
+        vec![
+            Zone::Library,
+            Zone::Hand,
+            Zone::Battlefield,
+            Zone::Stack,
+            Zone::Exile,
+            Zone::Command
+        ]
+    );
+    // not (in graveyard and in hand): no source is in both, so it always holds.
+    let contradiction = negated(StaticCondition::And {
+        conditions: vec![
+            in_zone(Zone::Graveyard),
+            in_zone(Zone::Hand),
+            non_zone_leaf(),
+        ],
+    });
+    assert_eq!(
+        zones_derived_from(contradiction),
+        vec![
+            Zone::Graveyard,
+            Zone::Hand,
+            Zone::Library,
+            Zone::Battlefield,
+            Zone::Stack,
+            Zone::Exile,
+            Zone::Command
+        ]
+    );
+    // A negation that tests no zone keeps the battlefield default.
+    assert_eq!(
+        zones_derived_from(negated(non_zone_leaf())),
+        Vec::<Zone>::new()
+    );
+    let zone_free_compound = negated(StaticCondition::And {
+        conditions: vec![non_zone_leaf(), StaticCondition::DuringYourTurn],
+    });
+    assert_eq!(zones_derived_from(zone_free_compound), Vec::<Zone>::new());
+
+    // Paired positives: the unnegated Anger shape still derives [Graveyard], and a pure
+    // Not inside a mixed And is still complemented.
+    let anger = StaticCondition::And {
+        conditions: vec![in_zone(Zone::Graveyard), non_zone_leaf()],
+    };
+    assert_eq!(zones_derived_from(anger), vec![Zone::Graveyard]);
+    let mixed = StaticCondition::And {
+        conditions: vec![negated(in_zone(Zone::Battlefield)), non_zone_leaf()],
+    };
+    assert_eq!(zones_derived_from(mixed), NON_BATTLEFIELD_ZONES.to_vec());
+    let from_text = parse_static_line(
+        "As long as ~ isn't on the battlefield and you control a Forest, it's a 1/1 Insect creature in addition to its other types.",
+    )
+    .expect("mixed negation must parse");
+    assert_eq!(from_text.active_zones, NON_BATTLEFIELD_ZONES.to_vec());
+}
+
+/// CR 113.6b + CR 113.6c: a source filter carrying a zone property is a test of
+/// the source's zone. Affirmed, it declares the zones it allows; negated, every
+/// zone it doesn't rule out. A source filter with no zone property tests no zone.
+#[test]
+fn zone_bearing_source_filter_is_a_zone_test() {
+    use crate::types::ability::{FilterProp, TypeFilter, TypedFilter};
+    let source_filter = |properties: Vec<FilterProp>| StaticCondition::SourceMatchesFilter {
+        filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(properties)),
+    };
+    let in_graveyard = source_filter(vec![FilterProp::InZone {
+        zone: Zone::Graveyard,
+    }]);
+    assert_eq!(
+        zones_derived_from(in_graveyard.clone()),
+        vec![Zone::Graveyard]
+    );
+    // Negated, it holds in every other zone, and in the graveyard whenever the
+    // source isn't a creature: it is zone-dependent, so it declares every zone
+    // (unlike a zone-free negation, below) and the runtime condition decides.
+    assert_eq!(
+        zones_derived_from(negated(in_graveyard)),
+        vec![
+            Zone::Graveyard,
+            Zone::Library,
+            Zone::Hand,
+            Zone::Battlefield,
+            Zone::Stack,
+            Zone::Exile,
+            Zone::Command
+        ]
+    );
+    let in_graveyard_or_exile = source_filter(vec![FilterProp::InAnyZone {
+        zones: vec![Zone::Graveyard, Zone::Exile],
+    }]);
+    assert_eq!(
+        zones_derived_from(in_graveyard_or_exile),
+        vec![Zone::Graveyard, Zone::Exile]
+    );
+    // A filter's own connectives compose: "a creature card in your graveyard or
+    // a spell" rules out every zone but those two.
+    let graveyard_or_spell = StaticCondition::SourceMatchesFilter {
+        filter: TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(vec![
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                ])),
+                TargetFilter::StackSpell,
+            ],
+        },
+    };
+    assert_eq!(
+        zones_derived_from(graveyard_or_spell),
+        vec![Zone::Graveyard, Zone::Stack]
+    );
+    // No zone property: no zone stated, affirmed or negated.
+    let zone_free = source_filter(vec![]);
+    assert_eq!(zones_derived_from(zone_free.clone()), Vec::<Zone>::new());
+    assert_eq!(zones_derived_from(negated(zone_free)), Vec::<Zone>::new());
+}
+
+/// CR 113.6b + CR 113.6c: a source filter's zone properties nested under
+/// `FilterProp::Not` / `FilterProp::AnyOf` are zone tests too.
+#[test]
+fn nested_zone_props_of_a_source_filter_are_zone_tests() {
+    use crate::types::ability::{FilterProp, TypeFilter, TypedFilter};
+    let source_filter = |properties: Vec<FilterProp>| StaticCondition::SourceMatchesFilter {
+        filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(properties)),
+    };
+    let not_on_battlefield = source_filter(vec![FilterProp::Not {
+        prop: Box::new(FilterProp::InZone {
+            zone: Zone::Battlefield,
+        }),
+    }]);
+    assert_eq!(
+        zones_derived_from(not_on_battlefield),
+        NON_BATTLEFIELD_ZONES.to_vec()
+    );
+    let graveyard_or_exile = source_filter(vec![FilterProp::AnyOf {
+        props: vec![
+            FilterProp::InZone {
+                zone: Zone::Graveyard,
+            },
+            FilterProp::InZone { zone: Zone::Exile },
+        ],
+    }]);
+    assert_eq!(
+        zones_derived_from(graveyard_or_exile),
+        vec![Zone::Graveyard, Zone::Exile]
+    );
+}
+
+/// CR 113.6c: a disjunction of a source-zone test and a non-zone leaf can hold
+/// in every zone (the non-zone leaf may be true anywhere), so it declares them
+/// all, the named zone first; a conjunction still declares only its zone.
+#[test]
+fn disjunction_with_a_non_zone_leaf_declares_every_zone() {
+    let in_hand_or_present = StaticCondition::Or {
+        conditions: vec![in_zone(Zone::Hand), non_zone_leaf()],
+    };
+    assert_eq!(
+        zones_derived_from(in_hand_or_present),
+        vec![
+            Zone::Hand,
+            Zone::Library,
+            Zone::Battlefield,
+            Zone::Graveyard,
+            Zone::Stack,
+            Zone::Exile,
+            Zone::Command
+        ]
+    );
+    let in_hand_and_present = StaticCondition::And {
+        conditions: vec![in_zone(Zone::Hand), non_zone_leaf()],
+    };
+    assert_eq!(zones_derived_from(in_hand_and_present), vec![Zone::Hand]);
+    // No node depends on the source's zone: the battlefield default.
+    let zone_free = StaticCondition::Or {
+        conditions: vec![non_zone_leaf(), StaticCondition::DuringYourTurn],
+    };
+    assert_eq!(zones_derived_from(zone_free), Vec::<Zone>::new());
+}
+
+#[test]
+fn complement_collapsing_to_battlefield_stays_default() {
+    let everything_else = StaticCondition::Or {
+        conditions: NON_BATTLEFIELD_ZONES.iter().copied().map(in_zone).collect(),
+    };
+    assert_eq!(
+        zones_derived_from(negated(everything_else)),
+        Vec::<Zone>::new()
+    );
+    assert_eq!(
+        zones_derived_from(in_zone(Zone::Battlefield)),
+        Vec::<Zone>::new()
+    );
+    // Identities of the set algebra (vacuous shapes, unreachable from text).
+    let empty_or = StaticCondition::Or { conditions: vec![] };
+    assert_eq!(zones_derived_from(empty_or.clone()), Vec::<Zone>::new());
+    assert_eq!(zones_derived_from(negated(empty_or)), Zone::ALL.to_vec());
+}
+
+#[test]
+fn zone_derivation_is_idempotent_and_never_clobbers() {
+    let mut def = parse_static_line(GRIST_STATIC_LINE).expect("Grist static must parse");
+    let once = def.active_zones.clone();
+    assert_eq!(once, NON_BATTLEFIELD_ZONES.to_vec());
+    shared::populate_active_zones_from_condition(&mut def);
+    assert_eq!(def.active_zones, once);
+
+    // The Class level-section path lowers a second time.
+    let relowered = lower_static_ir(&StaticIr::from_definition(GRIST_STATIC_LINE, def));
+    assert_eq!(relowered.active_zones, once);
+
+    // A pre-set active_zones is never replaced by the derivation.
+    let mut preset = crate::types::ability::StaticDefinition::continuous();
+    preset.condition = Some(negated(in_zone(Zone::Battlefield)));
+    preset.active_zones = vec![Zone::Hand];
+    shared::populate_active_zones_from_condition(&mut preset);
+    assert_eq!(preset.active_zones, vec![Zone::Hand]);
+}
 // ── Cost-modifier gates fail closed (CR 601.2f) ─────────────────────────────
 
 fn parse_card(
@@ -40799,4 +41249,165 @@ fn granted_loyalty_abilities_carry_cr_606_3_timing() {
         def.activation_restrictions
     );
     assert!(crate::game::mana_abilities::is_mana_ability(def));
+}
+
+/// CR 702.16i + CR 903.4: Commander's Plate — "Equipped creature gets +3/+3 and
+/// has protection from each color that's not in your commander's color
+/// identity." The protection quality is a typed `EachColor` set, not an
+/// untyped `CardType` string that no source could ever match.
+#[test]
+fn commanders_plate_static_line_parses_to_each_color_protection_set() {
+    use crate::types::keywords::{ProtectionColorSet, ProtectionTarget};
+
+    let def = parse_static_line(
+        "Equipped creature gets +3/+3 and has protection from each color that's not in your commander's color identity.",
+    )
+    .expect("Commander's Plate static line must parse");
+    assert_eq!(
+        def.modifications,
+        vec![
+            ContinuousModification::AddPower { value: 3 },
+            ContinuousModification::AddToughness { value: 3 },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(ProtectionTarget::EachColor(
+                    ProtectionColorSet::OutsideCommanderColorIdentity
+                )),
+            },
+        ]
+    );
+}
+
+// SHAPE: the full Oracle line and its canonical trailing forms must preserve
+// both the live Forest census and the complementary combat gates.
+// CR 604.3a + CR 611.3a + CR 613.4b: conditional equality is not a CDA.
+#[test]
+fn static_gaeas_liege_complementary_forest_setters() {
+    // The static parser receives card-name references normalized to `~` by the
+    // Oracle pipeline; full-card dispatch below covers the verbatim Oracle text.
+    let defs = parse_static_line_multi("As long as ~ isn't attacking, its power and toughness are each equal to the number of Forests you control. As long as ~ is attacking, its power and toughness are each equal to the number of Forests defending player controls.");
+    assert_eq!(defs.len(), 2, "{defs:?}");
+    let gates = [
+        StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceIsAttacking),
+        },
+        StaticCondition::SourceIsAttacking,
+    ];
+    for ((def, gate), controller) in defs
+        .iter()
+        .zip(gates)
+        .zip([ControllerRef::You, ControllerRef::DefendingPlayer])
+    {
+        let value = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Subtype("Forest".to_string()))
+                        .controller(controller),
+                ),
+            },
+        };
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert_eq!(def.condition, Some(gate));
+        assert_eq!(
+            def.modifications,
+            vec![
+                ContinuousModification::SetPowerDynamic {
+                    value: value.clone()
+                },
+                ContinuousModification::SetToughnessDynamic { value }
+            ]
+        );
+        assert!(!def.characteristic_defining);
+    }
+    for (line, expected) in [
+        ("Gaea's Liege's power and toughness are each equal to the number of Forests you control as long as it isn't attacking.", &defs[0]),
+        ("Gaea's Liege's power and toughness are each equal to the number of Forests defending player controls as long as it is attacking.", &defs[1]),
+    ] {
+        let def = parse_static_line(line).expect("canonical equality must parse");
+        assert_eq!(def.condition, expected.condition);
+        assert_eq!(def.modifications, expected.modifications);
+        assert!(!def.characteristic_defining);
+    }
+}
+
+// SHAPE: exercise the shared equality family's axes, preserve unconditional
+// CDAs, and retain unsupported gate text rather than erasing a rules condition.
+// CR 604.3a + CR 613.4a + CR 613.4b: only ungated equality is characteristic defining.
+#[test]
+fn static_gaeas_liege_equality_siblings_and_honest_gaps() {
+    let maro = parse_static_line(
+        "Maro's power and toughness are each equal to the number of cards in your hand.",
+    )
+    .unwrap();
+    assert!(maro.characteristic_defining);
+    assert_eq!(maro.modifications.len(), 2);
+    assert!(matches!(
+        maro.modifications[0],
+        ContinuousModification::SetDynamicPower { .. }
+    ));
+    for (axis, power) in [("power", true), ("toughness", false)] {
+        let line = format!("This creature's {axis} is equal to the number of Forests you control as long as it is attacking.");
+        let def = parse_static_line(&line).unwrap();
+        assert_eq!(def.condition, Some(StaticCondition::SourceIsAttacking));
+        assert_eq!(def.modifications.len(), 1);
+        assert_eq!(
+            matches!(
+                def.modifications[0],
+                ContinuousModification::SetPowerDynamic { .. }
+            ),
+            power
+        );
+        assert!(!def.characteristic_defining);
+    }
+    let unknown = parse_static_line("This creature's power and toughness are each equal to the number of Forests you control as long as the moon is made of cheese.").unwrap();
+    assert_eq!(
+        unknown.modifications.len(),
+        2,
+        "recognized equality body must survive"
+    );
+    assert!(matches!(
+        unknown.condition,
+        Some(StaticCondition::Unrecognized { .. })
+    ));
+    assert!(!unknown.characteristic_defining);
+    assert!(
+        unknown.condition.as_ref().unwrap().contains_unrecognized(),
+        "coverage must retain the unsupported condition gap"
+    );
+    assert!(super::cda::parse_cda_pt_equality(
+        "this creature's power and toughness are each equal to the smell of morning.",
+        "This creature's power and toughness are each equal to the smell of morning."
+    )
+    .is_none());
+    assert!(super::cda::parse_cda_pt_equality("this creature's power and toughness are each equal to the number of forests you control for as long as it is attacking.", "This creature's power and toughness are each equal to the number of Forests you control for as long as it is attacking.").is_none());
+    let combined = parse_static_line("During your turn, this creature's power and toughness are each equal to the number of Forests you control as long as it is attacking.").unwrap();
+    assert_eq!(
+        combined.condition,
+        Some(StaticCondition::And {
+            conditions: vec![
+                StaticCondition::DuringYourTurn,
+                StaticCondition::SourceIsAttacking
+            ]
+        })
+    );
+}
+
+// SHAPE: full card dispatch must reach both statics and its existing activation,
+// without a swallowed clause or an unsupported effect replacing either half.
+#[test]
+fn static_gaeas_liege_full_oracle_dispatch() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "As long as Gaea's Liege isn't attacking, its power and toughness are each equal to the number of Forests you control. As long as Gaea's Liege is attacking, its power and toughness are each equal to the number of Forests defending player controls.\n{T}: Target land becomes a Forest until this creature leaves the battlefield.",
+        "Gaea's Liege", &[], &["Creature".to_string()], &[],
+    );
+    assert_eq!(parsed.statics.len(), 2, "{parsed:?}");
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:?}");
+    assert!(parsed
+        .abilities
+        .iter()
+        .all(|a| a.effect.unimplemented_description().is_none()));
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "{:?}",
+        parsed.parse_warnings
+    );
 }

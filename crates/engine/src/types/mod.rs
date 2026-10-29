@@ -12,6 +12,7 @@ pub mod counter;
 pub mod custom_format;
 pub mod definitions;
 pub(crate) mod deterministic_serde;
+pub mod dungeon;
 pub mod events;
 pub mod format;
 pub mod game_state;
@@ -24,6 +25,7 @@ pub mod log;
 pub mod mana;
 pub mod match_config;
 pub mod object_map;
+pub mod oracle_diagnostic;
 pub mod phase;
 pub mod player;
 pub mod proposed_event;
@@ -33,15 +35,18 @@ pub mod resolution;
 pub mod resolved_commands;
 pub mod statics;
 pub mod stickers;
+pub mod text_grammar;
+pub mod token_presets;
 pub mod triggers;
 pub mod zones;
 
 pub use ability::{
     AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AdditionalCost, BasicLandType,
     ChosenAttribute, ChosenSubtypeKind, ContinuousModification, ControllerRef, Duration, Effect,
-    EffectError, FilterProp, ManaProduction, ManaSpendRestriction, Parity, ParitySource, PtValue,
-    ReplacementDefinition, ResolvedAbility, StaticCondition, StaticDefinition, TargetFilter,
-    TargetRef, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    EffectError, FilterProp, ManaProduction, ManaSpendRestriction, NumberQuality, Parity,
+    ParitySource, PtValue, ReplacementDefinition, ResolvedAbility, StaticCondition,
+    StaticDefinition, TargetFilter, TargetRef, TriggerCondition, TriggerDefinition, TypeFilter,
+    TypedFilter,
 };
 pub use action_rejection::{ActionRejection, ActionRejectionCode, ActionRejectionDisposition};
 pub use actions::{GameAction, ResolutionOptionalPaymentChoice};
