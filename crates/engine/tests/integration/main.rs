@@ -2143,6 +2143,7 @@ mod search_result_conditional_destination;
 mod search_result_missing_referent;
 
 mod activate_only_restriction_list;
+mod attack_owner_riders;
 mod celes_kotis_graveyard_origin_batch;
 mod commanders_plate_protection;
 mod display_identity_serde;

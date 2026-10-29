@@ -576,6 +576,43 @@ fn my_crushing_masterstroke_is_supported() {
     );
 }
 
+/// CR 608.2c: "They gain haste" after "Untap those permanents" names the
+/// chain's tracked set — the seized permanents — not the head's
+/// opponent-controlled population filter, which matches nothing once
+/// control has changed hands.
+#[test]
+fn my_crushing_masterstroke_haste_binds_the_seized_set() {
+    let oracle = "When you set this scheme in motion, gain control of all nonland permanents your opponents control until end of turn. Untap those permanents. They gain haste until end of turn. Each of them attacks its owner this turn if able.";
+    let (types, subtypes) = scheme_types();
+    let parsed = parse_oracle_text(oracle, "My Crushing Masterstroke", &[], &types, &subtypes);
+    let mut cursor = parsed.triggers[0]
+        .execute
+        .as_deref()
+        .expect("trigger has a body");
+    let affected = loop {
+        if let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*cursor.effect
+        {
+            break static_abilities
+                .iter()
+                .find_map(|static_def| static_def.affected.clone())
+                .expect("haste grant names an affected population");
+        }
+        cursor = cursor
+            .sub_ability
+            .as_deref()
+            .expect("haste grant must follow in the chain");
+    };
+    assert_eq!(
+        affected,
+        crate::types::ability::TargetFilter::TrackedSet {
+            id: crate::types::identifiers::TrackedSetId(0),
+        },
+        "\"They\" must bind the seized set, got {affected:?}"
+    );
+}
+
 #[test]
 fn the_dead_shall_serve_is_supported() {
     let oracle = "When you set this scheme in motion, for each opponent, put up to one target creature card from that player's graveyard onto the battlefield under your control. Each of those creatures attacks its owner each combat if able.";

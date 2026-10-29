@@ -29,6 +29,10 @@
 //!   NOTHING taps (selections tap simultaneously only once the combined
 //!   total passes), and Bow stays face up.
 //!
+//! One departure row (CR 104.3a + CR 800.4f): P1 holds the collective prompt
+//! and concedes — the session passes to the surviving heroes instead of
+//! stranding, P2 + P3 tap for a combined 8, and Bow is abandoned.
+//!
 //! One signed-power row (CR 107.1b): P1 controls 4, 4 and −1 power. The
 //! prompt is still offered (the can-pay gate sums positive-only power as an
 //! upper bound: 8), but submitting all three is refused (signed total 7)
@@ -41,7 +45,9 @@
 //! Revert-to-red: lower the head back to `SetTapState` — the below-eight row
 //! abandons Bow unconditionally. Rebind the payer to the controller — the
 //! eight row offers P0's creature instead of P1's. Drop the collective flag —
-//! the split-eight row offers only P1's 4 power and never abandons.
+//! the split-eight row offers only P1's 4 power and never abandons. Drop the
+//! departure reconciliation — the concession row strands the chain with the
+//! survivors never prompted and Bow face up.
 
 use engine::database::synthesis::synthesize_archenemy;
 use engine::game::deck_loading::create_scheme_deck_card;
@@ -569,6 +575,111 @@ fn bow_end_step_split_power_across_heroes_abandons() {
     assert!(
         runner.state().scheme_deck.contains(&bow),
         "abandoned Bow must be back in the scheme deck"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "clean drain back to priority, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// CR 104.3a + CR 800.4f + CR 805.6: P1 holds the collective payment prompt
+/// and concedes. The session must NOT strand: the prompt passes to the next
+/// surviving hero, P2 + P3 tap for a combined 8, and Bow is abandoned. P1's
+/// creature left with them and taps nothing.
+#[test]
+fn bow_end_step_conceding_current_hero_passes_payment_to_survivors() {
+    let (mut runner, bow, heroes, _) = setup_end_step_game_4p(&[(4, 4)], &[(4, 4)], &[(4, 4)]);
+    advance_to_p1_end_step(&mut runner);
+    let (p1_creatures, p2_creatures, p3_creatures) = (&heroes[0], &heroes[1], &heroes[2]);
+
+    let mut conceded = false;
+    let mut prompted_after: Vec<PlayerId> = Vec::new();
+    for _ in 0..80 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .unwrap();
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .unwrap();
+            }
+            WaitingFor::PayCost { player, resume, .. } => {
+                assert!(
+                    matches!(resume, CostResume::TeamTapPayment { .. }),
+                    "expected the collective-payment session, got {resume:?}"
+                );
+                if player == P1 && !conceded {
+                    conceded = true;
+                    runner
+                        .act(GameAction::Concede { player_id: P1 })
+                        .expect("concede must be accepted mid-prompt");
+                    continue;
+                }
+                prompted_after.push(player);
+                let mine = match player {
+                    p if p == P2 => p2_creatures,
+                    p if p == P3 => p3_creatures,
+                    other => panic!("only surviving heroes pay, got {other:?}"),
+                };
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: mine.clone(),
+                    })
+                    .unwrap();
+            }
+            WaitingFor::Priority { .. } => {
+                if runner.state().stack.is_empty() {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            other => panic!("unexpected prompt {other:?}"),
+        }
+    }
+
+    assert!(conceded, "P1 must have held the prompt and conceded");
+    assert_eq!(
+        prompted_after,
+        vec![P2, P3],
+        "both surviving heroes must be prompted after the concession"
+    );
+    for id in p1_creatures {
+        assert!(
+            !runner.state().battlefield.contains(id),
+            "the conceder's creature must have left the game"
+        );
+        assert!(
+            !runner.state().objects[id].tapped,
+            "the conceder's creature must tap nothing"
+        );
+    }
+    for id in p2_creatures.iter().chain(p3_creatures.iter()) {
+        assert!(
+            runner.state().objects[id].tapped,
+            "surviving contributors' creatures must be tapped"
+        );
+    }
+    assert!(
+        !runner.state().command_zone.contains(&bow),
+        "Bow must leave the command zone once abandoned"
+    );
+    assert!(
+        runner.state().objects[&bow].face_down,
+        "abandoned Bow must be face down"
+    );
+    assert!(
+        runner.state().scheme_deck.contains(&bow),
+        "abandoned Bow must be back in the scheme deck"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "the payment continuation must complete, not strand"
     );
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),

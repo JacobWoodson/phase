@@ -34670,16 +34670,18 @@ pub enum AbilityCondition {
     /// process") and any cross-sentence flip-result gate.
     CoinFlipOutcome { result: CoinFlipResult },
     /// CR 607.2d + CR 608.2c: "If [that|the] player chooses <label>" — true
-    /// when the ability source's persisted `ChosenAttribute::Label` matches
-    /// the anchor word (case-insensitive). The effect-resolution mirror of
+    /// when THIS resolution's labeled choice named the anchor word
+    /// (case-insensitive). The effect-resolution mirror of
     /// `StaticCondition::ChosenLabelIs` / `TriggerCondition::ChosenLabelIs`:
-    /// those gate anchor-word linked abilities (Khans Sieges); this gates
-    /// sequential if-chose branches on a label persisted EARLIER IN THE SAME
-    /// resolution (the self-or-others scheme class: The Fate of the Flammable,
-    /// Feed the Machine, May Civilization Collapse, Surrender Your Thoughts).
-    /// Evaluated by `evaluate_condition` via `conditions::eval_chosen_label_is`
-    /// against `ability.source_id` — the same object the preceding
-    /// `Choose { Labeled, persist }` wrote.
+    /// those gate anchor-word linked abilities (Khans Sieges) off the
+    /// source's persisted label; this gates sequential if-chose branches on
+    /// the current resolution's answer (the self-or-others scheme class: The
+    /// Fate of the Flammable, Feed the Machine, May Civilization Collapse,
+    /// Surrender Your Thoughts). Evaluated by `evaluate_condition` against
+    /// `state.named_label_this_resolution` (written by the preceding `Choose
+    /// { Labeled }` head's bind), NOT the persisted history: labels
+    /// accumulate across resolutions, so persisted history would let a
+    /// recycled scheme's first answer shadow every later one.
     ChosenLabelIs { label: String },
     /// CR 603.12: "When you do" — a reflexive trigger based on whether the
     /// parent event actually occurred. An optional non-cost parent must be

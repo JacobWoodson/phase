@@ -1203,6 +1203,62 @@ mod tests {
         );
     }
 
+    /// CR 904.13b + CR 810.9d: in Archenemy Commander the archenemy's
+    /// dedup key must stay distinct from the heroes' shared key even when
+    /// the archenemy sits in seat 1 — a bare `TeamId(player.0)` key
+    /// collides with the heroes' shared `TeamId(1)` and drops one side
+    /// from the fold (a Repay-in-Kind Min over archenemy-at-10 plus
+    /// heroes-sharing-60 would read 60 instead of 10).
+    #[test]
+    fn aggregate_over_teams_archenemy_commander_seat_one_keeps_sides_distinct() {
+        let mut config = FormatConfig::archenemy_commander();
+        config.archenemy_player = Some(PlayerId(1));
+        let mut state = GameState::new(config, 4, 0);
+        state.players[1].life = 10;
+        state.players[0].life = 20;
+        state.players[2].life = 20;
+        state.players[3].life = 20;
+        let all = vec![PlayerId(0), PlayerId(1), PlayerId(2), PlayerId(3)];
+        assert_eq!(
+            aggregate_over_teams(&state, all.clone(), AggregateFunction::Min),
+            10,
+            "seat-1 archenemy's 10 must survive the fold, not collapse into the heroes' 60"
+        );
+        assert_eq!(
+            aggregate_over_teams(&state, all.clone(), AggregateFunction::Max),
+            60
+        );
+        assert_eq!(
+            aggregate_over_teams(&state, all, AggregateFunction::Sum),
+            70,
+            "both sides' totals must be counted exactly once"
+        );
+    }
+
+    /// Default Archenemy keeps per-seat keys: every seat reads its own
+    /// life, so a seat-1 archenemy at 40 beside 20-life heroes folds as
+    /// four distinct totals. Pins the non-Commander side of the seat-1
+    /// key fix.
+    #[test]
+    fn aggregate_over_teams_default_archenemy_seat_one_stays_per_seat() {
+        let mut config = FormatConfig::archenemy();
+        config.archenemy_player = Some(PlayerId(1));
+        let mut state = GameState::new(config, 4, 0);
+        state.players[1].life = 40;
+        state.players[0].life = 20;
+        state.players[2].life = 20;
+        state.players[3].life = 20;
+        let all = vec![PlayerId(0), PlayerId(1), PlayerId(2), PlayerId(3)];
+        assert_eq!(
+            aggregate_over_teams(&state, all.clone(), AggregateFunction::Min),
+            20
+        );
+        assert_eq!(
+            aggregate_over_teams(&state, all, AggregateFunction::Sum),
+            100
+        );
+    }
+
     // --- linked-exile LKI incarnation bounds (CR 400.7 + CR 113.7a) ---
 
     /// The incarnation the source had when it left the battlefield.

@@ -378,31 +378,154 @@ pub(crate) fn handle_team_tap_payment_selection(
         };
         return Ok(state.waiting_for.clone());
     }
-    // No heroes left: the combined SIGNED power (CR 107.1b — negative power
-    // counts) decides, exactly like the single-payer validator.
-    let combined = super::casting_costs::tap_creatures_signed_total_power(state, &selected);
+    // No heroes left: settle the combined selections explicitly.
+    settle_team_tap_payment(state, hero, &aggregate, &selected, events)?;
+    Ok(state.waiting_for.clone())
+}
+
+/// CR 805.6 + CR 118.12 + CR 107.1b: Settle a collective tap-creatures
+/// payment from its accumulated selections. The combined SIGNED power
+/// (negative power counts, exactly like the single-payer validator)
+/// decides: on success every selected creature taps simultaneously
+/// (CR 701.26a + CR 508.1f, routed through the single authority — the same
+/// tap loop as `pay_tap_creatures_selection`); on a shortfall nothing taps
+/// (selections were never executed) and the chain takes its didn't-pay
+/// branch (`cost_payment_failed_flag`). Shared by the normal final-answer
+/// path and the post-departure reconciliation, which passes the next
+/// living player for priority.
+fn settle_team_tap_payment(
+    state: &mut GameState,
+    priority_player: PlayerId,
+    aggregate: &crate::types::ability::TapCreaturesAggregate,
+    selected: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    let combined = super::casting_costs::tap_creatures_signed_total_power(state, selected);
     if !aggregate.satisfied_by(combined) {
-        // The team selected short of the threshold: nothing taps (selections
-        // were never executed) and the chain takes its didn't-pay branch.
         state.cost_payment_failed_flag = true;
         if matches!(state.waiting_for, WaitingFor::PayCost { .. }) {
-            state.waiting_for = WaitingFor::Priority { player: hero };
+            state.waiting_for = WaitingFor::Priority {
+                player: priority_player,
+            };
         }
         super::effects::drain_pending_continuation(state, events);
-        return Ok(state.waiting_for.clone());
+        return Ok(());
     }
-    // CR 701.26a + CR 508.1f: tap every selected creature simultaneously,
-    // routed through the single authority — the same tap loop as
-    // `pay_tap_creatures_selection`.
-    for &id in &selected {
+    for &id in selected {
         crate::game::restrictions::tap_permanent_for_cost(state, id, events)?;
     }
     state.last_effect_count = Some(selected.len() as i32);
     if matches!(state.waiting_for, WaitingFor::PayCost { .. }) {
-        state.waiting_for = WaitingFor::Priority { player: hero };
+        state.waiting_for = WaitingFor::Priority {
+            player: priority_player,
+        };
     }
     super::effects::drain_pending_continuation(state, events);
-    Ok(state.waiting_for.clone())
+    Ok(())
+}
+
+/// CR 800.4f + CR 805.6 + CR 118.12: Reconcile an in-progress collective
+/// tap-creatures payment with the surviving heroes after a departure. Runs
+/// from the elimination pass before the generic dead-actor repoint, which
+/// would otherwise discard the session (`selected`, `remaining`, the
+/// aggregate) and strand the resolving chain.
+///
+/// A departed hero's required cost "is not paid": departed heroes are
+/// pruned from `remaining` and their creatures from `eligible`/`selected`.
+/// The current prompt holder keeps answering when alive; otherwise the
+/// next surviving contributor is prompted, or — with nobody left to ask —
+/// the surviving selections settle explicitly and the continuation drains.
+/// No-op unless `waiting_for` is a collective-payment prompt.
+pub(crate) fn reconcile_team_tap_payment_after_departure(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    let WaitingFor::PayCost {
+        player,
+        kind:
+            PayCostKind::TapCreatures {
+                mode: crate::types::ability::TapCreaturesSelectionMode::VariableX,
+            },
+        resume:
+            CostResume::TeamTapPayment {
+                aggregate,
+                eligible,
+                selected,
+                remaining,
+            },
+        ..
+    } = state.waiting_for.clone()
+    else {
+        return Ok(());
+    };
+    let live_creature = |state: &GameState, id: &ObjectId| {
+        state.battlefield.contains(id)
+            && state
+                .objects
+                .get(id)
+                .is_some_and(|obj| super::players::is_alive(state, obj.controller))
+    };
+    let eligible: Vec<ObjectId> = eligible
+        .into_iter()
+        .filter(|id| live_creature(state, id))
+        .collect();
+    let selected: Vec<ObjectId> = selected
+        .into_iter()
+        .filter(|id| live_creature(state, id))
+        .collect();
+    let remaining: Vec<PlayerId> = remaining
+        .into_iter()
+        .filter(|hero| super::players::is_alive(state, *hero))
+        .collect();
+    // The current holder answers first when alive; otherwise the survivors
+    // after them, in seat order — mirroring the session's advance rule
+    // (creatureless heroes are skipped, never prompted).
+    let mut order = Vec::with_capacity(remaining.len() + 1);
+    if super::players::is_alive(state, player) {
+        order.push(player);
+    }
+    order.extend(remaining);
+    if let Some(next_hero) = order.iter().copied().find(|&hero| {
+        eligible.iter().any(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|obj| obj.controller == hero)
+        })
+    }) {
+        let after: Vec<PlayerId> = order
+            .into_iter()
+            .skip_while(|&hero| hero != next_hero)
+            .skip(1)
+            .collect();
+        let choices = hero_tap_slice(state, &eligible, next_hero);
+        state.waiting_for = WaitingFor::PayCost {
+            player: next_hero,
+            kind: PayCostKind::TapCreatures {
+                mode: crate::types::ability::TapCreaturesSelectionMode::VariableX,
+            },
+            count: choices.len(),
+            min_count: 0,
+            choices,
+            resume: CostResume::TeamTapPayment {
+                aggregate,
+                eligible,
+                selected,
+                remaining: after,
+            },
+        };
+    } else {
+        // Nobody left to ask: settle the surviving selections explicitly so
+        // the chain completes instead of stranding.
+        settle_team_tap_payment(
+            state,
+            super::players::next_player(state, player),
+            &aggregate,
+            &selected,
+            events,
+        )?;
+    }
+    Ok(())
 }
 
 /// Selects the payment regime for `pay_ability_cost_inner`. The two variants

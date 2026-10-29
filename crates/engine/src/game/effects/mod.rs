@@ -13563,6 +13563,23 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
             return true;
         }
     }
+    // CR 608.2c + CR 108.3: `ForceAttack` with scope `All` ("Each of those
+    // creatures attacks its owner", The Dead Shall Serve) carries its
+    // subject in `target`, which `Effect::target_filter()` deliberately
+    // hides (no creature slot is announced for the broadcast scope). A
+    // `TrackedSet`-bound rider still consumes the moved set, so inspect
+    // the field directly — without this the producer never publishes and
+    // the rider grafts nothing.
+    if let Effect::ForceAttack {
+        scope: EffectScope::All,
+        target,
+        ..
+    } = effect
+    {
+        if filter_references_tracked_set(target) {
+            return true;
+        }
+    }
     false
 }
 

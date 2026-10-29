@@ -174,6 +174,15 @@ pub(crate) fn shared_poison_members(state: &GameState, player: PlayerId) -> Vec<
 pub(crate) fn shared_life_dedup_key(state: &GameState, player: PlayerId) -> TeamId {
     if has_shared_life(state, player) {
         team_id(state, player)
+    } else if Some(player) == archenemy(state)
+        && state.format_config.format == crate::types::format::GameFormat::ArchenemyCommander
+    {
+        // CR 904.13b: the Archenemy Commander archenemy reads their own
+        // life, but `TeamId(player.0)` collides with the heroes' shared
+        // `TeamId(1)` key from seat 1 and drops one side from the fold.
+        // `team_id` assigns the archenemy side `TeamId(0)`, distinct by
+        // construction in this two-sided topology.
+        team_id(state, player)
     } else {
         TeamId(player.0)
     }

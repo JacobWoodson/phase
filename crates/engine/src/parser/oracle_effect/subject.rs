@@ -4656,10 +4656,22 @@ fn resolve_they_pronoun(ctx: &mut ParseContext, consumer: AnaphorConsumer) -> Ta
         // A mass effect chooses no target, so `ParentTarget` cannot express this
         // (see `has_typed_target_widened`'s single-target whitelist); the anaphor
         // inherits the population FILTER itself.
-        Some(subject) if !matches!(subject, TargetFilter::SelfRef | TargetFilter::Any) => ctx
-            .chain_prior_mass_population
-            .clone()
-            .unwrap_or(TargetFilter::TriggeringSource),
+        Some(subject) if !matches!(subject, TargetFilter::SelfRef | TargetFilter::Any) => {
+            // CR 608.2c: a nearer clause that operated on the chain's tracked
+            // set is the nearer antecedent ("Untap those permanents. They gain
+            // haste" — "They" is those permanents). The mass-population filter
+            // below describes the head's pre-move selection, which is stale
+            // once the head moved them (My Crushing Masterstroke: seized
+            // permanents are no longer opponent-controlled, so the filter
+            // matches nothing at resolution).
+            if let Some(set) = ctx.chain_prior_object_set.clone() {
+                set
+            } else {
+                ctx.chain_prior_mass_population
+                    .clone()
+                    .unwrap_or(TargetFilter::TriggeringSource)
+            }
+        }
         // CR 608.2c: the nearest earlier clause announced a player; "they" is that
         // player, spelled as "that player" is.
         _ if ctx.prior_player_declaration => TargetFilter::ParentTargetController,
@@ -9009,8 +9021,11 @@ mod tests {
             ),
             TargetFilter::ParentTarget,
         );
-        // (3) Once the frame yields, an object trigger subject still defers to a
-        // nearer mass population, as in a frameless body.
+        // (3) Once the frame yields, the nearer tracked-set operand beats the
+        // farther mass population: `chain_prior_object_set` reads ONLY the
+        // nearest clause, so `Some` proves the set clause is nearer than any
+        // mass clause ("Untap those permanents. They gain haste" — "They" is
+        // those permanents, not the head's pre-move population filter).
         let population =
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
         assert_eq!(
@@ -9019,6 +9034,22 @@ mod tests {
                     subject: Some(TargetFilter::Typed(TypedFilter::creature())),
                     chain_prior_mass_population: Some(population.clone()),
                     ..framed(object_set.clone())
+                },
+                AnaphorConsumer::AffectedObject,
+            ),
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            },
+        );
+        // (3b) With no nearer set operand, the mass population still wins
+        // (Ardbert: "… on each legendary creature you control. They gain
+        // vigilance until end of turn").
+        assert_eq!(
+            resolve_they_pronoun(
+                &mut ParseContext {
+                    subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+                    chain_prior_mass_population: Some(population.clone()),
+                    ..Default::default()
                 },
                 AnaphorConsumer::AffectedObject,
             ),
