@@ -297,6 +297,51 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       },
     ],
   },
+  {
+    deck: "TurtleTeamUpHorde",
+    label: "Turtle Team-Up Horde",
+    short_label: "TMT",
+    description:
+      "Teenage Mutant Ninja Turtles — staged Bosses sharing one life total per stage, backed by an event deck of Ninjas and villain Events",
+    default_ruleset: {
+      challenge_deck: "TurtleTeamUpHorde",
+      wave: { type: "FixedCount", data: 2 },
+      survivor_setup_turns: 0,
+      combined_base_life: 10,
+      per_extra_survivor_life_delta: 10,
+      horde_creatures_forced_attackers: true,
+      legendary_death: "Normal",
+      post_combat_activation: "None",
+      survivor_deck_format: "Constructed",
+      boss_stages: {
+        stage_sizes: [1, 2, 3],
+        life_base: 20,
+        life_at_four_survivors: 30,
+      },
+    },
+    rules: [
+      { label: "Waves", detail: "Reveals 2 cards each Horde turn" },
+      { label: "Survivor life", detail: "10 life shared, +10 per extra survivor" },
+      {
+        label: "Survivor decks",
+        detail: "Survivors bring 60-card constructed decks",
+      },
+      {
+        label: "Setup",
+        detail: "Survivors take 0 turns to set up before the Horde's first turn",
+      },
+      {
+        label: "Horde combat",
+        detail:
+          "The Horde's creatures attack every combat if able, and only its Defenders can block",
+      },
+      {
+        label: "Bosses",
+        detail:
+          "Bosses deploy in 3 stages (1 → 2 → 3) sharing 20 life per stage (30 with 4+ heroes)",
+      },
+    ],
+  },
 ];
 
 /** The deck a Horde game uses when the player hasn't picked one. */

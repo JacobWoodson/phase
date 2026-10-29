@@ -342,7 +342,8 @@ export type ChallengeDeck =
   | "HumansGodzillaHorde"
   | "SauronHorde"
   | "SarumanHorde"
-  | "LotrTwoTowersHorde";
+  | "LotrTwoTowersHorde"
+  | "TurtleTeamUpHorde";
 
 /**
  * Card rarity. Mirrors the engine `Rarity` enum (serde `rename_all =
@@ -434,6 +435,25 @@ export interface HordeRuleset {
    * (`skip_serializing_if` empty). Absent ⇒ no co-hordes.
    */
   co_horde_decks?: ChallengeDeck[];
+  /**
+   * Staged boss-deck configuration (Turtle Team-Up class): the Boss team fights
+   * in stages sharing one life total per stage instead of the classic mill
+   * race. Omitted for classic decks (`skip_serializing_if` none). Absent ⇒ no
+   * Boss stages.
+   */
+  boss_stages?: BossStages;
+}
+
+/**
+ * Staged boss-deck configuration. Mirrors the engine `BossStages` struct.
+ */
+export interface BossStages {
+  /** Bosses deployed per stage in order — `[1, 2, 3]` for Turtle Team-Up. */
+  stage_sizes: number[];
+  /** Boss life at the start of each stage with fewer than four survivors. */
+  life_base: number;
+  /** Boss life at the start of each stage with four or more survivors. */
+  life_at_four_survivors: number;
 }
 
 /**
@@ -2797,6 +2817,19 @@ export interface ContestState {
   result?: ContestResult | null;
 }
 
+/** Turtle Team-Up hero-choice Event kind. Mirrors `engine::types::game_state::HeroEventKind`. */
+export type HeroEventKind =
+  | { type: "ChromeOverload" }
+  | { type: "KrangStratagem"; data: { remaining: number } }
+  | { type: "Smackdown" }
+  | { type: "RatKingRevolution" }
+  | { type: "SavantiCurse" }
+  | { type: "Infiltration" }
+  | { type: "VillainMayhem" };
+
+/** One hero's recorded answer. Mirrors `engine::types::game_state::HeroEventAnswer`. */
+export type HeroEventAnswer = { hero: PlayerId; cards: ObjectId[] };
+
 export type WaitingFor =
   | { type: "Priority"; data: { player: PlayerId } }
   | { type: "ResolveAllConsent"; data: { epoch: number; representative: PlayerId } }
@@ -3020,6 +3053,7 @@ export type WaitingFor =
   | { type: "ChooseObjectsSelection"; data: { player: PlayerId; eligible: TargetRef[]; min: number; max?: number; trigger_event?: GameEvent } }
   | { type: "ConniveDiscard"; data: { player: PlayerId; conniver_id: ObjectId; source_id: ObjectId; cards: ObjectId[]; count: number } }
   | { type: "DiscardChoice"; data: { player: PlayerId; count: number; cards: ObjectId[]; source_id: ObjectId; effect_kind: string; up_to?: boolean; unless_filter?: TargetFilter } }
+  | { type: "HeroEventChoice"; data: { player: PlayerId; event: HeroEventKind; event_id: ObjectId; cards: ObjectId[]; count: number; up_to?: boolean; remaining_heroes?: PlayerId[]; answers?: HeroEventAnswer[]; copies_pending: number; fired_baxters?: ObjectId[] } }
   | { type: "ManifestDreadChoice"; data: { player: PlayerId; cards: ObjectId[]; source_id: ObjectId } }
   | { type: "LearnChoice"; data: { player: PlayerId; hand_cards: ObjectId[] } }
   | { type: "ClashChooseOpponent"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown } }
