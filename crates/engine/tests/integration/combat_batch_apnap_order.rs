@@ -579,3 +579,136 @@ fn redirected_recipient_reorders_outstanding_prompts_by_apnap() {
         "the redirected damage is prevented by the Emissary protection"
     );
 }
+
+/// CR 614.6 + CR 800.4a + CR 616.1: after Pariah has redirected damage,
+/// its original recipient's departure cannot erase the surviving host's event.
+#[test]
+fn redirected_damage_survives_original_recipient_conceding_at_replacement_pause() {
+    // Verbatim Scryfall Oracle (retrieved 2026-10-29).
+    const GISELA: &str = "Flying, first strike\nIf a source would deal damage to an opponent or a permanent an opponent controls, that source deals double that damage to that player or permanent instead.\nIf a source would deal damage to you or a permanent you control, prevent half that damage, rounded up.";
+    let mut scenario = GameScenario::new_n_player(3, 0);
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker = scenario.add_creature(P0, "Attacker", 2, 2).id();
+    let host = scenario.add_creature(P2, "Pariah Host", 0, 10).id();
+    let pariah = scenario
+        .add_creature(P1, "Pariah", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text(PARIAH_TEXT)
+        .id();
+    let gisela = scenario
+        .add_creature_from_oracle(P2, "Gisela, Blade of Goldnight", 5, 5, GISELA)
+        .id();
+    let furnace = scenario
+        .add_enchantment_from_oracle(P0, "Furnace of Rath", FURNACE)
+        .id();
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), pariah, host);
+    let mut redirected = false;
+    let mut conceded = false;
+    let mut log = Vec::new();
+    for _ in 0..96 {
+        if matches!(
+            runner.state().phase,
+            Phase::EndCombat | Phase::PostCombatMain
+        ) {
+            break;
+        }
+        let result = match runner.state().waiting_for.clone() {
+            WaitingFor::DeclareAttackers { player, .. } => {
+                assert_eq!(player, P0);
+                runner.declare_attackers(&[(attacker, AttackTarget::Player(P1))])
+            }
+            WaitingFor::DeclareBlockers { .. } => runner.declare_blockers(&[]),
+            WaitingFor::ReplacementChoice {
+                player, candidates, ..
+            } if !redirected => {
+                assert_eq!(player, P1);
+                let index = candidates
+                    .iter()
+                    .position(|c| c.source_id == pariah)
+                    .expect("the original recipient must be offered Pariah");
+                redirected = true;
+                runner.act(GameAction::ChooseReplacement { index })
+            }
+            WaitingFor::ReplacementChoice {
+                player, candidates, ..
+            } if !conceded => {
+                assert_eq!(
+                    player, P2,
+                    "the host's controller owns the redirected choice"
+                );
+                assert!(
+                    matches!(
+                        &runner.state().pending_replacement.as_ref().unwrap().proposed,
+                        ProposedEvent::Damage { source_id, target, amount: 2, .. }
+                            if *source_id == attacker && *target == TargetRef::Object(host)
+                    ),
+                    "reach guard: the parked event already names the surviving host"
+                );
+                assert_eq!(candidates.len(), 2);
+                assert!(candidates.iter().any(|c| c.source_id == gisela));
+                assert!(candidates.iter().any(|c| c.source_id == furnace));
+                log.extend(
+                    runner
+                        .act(GameAction::Concede { player_id: P1 })
+                        .expect("the original recipient may concede during another player's choice")
+                        .events,
+                );
+                assert!(runner.state().players[P1.0 as usize].is_eliminated);
+                let record = runner
+                    .state()
+                    .pending_combat_damage
+                    .as_ref()
+                    .expect("the surviving recipient's combat event remains parked");
+                assert!(
+                    !record.paused_entry_pruned,
+                    "the historical assignment to P1 cannot prune damage now owed to the host"
+                );
+                let WaitingFor::ReplacementChoice {
+                    player, candidates, ..
+                } = &runner.state().waiting_for
+                else {
+                    panic!("the surviving host's prompt must remain live");
+                };
+                assert_eq!(*player, P2);
+                let index = candidates
+                    .iter()
+                    .position(|c| c.source_id == furnace)
+                    .expect("choose Furnace before Gisela's half prevention");
+                conceded = true;
+                runner.act(GameAction::ChooseReplacement { index })
+            }
+            WaitingFor::ReplacementChoice { candidates, .. } => {
+                assert_eq!(candidates.len(), 1, "only Gisela's remainder may follow");
+                runner.act(GameAction::ChooseReplacement { index: 0 })
+            }
+            WaitingFor::Priority { .. } => runner.act(GameAction::PassPriority),
+            other => panic!("unexpected combat prompt: {other:?}"),
+        }
+        .expect("combat must advance through public actions");
+        log.extend(result.events);
+    }
+    assert!(
+        redirected && conceded,
+        "both the redirect and departure must occur"
+    );
+    assert!(matches!(
+        runner.state().phase,
+        Phase::EndCombat | Phase::PostCombatMain
+    ));
+    assert!(runner.state().pending_combat_damage.is_none());
+    assert!(runner.state().pending_replacement.is_none());
+    assert_eq!(runner.state().objects[&host].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&host].damage_marked,
+        2,
+        "Furnace doubles 2 to 4, then Gisela prevents 2; the remaining 2 must land"
+    );
+    assert!(
+        log.iter().any(|event| matches!(event,
+            GameEvent::DamageDealt { target, amount: 2, .. } if *target == TargetRef::Object(host)
+        )),
+        "positive damage delivery rules out a vacuous fully prevented event"
+    );
+}

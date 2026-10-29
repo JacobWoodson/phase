@@ -90,9 +90,10 @@ use engine::types::events::GameEvent;
 use engine::types::game_state::{PersistedGameState, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::{MatchedProtectionQuality, ProtectionTarget};
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::proposed_event::ProposedEvent;
 use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
@@ -4808,4 +4809,273 @@ fn sequential_noncombat_pings_stay_separate_under_protection() {
         4,
         "two triggers for 1 damage each, plus 1 per trigger from Hardened Scales"
     );
+}
+
+// Verbatim Scryfall Oracle (retrieved 2026-10-29).
+const BLASPHEMOUS_ACT_TEXT: &str = "This spell costs {1} less to cast for each creature on the battlefield.\nBlasphemous Act deals 13 damage to each creature.";
+const JADE_MONOLITH_TEXT: &str = "{1}: The next time a source of your choice would deal damage to target creature this turn, that source deals that damage to you instead.";
+const SHIELDED_PASSAGE_TEXT: &str =
+    "Prevent all damage that would be dealt to target creature this turn.";
+
+/// CR 615.13 + CR 616.1: Act's two simultaneous creature portions redirect to
+/// one player. A creature-only shield adds a choice on the second portion,
+/// after a nonempty prevention prefix; an optional third creature leaves a
+/// genuine raw tail after that choice.
+fn run_blasphemous_act_redirect_batch(pause: bool, with_tail: bool) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    stock_libraries(&mut scenario);
+    let squire = scenario
+        .add_creature_to_hand_from_oracle(P0, "Selfless Squire", 1, 1, SELFLESS_SQUIRE_TEXT)
+        .with_mana_cost(free_cost())
+        .id();
+    let bear = scenario
+        .add_creature_to_hand(P0, "Bear", 2, 2)
+        .with_mana_cost(free_cost())
+        .id();
+    let tail = with_tail.then(|| {
+        scenario
+            .add_creature_to_hand(P0, "Survivor", 0, 20)
+            .with_mana_cost(free_cost())
+            .id()
+    });
+    scenario.add_enchantment_from_oracle(P0, "Hardened Scales",
+        "If one or more +1/+1 counters would be put on a creature you control, that many plus one +1/+1 counters are put on it instead.");
+    let jade = scenario
+        .add_artifact_from_oracle(P0, "Jade Monolith", JADE_MONOLITH_TEXT)
+        .id();
+    let passage =
+        add_instant_from_oracle(&mut scenario, P0, "Shielded Passage", SHIELDED_PASSAGE_TEXT);
+    let act = scenario
+        .add_spell_to_hand_from_oracle(P0, "Blasphemous Act", false, BLASPHEMOUS_ACT_TEXT)
+        .with_mana_cost(free_cost())
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(squire).resolve();
+    runner.cast(bear).resolve();
+    if let Some(tail) = tail {
+        runner.cast(tail).resolve();
+    }
+    if pause {
+        runner.cast(passage).target_object(bear).resolve();
+    }
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    let creatures: Vec<_> = runner
+        .state()
+        .battlefield
+        .iter()
+        .filter(|id| runner.state().objects[id].power.is_some())
+        .copied()
+        .collect();
+    let mut expected = vec![squire, bear];
+    expected.extend(tail);
+    assert_eq!(
+        creatures, expected,
+        "the prevented prefix must precede the optional tail"
+    );
+
+    // Act must already be a spell on the stack when Jade chooses its source.
+    let _ = runner.cast(act).commit();
+    assert_eq!(runner.state().objects[&act].zone, Zone::Stack);
+    for target in [squire, bear] {
+        runner.state_mut().add_mana_to_pool(
+            P0,
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        );
+        runner.activate(jade, 0).target_object(target).resolve();
+        let WaitingFor::DamageSourceChoice {
+            player, options, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("Jade's printed activation must reach its source choice");
+        };
+        assert_eq!(*player, P0);
+        assert!(
+            options.contains(&act),
+            "the stacked Act must be an offered source"
+        );
+        runner
+            .act(GameAction::ChooseDamageSource { source: act })
+            .expect("choose the stacked Act through the public source action");
+        assert_eq!(
+            runner.state().stack.len(),
+            1,
+            "only Act remains after each Jade activation"
+        );
+    }
+    let life_before = runner.life(P0);
+    let mut log = Vec::new();
+    let mut ordering_seen = false;
+    for _ in 0..64 {
+        if runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        let result = match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => runner.act(GameAction::PassPriority),
+            WaitingFor::OrderTriggers { triggers, .. } => runner.act(GameAction::OrderTriggers {
+                order: (0..triggers.len()).collect(),
+            }),
+            WaitingFor::ReplacementChoice {
+                player, candidates, ..
+            } => {
+                assert!(pause, "the unpaused batch needs no ordering choices");
+                assert_eq!(player, P0);
+                let index = if !ordering_seen {
+                    ordering_seen = true;
+                    assert_eq!(candidates.len(), 2, "Bear offers Jade and Shielded Passage");
+                    assert!(
+                        matches!(
+                            &runner.state().pending_replacement.as_ref().unwrap().proposed,
+                            ProposedEvent::Damage { target, amount: 13, .. }
+                                if *target == TargetRef::Object(bear)
+                        ),
+                        "the pause must be on Bear's second portion"
+                    );
+                    assert_eq!(runner.state().pending_each_source_batches.len(), 1);
+                    assert_eq!(
+                        runner.state().pending_each_source_batches[0]
+                            .tally
+                            .iter()
+                            .map(|entry| entry.amount)
+                            .sum::<i32>(),
+                        13,
+                        "Squire's first redirected portion is a nonempty parked prefix"
+                    );
+                    assert_eq!(
+                        runner
+                            .state()
+                            .pending_replacement
+                            .as_ref()
+                            .unwrap()
+                            .each_source_batch_owner
+                            .is_some(),
+                        !with_tail,
+                        "an empty damage tail stamps the prompt's own batch boundary"
+                    );
+                    let index = candidates
+                        .iter()
+                        .position(|c| c.description == "One-shot damage replacement")
+                        .expect("choose Jade so the same Squire shield prevents both portions");
+                    // Reuse the established authoritative save/load path to pin
+                    // the owner and prefix through this DamageAll pause.
+                    let saved =
+                        serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+                            .expect("serialize the paused Act");
+                    let restored: PersistedGameState =
+                        serde_json::from_str(&saved).expect("deserialize the paused Act");
+                    runner = GameRunner::from_state(
+                        restored
+                            .into_game_state()
+                            .expect("restore the authoritative paused state"),
+                    );
+                    assert_eq!(
+                        runner.state().pending_each_source_batches[0]
+                            .tally
+                            .iter()
+                            .map(|entry| entry.amount)
+                            .sum::<i32>(),
+                        13
+                    );
+                    index
+                } else {
+                    assert_eq!(
+                        candidates.len(),
+                        1,
+                        "only a lone replacement remainder may follow"
+                    );
+                    0
+                };
+                runner.act(GameAction::ChooseReplacement { index })
+            }
+            other => panic!("unexpected Act resolution prompt: {other:?}"),
+        }
+        .expect("resolve Act and its prevention trigger through public actions");
+        log.extend(result.events);
+    }
+    assert_eq!(
+        ordering_seen, pause,
+        "the selected path must really be reached"
+    );
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().objects[&act].zone, Zone::Graveyard);
+    assert_eq!(runner.life(P0), life_before);
+    assert_eq!(
+        prevented_pairs(&log),
+        vec![(TargetRef::Player(P0), 26)],
+        "both redirected portions form one prevention application"
+    );
+    assert_eq!(
+        counters_on(&runner, squire),
+        27,
+        "one 26-counter trigger plus Scales; fragmented applications would put 28"
+    );
+    assert_eq!(runner.state().objects[&squire].damage_marked, 0);
+    assert_eq!(runner.state().objects[&bear].damage_marked, 0);
+    if let Some(tail) = tail {
+        assert_eq!(
+            runner.state().objects[&tail].damage_marked,
+            13,
+            "the raw tail must resume and deal its independent damage"
+        );
+        assert_eq!(runner.state().objects[&tail].zone, Zone::Battlefield);
+    }
+    assert!(runner.state().pending_each_source_batches.is_empty());
+    assert!(runner.state().combat_prevention_tally.is_none());
+    assert!(runner.state().resolving_each_source_batch_owner.is_none());
+    assert!(runner.state().pending_replacement.is_none());
+    assert!(runner.state().active_ability_continuation().is_none());
+}
+
+#[test]
+fn damage_all_redirected_portions_publish_one_prevention_application() {
+    run_blasphemous_act_redirect_batch(false, false);
+}
+
+#[test]
+fn damage_all_final_recipient_pause_preserves_prevention_prefix() {
+    run_blasphemous_act_redirect_batch(true, false);
+}
+
+#[test]
+fn damage_all_recipient_pause_preserves_prevention_prefix_and_raw_tail() {
+    run_blasphemous_act_redirect_batch(true, true);
+}
+
+/// CR 615.13: empty and single-recipient unprevented batches complete without
+/// retaining an accumulation scope for a later instruction.
+#[test]
+fn damage_all_empty_and_unprevented_batches_release_prevention_scope() {
+    for with_creature in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let creature = with_creature.then(|| scenario.add_creature(P0, "Survivor", 0, 20).id());
+        let act = scenario
+            .add_spell_to_hand_from_oracle(P0, "Blasphemous Act", false, BLASPHEMOUS_ACT_TEXT)
+            .with_mana_cost(free_cost())
+            .id();
+        let mut runner = scenario.build();
+        let outcome = runner.cast(act).resolve();
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+        assert_eq!(outcome.zone_of(act), Zone::Graveyard);
+        assert!(runner.state().stack.is_empty());
+        if let Some(creature) = creature {
+            assert_eq!(runner.state().objects[&creature].damage_marked, 13);
+        }
+        assert!(runner.state().pending_each_source_batches.is_empty());
+        assert!(runner.state().combat_prevention_tally.is_none());
+        assert!(runner.state().resolving_each_source_batch_owner.is_none());
+    }
 }

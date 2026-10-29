@@ -2014,9 +2014,8 @@ fn apply_batch_survivors_before_replacement_pause(
 /// (CR 609.7, CR 614, CR 615) observe one coherent event across the full set.
 /// CR 120.3e: Non-combat damage from an effect is marked on each matching creature.
 /// CR 120.3a: Damage dealt to a player causes that player to lose that much life.
-/// CR 120.4b: Each per-target damage instance is routed through the replacement
-/// pipeline individually (see `apply_damage_to_target`), but all share the same
-/// `DamageContext` (single source, single set of keywords) and the same effect.
+/// CR 120.4b + CR 615.13: Each portion uses the replacement pipeline within
+/// one owner-scoped batch, sharing its `DamageContext` and prevention tally.
 pub fn resolve_all(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -2164,9 +2163,9 @@ pub fn resolve_all(
     recipients.extend(matching_objects.iter().map(|&id| TargetRef::Object(id)));
     recipients.extend(matching_players.iter().map(|&pid| TargetRef::Player(pid)));
 
-    let recipient_amounts: Vec<(TargetRef, u32)> = recipients
+    let entries: Vec<(ObjectId, DamageContext, TargetRef, u32)> = recipients
         .into_iter()
-        .map(|target| {
+        .filter_map(|target| {
             let dmg = match (shared_num_dmg, &target) {
                 (Some(dmg), _) => dmg,
                 (None, TargetRef::Object(id)) => {
@@ -2177,34 +2176,11 @@ pub fn resolve_all(
                     resolve_quantity_with_targets(state, amount, ability).max(0) as u32
                 }
             };
-            (target, dmg)
+            (dmg > 0).then_some((ctx.source_id, ctx, target, dmg))
         })
         .collect();
 
-    for (i, (target, num_dmg)) in recipient_amounts.iter().enumerate() {
-        match apply_damage_to_target(state, &ctx, target.clone(), *num_dmg, false, events)? {
-            DamageResult::Applied(_) => {}
-            DamageResult::NeedsChoice => {
-                // CR 120.3 + CR 616.1e: Remaining batch recipients must resume after
-                // the replacement choice resolves — chain them as DealDamage
-                // continuations keyed to the same damage-source id.
-                let remaining = recipient_amounts[i + 1..].iter().cloned();
-                stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
-                // Tag the stashed chain with the parent `EffectKind::DamageAll` so the
-                // drain re-emits the parent event the non-pause tail fires.
-                mark_pending_continuation_parent(state, EffectKind::DamageAll);
-                return Ok(());
-            }
-        }
-    }
-
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::from(&ability.effect),
-        source_id: ability.source_id,
-        subject: None,
-    });
-
-    Ok(())
+    resolve_noncombat_damage_batch(state, ability, events, &entries)
 }
 
 /// CR 120.3: Collect non-eliminated players matching the filter for simultaneous
@@ -3170,54 +3146,6 @@ pub fn resolve_each_source_deals_damage(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // CR 615.13: a batch nested inside a suspended batch pushes a scope frame
-    // so its accumulations attribute to itself (never to the outer frame via
-    // write-through). Top-level batches push nothing — the common path stays
-    // allocation-free.
-    //
-    // CR 615.13 + CR 616.1e (Matt M1): every batch mints an owning id for the
-    // frames it parks and the tail it stashes, so a nested batch never shares
-    // attribution with its outer. The counter starts at 1; `0` stays the
-    // legacy-unowned sentinel.
-    let batch_id = state.next_each_source_batch_id.max(1);
-    state.next_each_source_batch_id = batch_id.saturating_add(1).max(1);
-    let entry_len = state.pending_each_source_batches.len();
-    let pushed_scope = !state.pending_each_source_batches.is_empty();
-    if pushed_scope {
-        state
-            .pending_each_source_batches
-            .push(EachSourceBatchFrame {
-                tally: Vec::new(),
-                restore_tally: None,
-                owner: batch_id,
-            });
-    }
-    // CR 615.13 + CR 616.1e (Matt F3): bind accumulation to the executing
-    // batch for the synchronous window (save/restore, like the tail drain).
-    // A child that opens inside an already-owned outer tail would otherwise
-    // write its snapshot through the ambient outer owner into the outer
-    // persisted record — which later republishes the child's amount while
-    // the outer application is lost. Top-level and answer-hook nesting are
-    // unaffected (no owned frame exists yet, or the child scope is topmost).
-    let prior_batch_owner = state.resolving_each_source_batch_owner.replace(batch_id);
-    let result = resolve_each_source_deals_damage_inner(state, ability, events, batch_id);
-    state.resolving_each_source_batch_owner = prior_batch_owner;
-    // A pause in this invocation (or deeper) pushed above our scope: the
-    // frames stay for the completion cascade. Otherwise this batch completed
-    // synchronously — pop and discard our scope (its tally already published
-    // by the inline flush, or is empty).
-    if pushed_scope && state.pending_each_source_batches.len() == entry_len + 1 {
-        state.pending_each_source_batches.pop();
-    }
-    result
-}
-
-fn resolve_each_source_deals_damage_inner(
-    state: &mut GameState,
-    ability: &ResolvedAbility,
-    events: &mut Vec<GameEvent>,
-    batch_id: u64,
-) -> Result<(), EffectError> {
     let (sources, amount, recipient) = match &ability.effect {
         Effect::EachSourceDealsDamage {
             sources,
@@ -3356,6 +3284,66 @@ fn resolve_each_source_deals_damage_inner(
         }
     }
 
+    resolve_noncombat_damage_batch(state, ability, events, &entries)
+}
+
+/// CR 615.13 + CR 616.1: all portions of one simultaneous noncombat damage
+/// instruction share a prevention application, including across choices.
+fn resolve_noncombat_damage_batch(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    entries: &[(ObjectId, DamageContext, TargetRef, u32)],
+) -> Result<(), EffectError> {
+    // CR 615.13: a batch nested inside a suspended batch pushes a scope frame
+    // so its accumulations attribute to itself (never to the outer frame via
+    // write-through). Top-level batches push nothing — the common path stays
+    // allocation-free.
+    //
+    // CR 615.13 + CR 616.1e (Matt M1): every batch mints an owning id for the
+    // frames it parks and the tail it stashes, so a nested batch never shares
+    // attribution with its outer. The counter starts at 1; `0` stays the
+    // legacy-unowned sentinel.
+    let batch_id = state.next_each_source_batch_id.max(1);
+    state.next_each_source_batch_id = batch_id.saturating_add(1).max(1);
+    let entry_len = state.pending_each_source_batches.len();
+    let pushed_scope = !state.pending_each_source_batches.is_empty();
+    if pushed_scope {
+        state
+            .pending_each_source_batches
+            .push(EachSourceBatchFrame {
+                tally: Vec::new(),
+                restore_tally: None,
+                owner: batch_id,
+            });
+    }
+    // CR 615.13 + CR 616.1e (Matt F3): bind accumulation to the executing
+    // batch for the synchronous window (save/restore, like the tail drain).
+    // A child that opens inside an already-owned outer tail would otherwise
+    // write its snapshot through the ambient outer owner into the outer
+    // persisted record — which later republishes the child's amount while
+    // the outer application is lost. Top-level and answer-hook nesting are
+    // unaffected (no owned frame exists yet, or the child scope is topmost).
+    let prior_batch_owner = state.resolving_each_source_batch_owner.replace(batch_id);
+    let result = resolve_noncombat_damage_batch_inner(state, ability, events, entries, batch_id);
+    state.resolving_each_source_batch_owner = prior_batch_owner;
+    // A pause in this invocation (or deeper) pushed above our scope: the
+    // frames stay for the completion cascade. Otherwise this batch completed
+    // synchronously — pop and discard our scope (its tally already published
+    // by the inline flush, or is empty).
+    if pushed_scope && state.pending_each_source_batches.len() == entry_len + 1 {
+        state.pending_each_source_batches.pop();
+    }
+    result
+}
+
+fn resolve_noncombat_damage_batch_inner(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    entries: &[(ObjectId, DamageContext, TargetRef, u32)],
+    batch_id: u64,
+) -> Result<(), EffectError> {
     // CR 616.1 + CR 120.3: Two-phase batch application preserving the
     // simultaneous-damage guarantee (CR 120.6 + CR 120.10): marks accumulate
     // on a shared recipient before any Phase-C consequence (lifelink, excess)
@@ -3470,7 +3458,7 @@ fn resolve_each_source_deals_damage_inner(
                 pending.each_source_batch_owner = Some(batch_id);
             }
         }
-        mark_pending_continuation_parent(state, EffectKind::EachSourceDealsDamage);
+        mark_pending_continuation_parent(state, EffectKind::from(&ability.effect));
         return Ok(());
     }
 
@@ -3497,7 +3485,7 @@ fn resolve_each_source_deals_damage_inner(
         let remaining_refs: Vec<(&DamageContext, ProposedEvent)> =
             replaced.iter().map(|(ctx, ev)| (ctx, ev.clone())).collect();
         stash_remaining_post_replacement_damage(state, ability, &remaining_refs);
-        mark_pending_continuation_parent(state, EffectKind::EachSourceDealsDamage);
+        mark_pending_continuation_parent(state, EffectKind::from(&ability.effect));
         state.waiting_for = fresh;
         return Ok(());
     }
@@ -3520,7 +3508,7 @@ fn resolve_each_source_deals_damage_inner(
                     .map(|(ctx, ev)| (ctx, ev.clone()))
                     .collect();
                 stash_remaining_post_replacement_damage(state, ability, &remaining_refs);
-                mark_pending_continuation_parent(state, EffectKind::EachSourceDealsDamage);
+                mark_pending_continuation_parent(state, EffectKind::from(&ability.effect));
                 return Ok(());
             }
         }

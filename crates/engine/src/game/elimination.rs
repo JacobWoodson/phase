@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use crate::game::game_object::ObjectIncarnationRefExt;
+use crate::types::ability::TargetRef;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ActiveSearchDecisionAuthority, CostResume, GameEnd, GameState, LeavingGameDeparture,
@@ -10,13 +11,13 @@ use crate::types::game_state::{
 use crate::types::identifiers::ObjectIncarnationRef;
 use crate::types::match_config::MatchPhase;
 use crate::types::player::PlayerId;
+use crate::types::proposed_event::ProposedEvent;
 use crate::types::resolution::OptionalEffectFrame;
 use crate::types::resolved_commands::{
     ResolvedPlayerLeaveCommand, ResolvedPlayerLeaveReplayInvariantError, RulesExecutionNodeRef,
 };
 use crate::types::zones::Zone;
 
-use super::combat::DamageTarget;
 use super::players;
 
 /// CR 800.4a: A spell that has been announced but not yet cast can be parked in
@@ -1420,6 +1421,51 @@ fn do_eliminate(
     // CR 800.4a + CR 616.1: Capture the parked replacement chooser before
     // cast-abandonment teardown can replace its prompt with priority.
     let leaving_is_latched_chooser = state.waiting_for.acting_player() == Some(player);
+    // CR 614.6 + CR 800.4a: replacements supersede the original assignment.
+    // Capture each current recipient before teardown can discard the parked
+    // event or remove the objects needed for its ownership check.
+    let departed_recipients: Vec<bool> = state
+        .pending_combat_damage
+        .as_ref()
+        .map(|record| {
+            record
+                .entries
+                .iter()
+                .enumerate()
+                .map(|(index, entry)| {
+                    let event = if index < record.decided.len() {
+                        record.decided[index].as_ref()
+                    } else if index == record.paused_entry {
+                        state
+                            .pending_replacement
+                            .as_ref()
+                            .filter(|pending| {
+                                pending.combat_pause_slot.is_some_and(|slot| {
+                                    slot.paused_entry == index && slot.source == entry.ctx.source_id
+                                })
+                            })
+                            .map(|pending| &pending.proposed)
+                    } else {
+                        record.remaining.get(index - record.paused_entry - 1)
+                    };
+                    match event {
+                        Some(ProposedEvent::Damage {
+                            target: TargetRef::Player(recipient),
+                            ..
+                        }) => *recipient == player,
+                        Some(ProposedEvent::Damage {
+                            target: TargetRef::Object(object_id),
+                            ..
+                        }) => state
+                            .objects
+                            .get(object_id)
+                            .is_some_and(|obj| obj.owner == player),
+                        _ => false,
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     abandon_source_bound_resolution_prompt(state, player, leaving_set, events);
     retire_pending_zone_change_contexts_owned_by(state, player);
@@ -1697,23 +1743,6 @@ fn do_eliminate(
     // (entry retained, flag left clear, no re-index for the paused slot —
     // mirroring the lifelink per-entry None-ing). Sources never prune: the
     // snapshot incarnation is LKI-correct.
-    let departed_recipients: Vec<bool> = state
-        .pending_combat_damage
-        .as_ref()
-        .map(|record| {
-            record
-                .entries
-                .iter()
-                .map(|entry| match &entry.assignment.target {
-                    DamageTarget::Player(recipient) => *recipient == player,
-                    DamageTarget::Object(object_id) => state
-                        .objects
-                        .get(object_id)
-                        .is_some_and(|obj| obj.owner == player),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
     if let Some(record) = state.pending_combat_damage.as_mut() {
         for entry in record.entries.iter_mut() {
             if entry.lifelink_controller == Some(player) {
@@ -2427,6 +2456,24 @@ mod tests {
                 lives_before: vec![20, 20, 20],
                 sub_step: CombatDamageSubStep::Regular,
             }));
+            if !stashed {
+                let mut pending = pending_replacement_for(
+                    decided_damage(source, TargetRef::Object(stolen)).unwrap(),
+                );
+                pending.combat_pause_slot = Some(crate::types::game_state::CombatPauseSlot {
+                    paused_entry: 1,
+                    source,
+                });
+                state.pending_replacement = Some(pending);
+                state.waiting_for = WaitingFor::ReplacementChoice {
+                    player: PlayerId(2),
+                    candidate_count: 0,
+                    candidates: Vec::new(),
+                    kind: Default::default(),
+                    last_applied_decides: false,
+                    remember_identity: None,
+                };
+            }
             (state, source, stolen, survivor)
         }
 
@@ -2499,6 +2546,89 @@ mod tests {
             record.entries[1].assignment.target,
             DamageTarget::Object(survivor)
         );
+
+        // CR 614.6 + CR 800.4a: the current events, rather than their original
+        // assignments, decide every storage position's fate after redirection.
+        for stashed in [false, true] {
+            let (mut state, source, stolen, survivor) = fixture(stashed);
+            let record = state.pending_combat_damage.as_mut().unwrap();
+            record.decided[0] = decided_damage(source, TargetRef::Object(survivor));
+            if stashed {
+                record.decided[1] = decided_damage(source, TargetRef::Object(survivor));
+            } else {
+                state.pending_replacement.as_mut().unwrap().proposed =
+                    decided_damage(source, TargetRef::Object(survivor)).unwrap();
+            }
+            let record = state.pending_combat_damage.as_mut().unwrap();
+            record.remaining[0] = decided_damage(source, TargetRef::Object(stolen)).unwrap();
+            eliminate_player(&mut state, PlayerId(0), &mut Vec::new());
+            let record = state.pending_combat_damage.as_ref().unwrap();
+            assert_eq!(
+                record.entries.len(),
+                2,
+                "the redirected remaining pair prunes"
+            );
+            assert_eq!(
+                record.paused_entry, 1,
+                "the redirected decided pair survives"
+            );
+            assert_eq!(
+                record.decided[0],
+                decided_damage(source, TargetRef::Object(survivor)),
+                "damage redirected away from the leaver must survive"
+            );
+            assert!(
+                !record.paused_entry_pruned,
+                "the surviving paused recipient is retained"
+            );
+            assert!(record.remaining.is_empty());
+            if stashed {
+                assert_eq!(
+                    record.decided[1],
+                    decided_damage(source, TargetRef::Object(survivor))
+                );
+            } else {
+                assert_eq!(
+                    state
+                        .pending_replacement
+                        .as_ref()
+                        .unwrap()
+                        .combat_pause_slot,
+                    Some(crate::types::game_state::CombatPauseSlot {
+                        paused_entry: 1,
+                        source
+                    })
+                );
+            }
+        }
+
+        // The inverse decided redirect must prune even though its historical
+        // assignment names a survivor; an already prevented slot stays None.
+        for prevented in [false, true] {
+            let (mut state, source, _, survivor) = fixture(true);
+            let record = state.pending_combat_damage.as_mut().unwrap();
+            record.entries[0].assignment.target = DamageTarget::Object(survivor);
+            if prevented {
+                record.decided[0] = None;
+            }
+            eliminate_player(&mut state, PlayerId(0), &mut Vec::new());
+            let record = state.pending_combat_damage.as_ref().unwrap();
+            assert_eq!(record.entries.len(), if prevented { 3 } else { 2 });
+            assert_eq!(record.paused_entry, usize::from(prevented));
+            assert_eq!(
+                record.decided,
+                if prevented {
+                    vec![None, None]
+                } else {
+                    vec![None]
+                }
+            );
+            assert_eq!(
+                record.remaining[0],
+                decided_damage(source, TargetRef::Object(survivor)).unwrap(),
+                "the positive remaining member preserves alignment"
+            );
+        }
     }
 
     /// CR 800.4e + CR 614.9 + CR 616.1 (B6 site 3 companion): a parked
@@ -2615,6 +2745,23 @@ mod tests {
                 lives_before: vec![20, 20, 20],
                 sub_step: CombatDamageSubStep::Regular,
             }));
+            if !stashed {
+                let mut pending =
+                    pending_replacement_for(damage(source, TargetRef::Object(stolen)));
+                pending.combat_pause_slot = Some(crate::types::game_state::CombatPauseSlot {
+                    paused_entry: 1,
+                    source,
+                });
+                state.pending_replacement = Some(pending);
+                state.waiting_for = WaitingFor::ReplacementChoice {
+                    player: PlayerId(2),
+                    candidate_count: 0,
+                    candidates: Vec::new(),
+                    kind: Default::default(),
+                    last_applied_decides: false,
+                    remember_identity: None,
+                };
+            }
             (state, stolen, survivor)
         }
 
