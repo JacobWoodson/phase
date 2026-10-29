@@ -79,9 +79,9 @@ use engine::game::zones::create_object;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, ChosenAttribute, ControllerRef,
-    DamageTargetFilter, DamageTargetPlayerScope, EachDamageRecipient, Effect, ObjectScope,
-    PreventionAmount, QuantityExpr, QuantityRef, ShieldKind, StaticDefinition, TargetFilter,
-    TargetRef, TypeFilter, TypedFilter,
+    DamageTargetFilter, DamageTargetPlayerScope, EachDamageRecipient, Effect, EffectKind,
+    ObjectScope, PlayerFilter, PreventionAmount, QuantityExpr, QuantityRef, ShieldKind,
+    StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -5078,4 +5078,252 @@ fn damage_all_empty_and_unprevented_batches_release_prevention_scope() {
         assert!(runner.state().combat_prevention_tally.is_none());
         assert!(runner.state().resolving_each_source_batch_owner.is_none());
     }
+}
+
+/// CR 608.2c + CR 615.13 + CR 616.1: preventing the final batch member
+/// preserves the independent Draw instruction and the root's completion.
+/// This synthetic typed spell tests instruction composition, not card parsing.
+#[test]
+fn damage_all_fully_prevented_final_member_resumes_draw_and_spell_completion() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    stock_libraries(&mut scenario);
+    let squire = scenario
+        .add_creature_to_hand_from_oracle(P0, "Selfless Squire", 1, 1, SELFLESS_SQUIRE_TEXT)
+        .with_mana_cost(free_cost())
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "Hardened Scales",
+        "If one or more +1/+1 counters would be put on a creature you control, that many plus one +1/+1 counters are put on it instead.");
+    let way = add_instant_from_oracle(&mut scenario, P0, "New Way Forward", NEW_WAY_FORWARD_TEXT);
+    let spell = scenario
+        .add_spell_to_hand(P0, "Synthetic DamageAll Then Draw", false)
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DamageAll {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::None,
+                    player_filter: Some(PlayerFilter::Controller),
+                    damage_source: None,
+                },
+            )
+            .sub_ability(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )),
+        )
+        .with_mana_cost(free_cost())
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(squire).resolve();
+    assert_eq!(runner.state().objects[&squire].zone, Zone::Battlefield);
+    assert_eq!(counters_on(&runner, squire), 0);
+    let _ = runner.cast(spell).commit();
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+    runner.cast(way).resolve();
+    let WaitingFor::DamageSourceChoice {
+        player, options, ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("New Way Forward must ask for its source while the typed spell is stacked");
+    };
+    assert_eq!(*player, P0);
+    assert!(options.contains(&spell));
+    runner
+        .act(GameAction::ChooseDamageSource { source: spell })
+        .expect("choose the stacked typed spell as New Way Forward's source");
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(runner.state().pending_damage_replacements.len(), 2);
+    let hand_before = runner.state().players[P0.0 as usize].hand.clone();
+    let drawn_card = runner.state().players[P0.0 as usize].library[0];
+    let life_before = runner.life(P0);
+    let opponent_life_before = runner.life(P1);
+    let mut log = Vec::new();
+    for _ in 0..16 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ) {
+            break;
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        log.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass priority until the typed damage batch pauses")
+                .events,
+        );
+    }
+    let WaitingFor::ReplacementChoice {
+        player, candidates, ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("the only batch member must reach the two-shield ordering prompt");
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(candidates.len(), 2);
+    let squire_index = candidates
+        .iter()
+        .position(|candidate| candidate.source_name.contains("Selfless Squire"))
+        .expect("the Squire shield must be a candidate");
+    assert!(candidates
+        .iter()
+        .any(|candidate| candidate.source_name.is_empty()));
+    let pending = runner.state().pending_replacement.as_ref().unwrap();
+    assert!(matches!(
+        &pending.proposed,
+        ProposedEvent::Damage { source_id, target, amount: 1, is_combat: false, .. }
+            if *source_id == spell && *target == TargetRef::Player(P0)
+    ));
+    assert_eq!(runner.state().pending_each_source_batches.len(), 1);
+    let owner = runner.state().pending_each_source_batches[0].owner;
+    assert_ne!(owner, 0, "the batch must have a minted owner");
+    assert_eq!(pending.each_source_batch_owner, Some(owner));
+    assert!(runner.state().pending_each_source_batches[0]
+        .tally
+        .is_empty());
+    let downstream = runner.state().active_ability_continuation().unwrap();
+    assert_eq!(downstream.each_source_batch_owner, None);
+    assert_eq!(downstream.parent_kind, Some(EffectKind::DamageAll));
+    assert!(matches!(&downstream.chain.effect, Effect::Draw { .. }));
+    assert!(
+        downstream.chain.sub_ability.is_none(),
+        "no damage remainder may be parked"
+    );
+    assert_eq!(downstream.chain.source_id, spell);
+    assert_eq!(
+        runner.state().resolution_stack.len(),
+        1,
+        "only the ownerless Draw tail is parked"
+    );
+    assert_eq!(
+        runner.state().resolving_stack_entry.as_ref().unwrap().id,
+        spell
+    );
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+
+    let saved = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+        .expect("serialize the final-member ordering pause");
+    let restored: PersistedGameState =
+        serde_json::from_str(&saved).expect("deserialize the final-member ordering pause");
+    runner = GameRunner::from_state(
+        restored
+            .into_game_state()
+            .expect("restore the authoritative paused state"),
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { player: P0, .. }
+    ));
+    assert_eq!(
+        runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .unwrap()
+            .each_source_batch_owner,
+        Some(owner)
+    );
+    assert_eq!(runner.state().pending_each_source_batches[0].owner, owner);
+    assert_eq!(
+        runner
+            .state()
+            .active_ability_continuation()
+            .unwrap()
+            .each_source_batch_owner,
+        None
+    );
+    log.extend(
+        runner
+            .act(GameAction::ChooseReplacement {
+                index: squire_index,
+            })
+            .expect("choose Squire after restoring the owned final-member prompt")
+            .events,
+    );
+    for _ in 0..32 {
+        if runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        log.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("resolve the independent Draw and Squire trigger")
+                .events,
+        );
+    }
+    // CR 608.2c: the independent instruction draws the actual top card once.
+    let hand_after = &runner.state().players[P0.0 as usize].hand;
+    assert_eq!(hand_after.len(), hand_before.len() + 1);
+    assert!(hand_after.contains(&drawn_card));
+    assert!(hand_before.iter().all(|card| hand_after.contains(card)));
+    assert_eq!(runner.state().objects[&drawn_card].zone, Zone::Hand);
+    assert_eq!(
+        log.iter()
+            .filter(|event| matches!(event,
+                GameEvent::CardDrawn { player_id: P0, object_id, .. } if *object_id == drawn_card
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        log.iter()
+            .filter(|event| matches!(event, GameEvent::CardDrawn { .. }))
+            .count(),
+        1
+    );
+    // CR 615.13: one prevention application puts one counter, plus one from Scales.
+    assert_eq!(prevented_pairs(&log), vec![(TargetRef::Player(P0), 1)]);
+    assert_eq!(counters_on(&runner, squire), 2);
+    assert_eq!(runner.life(P0), life_before);
+    assert_eq!(runner.life(P1), opponent_life_before);
+    assert!(
+        !log.iter()
+            .any(|event| matches!(event, GameEvent::DamageDealt { .. })),
+        "the unselected New Way Forward shield must not reflect damage"
+    );
+    assert_eq!(
+        log.iter()
+            .filter(|event| matches!(event,
+                GameEvent::EffectResolved { kind: EffectKind::DamageAll, source_id, .. }
+                    if *source_id == spell
+            ))
+            .count(),
+        1,
+        "the paused parent must publish completion exactly once"
+    );
+    // CR 608.2n: normal spell completion moves the spell to its graveyard once.
+    assert_eq!(
+        log.iter()
+            .filter(|event| matches!(event,
+                GameEvent::StackResolved { object_id } if *object_id == spell
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().pending_replacement.is_none());
+    assert!(runner.state().pending_each_source_batches.is_empty());
+    assert!(runner.state().active_ability_continuation().is_none());
+    assert!(runner.state().resolution_stack.is_empty());
+    assert!(runner.state().resolving_stack_entry.is_none());
+    assert!(runner.state().combat_prevention_tally.is_none());
+    assert!(runner.state().resolving_each_source_batch_owner.is_none());
 }

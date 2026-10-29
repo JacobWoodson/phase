@@ -2320,13 +2320,14 @@ fn handle_replacement_choice_inner(
             // continuations clear.
             //
             // CR 615.13 + CR 608.2c (Matt F1): the empty-remainder pause's
-            // ownerless downstream tail is equally live — the pause site
-            // marks it with the batch parent, and the stamped prompt's flush
-            // publishes the batch before it drains. A dead prevented-spell
-            // continuation carries neither a batch stamp nor a batch parent.
+            // ownerless downstream tail is equally live when the answered
+            // prompt owned the completed batch. Its parent kind records
+            // completion, while the captured prompt stamp keeps it live after
+            // the flush publishes and removes the batch's parked frames.
             let active_is_live_batch_tail =
                 state.active_ability_continuation().is_some_and(|pending| {
-                    pending.each_source_batch_owner.is_some()
+                    parked_batch_owner.is_some()
+                        || pending.each_source_batch_owner.is_some()
                         || pending.parent_kind
                             == Some(crate::types::ability::EffectKind::EachSourceDealsDamage)
                 });
