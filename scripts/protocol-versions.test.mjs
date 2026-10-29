@@ -302,6 +302,15 @@ function ownershipFixture(path) {
     mkdirSync(dirname(join(path, file)), { recursive: true });
     copyFileSync(join(root, file), join(path, file));
   }
+  // The live checker enforces frozen floors against the fixture registry, so a
+  // floor pinned above the fixture's lobby (a live lobby bump the fixture does
+  // not carry) would fail every ownership test. Top the lobby up to the highest
+  // frozen floor with synthetic lobby-only records; full/wire/draft/directory
+  // counts (asserted by the migration tests) stay untouched.
+  const script = readFileSync(join(path, "scripts/check-protocol-version.mjs"), "utf8");
+  const floors = [...script.matchAll(/MIN_LOBBY_PROTOCOL_FOR_\w+:\s*(\d+)/g)].map((m) => Number(m[1]));
+  const topUp = Math.max(0, ...floors.map((floor) => floor - loadProtocolVersions(path).lobby));
+  for (let i = 0; i < topUp; i++) record(path, { surfaces: ["lobby"], reason: "ownership fixture tops lobby to the frozen floors" });
   generateProtocolVersions(path);
   checker(path);
 }
