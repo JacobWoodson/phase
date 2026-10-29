@@ -89,8 +89,7 @@ use crate::types::ability::{
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
-use crate::types::events::{ClashResult, PlayerActionKind};
-use crate::types::identifiers::ObjectId;
+use crate::types::event_kinds::{ClashResult, PlayerActionKind};
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::{ManaColor, ManaType};
 use crate::types::phase::{Phase, PhaseGroup};
@@ -650,7 +649,7 @@ fn rewrite_cost_x_in_condition(cond: &mut crate::types::ability::AbilityConditio
 /// mirror image of the lying green, and just as dishonest.
 fn cost_x_sibling_slot_still_unbound(def: &crate::types::ability::AbilityDefinition) -> bool {
     use crate::types::ability::AbilityCondition;
-    use crate::types::game_state::TargetSelectionConstraint;
+    use crate::types::game_state_kinds::TargetSelectionConstraint;
 
     fn condition_has_bare_x(cond: &AbilityCondition) -> bool {
         match cond {
@@ -738,7 +737,7 @@ fn cost_x_sibling_slot_still_unbound(def: &crate::types::ability::AbilityDefinit
 /// it is correct at both selection time and resolution time.
 fn rewrite_cost_x_in_ability(def: &mut crate::types::ability::AbilityDefinition) {
     use super::oracle_replacement::rewrite_variable_x_to_cost_x_paid;
-    use crate::types::game_state::TargetSelectionConstraint;
+    use crate::types::game_state_kinds::TargetSelectionConstraint;
 
     if let Some(cond) = def.condition.as_mut() {
         rewrite_cost_x_in_condition(cond);
@@ -5014,7 +5013,7 @@ fn parse_may_pay_decline_restriction(input: &str) -> Option<ParsedEffectClause> 
     }
     let mut clause = parsed_clause(Effect::AddRestriction {
         restriction: GameRestriction::ProhibitActivity {
-            source: ObjectId(0),
+            source: crate::types::identifiers::ObjectId(0),
             affected_players: RestrictionPlayerScope::ScopedPlayer,
             expiry: RestrictionExpiry::EndOfCombat,
             activity: ProhibitedActivity::Attack {

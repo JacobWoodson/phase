@@ -23,8 +23,7 @@ use crate::types::ability::{
     PlayerFilter, PlayerRelation, PlayerScope, PtValue, QuantityExpr, StaticCondition,
     StaticDefinition, TargetFilter, TypedFilter,
 };
-use crate::types::game_state::DayNight;
-use crate::types::identifiers::TrackedSetId;
+use crate::types::game_state_kinds::DayNight;
 use crate::types::keywords::Keyword;
 use crate::types::phase::Phase;
 use crate::types::statics::{ProhibitionScope, StaticMode};
@@ -4560,7 +4559,7 @@ fn resolve_they_pronoun(ctx: &mut ParseContext, consumer: AnaphorConsumer) -> Ta
         // this either: a triggerless grant declares no target, so it would
         // resolve to the controller and the grant would silently misfire.
         _ if ctx.chain_prior_mass_population.is_some() => TargetFilter::TrackedSet {
-            id: TrackedSetId(0),
+            id: crate::types::identifiers::TrackedSetId(0),
         },
         // No trigger context — anaphoric reference to previously mentioned objects
         _ => TargetFilter::ParentTarget,
