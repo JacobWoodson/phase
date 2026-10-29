@@ -55,6 +55,19 @@ impl<T> Default for Definitions<T> {
     }
 }
 
+/// Registry-index projection for replacement-candidate identities.
+///
+/// The `*_by_rid` accessors take `impl ReplacementIdentity` rather than the
+/// state-layer identity item itself: `Definitions` is AST-reachable, so a
+/// signature naming that item would pull it into the AST closure
+/// (layer_boundary_census 5b). The single implementation lives beside the
+/// identity item in `types/proposed_event.rs`.
+pub trait ReplacementIdentity {
+    /// Contained projection to a registry ordinal, or `None` when the
+    /// identity carries no real ordinal (virtual-candidate payload, foreign).
+    fn registry_index(self) -> Option<usize>;
+}
+
 impl<T: Clone> Definitions<T> {
     /// Append a new definition. Public because mutation is a legitimate cross-
     /// crate operation (test fixtures, card construction, copy effects). The
@@ -98,17 +111,6 @@ impl<T: Clone> Definitions<T> {
     pub(crate) fn get_mut(&mut self, i: usize) -> Option<&mut T> {
         Arc::make_mut(&mut self.0).get_mut(i)
     }
-
-    /// Mutable access by replacement-candidate identity. Same contained
-    /// conversion as [`Definitions::get_by_rid`].
-    pub(crate) fn get_mut_by_rid(
-        &mut self,
-        rid: crate::types::proposed_event::ReplacementId,
-    ) -> Option<&mut T> {
-        usize::try_from(rid.index)
-            .ok()
-            .and_then(|i| Arc::make_mut(&mut self.0).get_mut(i))
-    }
 }
 
 impl<T> Definitions<T> {
@@ -126,14 +128,6 @@ impl<T> Definitions<T> {
     /// `game::functioning_abilities` instead.
     pub fn get(&self, i: usize) -> Option<&T> {
         self.0.get(i)
-    }
-
-    /// Read access by replacement-candidate identity. The rid index is `u64`
-    /// on every target (it doubles as the virtual-candidate payload carrier),
-    /// so the conversion is contained: real ordinals resolve, anything wider
-    /// answers `None` exactly as an out-of-range `.get()` does on 64-bit.
-    pub fn get_by_rid(&self, rid: crate::types::proposed_event::ReplacementId) -> Option<&T> {
-        usize::try_from(rid.index).ok().and_then(|i| self.0.get(i))
     }
 
     /// First definition, if any. Does not apply CR gating.
