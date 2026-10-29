@@ -1,5 +1,6 @@
 //! P2 replay coverage for resolved mana, scalar, status, counter, and ledger commands.
 
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -255,6 +256,7 @@ fn activated_signet_states() -> (GameState, GameState, ObjectId) {
         .act(GameAction::ActivateAbility {
             source_id: signet,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("the real Signet mana ability must activate");
     (pre_state, runner.state().clone(), signet)

@@ -35,12 +35,13 @@
 //! that net deliberately does not (`CopyValues` is parse-unreachable).
 //!
 //! Two narrower ad-hoc walkers remain unmigrated and are candidate future
-//! consumers: `game::coverage::ability_tree_any` (which has a `_ => {}`
-//! wildcard and omits many carriers — broadening it would change the coverage
-//! report) and `game::replacement::ability_tree_creates_tokens` (which walks
-//! only `Token` / `ChooseOneOf` / `sub_ability` / `else_ability` — broadening it
-//! would change replacement behavior). Neither is migrated here, because either
-//! migration would change behavior.
+//! consumers: [`ability_tree_any`], which lives in this module verbatim but is
+//! not built on the shared walk (it has a `_ => {}` wildcard and omits many
+//! carriers — broadening it would change the coverage report), and
+//! `game::replacement::ability_tree_creates_tokens` (which walks only `Token` /
+//! `ChooseOneOf` / `sub_ability` / `else_ability` — broadening it would change
+//! replacement behavior). Neither is migrated onto the shared walk, because
+//! either migration would change behavior.
 //!
 //! The effect-axis walk is one `define_walk!` body, expanded as the shared
 //! `&Effect` walk here and as the exclusive definition-node walk in [`nodes_mut`].
@@ -83,8 +84,8 @@
 
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ContinuousModification, CopiableValues,
-    CounterSourceRider, Effect, ReplacementDefinition, ReplacementMode, StaticDefinition,
-    TriggerDefinition, VoteSubject,
+    CounterSourceRider, Effect, NestedDefinitionEdge, ReplacementDefinition, ReplacementMode,
+    StaticDefinition, TargetFilter, TriggerDefinition, VoteSubject,
 };
 use std::ops::ControlFlow;
 
@@ -181,8 +182,9 @@ fn debug_assert_own_resolution_unreachable(scope: ResolutionScope, fn_name: &str
 /// **KNOWN GAP — inline branch carriers are NOT descended on the cost axis.**
 /// `visit_effect_scoped` descends nested `AbilityDefinition`s under
 /// `Vote.per_choice_effect` / `VoteSubject.outcome_template`,
-/// `SeparateIntoPiles`, `RevealFromHand.on_decline`, `FlipCoin` / `FlipCoins`,
-/// `FlipCoinUntilLose`, `RollDie.results`, and `ChooseOneOf.branches` (all via
+/// `SeparateIntoPiles`, `RevealFromHand.on_decline`, `FlipCoins` (win and lose),
+/// `ExileTopCardContest.winner_effect`, `RollDie.results`, and
+/// `ChooseOneOf.branches` (all via
 /// `visit_nested_ability_def_scoped`); this walk does not. A cost sitting on one
 /// of those nested defs — e.g. `ChooseOneOf { branches: [AbilityDefinition {
 /// cost: AbilityCost::Mill { .. }, .. }] }` — is therefore invisible here, which
@@ -428,9 +430,10 @@ where
             visit_copiable_values_scoped(values, scope, visit)?
         }
         // Remaining modifications carry no nested ability/effect carriers.
-        // GrantAllActivatedAbilitiesOf / GrantAllTriggeredAbilitiesOf only hold a
-        // source `TargetFilter`; the granted abilities/triggers are pulled live
-        // from the provider objects at layer collection time, not nested here.
+        // GrantAllActivatedAbilitiesOf / GrantAllTriggeredAbilitiesOf only
+        // hold a source `TargetFilter`; the granted abilities/triggers are
+        // pulled live from the provider objects at layer collection time,
+        // not nested here.
         ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
         // CR 707.2c (Metamorphic Alteration): inert parse-time copy marker — no
@@ -681,6 +684,9 @@ where
                 visit_nested_ability_def_scoped(outcome_template, scope, visit)?;
             }
         }
+        Effect::ExileTopCardContest { winner_effect } => {
+            visit_nested_ability_def_scoped(winner_effect, scope, visit)?;
+        }
         Effect::SeparateIntoPiles {
             chosen_pile_effect,
             unchosen_pile_effect,
@@ -709,12 +715,18 @@ where
                 visit_ability_def_scoped(effect, scope, visit)?
             }
         }
-        Effect::FlipCoin {
-            win_effect,
-            lose_effect,
-            ..
+        // BOUNDARY CARRIER (digital-only Alchemy, no CR entry): a boon
+        // installs a delayed trigger for its holder that resolves later as
+        // its own ability on the stack (CR 603.3 via CR 603.7). Its payload
+        // is not an instruction THIS ability follows during its own
+        // resolution (CR 608.2c), so `OwnResolutionOnly` stops here — the
+        // same treatment as `CreateDelayedTrigger`.
+        Effect::CreateBoon { trigger, .. } => {
+            if scope == ResolutionScope::IncludeRegisteredLater {
+                visit_trigger_scoped(trigger, scope, visit)?
+            }
         }
-        | Effect::FlipCoins {
+        Effect::FlipCoins {
             win_effect,
             lose_effect,
             ..
@@ -725,9 +737,6 @@ where
             if let Some(sub) = lose_effect {
                 visit_nested_ability_def_scoped(sub, scope, visit)?;
             }
-        }
-        Effect::FlipCoinUntilLose { win_effect } => {
-            visit_nested_ability_def_scoped(win_effect, scope, visit)?
         }
         Effect::RollDie { results, .. } => {
             for branch in results {
@@ -864,6 +873,7 @@ where
         | Effect::EndCombatPhase
         | Effect::Populate
         | Effect::Clash
+        | Effect::PhysicalContest { .. }
         | Effect::Behold { .. }
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }
@@ -984,6 +994,7 @@ where
         | Effect::ChooseFromZone { .. }
         | Effect::RememberCard { .. }
         | Effect::NoteManaSpent
+        | Effect::NoteNumber { .. }
         | Effect::ForEachCategory { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }
@@ -1018,6 +1029,7 @@ where
         | Effect::SkipNextStep { .. }
         | Effect::AdditionalPhase { .. }
         | Effect::Double { .. }
+        | Effect::ModifyAnnouncedX { .. }
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
@@ -1219,6 +1231,9 @@ pub(crate) fn node_fields(node: $Node<'_>, v: &mut impl FnMut(Symbol<'_>)) {
             if let Some(condition) = &$($mut_)? trigger.condition {
                 trigger_condition(condition, v);
             }
+            if let Some(condition) = &$($mut_)? trigger.attack_cost_condition {
+                static_condition(condition, v);
+            }
         }
         $Node::Static(def) => {
             if let Some(affected) = &$($mut_)? def.affected {
@@ -1306,6 +1321,10 @@ fn ability_condition(condition: &$($mut_)? AbilityCondition, v: &mut impl FnMut(
             quantity(lhs, v);
             quantity(rhs, v);
         }
+        AbilityCondition::QuantityQuality {
+            quantity: q,
+            quality: _,
+        } => quantity(q, v),
         AbilityCondition::PreviousEffectAmount { rhs, .. } => quantity(rhs, v),
         AbilityCondition::ConditionInstead { inner: c } | AbilityCondition::Not { condition: c } => {
             ability_condition(c, v)
@@ -1328,6 +1347,10 @@ fn trigger_condition(condition: &$($mut_)? TriggerCondition, v: &mut impl FnMut(
             quantity(lhs, v);
             quantity(rhs, v);
         }
+        TriggerCondition::QuantityQuality {
+            quantity: q,
+            quality: _,
+        } => quantity(q, v),
         // CR 201.5a: an `EventTime` condition (a state trigger's head, CR 603.8,
         // or an event trigger's "while" gate, CR 508.1m) is the wrapped
         // condition read only when the trigger fires, so its granter symbols
@@ -1350,6 +1373,10 @@ pub(crate) fn static_condition(condition: &$($mut_)? StaticCondition, v: &mut im
             quantity(lhs, v);
             quantity(rhs, v);
         }
+        StaticCondition::QuantityQuality {
+            quantity: q,
+            quality: _,
+        } => quantity(q, v),
         StaticCondition::IsTapped { scope } => object_scope(scope, v),
         StaticCondition::Not { condition: c } => static_condition(c, v),
         StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
@@ -1514,4 +1541,125 @@ pub(crate) fn each_granter_symbol(
     v: &mut impl FnMut(granter_symbols::Symbol<'_>),
 ) {
     granter_symbols::each_node(root, &mut |node| granter_symbols::node_fields(node, v));
+}
+
+/// CR 201.5a: whether a granter symbol still names an unbound granter.
+pub(crate) fn names_unbound_granter(symbol: &granter_symbols::Symbol<'_>) -> bool {
+    match symbol {
+        granter_symbols::Symbol::Filter(bound) => bound.is_none(),
+        granter_symbols::Symbol::Scope(scope) => {
+            matches!(scope, crate::types::ability::ObjectScope::GrantingObject)
+        }
+        granter_symbols::Symbol::Caster(_) => false,
+    }
+}
+
+/// CR 201.5a: whether a static's own fields name an unbound granter. Nested definition nodes
+/// are not entered; [`nested_definitions_name_granter`] covers them.
+pub(crate) fn own_fields_name_granter(def: &StaticDefinition) -> bool {
+    let mut names = false;
+    granter_symbols::node_fields(DefinitionNode::Static(def), &mut |symbol| {
+        names |= names_unbound_granter(&symbol);
+    });
+    names
+}
+
+/// CR 201.5a: whether a definition nested in `def`'s modifications names an unbound
+/// granter — together with [`own_fields_name_granter`], the whole of
+/// [`each_granter_symbol`]'s walk over a static.
+pub(crate) fn nested_definitions_name_granter(def: &StaticDefinition) -> bool {
+    let mut names = false;
+    for m in &def.modifications {
+        granter_symbols::each_node_in(m, &mut |node| {
+            granter_symbols::node_fields(node, &mut |symbol| {
+                names |= names_unbound_granter(&symbol);
+            })
+        });
+    }
+    names
+}
+
+/// CR 111.3 + CR 201.5a: whether a created token's static grants its nested definitions
+/// to the token itself. Those definitions are the token's own quoted abilities — its
+/// text, written by the creating effect — so a by-name reference in them names the
+/// creator and is bound at creation, as one in the static's own fields is. Any other
+/// static grants its nested definitions to other objects; the token is that grant's
+/// source, so a by-name reference in them names the token and binds at layer 6
+/// (CR 613.1f).
+pub(crate) fn token_static_grants_to_itself(def: &StaticDefinition) -> bool {
+    matches!(def.affected.as_ref(), Some(TargetFilter::SelfRef))
+}
+
+/// Walk an ability definition tree, visiting all nested `AbilityDefinition`s including
+/// those embedded in compound effects (`FlipCoins`, `RollDie`, `GrantAbility`, etc.).
+/// Returns `true` if the predicate returns `true` for any node in the tree.
+///
+/// `pub(crate)`: also the single-authority walker `PerpetualGrantModification::try_from`
+/// (`types/ability.rs`) reuses to reject a `GrantAbility` whose nested tree contains
+/// `Effect::Unimplemented` -- never reimplement tree-walking at that call site.
+pub(crate) fn ability_tree_any(
+    def: &AbilityDefinition,
+    pred: &impl Fn(&AbilityDefinition) -> bool,
+) -> bool {
+    if pred(def) {
+        return true;
+    }
+    // Standard chaining: sub_ability, else_ability, mode_abilities
+    if let Some(ref sub) = def.sub_ability {
+        if ability_tree_any(sub, pred) {
+            return true;
+        }
+    }
+    if let Some(ref else_ab) = def.else_ability {
+        if ability_tree_any(else_ab, pred) {
+            return true;
+        }
+    }
+    for mode_ab in &def.mode_abilities {
+        if ability_tree_any(mode_ab, pred) {
+            return true;
+        }
+    }
+    let mut found = false;
+    visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
+        found |= ability_tree_any(payload, pred);
+    });
+    if found {
+        return true;
+    }
+    // ContinuousModification::GrantAbility inside GenericEffect
+    if let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*def.effect
+    {
+        for stat in static_abilities {
+            for modif in &stat.modifications {
+                if let ContinuousModification::GrantAbility { definition } = modif {
+                    if ability_tree_any(definition, pred) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Visits the one-level executable ability payloads embedded directly in an effect.
+///
+/// Thin adapter over [`Effect::for_each_nested_definition`], the single
+/// authority for which effects carry a direct executable payload. The traversal
+/// and its exhaustiveness guarantee live in the AST layer; this wrapper exists
+/// only so coverage's many call sites keep their `impl FnMut` call style rather
+/// than each spelling out `&mut`.
+///
+/// Because the AST-layer match is exhaustive and wildcard-free, a newly added
+/// definition-carrying `Effect` variant is a compile error there — and every
+/// consumer in `game::coverage` inherits that guarantee instead of needing its own
+/// arm list to be kept in sync by hand.
+pub(crate) fn visit_direct_effect_ability_payloads<'a>(
+    effect: &'a Effect,
+    mut visit: impl FnMut(NestedDefinitionEdge, &'a AbilityDefinition),
+) {
+    effect.for_each_nested_definition(&mut visit);
 }

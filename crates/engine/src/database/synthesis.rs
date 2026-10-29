@@ -12,22 +12,23 @@ use crate::types::ability::{
     ActivationRestriction, AdditionalCost, AdditionalCostOrigin, AdditionalCostPaymentSource,
     AggregateFunction, AttachCardinality, AttachSelection, AttackSubject, CardPlayMode,
     CastFromZoneDriver, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, ChoiceType,
-    CombatHistoryScope, Comparator, ContinuousModification, ControllerRef, CopyRetargetPermission,
-    CounterTriggerFilter, DamageChannel, DamageKindFilter, DamageModification,
-    DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, KickerVariant,
-    ManaContribution, ManaProduction, ModalSelectionCondition, ModalSelectionConstraint,
-    NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PtStat, PtValue,
-    PtValueScope, QuantityExpr, QuantityRef, RenownSubject, ReplacementCondition,
-    ReplacementDefinition, RuntimeHandler, SacrificeCost, SearchSelectionConstraint,
-    StaticCondition, StaticDefinition, TapStateChange, TargetChoiceTiming, TargetFilter,
-    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
+    ChooseOneOfKind, CombatHistoryScope, Comparator, ContinuousModification, ControllerRef,
+    CopyRetargetPermission, CounterTriggerFilter, DamageChannel, DamageKindFilter,
+    DamageModification, DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp,
+    KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
+    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter,
+    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
+    ReplacementCondition, ReplacementDefinition, RuntimeHandler, SacrificeCost,
+    SearchSelectionConstraint, StaticCondition, StaticDefinition, TapStateChange,
+    TargetChoiceTiming, TargetFilter, TokenAttackDestination, TriggerCondition, TriggerDefinition,
+    TypeFilter, TypedFilter, UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::format::DeckCopyLimit;
 use crate::types::keywords::{
-    BloodthirstValue, BuybackCost, CyclingCost, EchoCost, Keyword, PartnerType,
+    BloodthirstValue, BuybackCost, CyclingCost, EchoCost, EntwineCost, Keyword, PartnerType,
 };
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::phase::Phase;
@@ -861,6 +862,7 @@ fn build_mobilize_trigger(qty: &QuantityExpr) -> TriggerDefinition {
         owner: TargetFilter::Controller,
         attach_to: None,
         enters_attacking: true,
+        attack_destination: TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
@@ -1020,6 +1022,7 @@ fn synthesize_etb_token_attach_keyword(
         owner: TargetFilter::Controller,
         attach_to: None,
         enters_attacking: false,
+        attack_destination: TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
@@ -2997,9 +3000,15 @@ pub fn synthesize_entwine(face: &mut CardFace) {
         None => return,
     };
 
+    // Convert EntwineCost to AbilityCost
+    let ability_cost = match cost {
+        EntwineCost::Mana(mc) => AbilityCost::Mana { cost: mc },
+        EntwineCost::NonMana(ac) => ac,
+    };
+
     // Set entwine_cost on the face's modal choice + allow all-mode selection
     if let Some(ref mut modal) = face.modal {
-        modal.entwine_cost = Some(cost);
+        modal.entwine_cost = Some(Box::new(ability_cost));
         // CR 702.42a: "You may choose all modes" — raise max_choices to allow it
         modal.max_choices = modal.mode_count;
     }
@@ -3339,6 +3348,7 @@ fn offspring_etb_copy_trigger_for_ordinal(origin_ordinal: u32) -> TriggerDefinit
             owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking: false,
+            attack_destination: TokenAttackDestination::ControllerChooses,
             tapped: false,
             count: QuantityExpr::Fixed { value: 1 },
             extra_keywords: vec![],
@@ -3537,6 +3547,7 @@ fn install_etb_copy_on_additional_cost(face: &mut CardFace, spec: EtbCopyOnAddit
             owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking: false,
+            attack_destination: TokenAttackDestination::ControllerChooses,
             tapped: false,
             count: spec.count,
             extra_keywords: vec![],
@@ -3759,6 +3770,7 @@ fn build_fabricate_trigger(n: u32) -> TriggerDefinition {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -3773,6 +3785,7 @@ fn build_fabricate_trigger(n: u32) -> TriggerDefinition {
         Effect::ChooseOneOf {
             chooser: crate::types::ability::PlayerFilter::Controller,
             branches: vec![counters_branch, servos_branch],
+            kind: ChooseOneOfKind::Ordinary,
         },
     );
 
@@ -4371,6 +4384,7 @@ fn build_afterlife_trigger(count: u32) -> TriggerDefinition {
         owner: TargetFilter::Controller,
         attach_to: None,
         enters_attacking: false,
+        attack_destination: TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
@@ -5042,6 +5056,7 @@ fn build_double_team_trigger() -> TriggerDefinition {
             owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking: true,
+            attack_destination: TokenAttackDestination::ControllerChooses,
             tapped: true,
             count: QuantityExpr::Fixed { value: 1 },
             extra_keywords: vec![],
@@ -8044,6 +8059,7 @@ fn build_champion_etb_trigger(type_str: &str) -> TriggerDefinition {
         Effect::ChooseOneOf {
             chooser: PlayerFilter::Controller,
             branches: vec![exile_branch, sacrifice_branch.clone()],
+            kind: ChooseOneOfKind::Ordinary,
         },
     )
     .condition(champion_has_eligible_object_condition(type_str));
@@ -14547,6 +14563,7 @@ mod provoke_runtime_tests {
     use crate::game::ability_utils::build_resolved_from_def_with_targets;
     use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
     use crate::game::effects::resolve_ability_chain;
+    use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::game::zones::create_object;
     use crate::types::ability::{ContinuousModification, EffectKind, TargetRef};
     use crate::types::events::GameEvent;
@@ -25762,8 +25779,9 @@ mod champion_synthesis_tests {
             "Champion should sacrifice itself directly when no eligible object exists"
         );
 
-        let Some(Effect::ChooseOneOf { branches, chooser }) =
-            etb.execute.as_deref().map(|a| &*a.effect)
+        let Some(Effect::ChooseOneOf {
+            branches, chooser, ..
+        }) = etb.execute.as_deref().map(|a| &*a.effect)
         else {
             panic!("expected ChooseOneOf ETB execute");
         };

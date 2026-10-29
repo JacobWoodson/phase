@@ -4,6 +4,7 @@
 
 use engine::game::effects::attach::attach_to;
 use engine::game::filter::{matches_target_filter, FilterContext};
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::game_object::{PhaseOutCause, PhaseStatus};
 use engine::game::layers::flush_layers;
 use engine::game::scenario::{CastOutcome, GameRunner, GameScenario, P0, P1};
@@ -16,6 +17,7 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::{LayersDirty, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use engine::types::keywords::{EchoCost, Keyword};
@@ -451,6 +453,7 @@ fn rootwater_source_can_depart_before_the_activation_resolves() {
         .act(GameAction::ActivateAbility {
             source_id: sources[0],
             ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .unwrap();
     assert!(matches!(
@@ -689,6 +692,7 @@ fn never_started_control_duration_cannot_sustain_itself() {
             .act(GameAction::ActivateAbility {
                 source_id: champion,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .unwrap();
         runner

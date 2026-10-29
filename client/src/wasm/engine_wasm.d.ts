@@ -144,6 +144,20 @@ export function deckCopyLimit(name: string): any;
 export function deckSupplyForFormat(format: any): any;
 
 /**
+ * Host the running Eye to Eye / Mouth to Mouth contest locally (single-player and
+ * P2P-host engines have no server to stamp time). The JS driver passes its own
+ * monotonic `now_ms` (`performance.now()`), the seats that are AI, and any clicks it
+ * collected since the last call — each stamped with its own `at_ms`. Clicks are
+ * applied in order, then the clock is advanced to `now_ms`, exactly as the server
+ * does; the engine's state machine decides everything.
+ *
+ * A contest's real-time result cannot be replayed from a recorded action list, so
+ * the first drive call invalidates an in-progress replay recording (the same
+ * treatment debug actions get).
+ */
+export function drive_contest_js(now_ms: number, ai_players: Uint8Array, away_players: Uint8Array, clicks: any): any;
+
+/**
  * Estimates a Commander deck's bracket without touching `GAME_STATE`.
  * Reads `CARD_DB` for bracket signals. Returns `null` (via serde) when the
  * deck has no commander or the card database is not loaded.
@@ -631,6 +645,13 @@ export function resume_restored_game_state(): any;
 export function search_cards_js(query: any): any;
 
 /**
+ * Request (or stop requesting) the "Show AI Hand" disclosure for the local
+ * seat's `get_game_state` projection. The engine honors it only for a seat
+ * with debug identity access; otherwise hands stay hidden.
+ */
+export function set_debug_hand_reveal(enabled: boolean): void;
+
+/**
  * Set the multiplayer enforcement flag directly.
  *
  * Entering multiplayer is *not* done here: the engine claims the flag itself,
@@ -731,6 +752,7 @@ export interface InitOutput {
     readonly customFormatFromLobbyConfig: (a: number, b: number, c: any) => [number, number, number];
     readonly deckCopyLimit: (a: number, b: number) => any;
     readonly deckSupplyForFormat: (a: any) => any;
+    readonly drive_contest_js: (a: number, b: number, c: number, d: number, e: number, f: any) => any;
     readonly estimate_bracket_for_deck: (a: any) => [number, number, number];
     readonly evaluateDeckFormatGate: (a: any) => [number, number, number];
     readonly evaluate_deck_compatibility_js: (a: any) => [number, number, number];
@@ -773,6 +795,7 @@ export interface InitOutput {
     readonly resume_multiplayer_host_state: (a: number, b: number) => [number, number, number];
     readonly resume_restored_game_state: () => [number, number, number];
     readonly search_cards_js: (a: any) => [number, number, number];
+    readonly set_debug_hand_reveal: (a: number) => void;
     readonly set_multiplayer_mode: (a: number) => void;
     readonly sideboardPolicyForFormat: (a: any) => [number, number, number];
     readonly signatureSpellSelectionPolicy: (a: any) => [number, number, number];

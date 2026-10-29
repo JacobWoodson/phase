@@ -23,7 +23,11 @@ import type {
   SerializedAbilityCost,
   AiDecisionDiagnosticReceipt,
 } from "../adapter/types";
-import { supportsAiDecisionDiagnostics, supportsMatchConcede } from "../adapter/types";
+import {
+  supportsAiDecisionDiagnostics,
+  supportsDebugHandReveal,
+  supportsMatchConcede,
+} from "../adapter/types";
 import type {
   InteractionManaRestriction,
   InteractionPresentationSurface,
@@ -33,7 +37,10 @@ import { useDraftStore } from "../stores/draftStore";
 import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
 import type { DraftMatchResult } from "../services/quickDraftPersistence";
 import { useResolvedGridRows, useResolvedSplitGridRows } from "../hooks/useResolvedGridRows.ts";
+import { useDebugHandReveal } from "../hooks/useDebugHandReveal";
 import { useIsMobile } from "../hooks/useIsMobile.ts";
+import { useLocalizedCardContent } from "../hooks/useLocalizedCardContent.ts";
+import { CardTextReference } from "../components/card/CardTextReference.tsx";
 import { useGameViewportLock } from "../hooks/useGameViewportLock.ts";
 import { FlexEditOverlay } from "../components/flexlayout/FlexEditOverlay.tsx";
 import { DraggableWidget } from "../components/flexlayout/DraggableWidget.tsx";
@@ -125,6 +132,8 @@ import { CombatTaxModal } from "../components/modal/CombatTaxModal.tsx";
 import { TopOrBottomChoiceModalContent } from "../components/modal/TopOrBottomChoiceModal.tsx";
 import { MutateMergeChoiceModalContent } from "../components/modal/MutateMergeChoiceModal.tsx";
 import { CipherEncodeChoiceModalContent } from "../components/modal/CipherEncodeChoiceModal.tsx";
+import { ContestOverlay } from "../components/contest/ContestOverlay.tsx";
+import { useContestStore } from "../stores/contestStore.ts";
 import { DialogHost, isClickThroughWaitingFor } from "../components/modal/DialogHost.tsx";
 import { PermanentTypeSlotModal } from "../components/modal/PermanentTypeSlotModal.tsx";
 import { StackDisplay } from "../components/stack/StackDisplay.tsx";
@@ -132,6 +141,7 @@ import { TargetingOverlay } from "../components/targeting/TargetingOverlay.tsx";
 import { PlayerHud } from "../components/hud/PlayerHud.tsx";
 import { OpponentHud } from "../components/hud/OpponentHud.tsx";
 import { TurnStatusLine } from "../components/hud/TurnStatusLine.tsx";
+import { DayNightBadge } from "../components/hud/HudBadges.tsx";
 import { GraveyardPile } from "../components/zone/GraveyardPile.tsx";
 import { LibraryPile } from "../components/zone/LibraryPile.tsx";
 import { ExilePile } from "../components/zone/ExilePile.tsx";
@@ -161,6 +171,9 @@ import { MANA_PAYMENT_WAITING_FOR_TYPES } from "../game/waitingForRegistry.ts";
 import { useGameDispatch } from "../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../hooks/useInspectHoverProps.ts";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
+import { usePriorityAttentionController } from "../hooks/usePriorityAttention.ts";
+import { usePriorityChime } from "../hooks/usePriorityChime.ts";
+import { usePriorityTabTitle } from "../hooks/usePriorityTabTitle.ts";
 import { clearPromptOverlayState } from "../game/sessionCleanup.ts";
 import { clearGame, hasRemoteHumans, loadActiveGame, useGameStore } from "../stores/gameStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
@@ -472,6 +485,9 @@ export function GamePage() {
           3000,
         );
         break;
+      case "contestProgress":
+        useContestStore.getState().setProgress(event.contest, event.clicks);
+        break;
       case "timerUpdate":
         setTimerRemaining((prev) => ({
           ...prev,
@@ -538,7 +554,12 @@ export function GamePage() {
             : [...s.spectators, event.name],
         }));
         break;
+      case "operationFailed":
+        useMultiplayerStore.getState().showToast(event.message);
+        break;
       case "error":
+        // Also the terminal surface for a native AI driver fault (the adapter
+        // emits `aiDriverFault`, then this `error`): the game cannot continue.
         useMultiplayerStore.getState().showToast(event.message);
         // Native engine sockets emit an error before close; the provider disposes
         // that terminal adapter, so no reconnectFailed event follows.
@@ -685,7 +706,8 @@ export function GamePage() {
         break;
       case "terminalResult":
         clearPromptOverlayState();
-        if (gameId) void clearGame(gameId);
+        // Display is independent of native guest convergence. The provider /
+        // adapter owns deletion after durable cleanup ownership is established.
         setTerminalReason(event.result.display.reason);
         useGameStore.setState({
           waitingFor: { type: "GameOver", data: { winner: event.result.display.winner } },
@@ -703,6 +725,9 @@ export function GamePage() {
             joinCode,
           },
         });
+        break;
+      case "operationFailed":
+        useMultiplayerStore.getState().showToast(event.message);
         break;
       case "error":
         useMultiplayerStore.getState().showToast(event.message);
@@ -1001,9 +1026,9 @@ function GamePageContent({
   const canReportCard = gameState != null && !isSpectatorMode;
   const canActForWaitingState = useCanActForWaitingState();
   const boardChoiceLayerActive = useMemo(() => {
-    const choice = getBoardChoiceView(waitingFor, objects);
+    const choice = getBoardChoiceView(waitingFor, objects, gameState?.allows_cancel_cast);
     return canActForWaitingState && choice != null;
-  }, [canActForWaitingState, objects, waitingFor]);
+  }, [canActForWaitingState, gameState?.allows_cancel_cast, objects, waitingFor]);
   const helpSheetOpen = useUiStore((s) => s.helpSheetOpen);
   const setHelpSheetOpen = useUiStore((s) => s.setHelpSheetOpen);
   const dismissedFlowHelpNudge = usePreferencesStore((s) => s.dismissedFlowHelpNudge);
@@ -1046,6 +1071,7 @@ function GamePageContent({
       adapter.setAiDecisionDiagnosticsEnabled(false);
     };
   }, [adapter, aiDecisionCaptureEnabled]);
+  useDebugHandReveal(showAiHand);
   // The AUTHORITATIVE game mode. The URL-derived `mode` prop structurally
   // cannot contain `native-ai` (desktop solo arrives as `rawMode === "ai"`), so
   // it cannot answer "is anyone else at this table?".
@@ -1065,7 +1091,7 @@ function GamePageContent({
   const untapForcedSplit =
     seatCount > 2 &&
     canActForWaitingState &&
-    getBoardChoiceView(waitingFor, objects)?.intent === "untap";
+    getBoardChoiceView(waitingFor, objects, gameState?.allows_cancel_cast)?.intent === "untap";
   const effectiveMultiplayerBoardLayout = untapForcedSplit
     ? "split"
     : resolvedMultiplayerBoardLayout;
@@ -1199,6 +1225,11 @@ function GamePageContent({
   }, [isOnlineMode, gameId, handleConcede, navigate]);
 
   useKeyboardShortcuts();
+
+  // Priority-attention cues: one controller writes the store; each cue reads it.
+  usePriorityAttentionController();
+  usePriorityChime();
+  usePriorityTabTitle();
 
   // Toggle debug layout bounds with Ctrl+Shift+D
   useEffect(() => {
@@ -1541,7 +1572,7 @@ function GamePageContent({
             <>
               <div aria-hidden />
               <div className="min-w-0">
-                <OpponentHand showCards={showAiHand} />
+                <OpponentHand />
               </div>
               <DraggableWidget
                 target={{ kind: "widget", key: "opponentPiles" }}
@@ -1589,7 +1620,6 @@ function GamePageContent({
             effectiveMultiplayerBoardLayout={effectiveMultiplayerBoardLayout}
             oppHud={oppHud}
             playerHud={playerHud}
-            showOpponentCards={showAiHand}
             onKickPlayer={isP2PHost ? handleKickPlayer : undefined}
             onViewZone={handleViewZone}
           />
@@ -1681,6 +1711,7 @@ function GamePageContent({
             <div className="flex flex-col gap-1 max-lg:gap-1">
               <MobilePhaseChip className="w-full" />
               <HandBadge className="w-full" />
+              <DayNightBadge />
             </div>
             <div className="flex items-center gap-1.5">
               <PriorityYieldList />
@@ -1700,7 +1731,10 @@ function GamePageContent({
             <CombatPhaseIndicator />
           </div>
           {isSpectatorMode ? (
-            <TurnStatusLine />
+            <div className="flex flex-row items-center gap-1.5">
+              <TurnStatusLine />
+              <DayNightBadge />
+            </div>
           ) : (
             <>
               <div className="hidden max-lg:portrait:block max-lg:portrait:w-full">
@@ -1712,6 +1746,7 @@ function GamePageContent({
                 <MobilePhaseChip className="lg:hidden" />
                 <TurnStatusLine />
                 <HandBadge />
+                <DayNightBadge />
                 {/* CR 117.3d: standing priority-yield summary chip, beside the
                     Full Control toggle (self-hides when no yields stand). */}
                 <PriorityYieldList />
@@ -1732,7 +1767,7 @@ function GamePageContent({
       {/* Game menu — top-left hamburger */}
       <GameMenu
         gameId={gameId}
-        isAiMode={mode === "ai"}
+        isAiMode={mode === "ai" && supportsDebugHandReveal(adapter)}
         isOnlineMode={isOnlineMode}
         showAiHand={showAiHand}
         onToggleAiHand={() => setShowAiHand((v) => !v)}
@@ -1987,6 +2022,9 @@ function GamePageContent({
               Wrapped in DialogHost so any active dialog can be peeked away to
               reveal the battlefield underneath; peek state resets on every
               new WaitingFor so a fresh prompt is always visible. */}
+          {/* Eye to Eye / Mouth to Mouth: real-time clicking contest + result banner. */}
+          <ContestOverlay />
+
           <DialogHost>
             {waitingFor != null &&
               isClickThroughWaitingFor(waitingFor, objects) &&
@@ -3325,6 +3363,7 @@ function AbilityChoiceModal() {
   const obj = useGameStore((s) =>
     pending ? s.gameState?.objects[pending.objectId] : undefined,
   );
+  const localized = useLocalizedCardContent(obj?.name ?? null);
   const objects = useGameStore((s) => s.gameState?.objects);
   const webSlingingCosts = useGameStore(
     (s) => s.gameState?.derived?.web_slinging_costs,
@@ -3380,7 +3419,9 @@ function AbilityChoiceModal() {
 
   return (
     <ChoiceModal
-      title={obj.name}
+      title={localized?.name || obj.name}
+      scrollable
+      footer={<CardTextReference text={localized?.oracle_text} />}
       subtitle={subtitle}
       previewCardName={obj.name}
       previewCardTypes={obj.card_types}

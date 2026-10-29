@@ -9,7 +9,7 @@ use super::ability::{
     AbilityCost, AbilityTag, CardPlayMode, CastTimingPermission, CostCategory, PlayerFilter,
     QuantityExpr, QuantityRef, TargetFilter,
 };
-use super::events::ActivatedAbilityKind;
+use super::event_kinds::ActivatedAbilityKind;
 use super::identifiers::ObjectIncarnationRef;
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{ManaColor, ManaCost, SpecialAction, StepEndManaAction};
@@ -314,22 +314,6 @@ pub enum GraveyardPermissionPool {
 impl GraveyardPermissionPool {
     pub fn is_own_graveyard(&self) -> bool {
         matches!(self, GraveyardPermissionPool::OwnGraveyard)
-    }
-
-    /// Whether `card` is in this pool for `caster`: "your graveyard" is the
-    /// graveyard container the caster reads (CR 400.1 + CR 109.5).
-    pub fn admits(
-        self,
-        state: &crate::types::game_state::GameState,
-        card: &crate::game::game_object::GameObject,
-        caster: PlayerId,
-    ) -> bool {
-        match self {
-            GraveyardPermissionPool::OwnGraveyard => {
-                state.object_in_players_zone(card, Zone::Graveyard, caster)
-            }
-            GraveyardPermissionPool::AnyGraveyard => true,
-        }
     }
 }
 
@@ -856,6 +840,7 @@ fn special_action_registry_str(action: SpecialAction) -> &'static str {
         SpecialAction::TurnFaceUp => "TurnFaceUp",
         SpecialAction::RollPlanarDie => "RollPlanarDie",
         SpecialAction::EndContinuousEffect => "EndContinuousEffect",
+        SpecialAction::Foretell => "Foretell",
     }
 }
 
@@ -870,6 +855,8 @@ fn special_action_from_registry_str(s: &str) -> Option<SpecialAction> {
         // CR 116.2c: this arm is NOT compiler-forced (`_ => None` below) —
         // omitting it silently breaks the registry string round-trip.
         "EndContinuousEffect" => Some(SpecialAction::EndContinuousEffect),
+        // CR 116.2h: same non-compiler-forced registry round-trip obligation.
+        "Foretell" => Some(SpecialAction::Foretell),
         _ => None,
     }
 }
@@ -1415,6 +1402,12 @@ pub enum StaticMode {
     /// a keyword tag. E.g., "Creatures you control can boast twice during each of
     /// your turns rather than once" → overrides `OnlyOnceEachTurn` to `MaxTimesEachTurn(2)`
     /// for boast-tagged abilities on affected permanents.
+    ///
+    /// CR 606.3 loyalty reading: with `keyword: "loyalty"`, raises the
+    /// per-permanent loyalty-ability cap (Oath of Teferi class — "You may
+    /// activate the loyalty abilities of planeswalkers you control twice each
+    /// turn rather than only once"). Matched by the loyalty legality gate
+    /// against `is_loyalty_ability_cost`, not by `AbilityTag`.
     ModifyActivationLimit {
         /// The keyword tag whose activation limit is modified.
         keyword: String,

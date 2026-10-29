@@ -4,19 +4,22 @@ use std::str::FromStr;
 
 use nom::branch::alt;
 use nom::bytes::complete::tag;
-use nom::combinator::value;
-use nom::sequence::preceded;
+use nom::combinator::{all_consuming, opt, value};
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
 use super::ability::ControllerRef;
 use super::ability::{
-    AbilityCost, ActivationRestriction, Comparator, CostObjectCount, CostReduction, FilterProp,
-    QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
+    AbilityCost, ActivationRestriction, CardSelectionMode, Comparator, CostObjectCount,
+    CostReduction, FilterProp, QuantityExpr, SacrificeRequirement, TargetFilter, TypeFilter,
+    TypedFilter,
 };
 use super::counter::{parse_counter_type, CounterType};
 use super::mana::{ManaColor, ManaCost};
+
+pub use super::text_grammar::craft_materials_default;
 
 /// CR 702.34a: Flashback cost — either a mana cost or a non-mana cost
 /// (e.g., "Tap three untapped white creatures you control").
@@ -97,6 +100,145 @@ pub enum EvokeCost {
 pub enum EchoCost {
     Mana(ManaCost),
     NonMana(AbilityCost),
+}
+
+/// CR 702.42a: Entwine cost — pay additional cost to choose all modes of a modal spell.
+/// Most Entwine cards use a pure mana cost (e.g., Journey of Discovery "Entwine {2}{G}"),
+/// but some use non-mana costs (e.g., Solar Tide "Entwine—Sacrifice two lands.").
+/// Mirrors `EvokeCost`/`FlashbackCost`/`CyclingCost` so the non-mana portion
+/// composes through the existing `AbilityCost` / `pay_additional_cost` pipeline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", from = "EntwineCostWire")]
+pub enum EntwineCost {
+    Mana(ManaCost),
+    NonMana(AbilityCost),
+}
+
+/// Deserialization shape for `EntwineCost`. Entwine was previously stored as a
+/// bare `ManaCost`; previously exported card data (and fixtures) still carry
+/// that form, so it is read as `EntwineCost::Mana`. Serialization always emits
+/// the tagged `Mana`/`NonMana` wrapper.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum EntwineCostWire {
+    Tagged(EntwineCostTagged),
+    LegacyMana(ManaCost),
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", content = "data")]
+enum EntwineCostTagged {
+    Mana(ManaCost),
+    NonMana(AbilityCost),
+}
+
+impl From<EntwineCostWire> for EntwineCost {
+    fn from(wire: EntwineCostWire) -> Self {
+        match wire {
+            EntwineCostWire::Tagged(EntwineCostTagged::Mana(cost))
+            | EntwineCostWire::LegacyMana(cost) => EntwineCost::Mana(cost),
+            EntwineCostWire::Tagged(EntwineCostTagged::NonMana(cost)) => EntwineCost::NonMana(cost),
+        }
+    }
+}
+
+/// CR 702.37a + CR 702.37e: Morph cost — either a mana cost (most morph cards,
+/// e.g. Exalted Angel "{2}{W}{W}") or a non-mana cost (Fathom Seer "Return two
+/// Islands you control to their owner's hand", Gathan Raiders "Discard a card",
+/// Zombie Cutthroat "Pay 5 life", Ruthless Ripper "Reveal a black card in your
+/// hand"). Mirrors `EvokeCost`/`BuybackCost`/`CyclingCost`/`EchoCost` so non-mana
+/// costs compose through the existing `AbilityCost` pipeline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum MorphCost {
+    Mana(ManaCost),
+    NonMana(AbilityCost),
+}
+
+impl From<ManaCost> for MorphCost {
+    fn from(cost: ManaCost) -> Self {
+        Self::Mana(cost)
+    }
+}
+
+impl From<AbilityCost> for MorphCost {
+    fn from(cost: AbilityCost) -> Self {
+        Self::NonMana(cost)
+    }
+}
+
+impl MorphCost {
+    /// CR 702.37e: Returns true if the morph cost is supported by the engine.
+    pub fn is_supported(&self) -> bool {
+        match self {
+            Self::Mana(_) => true,
+            Self::NonMana(cost) => is_ability_cost_supported_for_morph(cost),
+        }
+    }
+}
+
+/// CR 702.37e + CR 118.1: Supported non-mana cost shapes for morph: ReturnToHand,
+/// Discard (chosen from hand only), PayLife, Reveal, Sacrifice (fixed count only),
+/// and Mana. Aggregate sacrifice requirements and random/source-card discards are
+/// rejected until prompt semantics exist. Composite is suppressed until
+/// transaction rollback / pause continuations are implemented.
+pub fn is_ability_cost_supported_for_morph(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::ReturnToHand { .. } => true,
+        // CR 107.3d: a morph cost's X is chosen immediately before paying it, but
+        // variable non-mana morph costs are not supported yet, so only fixed
+        // counts are accepted.
+        AbilityCost::Discard {
+            count,
+            selection,
+            self_scope,
+            ..
+        } => {
+            matches!(count, QuantityExpr::Fixed { .. })
+                && !self_scope.is_source_card()
+                && *selection != CardSelectionMode::Random
+        }
+        AbilityCost::PayLife { amount } => matches!(amount, QuantityExpr::Fixed { .. }),
+        // CR 107.3d: variable non-mana morph costs are not supported yet (the
+        // turn-face-up flow has no X choice for non-mana counts), so a symbolic
+        // reveal count is unsupported rather than read as 0.
+        AbilityCost::Reveal { count, .. } => matches!(count, QuantityExpr::Fixed { .. }),
+        AbilityCost::Sacrifice(cost) => {
+            // `u32::MAX` is the parser sentinel for "X" / "any number of".
+            matches!(
+                cost.requirement,
+                SacrificeRequirement::Count { count } if count != u32::MAX
+            )
+        }
+        AbilityCost::Mana { .. } => true,
+        AbilityCost::ManaDynamic { .. }
+        | AbilityCost::Tap
+        | AbilityCost::Untap
+        | AbilityCost::Loyalty { .. }
+        | AbilityCost::Exile { .. }
+        | AbilityCost::ExileMaterials { .. }
+        | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::ExileWithAggregate { .. }
+        | AbilityCost::TapCreatures { .. }
+        | AbilityCost::RemoveCounter { .. }
+        | AbilityCost::PayEnergy { .. }
+        | AbilityCost::PaySpeed { .. }
+        | AbilityCost::Unattach
+        | AbilityCost::UnattachFrom { .. }
+        | AbilityCost::Mill { .. }
+        | AbilityCost::Exert
+        | AbilityCost::Blight { .. }
+        | AbilityCost::Behold { .. }
+        | AbilityCost::Composite { .. }
+        | AbilityCost::OneOf { .. }
+        | AbilityCost::Waterbend { .. }
+        | AbilityCost::NinjutsuFamily { .. }
+        | AbilityCost::EffectCost { .. }
+        | AbilityCost::PerCounter { .. }
+        | AbilityCost::KeywordCostOfCastSpell { .. }
+        | AbilityCost::GetPlayerCounters { .. }
+        | AbilityCost::Unimplemented { .. } => false,
+    }
 }
 
 /// CR 702.103a + CR 118.9: Bestow cost — the alternative cost paid to cast the
@@ -586,17 +728,44 @@ pub enum ProtectionTarget {
     /// behave as protection from every opponent, which the Opponent scope
     /// captures in one variant.
     FromPlayer(super::ability::ControllerRef),
+    /// CR 702.16i: "protection from each [color in set]" — one separate protection
+    /// ability per member color, expanded when the grant is applied
+    /// (`game::keywords::resolve_granted_protection`).
+    EachColor(ProtectionColorSet),
+}
+
+/// CR 702.16i: a set of colors that "protection from each [set]" expands over.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProtectionColorSet {
+    /// CR 903.4 + CR 903.4f + CR 702.124c: colors of `ManaColor::ALL` outside the combined
+    /// color identity of the granting effect's controller's commander(s); undefined
+    /// (no colors) when that player has no commander.
+    OutsideCommanderColorIdentity,
 }
 
 /// CR 702.21a: Ward cost — what the targeting player must pay.
+///
+/// Decoded through a normalizing `Deserialize` (`remote = "Self"`): payloads
+/// written before the discard cost carried its axes (`{"type":"DiscardCard"}`)
+/// still load.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data")]
+#[serde(remote = "Self", tag = "type", content = "data")]
 pub enum WardCost {
     Mana(ManaCost),
     PayLife(i32),
     /// CR 702.21a: Ward whose life payment is the warded creature's power at resolution.
     PayLifeEqualToPower,
-    DiscardCard,
+    /// CR 702.21a + CR 701.9a + CR 701.9b: Discard `count` cards from the paying
+    /// player's hand, restricted to cards matching `filter` when present
+    /// ("Ward—Discard an enchantment, instant, or sorcery card."), chosen by the
+    /// payer or at random ("Ward—Discard a card at random."). Mirrors
+    /// `AbilityCost::Discard`'s axes minus `self_scope`: a ward cost is always
+    /// paid from the payer's hand.
+    Discard {
+        count: u32,
+        filter: Option<TargetFilter>,
+        selection: CardSelectionMode,
+    },
     /// CR 702.21a: Sacrifice N permanents matching a filter as ward cost.
     Sacrifice {
         count: u32,
@@ -617,6 +786,39 @@ pub enum WardCost {
         counter_kind: crate::types::player::PlayerCounterKind,
         count: u32,
     },
+}
+
+impl Serialize for WardCost {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        WardCost::serialize(self, serializer)
+    }
+}
+
+/// Decode-only staging for `WardCost` payloads that predate the reshaped
+/// discard variant; never constructed.
+/// Pre-reshape payloads stored the one-chosen-card discard as the unit form
+/// `{"type":"DiscardCard"}`.
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum LegacyWardCost {
+    DiscardCard,
+}
+
+impl<'de> Deserialize<'de> for WardCost {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = serde_json::Value::deserialize(deserializer)?;
+        match WardCost::deserialize(raw.clone()) {
+            Ok(cost) => Ok(cost),
+            Err(current_err) => match serde_json::from_value::<LegacyWardCost>(raw) {
+                Ok(LegacyWardCost::DiscardCard) => Ok(WardCost::Discard {
+                    count: 1,
+                    filter: None,
+                    selection: CardSelectionMode::Chosen,
+                }),
+                Err(_) => Err(serde::de::Error::custom(current_err)),
+            },
+        }
+    }
 }
 
 /// CR 702.54a + CR 702.54b: Bloodthirst has fixed-N and X-count forms.
@@ -799,7 +1001,7 @@ pub enum Keyword {
 
     // Additional common keywords with ManaCost
     Prowl(ManaCost),
-    Morph(ManaCost),
+    Morph(MorphCost),
     Megamorph(ManaCost),
     /// CR 702.187b: Mayhem {cost} — cast from graveyard if you discarded this
     /// card this turn, paying the mayhem cost rather than its mana cost.
@@ -854,7 +1056,7 @@ pub enum Keyword {
     /// `EchoCost::NonMana(AbilityCost::Discard { .. })`.
     Echo(EchoCost),
     /// CR 702.42a: Entwine — pay additional cost to choose all modes of a modal spell.
-    Entwine(ManaCost),
+    Entwine(EntwineCost),
     Outlast(ManaCost),
     Scavenge(ManaCost),
     /// CR 702.77a: Reinforce N—[cost] means "[Cost], Discard this card:
@@ -1243,6 +1445,11 @@ pub enum Keyword {
 }
 
 impl Keyword {
+    /// CR 702.37a/e: Construct a Morph keyword from either a ManaCost or AbilityCost.
+    pub fn morph(cost: impl Into<MorphCost>) -> Self {
+        Self::Morph(cost.into())
+    }
+
     /// Whether this keyword should appear in the battlefield card's compact
     /// badge strip. The strip communicates abilities that remain relevant to
     /// the object as a permanent: combat, protection, live characteristics,
@@ -2258,20 +2465,12 @@ fn extract_companion_subtypes(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// CR 702.167b: Public re-export of the default craft materials filter (the
-/// creature class) so keyword deserializers can request it without reaching into the
-/// `pub(crate)` parser module. The single authority remains
-/// `parser::oracle_keyword::craft_materials_filter`.
-pub fn craft_materials_default() -> TargetFilter {
-    crate::parser::oracle_keyword::craft_materials_default()
-}
-
 /// Parse a mana cost string into ManaCost. Supports both MTGJSON format ({1}{W})
 /// and simple format (1W, 2, W, etc.) for keyword parameters.
 fn parse_keyword_mana_cost(s: &str) -> ManaCost {
     // If it contains braces, delegate to the MTGJSON parser
     if s.contains('{') {
-        return crate::database::mtgjson::parse_mtgjson_mana_cost(s);
+        return crate::types::mana::parse_mtgjson_mana_cost(s);
     }
 
     // Simple format: try to parse as pure generic (e.g. "3"), or as mana symbols
@@ -2379,7 +2578,7 @@ fn parse_affinity_type(s: &str) -> Option<TypedFilter> {
             // subtype parser first so irregular plurals such as "Elves" are
             // canonicalized to their rules name ("Elf"). Unknown names are still
             // valid subtypes (for example, Daleks), so retain the generic fallback.
-            let subtype = crate::parser::oracle_util::parse_subtype(s)
+            let subtype = super::text_grammar::parse_subtype(s)
                 .filter(|(_, consumed)| *consumed == s.len())
                 .map(|(subtype, _)| subtype)
                 .unwrap_or_else(|| {
@@ -2417,12 +2616,12 @@ fn parse_affinity_type(s: &str) -> Option<TypedFilter> {
 /// `Keyword::Unknown` fallthrough rather than silently dumping the raw text
 /// into a `TypeFilter::Subtype` (the bug fixed by issue #537).
 fn parse_enchant_target(s: &str) -> Option<TargetFilter> {
-    use crate::parser::oracle_nom::enchant::{
+    use super::text_grammar::parse_zone_filter;
+    use super::text_grammar::OracleResult;
+    use super::text_grammar::{
         parse_enchant_attachment_qualifier, parse_enchant_controller_suffix,
         parse_enchant_player_base, parse_enchant_qualified_type_leg,
     };
-    use crate::parser::oracle_nom::error::OracleResult;
-    use crate::parser::oracle_nom::filter::parse_zone_filter;
     use nom::bytes::complete::tag;
     use nom::combinator::opt;
     use nom::sequence::preceded;
@@ -2431,22 +2630,17 @@ fn parse_enchant_target(s: &str) -> Option<TargetFilter> {
     // Typed sub-combinator: optional " card" word with optional leading space
     // (the space is only required when a preceding type leg was consumed).
     fn parse_card_word(input: &str) -> OracleResult<'_, ()> {
-        let (rest, _) = opt(tag::<
-            &str,
-            &str,
-            crate::parser::oracle_nom::error::OracleError<'_>,
-        >(" "))
-        .parse(input)?;
         let (rest, _) =
-            tag::<&str, &str, crate::parser::oracle_nom::error::OracleError<'_>>("card")
-                .parse(rest)?;
+            opt(tag::<&str, &str, super::text_grammar::OracleError<'_>>(" ")).parse(input)?;
+        let (rest, _) =
+            tag::<&str, &str, super::text_grammar::OracleError<'_>>("card").parse(rest)?;
         Ok((rest, ()))
     }
 
     // Typed sub-combinator: " " + zone phrase.
     fn parse_leading_zone(input: &str) -> OracleResult<'_, crate::types::zones::Zone> {
         preceded(
-            tag::<&str, &str, crate::parser::oracle_nom::error::OracleError<'_>>(" "),
+            tag::<&str, &str, super::text_grammar::OracleError<'_>>(" "),
             parse_zone_filter,
         )
         .parse(input)
@@ -2496,11 +2690,10 @@ fn parse_enchant_target(s: &str) -> Option<TargetFilter> {
     // another Aura attached to it" (Daybreak Coronet) narrows the legal target
     // set to objects that already carry an attachment of the named kind.
     let (rest, attachment) = opt(parse_enchant_attachment_qualifier).parse(rest).ok()?;
-    let (rest, without_keyword) =
-        match crate::parser::oracle_target::parse_without_keyword_suffix(rest) {
-            Some((props, consumed)) => (&rest[consumed..], props),
-            None => (rest, Vec::new()),
-        };
+    let (rest, without_keyword) = match super::text_grammar::parse_without_keyword_suffix(rest) {
+        Some((props, consumed)) => (&rest[consumed..], props),
+        None => (rest, Vec::new()),
+    };
     if !rest.trim().is_empty() {
         return None;
     }
@@ -2714,7 +2907,7 @@ impl FromStr for Keyword {
                 }
                 "unearth" => return Ok(Keyword::Unearth(parse_keyword_mana_cost(p))),
                 "prowl" => return Ok(Keyword::Prowl(parse_keyword_mana_cost(p))),
-                "morph" => return Ok(Keyword::Morph(parse_keyword_mana_cost(p))),
+                "morph" => return Ok(Keyword::Morph(MorphCost::Mana(parse_keyword_mana_cost(p)))),
                 "megamorph" => return Ok(Keyword::Megamorph(parse_keyword_mana_cost(p))),
                 "mayhem" => return Ok(Keyword::Mayhem(parse_keyword_mana_cost(p))),
                 "madness" => return Ok(Keyword::Madness(parse_keyword_mana_cost(p))),
@@ -2759,7 +2952,11 @@ impl FromStr for Keyword {
                     )))
                 }
                 "casualty" => return Ok(Keyword::Casualty(p.parse().unwrap_or(1))),
-                "entwine" => return Ok(Keyword::Entwine(parse_keyword_mana_cost(p))),
+                "entwine" => {
+                    return Ok(Keyword::Entwine(EntwineCost::Mana(
+                        parse_keyword_mana_cost(p),
+                    )))
+                }
                 "affinity" => {
                     if let Some(tf) = parse_affinity_type(p) {
                         return Ok(Keyword::Affinity(tf));
@@ -3266,6 +3463,11 @@ pub(crate) fn parse_protection_target(s: &str) -> ProtectionTarget {
         // lowercase, so the canonical stored form must be lowercase.
         _ if lower.starts_with("from ") => ProtectionTarget::Quality(lower),
         _ => {
+            // CR 702.16i: "each color that's not in your commander's color identity"
+            // — a dynamic color set, expanded into concrete colors at grant time.
+            if let Some(set) = parse_protection_color_set(&lower) {
+                return ProtectionTarget::EachColor(set);
+            }
             // CR 702.16a + CR 202.3: "mana value N or less/greater" — protection
             // from objects whose mana value satisfies a comparator threshold.
             if let Some(filter) = parse_protection_mana_value_filter(&lower) {
@@ -3276,6 +3478,33 @@ pub(crate) fn parse_protection_target(s: &str) -> ProtectionTarget {
     }
 }
 
+/// CR 702.16i + CR 903.4: Parse "each color that's not in your commander's color
+/// identity" (and its "that is not in" / "not in" spellings) into a
+/// `ProtectionColorSet`. One trailing period is tolerated because the keyword
+/// quality splitter can preserve sentence punctuation.
+fn parse_protection_color_set(s: &str) -> Option<ProtectionColorSet> {
+    type E<'a> = nom::error::Error<&'a str>;
+
+    all_consuming(terminated(
+        value(
+            ProtectionColorSet::OutsideCommanderColorIdentity,
+            (
+                tag::<_, _, E<'_>>("each color "),
+                alt((
+                    tag("that's not in "),
+                    tag("that is not in "),
+                    tag("not in "),
+                )),
+                super::text_grammar::parse_your_commanders_color_identity,
+            ),
+        ),
+        opt(tag(".")),
+    ))
+    .parse(s)
+    .ok()
+    .map(|(_, set)| set)
+}
+
 /// CR 702.16a + CR 202.3: Parse "mana value N or less/greater" into a
 /// `TypedFilter` with a `Cmc` property. Uses nom combinators for structured
 /// extraction. Returns `None` if the input doesn't match.
@@ -3284,7 +3513,7 @@ fn parse_protection_mana_value_filter(s: &str) -> Option<TypedFilter> {
 
     // "mana value N or less" / "mana value N or greater"
     let (rest, _) = tag::<_, _, E<'_>>("mana value ").parse(s).ok()?;
-    let (rest, n) = crate::parser::oracle_nom::primitives::parse_number(rest).ok()?;
+    let (rest, n) = super::text_grammar::parse_number(rest).ok()?;
     let (rest, comparator) = preceded(
         tag::<_, _, E<'_>>(" or "),
         alt((
@@ -3579,7 +3808,13 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         }
         "Unearth" => Ok(Keyword::Unearth(mana(data)?)),
         "Prowl" => Ok(Keyword::Prowl(mana(data)?)),
-        "Morph" => Ok(Keyword::Morph(mana(data)?)),
+        "Morph" => {
+            if let Ok(morph_cost) = serde_json::from_value::<MorphCost>(data.clone()) {
+                Ok(Keyword::Morph(morph_cost))
+            } else {
+                Ok(Keyword::Morph(MorphCost::Mana(mana(data)?)))
+            }
+        }
         "Megamorph" => Ok(Keyword::Megamorph(mana(data)?)),
         // CR 702.187b: MTGJSON may provide bare "Mayhem"; the Oracle parser
         // overwrites with the real mana cost extracted from reminder text.
@@ -3652,7 +3887,16 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         // CR 702.153a
         "Casualty" => Ok(Keyword::Casualty(uint(data))),
         // CR 702.42a
-        "Entwine" => Ok(Keyword::Entwine(mana(data)?)),
+        "Entwine" => {
+            // `EntwineCost`'s `from = "EntwineCostWire"` shim already accepts the
+            // legacy bare `ManaCost` payload (`EntwineCostWire::LegacyMana`), so
+            // this is the single authority for both the legacy and tagged shapes.
+            // A malformed payload surfaces the `EntwineCost` error instead of
+            // being silently re-read as a bare `ManaCost`.
+            serde_json::from_value::<EntwineCost>(data.clone())
+                .map(Keyword::Entwine)
+                .map_err(|e| format!("Entwine: {e}"))
+        }
         // CR 702.120a: accept both legacy ManaCost format and new AbilityCost tagged format.
         "Escalate" => {
             if let Ok(cost) = serde_json::from_value::<AbilityCost>(data.clone()) {
@@ -3978,18 +4222,24 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
     }
 }
 
-/// Check if a game object has a specific keyword, using discriminant-based matching.
-/// For parameterized keywords, checks the base keyword only (ignoring the parameter value).
-pub fn has_keyword(obj: &crate::game::game_object::GameObject, keyword: &Keyword) -> bool {
-    use std::mem::discriminant;
-    obj.keywords
-        .iter()
-        .any(|k| discriminant(k) == discriminant(keyword))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Card data exported before `EntwineCost` gained its `Mana`/`NonMana` wrapper
+    /// stored Entwine as a bare `ManaCost`; it must still load as `Mana`.
+    #[test]
+    fn entwine_cost_reads_legacy_bare_mana_cost() {
+        let tagged = EntwineCost::Mana(ManaCost::generic(2));
+        let json = serde_json::to_value(&tagged).unwrap();
+        assert_eq!(json["type"], "Mana");
+        let legacy = serde_json::to_value(ManaCost::generic(2)).unwrap();
+        assert_eq!(
+            serde_json::from_value::<EntwineCost>(legacy).unwrap(),
+            tagged
+        );
+        assert_eq!(serde_json::from_value::<EntwineCost>(json).unwrap(), tagged);
+    }
     use crate::types::ability::Effect;
 
     // SHAPE: CR 702.5a + CR 205.3m: the single-leg adapter must retain the
@@ -4736,6 +4986,54 @@ mod tests {
             parse_protection_target("mana value 3 or less from sources"),
             ProtectionTarget::CardType("mana value 3 or less from sources".to_string())
         );
+    }
+
+    /// CR 702.16i + CR 903.4: "each color that's not in your commander's color
+    /// identity" is a dynamic color set, not an untyped card-type string.
+    #[test]
+    fn parse_protection_target_each_color_outside_commander_identity() {
+        let expected =
+            ProtectionTarget::EachColor(ProtectionColorSet::OutsideCommanderColorIdentity);
+        for phrase in [
+            "each color that's not in your commander's color identity",
+            "each color that is not in your commander's color identity",
+            "each color not in your commander's color identity",
+            "Each color that's not in your commander's color identity",
+            // The keyword quality splitter can preserve a trailing sentence period.
+            "each color that's not in your commander's color identity.",
+        ] {
+            assert_eq!(parse_protection_target(phrase), expected, "{phrase}");
+        }
+
+        // Roundtrip via Keyword::from_str (MTGJSON colon form) and the serde wire form.
+        let kw = Keyword::from_str(
+            "Protection:each color that's not in your commander's color identity",
+        )
+        .unwrap();
+        assert_eq!(kw, Keyword::Protection(expected));
+        assert_eq!(
+            serde_json::to_value(ProtectionTarget::EachColor(
+                ProtectionColorSet::OutsideCommanderColorIdentity
+            ))
+            .unwrap(),
+            serde_json::json!({"EachColor": "OutsideCommanderColorIdentity"})
+        );
+    }
+
+    /// Hostile siblings of the color-set phrase stay untyped card-type strings.
+    #[test]
+    fn parse_protection_target_each_color_siblings_stay_card_type() {
+        for phrase in [
+            "each color that's in your commander's color identity",
+            "each color that's not in your commander's color identity and from artifacts",
+            "each color with the most votes",
+        ] {
+            assert_eq!(
+                parse_protection_target(phrase),
+                ProtectionTarget::CardType(phrase.to_string()),
+                "{phrase}"
+            );
+        }
     }
 
     #[test]
@@ -5662,6 +5960,31 @@ mod tests {
         }
     }
 
+    // CR 107.3d + CR 702.37e: variable non-mana morph costs are not supported
+    // yet, so symbolic or sentinel counts must not be accepted as payable morph
+    // costs (they stay unsupported in coverage).
+    #[test]
+    fn morph_cost_support_requires_fixed_counts() {
+        assert!(is_ability_cost_supported_for_morph(&pay_life_cost()));
+        assert!(!is_ability_cost_supported_for_morph(
+            &AbilityCost::PayLife {
+                amount: QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::HandSize {
+                        player: crate::types::ability::PlayerScope::Controller,
+                    },
+                },
+            }
+        ));
+        let sacrifice = |count| {
+            AbilityCost::Sacrifice(crate::types::ability::SacrificeCost::new(
+                TargetFilter::Any,
+                crate::types::ability::SacrificeRequirement::Count { count },
+            ))
+        };
+        assert!(is_ability_cost_supported_for_morph(&sacrifice(1)));
+        assert!(!is_ability_cost_supported_for_morph(&sacrifice(u32::MAX)));
+    }
+
     /// One distinctive sample per payload-bearing `Keyword` variant.
     ///
     /// Kept in lockstep with `payload_variant_name` below, which fails to
@@ -5710,7 +6033,7 @@ mod tests {
             Keyword::Ninjutsu(mc("{2}{R}")),
             Keyword::CommanderNinjutsu(mc("{2}{R}")),
             Keyword::Prowl(mc("{2}{R}")),
-            Keyword::Morph(mc("{2}{R}")),
+            Keyword::morph(pay_life_cost()),
             Keyword::Megamorph(mc("{2}{R}")),
             Keyword::Mayhem(mc("{2}{R}")),
             Keyword::Madness(mc("{2}{R}")),
@@ -5743,7 +6066,7 @@ mod tests {
             Keyword::Buyback(BuybackCost::NonMana(pay_life_cost())),
             Keyword::Casualty(3),
             Keyword::Echo(EchoCost::NonMana(pay_life_cost())),
-            Keyword::Entwine(mc("{2}{R}")),
+            Keyword::Entwine(EntwineCost::NonMana(pay_life_cost())),
             Keyword::Outlast(mc("{2}{R}")),
             Keyword::Scavenge(mc("{2}{R}")),
             Keyword::Reinforce {
@@ -6297,7 +6620,9 @@ mod tests {
             Keyword::Buyback(BuybackCost::Mana(mc("{3}"))),
             Keyword::Echo(EchoCost::Mana(mc("{1}{R}"))),
             Keyword::Blitz(BlitzCost::Mana(mc("{2}{R}"))),
+            Keyword::Entwine(EntwineCost::Mana(mc("{2}{R}"))),
             Keyword::Disguise(DisguiseCost::Mana(mc("{1}{W/U}"))),
+            Keyword::morph(mc("{2}{R}")),
             Keyword::Ward(WardCost::Mana(mc("{2}"))),
             Keyword::Ward(WardCost::Waterbend(mc("{4}"))),
             Keyword::Ward(WardCost::Compound(vec![
@@ -6335,6 +6660,31 @@ mod tests {
         .collect()
     }
 
+    /// Discard ward costs parsed from Oracle text (CR 702.21a + CR 701.9), keyed
+    /// by that text: the plain and random one-card costs, a counted cost, and a
+    /// card-type-filtered cost (the client shows no detail for the filtered one).
+    fn parsed_ward_discard_samples() -> std::collections::BTreeMap<&'static str, Keyword> {
+        [
+            "Ward\u{2014}Discard a card.",
+            "Ward\u{2014}Discard a card at random.",
+            "Ward\u{2014}Discard two cards.",
+            "Ward\u{2014}Discard an enchantment, instant, or sorcery card.",
+        ]
+        .into_iter()
+        .map(|oracle| {
+            let lower = oracle.to_lowercase();
+            let (kw, rest) = crate::parser::oracle_keyword::parse_keyword_line_core(&lower)
+                .unwrap_or_else(|| panic!("{oracle} parses as a keyword line"));
+            assert!(rest.is_empty(), "{oracle} left {rest:?} unconsumed");
+            assert!(
+                matches!(&kw, Keyword::Ward(WardCost::Discard { .. })),
+                "{oracle} parses as a discard ward, got {kw:?}"
+            );
+            (oracle, kw)
+        })
+        .collect()
+    }
+
     /// Engine-authored wire golden for the client's keyword-detail formatter
     /// (`client/src/viewmodel/keywordProps.ts`). The client once formatted a
     /// hand-written, externally tagged `ManaCost` shape that the engine never
@@ -6348,6 +6698,7 @@ mod tests {
         let wire = serde_json::json!({
             "samples": samples,
             "parsed_ward": parsed_ward_samples(),
+            "parsed_ward_discard": parsed_ward_discard_samples(),
         });
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -6367,6 +6718,49 @@ mod tests {
         assert_eq!(
             wire, committed,
             "the client's keyword payload golden drifted — re-run with UPDATE_WIRE_GOLDEN=1"
+        );
+    }
+
+    /// CR 702.21a + CR 701.9: ward discard costs written before the discard
+    /// variant carried its axes were the unit form `{"type":"DiscardCard"}`,
+    /// meaning one chosen card; they must keep loading, at the top level and
+    /// nested in a compound cost, and the current shape must round-trip.
+    #[test]
+    fn ward_discard_legacy_unit_payload_decodes_as_one_chosen_card() {
+        let one_chosen = WardCost::Discard {
+            count: 1,
+            filter: None,
+            selection: CardSelectionMode::Chosen,
+        };
+
+        let top_level: Keyword =
+            serde_json::from_str(r#"{"Ward":{"type":"DiscardCard"}}"#).unwrap();
+        assert_eq!(top_level, Keyword::Ward(one_chosen.clone()));
+
+        let nested: Keyword = serde_json::from_str(
+            r#"{"Ward":{"type":"Compound","data":[{"type":"DiscardCard"},{"type":"Mana","data":{"type":"Cost","shards":[],"generic":2}}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            nested,
+            Keyword::Ward(WardCost::Compound(vec![
+                one_chosen,
+                WardCost::Mana(ManaCost::generic(2)),
+            ]))
+        );
+
+        let current = Keyword::Ward(WardCost::Discard {
+            count: 2,
+            filter: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant))),
+            selection: CardSelectionMode::Random,
+        });
+        let round_trip: Keyword =
+            serde_json::from_str(&serde_json::to_string(&current).unwrap()).unwrap();
+        assert_eq!(round_trip, current);
+
+        assert!(
+            serde_json::from_str::<Keyword>(r#"{"Ward":{"type":"Bogus"}}"#).is_err(),
+            "an unknown ward cost must still be rejected, not defaulted"
         );
     }
 
