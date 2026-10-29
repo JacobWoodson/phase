@@ -180,6 +180,10 @@ fn is_zero_u64(value: &u64) -> bool {
     *value == 0
 }
 
+fn is_zero_u8(value: &u8) -> bool {
+    *value == 0
+}
+
 fn nonzero_delta_magnitude(delta: i32) -> Result<u32, ResolvedPlayerEditReplayInvariantError> {
     (delta != 0)
         .then_some(delta.unsigned_abs())
@@ -25228,7 +25232,7 @@ declare_game_state! {
     /// non-Horde format). A plain counter — the reveal loop re-enters after each
     /// Horde spell resolves (`horde::maybe_reveal_next`), because each free cast
     /// sets `waiting_for` and only one card can be cast per resolution beat.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub horde_wave_remaining: u32,
     /// Horde Magic: how many NON-token cards must still resolve before the
     /// current wave ends, for a `WaveTermination::UntilNonToken` ruleset. Seeded
@@ -25237,14 +25241,14 @@ declare_game_state! {
     /// and decremented as each nontoken is cast. `0` at every non-wave moment and
     /// for every non-Horde format. Distinct from `horde_wave_remaining`, which
     /// bounds total cards revealed (tokens included) as a termination safeguard.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub horde_wave_nontokens_remaining: u32,
     /// Horde Magic: how many turns the Horde has taken so far (0-based index of
     /// the CURRENT Horde turn while a wave is in progress). Incremented by
     /// `horde::begin_wave`. Drives per-turn wave schedules — `WaveCount::Snaking`
     /// derives its triangle wave from this index, so the ramp needs no direction
     /// flag or other mutable bookkeeping.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub horde_turn_index: u32,
     /// Horde Magic (advanced rule): the Horde permanents still owing a post-combat
     /// activation this turn. Seeded once as the Horde's post-combat main begins
@@ -25256,7 +25260,7 @@ declare_game_state! {
     /// structurally (a permanent that enters mid-beat is not added). Empty at every
     /// non-activation moment and for every deck without the
     /// `HordePostCombatActivation::OncePerPermanent` axis.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub horde_postcombat_activation_queue: Vec<crate::types::identifiers::ObjectId>,
     /// Horde Magic: the seats that make up the Horde side. A single-Horde game
     /// leaves this EMPTY and the Horde seat is resolved from the one-vs-many
@@ -25266,7 +25270,7 @@ declare_game_state! {
     /// seats here at game setup; the Horde SIDE loses only when EVERY listed seat's
     /// library is empty and none controls a creature ([`horde::horde_is_defeated`]).
     /// Runtime designation (assigned at setup), not a deck-intrinsic ruleset field.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub horde_seats: Vec<PlayerId>,
     /// Horde Magic (LOTR "Two Towers"): which [`horde_seats`] commander drives the
     /// NEXT Horde turn. The rules have the two Horde commanders alternate turns
@@ -25276,7 +25280,7 @@ declare_game_state! {
     /// advances (mod the seat count) once per REAL Horde turn in
     /// [`crate::game::horde::begin_wave`] — which only runs on a Horde's own turn,
     /// so setup-skipped turns never bump it. Only meaningful when `len >= 2`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
     pub active_horde_index: usize,
     /// Turtle Team-Up: the Boss deck pile (11 Bosses, face down). Front = top;
     /// stages deploy from here (`boss::deploy_bosses`), mirroring the
@@ -25289,7 +25293,7 @@ declare_game_state! {
     /// non-final stage; the final stage falling eliminates the Boss seat
     /// instead (normal CR 704.5a loss — boss-deck games keep a real life
     /// total, unlike the classic mill race).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
     pub boss_stage: u8,
     /// Turtle Team-Up: Baxter's Experiments cards set aside ("beside the
     /// event deck") awaiting the next event. Fired copies move to the Boss

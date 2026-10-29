@@ -201,14 +201,13 @@ pub(crate) fn team_members(state: &GameState, player: PlayerId) -> Vec<PlayerId>
 }
 
 /// Whether `player`'s side takes a single shared team turn (CR 805) rather than
-/// each member taking an individual turn. Per-side, so a mixed game (Horde:
-/// survivors shared, Hordes individual) answers differently per player. This is
-/// THE turn-structure predicate — it replaced a whole-format one, which could not
-/// describe a mixed game — used both inside the turn-rotation / priority / APNAP
-/// functions below AND at the peripheral consumers (land-drop, draw step,
-/// turn-control authorization), each of which asks about the ACTIVE player's
-/// side. For today's uniform formats every side of a game shares one structure,
-/// so the answer matches the old whole-format predicate.
+/// each member taking an individual turn. Per-side: the question is asked about
+/// a specific seat's side (the ACTIVE player's side at the peripheral consumers —
+/// land-drop, draw step, turn-control authorization), so a future mixed game
+/// answers per side without touching the call sites. This is THE turn-structure
+/// predicate — it replaced a whole-format one. Every side of a game shares one
+/// structure today (2HG-shaped Horde included), so the answer currently matches
+/// the old whole-format predicate for all sided players.
 pub(crate) fn side_takes_shared_turn(state: &GameState, player: PlayerId) -> bool {
     side_of(state, player).is_some_and(|s| s.turn_structure == TurnStructure::SharedTeamTurns)
 }
@@ -342,8 +341,7 @@ fn apnap_choice_groups_admitting(
     // CR 101.4 + CR 103.1: APNAP follows the current turn-order direction. The
     // all-individual case returns early (one group per admitted seat); below, a
     // shared-team side chooses as ONE group (its admitted members), deduped so
-    // it appears once, while an individual-turn seat in a mixed game (Horde:
-    // each Horde seat alongside the shared survivor side) is its own group.
+    // it appears once, while a seat on an individual-turn side is its own group.
     if !state.format_config.topology().has_shared_team_turns() {
         let start_idx = seat_order
             .iter()

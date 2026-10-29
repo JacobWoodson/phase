@@ -3,6 +3,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use super::ability::is_false;
 use super::event_kinds::BendingType;
 use super::identifiers::ObjectId;
 use super::mana::{ManaColor, ManaPool};
@@ -103,7 +104,7 @@ pub struct Player {
     /// (showing its library — the Horde's real clock, as it loses by decking out)
     /// instead of a frozen life total, WITHOUT re-deriving "which seat is the
     /// Horde" on the frontend.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub has_no_life_total: bool,
     pub mana_pool: ManaPool,
 
