@@ -3,7 +3,7 @@
 //! Tokens can live in the Horde's library and ENTER THE BATTLEFIELD when the
 //! Horde reveals them (a token is never cast — CR 111). Two pieces are exercised:
 //!
-//!   1. `GameObject.in_horde_library` EXEMPTS a library-resident token from the
+//!   1. `GameObject.is_horde_deck_token` EXEMPTS a library-resident token from the
 //!      CR 704.5d token cease-to-exist state-based action, so it can sit in the
 //!      library without being swept.
 //!   2. On the Horde's precombat main, revealing a library token creates a FRESH
@@ -45,7 +45,7 @@ fn horde_game(wave: u32) -> GameState {
 }
 
 /// Place a creature token on top of `owner`'s library. `flagged` sets the new
-/// `in_horde_library` cease-to-exist exemption.
+/// `is_horde_deck_token` cease-to-exist exemption.
 fn add_library_token(
     state: &mut GameState,
     owner: PlayerId,
@@ -58,7 +58,7 @@ fn add_library_token(
     let id = create_object(state, card_id, owner, name.to_string(), Zone::Library);
     let obj = state.objects.get_mut(&id).unwrap();
     obj.is_token = true;
-    obj.in_horde_library = flagged;
+    obj.is_horde_deck_token = flagged;
     obj.card_types.core_types.push(CoreType::Creature);
     obj.base_card_types = obj.card_types.clone();
     obj.power = Some(p);
@@ -113,11 +113,11 @@ fn run_wave(runner: &mut GameRunner) {
     }
 }
 
-/// A token flagged `in_horde_library` in the Horde's library SURVIVES a
+/// A token flagged `is_horde_deck_token` in the Horde's library SURVIVES a
 /// state-based-action pass; an otherwise-identical UNFLAGGED off-battlefield
 /// token IS swept.
 ///
-/// Revert guard: dropping the `!obj.in_horde_library` clause in
+/// Revert guard: dropping the `!obj.is_horde_deck_token` clause in
 /// `check_token_cease_to_exist` sweeps the flagged token too — the survival
 /// assertion flips. Positive reach-guard: the unflagged token being swept proves
 /// the CR 704.5d SBA actually ran (so the survival is the exemption's doing, not
@@ -133,7 +133,7 @@ fn flagged_library_token_survives_sba_unflagged_is_swept() {
 
     assert!(
         state.objects.contains_key(&flagged),
-        "an in_horde_library token must survive the CR 704.5d cease-to-exist SBA"
+        "an is_horde_deck_token token must survive the CR 704.5d cease-to-exist SBA"
     );
     assert!(
         state.players[HORDE.0 as usize].library.contains(&flagged),
@@ -187,10 +187,10 @@ fn precombat_main_reveal_puts_library_token_onto_battlefield() {
 }
 
 /// The revealed battlefield token is a NORMAL token: it does NOT carry
-/// `in_horde_library`, so it ceases to exist normally (CR 704.5d) if it later
+/// `is_horde_deck_token`, so it ceases to exist normally (CR 704.5d) if it later
 /// leaves the battlefield.
 ///
-/// Revert guard: if the reveal path erroneously stamped `in_horde_library` on the
+/// Revert guard: if the reveal path erroneously stamped `is_horde_deck_token` on the
 /// fresh token, the flag assertion flips AND the token would survive leaving the
 /// battlefield (the final cease-to-exist assertion flips too).
 #[test]
@@ -205,8 +205,8 @@ fn revealed_battlefield_token_is_normal_and_ceases_when_it_leaves() {
     assert_eq!(bf_tokens.len(), 1, "one battlefield token expected");
     let bf = bf_tokens[0];
     assert!(
-        !runner.state().objects.get(&bf).unwrap().in_horde_library,
-        "the fresh battlefield token must NOT carry in_horde_library"
+        !runner.state().objects.get(&bf).unwrap().is_horde_deck_token,
+        "the fresh battlefield token must NOT carry is_horde_deck_token"
     );
 
     // Sanity: it is a normal token now — move it off the battlefield and the

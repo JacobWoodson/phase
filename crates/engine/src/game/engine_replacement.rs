@@ -1271,6 +1271,38 @@ fn handle_replacement_choice_inner(
                 }
             }
 
+            // Turtle Team-Up: resume a hero-event batch parked by a nested
+            // replacement prompt — the same hook shape as the discard batch
+            // above. Re-pauses re-park through this same hook, so arbitrary
+            // nesting (regen during Mayhem destroys, Leng during Stratagem
+            // discards) composes.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && state.pending_hero_event.is_some()
+            {
+                match super::boss::drain_pending_hero_event(state, events) {
+                    super::boss::HeroEventDrainOutcome::Idle => {}
+                    super::boss::HeroEventDrainOutcome::PausedForReplacement => {
+                        waiting_for = state.waiting_for.clone();
+                        super::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
+                            state,
+                            events,
+                            replacement_action_event_start,
+                        );
+                    }
+                    super::boss::HeroEventDrainOutcome::Completed => {
+                        effects::drain_pending_continuation(state, events);
+                        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                            waiting_for = state.waiting_for.clone();
+                            super::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
+                                state,
+                                events,
+                                replacement_action_event_start,
+                            );
+                        }
+                    }
+                }
+            }
+
             if matches!(waiting_for, WaitingFor::Priority { .. })
                 && (state.active_ability_continuation().is_some()
                     || state.active_change_zone_frame().is_some())

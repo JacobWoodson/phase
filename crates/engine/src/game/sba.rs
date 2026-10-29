@@ -154,6 +154,15 @@ pub(crate) fn check_state_based_actions_with_waiting_triggers(
         // so the game-over check sees the true post-event living set — a draw
         // (winner: None) when all remaining players lose at once, instead of
         // crowning whichever player happened to be eliminated first.
+        // Turtle Team-Up: a Boss stage clearing (life hit zero on a non-final
+        // stage) exiles the deployed Bosses, resets Boss life, and deploys
+        // the next stage — BEFORE life losers are collected, so the reset
+        // seat is not a loser this pass. On the final stage this returns
+        // false and the normal CR 704.5a loss below proceeds (the heroes
+        // win). A clear performs game actions, so it counts as SBA progress.
+        if super::boss::maybe_clear_boss_stage(state, events) {
+            any_performed = true;
+        }
         // CR 704.5a-c + CR 704.6c: collect every player-loss SBA from this
         // check before applying any of them.
         let mut losers: Vec<PlayerId> = collect_life_losers(state);
@@ -2435,14 +2444,15 @@ fn check_token_cease_to_exist(state: &mut GameState, any_performed: &mut bool) {
         .objects
         .iter()
         .filter(|(_, obj)| {
-            // CR 704.5d exemption (casual Horde Magic variant): a token flagged
-            // `in_horde_library` lives in the Horde's library until it is
-            // revealed onto the battlefield, so it is NOT swept here. The
-            // exemption is scoped to this SBA only — the shared CR 111.8
-            // movement guards (`zones::token_is_outside_battlefield_and_stack`)
-            // are deliberately untouched so library tokens remain otherwise
-            // immovable. Not a CR-sanctioned rule; Horde Magic is casual.
-            !obj.in_horde_library
+            // Horde-deck-token exemption (casual Horde Magic variant): a token
+            // that IS a Horde deck card lives outside the battlefield by
+            // design (library placeholders, the Boss pile, the command zone,
+            // boss-deck graveyard instances), so it is NOT swept here. The
+            // same flag carves these tokens out of the CR 111.8 movement
+            // freeze (`zones::token_cannot_change_zones`) — boss-deck loops
+            // move them by design, while classic decks never move theirs.
+            // Not a CR-sanctioned rule; Horde Magic is casual.
+            !obj.is_horde_deck_token
                 && (zones::token_is_outside_battlefield_and_stack(state, obj)
                     || zones::copy_of_card_outside_battlefield_and_stack(state, obj))
         })

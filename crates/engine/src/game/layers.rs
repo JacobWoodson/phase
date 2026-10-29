@@ -258,7 +258,9 @@ fn core_type_subtype_set(core_type: CoreType) -> Option<SubtypeSet> {
         | CoreType::Plane
         | CoreType::Phenomenon
         | CoreType::Scheme
-        | CoreType::Conspiracy => None,
+        | CoreType::Conspiracy
+        | CoreType::Boss
+        | CoreType::Event => None,
     }
 }
 

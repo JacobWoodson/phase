@@ -120,6 +120,7 @@ pub mod endure;
 pub mod energy;
 pub mod epic;
 pub mod exile_resolving_spell;
+pub mod horde_play_card;
 pub mod physical_contest;
 pub mod put_chosen_counter;
 // Tests for `epic` live in a sibling file (declared here, not in `epic.rs`, so
@@ -7042,6 +7043,7 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::ChooseOneOf { .. }
+        | Effect::HordePlayCard { .. } => (None, ParentTargetHandling::NotAudited),
         | Effect::Unimplemented { .. } => (None, ParentTargetHandling::NotAudited),
     };
     let mut quantities_fixed = true;
@@ -9555,6 +9557,7 @@ fn resolve_legacy_effect(
         Effect::Amass { .. } => amass::resolve(state, ability, events),
         Effect::EmpowerJace { .. } => empower_jace::resolve(state, ability, events),
         Effect::Monstrosity { .. } => monstrosity::resolve(state, ability, events),
+        Effect::HordePlayCard { .. } => horde_play_card::resolve(state, ability, events),
         Effect::Specialize => specialize::resolve(state, ability, events),
         Effect::Renown { .. } => renown::resolve(state, ability, events),
         Effect::Adapt { .. } => adapt::resolve(state, ability, events),

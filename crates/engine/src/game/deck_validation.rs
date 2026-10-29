@@ -4401,12 +4401,16 @@ fn core_type_can_be_cast(core_type: CoreType) -> bool {
         // CR 108.2a: nontraditional card types, each of which its own CR
         // section says explicitly "can't be cast": CR 309.2c (Dungeon),
         // CR 311.2 (Plane), CR 312.2 (Phenomenon), CR 314.2 (Scheme),
-        // CR 315.3 (Conspiracy).
+        // CR 315.3 (Conspiracy). Turtle Team-Up Bosses and Events likewise
+        // can't be cast (the product booklet is the authority — they have no
+        // CR section of their own).
         CoreType::Dungeon
         | CoreType::Plane
         | CoreType::Phenomenon
         | CoreType::Scheme
-        | CoreType::Conspiracy => false,
+        | CoreType::Conspiracy
+        | CoreType::Boss
+        | CoreType::Event => false,
     }
 }
 

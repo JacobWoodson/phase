@@ -806,7 +806,8 @@ pub(crate) fn move_object_with_terminal(
         // remains in place and ceases to exist at the next SBA (CR 111.7). An
         // exact CR 601.2a pending spell plus its announcement placeholder makes
         // the retained-origin representation stack-resident until this delivery.
-        if zones::token_is_outside_battlefield_and_stack(state, obj) {
+        // (Horde-deck tokens exempt — boss-deck loops move them by design.)
+        if zones::token_cannot_change_zones(state, obj) {
             return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
         }
         // CR 603.2g + CR 603.6a: A Battlefield -> Battlefield move does not put a

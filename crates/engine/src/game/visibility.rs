@@ -160,6 +160,7 @@ fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
         | WaitingFor::ChooseOneOfBranch { .. }
         | WaitingFor::ConniveDiscard { .. }
         | WaitingFor::DiscardChoice { .. }
+        | WaitingFor::HeroEventChoice { .. }
         | WaitingFor::EffectZoneChoice { .. }
         | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
         | WaitingFor::LearnChoice { .. }

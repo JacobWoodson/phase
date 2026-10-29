@@ -2229,6 +2229,22 @@ pub fn candidate_actions_broad_with_probe(
             }
             actions
         }
+        // Turtle Team-Up hero-choice: the same SelectCards combinations as a
+        // discard (all valid sizes when up_to). No unless-filter shape.
+        WaitingFor::HeroEventChoice {
+            player,
+            count,
+            cards,
+            up_to,
+            ..
+        } => {
+            let sizes = if *up_to {
+                (0..=*count).collect()
+            } else {
+                vec![*count]
+            };
+            bounded_select_card_candidates(*player, cards, sizes)
+        }
         WaitingFor::OptionalCostChoice { player, .. } => vec![
             candidate(
                 GameAction::DecideOptionalCost { pay: true },

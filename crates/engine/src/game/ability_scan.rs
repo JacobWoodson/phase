@@ -2159,6 +2159,8 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_quantity_expr(count, mode));
             acc
         }
+        // A plain `u32` count: no quantity, filter, or bound-storage reads.
+        Effect::HordePlayCard { .. } => Axes::NONE,
         Effect::Specialize => Axes::NONE,
         Effect::Renown { count } => {
             let mut acc = Axes::NONE;
@@ -7198,6 +7200,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::Amass { .. }
         | Effect::EmpowerJace { .. }
         | Effect::Monstrosity { .. }
+        | Effect::HordePlayCard { .. }
         | Effect::Specialize
         | Effect::Renown { .. }
         | Effect::Bolster { .. }
@@ -7597,6 +7600,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::Amass { .. }
         | Effect::EmpowerJace { .. }
         | Effect::Monstrosity { .. }
+        | Effect::HordePlayCard { .. }
         | Effect::Specialize
         | Effect::Renown { .. }
         | Effect::Bolster { .. }

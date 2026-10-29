@@ -833,6 +833,9 @@ fn commander_eligibility_rule_from_source_format_covers_every_builtin() {
         (GameFormat::Archenemy, None),
         (GameFormat::Planechase, None),
         (GameFormat::Momir, None),
+        // Horde holds an engine emblem in the command zone, not a decklist
+        // commander — `from_source_format` answers `Ok(None)` like Momir.
+        (GameFormat::Horde, None),
         // CR 903.13g: Commander Draft games follow Commander's rules, and
         // CR 903.13f routes deck construction through CR 903.5, so CR 903.3's
         // eligibility test applies unchanged — the value `from_source_format`
@@ -901,6 +904,7 @@ fn game_format_serialization_is_byte_identical_to_old_derive_for_builtins() {
         (GameFormat::Archenemy, "Archenemy"),
         (GameFormat::Planechase, "Planechase"),
         (GameFormat::Momir, "Momir"),
+        (GameFormat::Horde, "Horde"),
         (GameFormat::CommanderDraft, "CommanderDraft"),
         (GameFormat::Freeform, "Freeform"),
         (GameFormat::FreeformCommander, "FreeformCommander"),

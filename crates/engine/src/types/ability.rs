@@ -21499,6 +21499,18 @@ pub enum Effect {
         /// Number of +1/+1 counters to place.
         count: QuantityExpr,
     },
+    /// Turtle Team-Up (Savanti Romero, Temporal Rogue): "the bosses play a
+    /// card" — reveal and resolve the top card of the Boss event deck
+    /// immediately, outside the wave (Savanti triggers on combat damage, mid
+    /// combat). Not a cast: creatures enter, Events resolve one-shot, exactly
+    /// as in the Action-phase wave. No CR section (casual product) — the
+    /// product booklet is the authority. Synthesized only (Boss grafts never
+    /// go through the Oracle parser).
+    HordePlayCard {
+        /// How many cards to play.
+        #[serde(default = "default_one")]
+        count: u32,
+    },
     /// Digital-only Specialize: permanently become a color-specific face after
     /// paying the synthesized activation cost (mana + discard). Not in CR text.
     Specialize,
@@ -23722,6 +23734,7 @@ impl Effect {
             // nor the note names a copied stack object.
             | Effect::CreateBoon { .. }
             | Effect::NoteNumber { .. }
+            | Effect::HordePlayCard { .. }
             | Effect::Unimplemented { .. } => false,
         }
     }
@@ -23973,6 +23986,7 @@ impl Effect {
             // note resolve their slot as operand, never as a donor.
             | Effect::CreateBoon { .. }
             | Effect::NoteNumber { .. }
+            | Effect::HordePlayCard { .. }
             | Effect::Unimplemented { .. } => AttachmentHostSlot::Operand,
         }
     }
@@ -24530,6 +24544,9 @@ impl Effect {
             // surfaced by `collect_target_slots`.
             | Effect::ChooseCounterAdjustment { .. }
             | Effect::Unimplemented { .. }
+            // Turtle Team-Up (no CR section — casual product): HordePlayCard
+            // names no target; the Boss event deck it plays from is implied.
+            | Effect::HordePlayCard { .. }
             // CR 603.7e: ChooseObjectsIntoTrackedSet has no discrete effect-target
             // slot — `chooser` is a player ref resolved like `PayCost.payer`, and
             // `filter` constrains the interactive selection, not a targeting slot.
@@ -24988,6 +25005,7 @@ impl Effect {
             | Effect::ChooseOneOf { .. }
             | Effect::ChooseCounterAdjustment { .. }
             | Effect::Unimplemented { .. }
+            | Effect::HordePlayCard { .. }
             | Effect::ChooseObjectsIntoTrackedSet { .. }
             | Effect::SeparateIntoPiles { .. }
             | Effect::ExileTopCardContest { .. }
@@ -25122,7 +25140,12 @@ impl Effect {
             | Effect::Learn
             // Randomly picks card(s) FROM a library matching a filter; the library
             // is always the origin.
-            | Effect::Seek { .. } => true,
+            | Effect::Seek { .. }
+            // Turtle Team-Up (no CR section — casual product): "the bosses
+            // play a card" reveals the top cards of the Boss event deck (a
+            // library) and resolves them onto the battlefield / into the
+            // graveyard; the library is always the origin.
+            | Effect::HordePlayCard { .. } => true,
 
             // CR 701.40a names no source zone ("Put that card onto the
             // battlefield face down"), so the verdict is conditional on the
@@ -26366,6 +26389,7 @@ macro_rules! define_effect_quantity_walk {
             // CR 122.1: the per-kind magnitude is `EventCounterReproductionCount`,
             // not a `QuantityExpr`, so there is nothing to visit here.
             | Effect::ReproduceEventCounters { .. }
+            | Effect::HordePlayCard { .. }
             | Effect::Unimplemented { .. } => {}
         }
     }
@@ -26738,6 +26762,7 @@ impl Effect {
             | Effect::ApplyPerpetual { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
+            | Effect::HordePlayCard { .. }
             | Effect::Unimplemented { .. } => {}
         }
     }
@@ -27016,6 +27041,7 @@ impl Effect {
             // CR 122.1: per-kind magnitude is `EventCounterReproductionCount`,
             // not a `QuantityExpr`.
             | Effect::ReproduceEventCounters { .. }
+            | Effect::HordePlayCard { .. }
             | Effect::WinTheGame { .. } => None,
         }
     }
@@ -27285,6 +27311,7 @@ impl Effect {
             // CR 122.1: per-kind magnitude is `EventCounterReproductionCount`,
             // not a `QuantityExpr`.
             | Effect::ReproduceEventCounters { .. }
+            | Effect::HordePlayCard { .. }
             | Effect::WinTheGame { .. } => None,
         }
     }
@@ -27503,6 +27530,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Amass { .. } => "Amass",
         Effect::EmpowerJace { .. } => "EmpowerJace",
         Effect::Monstrosity { .. } => "Monstrosity",
+        Effect::HordePlayCard { .. } => "HordePlayCard",
         Effect::Specialize => "Specialize",
         Effect::Renown { .. } => "Renown",
         Effect::Bolster { .. } => "Bolster",
@@ -27760,6 +27788,7 @@ pub enum EffectKind {
     Amass,
     EmpowerJace,
     Monstrosity,
+    HordePlayCard,
     Specialize,
     Renown,
     Bolster,
@@ -28054,6 +28083,7 @@ impl From<&Effect> for EffectKind {
             Effect::Amass { .. } => EffectKind::Amass,
             Effect::EmpowerJace { .. } => EffectKind::EmpowerJace,
             Effect::Monstrosity { .. } => EffectKind::Monstrosity,
+            Effect::HordePlayCard { .. } => EffectKind::HordePlayCard,
             Effect::Specialize => EffectKind::Specialize,
             Effect::Renown { .. } => EffectKind::Renown,
             Effect::Bolster { .. } => EffectKind::Bolster,
@@ -37355,6 +37385,7 @@ impl ResolvedAbility {
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
             | Effect::ChooseOneOf { .. }
+            | Effect::HordePlayCard { .. }
             | Effect::Unimplemented { .. } => None,
         }
     }

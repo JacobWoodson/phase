@@ -820,8 +820,9 @@ pub fn create_horde_library_card(
 /// CR 111: a token can never be cast, so Cyberman/Dalek tokens wait in the
 /// Horde's library and enter the battlefield when revealed
 /// (`horde::reveal_library_token`). The object is stamped `is_token` and
-/// `in_horde_library` (the CR 704.5d cease-to-exist exemption, scoped to
-/// `sba::check_token_cease_to_exist`) and carries the body's full
+/// `is_horde_deck_token` (the CR 704.5d cease-to-exist exemption plus the
+/// CR 111.8 movement-freeze carve-out — boss-deck loops move these tokens)
+/// and carries the body's full
 /// characteristics — P/T, card types, colors, keywords — on both the live and
 /// `base_*` fields so `reveal_library_token`'s `GameObject → TokenCharacteristics`
 /// projection round-trips the body faithfully. `TokenCharacteristics` has no
@@ -867,7 +868,7 @@ pub fn create_horde_library_token(
     let obj = state.objects.get_mut(&obj_id).expect("just created");
     // CR 111.1: mark as a token; CR 704.5d exemption while library-resident.
     obj.is_token = true;
-    obj.in_horde_library = true;
+    obj.is_horde_deck_token = true;
     // CR 111.4: the token's predefined identity, so `reveal_library_token` can
     // recover its catalog `rules_text` abilities on the apply path.
     obj.token_image_ref = token_image_ref.clone();
@@ -972,6 +973,15 @@ pub fn load_horde_library(
             crate::game::decks::sauron_horde::SAURON_HORDE_NONTOKEN_CARDS,
             crate::game::decks::sauron_horde::SAURON_HORDE_TOKENS,
             crate::game::decks::sauron_horde::card_rarity,
+        ),
+        // Turtle Team-Up: the 27-card event deck IS the Boss library (all
+        // tokens — the enemy deck has no card-DB cards). The 11-card Boss
+        // deck loads separately as the face-down Boss pile (see
+        // `boss::load_boss_deck`), not into the library.
+        ChallengeDeck::TurtleTeamUpHorde => (
+            crate::game::decks::turtle_teamup_horde::TURTLE_TEAMUP_NONTOKEN_CARDS,
+            crate::game::decks::turtle_teamup_horde::TURTLE_TEAMUP_EVENT_DECK_TOKENS,
+            no_pinned_rarity,
         ),
     };
 
@@ -1619,6 +1629,20 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
         // two commanders, each controlling its own creatures.
         for horde_seat in crate::game::horde::horde_seats(state) {
             grant_horde_emblem(state, horde_seat, forced_attackers);
+        }
+    }
+
+    // Turtle Team-Up: load the shuffled Boss pile and deploy stage 1. Beside
+    // the emblem grant because it is the same kind of game-start setup; gated
+    // on the ruleset's `boss_stages` axis so every classic deck skips it. Deck
+    // loading is event-free by design (no consumer exists yet at setup), so
+    // stage-1 deploy events (Boss zone moves, Leatherhead's potential
+    // enter-gain) go to a throwaway vec — the STATE (pile, deployed Bosses,
+    // grafted abilities, life) is what setup must produce.
+    if crate::game::horde::has_boss_stages(state) {
+        if let Some(&horde_seat) = crate::game::horde::horde_seats(state).first() {
+            let mut setup_events = Vec::new();
+            crate::game::boss::setup_boss_game(state, horde_seat, &mut setup_events);
         }
     }
 

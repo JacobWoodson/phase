@@ -3272,7 +3272,8 @@ impl ReflexiveGateParent {
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
             | Effect::ChooseOneOf { .. }
-            | Effect::Unimplemented { .. } => Self::Other,
+            | Effect::HordePlayCard { .. } => Self::Other,
+            Effect::Unimplemented { .. } => Self::Other,
         }
     }
 

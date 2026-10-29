@@ -110,6 +110,7 @@ mod omnath_tests;
 // Tests for `merge` live in a sibling file (declared here, not in `merge.rs`,
 // so `merge.rs` stays implementation-only).
 pub mod archenemy;
+pub mod boss;
 pub mod conspiracy;
 pub mod horde;
 // Tests for `conspiracy` live in a sibling file (declared here, not in

@@ -38614,6 +38614,7 @@ fn rebind_event_context_amount_counts(effect: &mut Effect, gate_qty: &QuantityRe
         | Effect::ChooseCounterKind { .. }
         | Effect::PutChosenCounter { .. }
         | Effect::ReproduceEventCounters { .. }
+        | Effect::HordePlayCard { .. }
         | Effect::Unimplemented { .. } => {}
     }
 }

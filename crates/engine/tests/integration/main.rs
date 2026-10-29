@@ -546,6 +546,7 @@ mod hogaak_cant_spend_mana_1095;
 mod hollow_one_cost_reduction;
 mod horde_cyberman_deck;
 mod horde_deck_card_names;
+mod horde_hero_events;
 mod horde_multiplayer;
 mod horde_spine_runtime;
 mod horde_tokens;

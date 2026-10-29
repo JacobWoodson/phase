@@ -3759,6 +3759,7 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::ManifestDread
         | Effect::Choose { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::HordePlayCard { .. } => false,
         | Effect::Unimplemented { .. } => false,
     }
 }
@@ -5407,6 +5408,18 @@ fn rw_effect(
             p.writes_membership_external_census.merge(Census::Any);
             p.writes_membership_external_zones.merge(ZoneSpan::Any);
             p.merge(rw_quantity_expr(mana_value_limit));
+            (p, None)
+        }
+        // Turtle Team-Up "play a card": reveals library cards into play — the
+        // Discover shape (library membership → anywhere), minus the stack:
+        // Boss libraries are all-token, so nothing is ever cast. The
+        // any-census/any-zone membership write covers creature ETBs, Event
+        // graveyarding, and the Events' own damage/destroy/life writes.
+        Effect::HordePlayCard { .. } => {
+            let mut p = ext_write(StateKind::SetMembership);
+            p.writes_external.set(StateKind::HandLibrary);
+            p.writes_membership_external_census.merge(Census::Any);
+            p.writes_membership_external_zones.merge(ZoneSpan::Any);
             (p, None)
         }
         Effect::RevealUntil {

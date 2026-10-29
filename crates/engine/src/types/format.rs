@@ -716,14 +716,24 @@ pub enum ChallengeDeck {
     /// two half-decks — its `default_ruleset` has `challenge_deck` = this (seat 0's
     /// library is Sauron's cards) and `co_horde_decks = [SarumanHorde]` (seat 1).
     LotrTwoTowersHorde,
+    /// Teenage Mutant Ninja Turtles "Turtle Team-Up" — the co-op boss-deck
+    /// game: four 60-card Turtle hero decks face 11 Bosses deployed in three
+    /// stages (1 → 2 → 3) sharing one life total per stage, backed by a
+    /// 27-card event deck of Ninja creatures and villain Events. The first
+    /// boss-deck challenge: the Horde seat keeps a real (per-stage) life
+    /// total instead of the classic mill race (see `HordeRuleset::boss_stages`).
+    TurtleTeamUpHorde,
 }
 
 /// Authoritative display metadata for one selectable Horde challenge deck.
 ///
 /// Produced by [`ChallengeDeck::registry`] and consumed by the frontend's Horde
-/// deck picker, so adding a new challenge deck requires touching the engine only
-/// — the client never maintains a mirrored deck list. Mirrors [`FormatMetadata`]
-/// for `GameFormat`.
+/// deck picker. The engine is the single source of truth for which decks exist;
+/// the client keeps only a synchronous render mirror of this registry
+/// (`client/src/data/challengeDeckRegistry.ts`, for pre-WASM picker render)
+/// plus a drift test against the `getChallengeDeckRegistry` WASM export — that
+/// mirror entry is the only client-side follow-up when adding a deck, never an
+/// independent list. Mirrors [`FormatMetadata`] for `GameFormat`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChallengeDeckMetadata {
     pub deck: ChallengeDeck,
@@ -917,11 +927,12 @@ pub enum HordePostCombatActivation {
 /// constructed decks. [`FormatConfig::horde`] derives the survivor deck
 /// constraints (size, singleton, commander) from this.
 ///
-/// `Constructed` is the default (and the current behavior for every shipped deck).
-/// Promoting a community deck to `Commander` is more than a deck-size change — it
-/// turns on the commander subsystem for survivors (command-zone commanders, tax,
-/// damage), which Horde setup does not yet wire — so that is a deliberate,
-/// per-deck follow-up; this axis is the declaration point for it.
+/// `Constructed` is the default (and the behavior for the basic community
+/// decks). Promoting a community deck to `Commander` is more than a deck-size
+/// change — it turns on the commander subsystem for survivors (command-zone
+/// commanders via [`FormatConfig::command_zone_holds_decklist_commander`], tax,
+/// damage), so that remains a deliberate, per-deck follow-up; this axis is the
+/// declaration point for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SurvivorDeckFormat {
     /// 60-card (minimum) constructed: non-singleton, no commander. Theros-block
@@ -931,6 +942,36 @@ pub enum SurvivorDeckFormat {
     /// EDH / Commander: 100-card singleton with a commander (command zone) and
     /// the 21-point commander-damage threshold.
     Commander,
+}
+
+/// Staged boss-deck configuration (Turtle Team-Up class): the Boss team fights
+/// in stages of deployed Bosses sharing one life total per stage, instead of
+/// the classic Horde's life-total-less mill race.
+///
+/// `Some` on [`HordeRuleset::boss_stages`] switches the Horde seat to a real
+/// (per-stage) life total: damage and life loss apply normally, and the Boss
+/// life hitting zero clears the stage (deployed Bosses leave, life resets, the
+/// next stage deploys) until the final stage falls. Turtle Team-Up's life
+/// table (per the product booklet): 20 Boss life with 2–3 heroes, 30 with 4.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BossStages {
+    /// Bosses deployed per stage in order — `[1, 2, 3]` for Turtle Team-Up.
+    pub stage_sizes: Vec<u8>,
+    /// Boss life at the start of each stage with fewer than four survivors.
+    pub life_base: i32,
+    /// Boss life at the start of each stage with four or more survivors.
+    pub life_at_four_survivors: i32,
+}
+
+impl BossStages {
+    /// Boss life for a stage given the survivor count.
+    pub fn life_for_survivor_count(&self, survivors: usize) -> i32 {
+        if survivors >= 4 {
+            self.life_at_four_survivors
+        } else {
+            self.life_base
+        }
+    }
 }
 
 /// The parameters that distinguish one Horde deck's rules from another, carried
@@ -997,6 +1038,13 @@ pub struct HordeRuleset {
     /// to before this axis existed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub co_horde_decks: Vec<ChallengeDeck>,
+    /// Staged boss-deck configuration (Turtle Team-Up class) — `None` for the
+    /// classic mill-race Hordes. `#[serde(default, skip_serializing_if)]` so
+    /// classic configs serialize byte-identically to before this axis existed
+    /// and pre-axis payloads back-fill `None` (correct: they predate any boss
+    /// deck).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boss_stages: Option<BossStages>,
 }
 
 impl HordeRuleset {
@@ -1139,6 +1187,28 @@ impl HordeRuleset {
             }),
         }
 
+        // Boss stages are likewise surfaced only for the decks that stage
+        // Bosses — classic mill-race decks keep their prior line set.
+        if let Some(boss) = &self.boss_stages {
+            let stages = boss
+                .stage_sizes
+                .iter()
+                .map(u8::to_string)
+                .collect::<Vec<_>>()
+                .join(" \u{2192} ");
+            lines.push(RuleSummaryLine {
+                label: "Bosses",
+                detail: format!(
+                    "Bosses deploy in {} stage{} ({}) sharing {} life per stage ({} with 4+ heroes)",
+                    boss.stage_sizes.len(),
+                    plural(boss.stage_sizes.len() as u32),
+                    stages,
+                    boss.life_base,
+                    boss.life_at_four_survivors
+                ),
+            });
+        }
+
         lines
     }
 }
@@ -1172,6 +1242,7 @@ impl ChallengeDeck {
         ChallengeDeck::SauronHorde,
         ChallengeDeck::SarumanHorde,
         ChallengeDeck::LotrTwoTowersHorde,
+        ChallengeDeck::TurtleTeamUpHorde,
     ];
 
     /// Display metadata for a single deck. Exhaustive match: adding a
@@ -1237,6 +1308,13 @@ impl ChallengeDeck {
                  with its own deck, battlefield, and graveyard, ALTERNATING turns \
                  against the survivor team",
             ),
+            ChallengeDeck::TurtleTeamUpHorde => (
+                "Turtle Team-Up Horde",
+                "TMT",
+                "Teenage Mutant Ninja Turtles — staged Bosses sharing one life \
+                 total per stage, backed by an event deck of Ninjas and villain \
+                 Events",
+            ),
         };
         let default_ruleset = self.default_ruleset();
         let rules = default_ruleset.summary();
@@ -1250,9 +1328,11 @@ impl ChallengeDeck {
         }
     }
 
-    /// The full catalog of selectable Horde decks with display metadata. The
-    /// frontend's Horde deck picker renders this directly — it is the single
-    /// source of truth for which decks exist and how they are labeled.
+    /// The full catalog of selectable Horde decks with display metadata. It is
+    /// the single source of truth for which decks exist and how they are
+    /// labeled; the frontend's Horde deck picker renders the synchronous TS
+    /// mirror of this registry pre-WASM, and the drift test pins the two
+    /// together.
     pub fn registry() -> Vec<ChallengeDeckMetadata> {
         Self::ALL.iter().copied().map(Self::metadata).collect()
     }
@@ -1283,10 +1363,11 @@ impl ChallengeDeck {
                 post_combat_activation: HordePostCombatActivation::None,
                 // Every shipped deck is a community deck; survivor decks currently
                 // load as 60-card constructed. Promoting these to `Commander`
-                // (per the basic EDH rule) is a follow-up that also wires survivor
-                // commanders into Horde setup.
+                // (per the basic EDH rule) remains a deliberate per-deck follow-up —
+                // the commander seating itself is wired, only the promotion is pending.
                 survivor_deck_format: SurvivorDeckFormat::Constructed,
                 co_horde_decks: Vec::new(),
+                boss_stages: None,
             },
             ChallengeDeck::DndHorde => HordeRuleset {
                 challenge_deck: ChallengeDeck::DndHorde,
@@ -1306,10 +1387,11 @@ impl ChallengeDeck {
                 post_combat_activation: HordePostCombatActivation::None,
                 // Every shipped deck is a community deck; survivor decks currently
                 // load as 60-card constructed. Promoting these to `Commander`
-                // (per the basic EDH rule) is a follow-up that also wires survivor
-                // commanders into Horde setup.
+                // (per the basic EDH rule) remains a deliberate per-deck follow-up —
+                // the commander seating itself is wired, only the promotion is pending.
                 survivor_deck_format: SurvivorDeckFormat::Constructed,
                 co_horde_decks: Vec::new(),
+                boss_stages: None,
             },
             ChallengeDeck::ZombiesHorde => HordeRuleset {
                 challenge_deck: ChallengeDeck::ZombiesHorde,
@@ -1333,10 +1415,11 @@ impl ChallengeDeck {
                 post_combat_activation: HordePostCombatActivation::None,
                 // Every shipped deck is a community deck; survivor decks currently
                 // load as 60-card constructed. Promoting these to `Commander`
-                // (per the basic EDH rule) is a follow-up that also wires survivor
-                // commanders into Horde setup.
+                // (per the basic EDH rule) remains a deliberate per-deck follow-up —
+                // the commander seating itself is wired, only the promotion is pending.
                 survivor_deck_format: SurvivorDeckFormat::Constructed,
                 co_horde_decks: Vec::new(),
+                boss_stages: None,
             },
             ChallengeDeck::SliversHorde => HordeRuleset {
                 challenge_deck: ChallengeDeck::SliversHorde,
@@ -1357,10 +1440,11 @@ impl ChallengeDeck {
                 post_combat_activation: HordePostCombatActivation::None,
                 // Every shipped deck is a community deck; survivor decks currently
                 // load as 60-card constructed. Promoting these to `Commander`
-                // (per the basic EDH rule) is a follow-up that also wires survivor
-                // commanders into Horde setup.
+                // (per the basic EDH rule) remains a deliberate per-deck follow-up —
+                // the commander seating itself is wired, only the promotion is pending.
                 survivor_deck_format: SurvivorDeckFormat::Constructed,
                 co_horde_decks: Vec::new(),
+                boss_stages: None,
             },
             ChallengeDeck::HumansGodzillaHorde => HordeRuleset {
                 challenge_deck: ChallengeDeck::HumansGodzillaHorde,
@@ -1378,10 +1462,11 @@ impl ChallengeDeck {
                 post_combat_activation: HordePostCombatActivation::None,
                 // Every shipped deck is a community deck; survivor decks currently
                 // load as 60-card constructed. Promoting these to `Commander`
-                // (per the basic EDH rule) is a follow-up that also wires survivor
-                // commanders into Horde setup.
+                // (per the basic EDH rule) remains a deliberate per-deck follow-up —
+                // the commander seating itself is wired, only the promotion is pending.
                 survivor_deck_format: SurvivorDeckFormat::Constructed,
                 co_horde_decks: Vec::new(),
+                boss_stages: None,
             },
             ChallengeDeck::SauronHorde => HordeRuleset {
                 challenge_deck: ChallengeDeck::SauronHorde,
@@ -1400,6 +1485,7 @@ impl ChallengeDeck {
                 // survivor decks (Aragorn, the Uniter) — the first Commander deck.
                 survivor_deck_format: SurvivorDeckFormat::Commander,
                 co_horde_decks: Vec::new(),
+                boss_stages: None,
             },
             ChallengeDeck::SarumanHorde => HordeRuleset {
                 challenge_deck: ChallengeDeck::SarumanHorde,
@@ -1414,6 +1500,7 @@ impl ChallengeDeck {
                 post_combat_activation: HordePostCombatActivation::None,
                 survivor_deck_format: SurvivorDeckFormat::Commander,
                 co_horde_decks: Vec::new(),
+                boss_stages: None,
             },
             ChallengeDeck::LotrTwoTowersHorde => HordeRuleset {
                 // Seat 0's library is Sauron's (its `load_horde_library` arm loads
@@ -1429,6 +1516,33 @@ impl ChallengeDeck {
                 legendary_death: HordeLegendaryDeath::EtbThenPhaseOut,
                 post_combat_activation: HordePostCombatActivation::None,
                 survivor_deck_format: SurvivorDeckFormat::Commander,
+                boss_stages: None,
+            },
+            ChallengeDeck::TurtleTeamUpHorde => HordeRuleset {
+                challenge_deck: ChallengeDeck::TurtleTeamUpHorde,
+                // The Boss Action phase plays 2 event cards — 3 with three or
+                // four heroes, plus one more while Krang is deployed (those
+                // live-state bonuses layer on in `horde::wave_seed`).
+                wave: WaveTermination::FixedCount(2),
+                // No setup turns: the heroes share the first turn immediately.
+                survivor_setup_turns: 0,
+                // Shared hero life 20/30/40 for 2/3/4 heroes: base 10 for the
+                // first, +10 per extra survivor.
+                combined_base_life: 10,
+                per_extra_survivor_life_delta: 10,
+                horde_creatures_forced_attackers: true,
+                legendary_death: HordeLegendaryDeath::Normal,
+                post_combat_activation: HordePostCombatActivation::None,
+                // The four 60-card Turtle hero decks.
+                survivor_deck_format: SurvivorDeckFormat::Constructed,
+                co_horde_decks: Vec::new(),
+                // Three stages (1 → 2 → 3 Bosses) sharing 20 life per stage
+                // (30 with four heroes), per the product's life table.
+                boss_stages: Some(BossStages {
+                    stage_sizes: vec![1, 2, 3],
+                    life_base: 20,
+                    life_at_four_survivors: 30,
+                }),
             },
         }
     }
@@ -6649,7 +6763,8 @@ mod tests {
                 | ChallengeDeck::HumansGodzillaHorde
                 | ChallengeDeck::SauronHorde
                 | ChallengeDeck::SarumanHorde
-                | ChallengeDeck::LotrTwoTowersHorde => {}
+                | ChallengeDeck::LotrTwoTowersHorde
+                | ChallengeDeck::TurtleTeamUpHorde => {}
             }
             assert!(
                 registry.iter().any(|meta| meta.deck == *deck),
@@ -6727,6 +6842,7 @@ mod tests {
             post_combat_activation: HordePostCombatActivation::None,
             survivor_deck_format: SurvivorDeckFormat::Constructed,
             co_horde_decks: Vec::new(),
+            boss_stages: None,
         };
         // Pull the "Waves" line out of the rendered summary.
         let wave_detail = |wave: WaveTermination| -> String {
@@ -6787,6 +6903,7 @@ mod tests {
                 post_combat_activation: HordePostCombatActivation::None,
                 survivor_deck_format: SurvivorDeckFormat::Constructed,
                 co_horde_decks: Vec::new(),
+                boss_stages: None,
             }
             .summary()
             .into_iter()
@@ -6815,6 +6932,7 @@ mod tests {
             post_combat_activation: HordePostCombatActivation::None,
             survivor_deck_format: SurvivorDeckFormat::Constructed,
             co_horde_decks: Vec::new(),
+            boss_stages: None,
         };
 
         let basic = with_legendary(HordeLegendaryDeath::Normal).summary();
@@ -6854,6 +6972,7 @@ mod tests {
             post_combat_activation: rule,
             survivor_deck_format: SurvivorDeckFormat::Constructed,
             co_horde_decks: Vec::new(),
+            boss_stages: None,
         };
 
         let basic = with_activation(HordePostCombatActivation::None).summary();
@@ -6932,6 +7051,24 @@ mod tests {
     fn community_decks_use_the_published_shared_life_rule() {
         for deck in ChallengeDeck::ALL {
             let r = deck.default_ruleset();
+            if *deck == ChallengeDeck::TurtleTeamUpHorde {
+                // Turtle Team-Up prints its OWN life table in the product
+                // booklet (20/30/40 shared for 2/3/4 heroes), not the community
+                // 100/−15 — pin that table deliberately instead.
+                assert_eq!(
+                    r.combined_base_life, 10,
+                    "Turtle Team-Up must use the product's 10-life hero base"
+                );
+                assert_eq!(
+                    r.per_extra_survivor_life_delta, 10,
+                    "Turtle Team-Up must add 10 per extra hero"
+                );
+                // 2 / 3 / 4 heroes → 20 / 30 / 40.
+                let combined =
+                    |n: i32| r.combined_base_life + r.per_extra_survivor_life_delta * (n - 1);
+                assert_eq!((combined(2), combined(3), combined(4)), (20, 30, 40));
+                continue;
+            }
             assert_eq!(
                 r.combined_base_life, 100,
                 "{deck:?} must use the 100-life community base"

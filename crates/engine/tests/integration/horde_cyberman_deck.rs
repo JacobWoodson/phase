@@ -8,7 +8,7 @@
 //!      battlefield; the next card stays in the library.
 //!   2. Seat-scoped deck injection (full-card-DB tests): loading a Horde game
 //!      through `load_and_hydrate_decks` puts the ~300-card Cyberman library on
-//!      the Horde seat (real non-token cards + `in_horde_library` tokens), all
+//!      the Horde seat (real non-token cards + `is_horde_deck_token` tokens), all
 //!      owned by the Horde, while survivors keep their submitted decks.
 //!
 //! Seat 0 = Horde, seat 1 = survivor. The full-DB tests skip gracefully when
@@ -57,7 +57,7 @@ fn horde_until_nontoken_game() -> GameState {
     state
 }
 
-/// Place a creature token on top of `owner`'s library, flagged `in_horde_library`.
+/// Place a creature token on top of `owner`'s library, flagged `is_horde_deck_token`.
 fn add_library_token(
     state: &mut GameState,
     owner: PlayerId,
@@ -69,7 +69,7 @@ fn add_library_token(
     let id = create_object(state, card_id, owner, name.to_string(), Zone::Library);
     let obj = state.objects.get_mut(&id).unwrap();
     obj.is_token = true;
-    obj.in_horde_library = true;
+    obj.is_horde_deck_token = true;
     obj.card_types.core_types.push(CoreType::Creature);
     obj.base_card_types = obj.card_types.clone();
     obj.power = Some(p);
@@ -273,7 +273,7 @@ fn horde_library_ids(state: &GameState) -> Vec<ObjectId> {
 
 /// Loading a Horde game through the real deck-load path puts a 300-card library
 /// on the Horde seat: 100 real (non-token) card objects + 200
-/// `is_token` + `in_horde_library` tokens, all owned by the Horde. Survivors keep
+/// `is_token` + `is_horde_deck_token` tokens, all owned by the Horde. Survivors keep
 /// their submitted deck (seat-scoped, not Momir's all-seat overwrite).
 ///
 /// Revert guard: dropping the `GameFormat::Horde` arm in `load_and_hydrate_decks`
@@ -310,7 +310,7 @@ fn cyberman_horde_deck_loads_seat_scoped_300_card_library() {
         if obj.is_token {
             tokens += 1;
             assert!(
-                obj.in_horde_library,
+                obj.is_horde_deck_token,
                 "a Horde library token must carry the cease-to-exist exemption flag"
             );
         } else {

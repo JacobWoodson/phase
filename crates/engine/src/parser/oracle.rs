@@ -9541,6 +9541,7 @@ fn resolve_guards_in_effect(effect: &mut Effect) {
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
+        | Effect::HordePlayCard { .. }
         | Effect::Unimplemented { .. } => {}
     }
 }
@@ -10629,6 +10630,7 @@ fn demote_lifetimes_in_effect(effect: &mut Effect) {
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
+        | Effect::HordePlayCard { .. }
         | Effect::Unimplemented { .. } => {}
     }
 }

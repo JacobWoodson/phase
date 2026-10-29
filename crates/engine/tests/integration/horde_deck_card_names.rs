@@ -54,6 +54,54 @@ fn deck_nontoken_cards(deck: ChallengeDeck) -> &'static [(u32, &'static str)] {
         // this name-resolution guard checks the same seat-0 list `load_horde_library`
         // resolves for it.
         ChallengeDeck::LotrTwoTowersHorde => decks::sauron_horde::SAURON_HORDE_NONTOKEN_CARDS,
+        // Turtle Team-Up fields no card-DB cards (every enemy-deck card is
+        // token-layout on Scryfall): an empty list, whose pile sizes the
+        // token/boss helpers below pin instead.
+        ChallengeDeck::TurtleTeamUpHorde => {
+            decks::turtle_teamup_horde::TURTLE_TEAMUP_NONTOKEN_CARDS
+        }
+    }
+}
+
+/// Each deck's token `(count, selector)` list. Exhaustive like
+/// `deck_nontoken_cards` above: a new `ChallengeDeck` variant will not compile
+/// until it is listed here too.
+fn deck_token_cards(deck: ChallengeDeck) -> &'static [(u32, &'static str)] {
+    use engine::game::decks;
+    match deck {
+        ChallengeDeck::CybermanHorde => decks::cyberman_horde::CYBERMAN_HORDE_TOKENS,
+        ChallengeDeck::DndHorde => decks::dnd_horde::DND_OOZE_TOKENS,
+        ChallengeDeck::ZombiesHorde => decks::zombies_horde::ZOMBIES_HORDE_TOKENS,
+        ChallengeDeck::SliversHorde => decks::slivers_horde::SLIVERS_HORDE_TOKENS,
+        ChallengeDeck::HumansGodzillaHorde => {
+            decks::humans_godzilla_horde::HUMANS_GODZILLA_HORDE_TOKENS
+        }
+        ChallengeDeck::SauronHorde => decks::sauron_horde::SAURON_HORDE_TOKENS,
+        ChallengeDeck::SarumanHorde => decks::saruman_horde::SARUMAN_HORDE_TOKENS,
+        ChallengeDeck::LotrTwoTowersHorde => decks::sauron_horde::SAURON_HORDE_TOKENS,
+        ChallengeDeck::TurtleTeamUpHorde => {
+            decks::turtle_teamup_horde::TURTLE_TEAMUP_EVENT_DECK_TOKENS
+        }
+    }
+}
+
+/// Each deck's Boss-deck `(count, preset-id)` list, if it stages Bosses.
+/// Exhaustive (explicit `None`s, not a wildcard) so a future boss-deck game
+/// fails to compile until its pile is pinned here.
+fn deck_boss_cards(deck: ChallengeDeck) -> Option<&'static [(u32, &'static str)]> {
+    use engine::game::decks;
+    match deck {
+        ChallengeDeck::CybermanHorde => None,
+        ChallengeDeck::DndHorde => None,
+        ChallengeDeck::ZombiesHorde => None,
+        ChallengeDeck::SliversHorde => None,
+        ChallengeDeck::HumansGodzillaHorde => None,
+        ChallengeDeck::SauronHorde => None,
+        ChallengeDeck::SarumanHorde => None,
+        ChallengeDeck::LotrTwoTowersHorde => None,
+        ChallengeDeck::TurtleTeamUpHorde => {
+            Some(decks::turtle_teamup_horde::TURTLE_TEAMUP_BOSS_DECK_TOKENS)
+        }
     }
 }
 
@@ -161,15 +209,33 @@ fn dnd_horde_library_cards_all_carry_a_rarity() {
 #[test]
 fn every_horde_deck_has_a_nonempty_decklist() {
     for &deck in ChallengeDeck::ALL {
-        let cards = deck_nontoken_cards(deck);
-        assert!(
-            !cards.is_empty(),
-            "{deck:?} has an empty non-token decklist"
-        );
-        let total: u32 = cards.iter().map(|(count, _)| *count).sum();
-        assert!(
-            total >= 50,
-            "{deck:?} has only {total} non-token cards — Horde libraries are ~100-150"
-        );
+        let nontokens: u32 = deck_nontoken_cards(deck)
+            .iter()
+            .map(|(count, _)| *count)
+            .sum();
+        let tokens: u32 = deck_token_cards(deck).iter().map(|(count, _)| *count).sum();
+        match deck_boss_cards(deck) {
+            // Boss-deck games field a small event-deck library plus a Boss
+            // pile, not a ~100-card mill-race library: pin both exact
+            // published counts (Turtle Team-Up: 27 + 11 = 38).
+            Some(bosses) => {
+                let boss_total: u32 = bosses.iter().map(|(count, _)| *count).sum();
+                assert_eq!(tokens, 27, "{deck:?} event deck must be exactly 27 cards");
+                assert_eq!(
+                    boss_total, 11,
+                    "{deck:?} Boss deck must be exactly 11 cards"
+                );
+            }
+            None => {
+                assert!(
+                    !deck_nontoken_cards(deck).is_empty(),
+                    "{deck:?} has an empty non-token decklist"
+                );
+                assert!(
+                    nontokens >= 50,
+                    "{deck:?} has only {nontokens} non-token cards — Horde libraries are ~100-150"
+                );
+            }
+        }
     }
 }

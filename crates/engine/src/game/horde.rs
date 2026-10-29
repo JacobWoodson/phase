@@ -102,15 +102,27 @@ pub(crate) fn active_horde_seat(state: &GameState) -> Option<PlayerId> {
     is_horde_turn(state).then_some(state.active_player)
 }
 
+/// True when this Horde game stages Bosses (Turtle Team-Up class): the ruleset
+/// carries a `boss_stages` config. Boss-deck games keep a real per-stage life
+/// total on the Horde seat instead of the classic mill race.
+pub(crate) fn has_boss_stages(state: &GameState) -> bool {
+    state
+        .format_config
+        .horde_ruleset
+        .as_ref()
+        .is_some_and(|r| r.boss_stages.is_some())
+}
+
 /// True when `id` is a Horde seat, which in this casual variant has no life
 /// total. Damage/life loss it would suffer is redirected to milling (see
 /// `effects::life`), and it is exempt from the CR 704.5a "0 or less life loses"
 /// state-based action (`sba::collect_life_losers`). This is not a
 /// CR-sanctioned rule — Horde Magic is a casual format — so the helper names
 /// the *mechanism* (a seat with no life total) rather than citing a fictional
-/// rule number. Every Horde seat has no life total.
+/// rule number. Every classic-Horde seat has no life total; boss-deck games
+/// (Turtle Team-Up) keep a real per-stage life total instead.
 pub(crate) fn player_has_no_life_total(state: &GameState, id: PlayerId) -> bool {
-    is_horde_seat(state, id)
+    is_horde_seat(state, id) && !has_boss_stages(state)
 }
 
 /// Redirect target for damage/life loss the Horde would suffer (CR 120.3a maps
@@ -302,10 +314,25 @@ pub(crate) fn player_skips_opening_hand(state: &GameState, id: PlayerId) -> bool
 /// For a two-Horde-force deck (LOTR Two Towers) the fold is a conjunction: "The
 /// Horde loses when both Horde libraries have no cards" — one Horde running out
 /// while the other still has cards or creatures does NOT end the game.
+///
+/// Boss-deck games (Turtle Team-Up) take a different branch: the Boss seat
+/// keeps a real per-stage life total, so defeat is plain elimination — the
+/// final stage falling to zero lets the normal CR 704.5a loss proceed. The
+/// library-empty clause must NOT apply here: the event deck empties routinely
+/// mid-game and Villain Scheme! reshuffles it.
 pub(crate) fn horde_is_defeated(state: &GameState) -> bool {
     let seats = horde_seats(state);
     if seats.is_empty() {
         return false;
+    }
+    if has_boss_stages(state) {
+        return seats.iter().all(|seat| {
+            state
+                .players
+                .iter()
+                .find(|p| p.id == *seat)
+                .is_some_and(|p| p.is_eliminated)
+        });
     }
     let all_libraries_empty = seats.iter().all(|seat| {
         state
@@ -341,17 +368,30 @@ fn wave_policy(state: &GameState) -> Option<WaveTermination> {
 ///   the loop still terminates if the library empties before the terminating
 ///   card appears.
 ///
-/// Live-state bonuses (one extra per Horde artifact, one extra per additional
-/// survivor) are a later PR.
+/// Live-state bonuses layer on via [`boss_wave_bonus`] (the first consumer is
+/// Turtle Team-Up's survivor-scaled Action phase).
 fn wave_seed(state: &GameState) -> u32 {
-    match wave_policy(state) {
+    let base = match wave_policy(state) {
         Some(WaveTermination::FixedCount(n)) => n,
         Some(WaveTermination::UntilNonToken { .. })
         | Some(WaveTermination::UntilRarityAtLeast(_)) => active_horde_seat(state)
             .and_then(|horde| state.players.iter().find(|p| p.id == horde))
             .map_or(0, |p| p.library.len() as u32),
         None => 0,
+    };
+    base.saturating_add(boss_wave_bonus(state))
+}
+
+/// Extra wave cards from live boss-deck state (Turtle Team-Up): +1 with three
+/// or more survivors (the "3 Events" Action phase), +1 while Krang, Dimension
+/// X Overlord is deployed ("the bosses play an additional card each turn").
+/// Zero for every classic deck.
+fn boss_wave_bonus(state: &GameState) -> u32 {
+    if !has_boss_stages(state) {
+        return 0;
     }
+    let survivors = state.players.len().saturating_sub(horde_seats(state).len());
+    u32::from(survivors >= 3) + u32::from(crate::game::boss::is_krang_deployed(state))
 }
 
 /// How many NON-token cards must resolve to end this Horde turn's wave.
@@ -429,24 +469,27 @@ pub(crate) fn begin_wave(state: &mut GameState, _events: &mut [GameEvent]) {
     }
 }
 
-/// If a Horde wave is in progress and the Horde is at an empty-stack priority
-/// window during its precombat main, reveal-and-resolve the next card and
-/// decrement the wave counter. Returns `Some(new_waiting_for)` when a card was
-/// revealed (the caller must adopt it), or `None` when the wave is not eligible
-/// to advance this beat (not the Horde's turn, wrong phase, non-empty stack,
-/// counter exhausted, or an empty library).
+/// If a Horde wave is in progress and the stack is empty, reveal-and-resolve
+/// the next card and decrement the wave counter. Returns `Some(new_waiting_for)`
+/// when a card was revealed (the caller must adopt it), or `None` when the wave
+/// is not eligible to advance this beat (non-empty stack, counter exhausted, or
+/// an empty library).
+///
+/// The gate is deliberately turn- and phase-agnostic: a positive budget outside
+/// the Horde's precombat main can only be `play_top_cards` residue (Savanti
+/// Romero's mid-combat "the bosses play a card", paused on a spell or a
+/// hero-event prompt — the wave budget always exhausts before the precombat
+/// main can end, and `begin_wave` reseeds only on Horde precombat entry), and
+/// that residue must continue on the next empty-stack priority beat, not strand
+/// until the next wave overwrites it.
 pub(crate) fn maybe_reveal_next(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
-    // Gate: only advance the wave when the Horde is the one about to act, its
-    // precombat main is open, the stack is clear (the previous card resolved),
-    // and cards remain to reveal.
-    if state.horde_wave_remaining == 0
-        || state.phase != Phase::PreCombatMain
-        || !state.stack.is_empty()
-        || !is_horde_turn(state)
-    {
+    // Gate: only advance the wave when the stack is clear (the previous card
+    // resolved) and budget remains. No turn/phase gate (see the doc comment):
+    // a positive budget IS the wave-active marker, in-window or residue.
+    if state.horde_wave_remaining == 0 || !state.stack.is_empty() {
         return None;
     }
     let horde = active_horde_seat(state)?;
@@ -454,7 +497,8 @@ pub(crate) fn maybe_reveal_next(
     // Reveal-and-resolve cards until either the wave pauses on a nontoken spell
     // (which is put on the stack and resolved through the normal priority loop
     // before the `engine::pass_priority_once` re-entry seam re-invokes this
-    // function) or the wave budget / library is exhausted.
+    // function), an Event parks a hero-choice prompt (same seam resumes it), or
+    // the wave budget / library is exhausted.
     //
     // Tokens must be handled in a LOOP here rather than one-per-beat: a token is
     // never cast (CR 111) and enters the battlefield synchronously, so it never
@@ -464,94 +508,193 @@ pub(crate) fn maybe_reveal_next(
     // `waiting_for` unchanged) would strand every later card in the wave. So on
     // a token we resolve its ETB and immediately `continue` to the next card.
     loop {
-        // Wave budget exhausted (e.g. after the last card was a token that
-        // decremented the counter to zero) — stop cleanly.
+        match reveal_and_resolve_top_card(state, horde, events) {
+            RevealOutcome::Continue => {}
+            RevealOutcome::Pause(waiting) => return Some(*waiting),
+            RevealOutcome::Done => return None,
+        }
+    }
+}
+
+/// Outcome of resolving one library card through the shared single-card wave
+/// driver ([`reveal_and_resolve_top_card`]).
+enum RevealOutcome {
+    /// A token entered / amassed, or an Event resolved synchronously: the
+    /// caller should reveal the next card.
+    Continue,
+    /// A nontoken spell went on the stack, or an Event parked a hero-choice (or
+    /// nested replacement) prompt: the wave pauses until it resolves, then the
+    /// priority re-entry seam continues the remaining budget.
+    /// Boxed: `WaitingFor` is ~1.7KB and the sibling variants carry nothing.
+    Pause(Box<WaitingFor>),
+    /// Nothing more to do (budget exhausted, empty library, redirected reveal,
+    /// or a failed cast).
+    Done,
+}
+
+/// Savanti Romero ("the bosses play a card") entry: seed `count` extra reveals
+/// and drive them immediately, ungated (Savanti triggers on combat damage, mid
+/// combat). On `Pause` (a nontoken spell went on the stack, or an Event parked
+/// a hero-choice prompt) the remaining budget stays seeded: the priority
+/// re-entry seam is turn- and phase-agnostic, so it continues the residue on
+/// the next empty-stack priority beat, mid-combat included.
+pub(crate) fn play_top_cards(
+    state: &mut GameState,
+    horde: PlayerId,
+    count: u32,
+    events: &mut Vec<GameEvent>,
+) {
+    state.horde_wave_remaining = state.horde_wave_remaining.saturating_add(count);
+    loop {
         if state.horde_wave_remaining == 0 {
-            return None;
+            break;
         }
-
-        // Reveal the top card of the Horde's library.
-        let Some(card_id) = state
-            .players
-            .iter()
-            .find(|p| p.id == horde)
-            .and_then(|p| p.library.front().copied())
-        else {
-            // Empty library: nothing more to reveal this wave. The Horde loses by
-            // decking out (a later PR); here we simply end the wave cleanly.
-            state.horde_wave_remaining = 0;
-            return None;
-        };
-
-        // Consume one from the wave budget regardless of the branch taken so the
-        // wave always terminates.
-        state.horde_wave_remaining = state.horde_wave_remaining.saturating_sub(1);
-
-        let is_token = state.objects.get(&card_id).is_some_and(|obj| obj.is_token);
-
-        if is_token {
-            // LOTR "Two Towers" rule "Orc Armies grow as a single army": a revealed
-            // Army token does NOT enter as a fresh 0/0 (which would die to SBAs
-            // immediately) — it AMASSES the Horde's single Army instead. Any other
-            // token enters normally.
-            if let Some(subtype) = revealed_army_subtype(state, card_id) {
-                amass_revealed_army(state, horde, card_id, &subtype, events);
-            } else {
-                // CR 111 + CR 111.1: a token can never be cast, so a revealed library
-                // token is put directly onto the battlefield under the Horde's
-                // control. Enters synchronously (no stack), so continue the wave with
-                // the next card in this same call.
-                reveal_library_token(state, card_id, horde, events);
-            }
-            continue;
+        match reveal_and_resolve_top_card(state, horde, events) {
+            RevealOutcome::Continue => {}
+            RevealOutcome::Pause(_) | RevealOutcome::Done => break,
         }
+    }
+}
 
-        // Capture the card's library rarity BEFORE it leaves the library, for the
-        // `UntilRarityAtLeast` end-of-wave check below. (The object survives the
-        // exile + free-cast, but reading it here keeps the rarity next to the
-        // reveal and independent of what the cast does to the object.)
-        let revealed_rarity = state
+/// Reveal-and-resolve the top card of the Horde's library (ungated): consumes
+/// one wave budget and dispatches Army-amass / ordinary-token ETB / Event
+/// one-shot / nontoken free-cast. Shared by the gated wave loop
+/// ([`maybe_reveal_next`]) and the mid-combat "play a card" entry
+/// ([`play_top_cards`]).
+fn reveal_and_resolve_top_card(
+    state: &mut GameState,
+    horde: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> RevealOutcome {
+    // Wave budget exhausted (e.g. after the last card was a token that
+    // decremented the counter to zero) — stop cleanly.
+    if state.horde_wave_remaining == 0 {
+        return RevealOutcome::Done;
+    }
+
+    // Reveal the top card of the Horde's library.
+    let Some(card_id) = state
+        .players
+        .iter()
+        .find(|p| p.id == horde)
+        .and_then(|p| p.library.front().copied())
+    else {
+        // Empty library: nothing more to reveal this wave. The Horde loses by
+        // decking out (checked by `horde_is_defeated`); here we simply end
+        // the wave cleanly, zeroing the budget so an additive
+        // `play_top_cards` seed (Krang/Savanti "play a card") cannot
+        // accumulate a stale residue across turns.
+        state.horde_wave_remaining = 0;
+        return RevealOutcome::Done;
+    };
+
+    // Consume one from the wave budget regardless of the branch taken so the
+    // wave always terminates.
+    state.horde_wave_remaining = state.horde_wave_remaining.saturating_sub(1);
+
+    let is_token = state.objects.get(&card_id).is_some_and(|obj| obj.is_token);
+
+    if is_token {
+        if state
             .objects
             .get(&card_id)
-            .and_then(|o| o.horde_library_rarity);
-
-        // Nontoken: cast it for free during resolution. Mirror Cascade — move the
-        // card to exile first (CR 601.2a: the reveal), then drive the free cast
-        // through the single free-cast authority (`cast_from_zone::resolve`'s
-        // `driver_free_cast` gate, CR 608.2g), which casts from the card's current
-        // (exile) zone at zero cost. X-cost nontokens resolve at X = 0 (CR 601.2b),
-        // exactly like Cascade/Discover.
-        crate::game::zones::move_to_zone(state, card_id, Zone::Exile, events);
-        if state.objects.get(&card_id).map(|o| o.zone) != Some(Zone::Exile) {
-            // A replacement effect redirected the reveal; do not attempt to cast.
-            return None;
-        }
-
-        let ability = free_cast_ability(card_id, horde);
-        return match crate::game::effects::cast_from_zone::resolve(state, &ability, events) {
-            Ok(()) => {
-                // This card is a resolved NON-token, so it counts against an
-                // `UntilNonToken` wave's quota (saturating: other policies leave
-                // the quota at 0 and are unaffected).
-                state.horde_wave_nontokens_remaining =
-                    state.horde_wave_nontokens_remaining.saturating_sub(1);
-
-                // Ending the wave clears the counter so the priority re-entry seam
-                // (which re-invokes this function once the spell resolves) reveals
-                // nothing more, leaving the rest of the library for the next Horde
-                // turn. See [`wave_ends_after_nontoken`] for the policy matrix.
-                if wave_ends_after_nontoken(
-                    wave_policy(state),
-                    revealed_rarity,
-                    state.horde_wave_nontokens_remaining,
-                ) {
-                    state.horde_wave_remaining = 0;
+            .is_some_and(crate::game::boss::is_event)
+        {
+            // Turtle Team-Up: a revealed Event resolves its one-shot (no
+            // stack) — synchronously when it needs no decisions, or pausing
+            // the wave on a hero-choice prompt that the re-entry seam resumes.
+            match resolve_revealed_event(state, horde, card_id, events) {
+                crate::game::boss::HeroEventProgress::Settled => {}
+                crate::game::boss::HeroEventProgress::Prompted => {
+                    return RevealOutcome::Pause(Box::new(state.waiting_for.clone()));
                 }
-                Some(state.waiting_for.clone())
             }
-            Err(_) => None,
-        };
+        } else if let Some(subtype) = revealed_army_subtype(state, card_id) {
+            // LOTR "Two Towers" rule "Orc Armies grow as a single army": a
+            // revealed Army token does NOT enter as a fresh 0/0 (which would
+            // die to SBAs immediately) — it AMASSES the Horde's single Army
+            // instead. Any other token enters normally.
+            amass_revealed_army(state, horde, card_id, &subtype, events);
+        } else {
+            // CR 111 + CR 111.1: a token can never be cast, so a revealed library
+            // token is put directly onto the battlefield under the Horde's
+            // control. Enters synchronously (no stack), so the caller
+            // continues the wave with the next card.
+            reveal_library_token(state, card_id, horde, events);
+        }
+        return RevealOutcome::Continue;
     }
+
+    // Capture the card's library rarity BEFORE it leaves the library, for the
+    // `UntilRarityAtLeast` end-of-wave check below. (The object survives the
+    // exile + free-cast, but reading it here keeps the rarity next to the
+    // reveal and independent of what the cast does to the object.)
+    let revealed_rarity = state
+        .objects
+        .get(&card_id)
+        .and_then(|o| o.horde_library_rarity);
+
+    // Nontoken: cast it for free during resolution. Mirror Cascade — move the
+    // card to exile first (CR 601.2a: the reveal), then drive the free cast
+    // through the single free-cast authority (`cast_from_zone::resolve`'s
+    // `driver_free_cast` gate, CR 608.2g), which casts from the card's current
+    // (exile) zone at zero cost. X-cost nontokens resolve at X = 0 (CR 601.2b),
+    // exactly like Cascade/Discover.
+    crate::game::zones::move_to_zone(state, card_id, Zone::Exile, events);
+    if state.objects.get(&card_id).map(|o| o.zone) != Some(Zone::Exile) {
+        // A replacement effect redirected the reveal; do not attempt to cast.
+        return RevealOutcome::Done;
+    }
+
+    let ability = free_cast_ability(card_id, horde);
+    match crate::game::effects::cast_from_zone::resolve(state, &ability, events) {
+        Ok(()) => {
+            // This card is a resolved NON-token, so it counts against an
+            // `UntilNonToken` wave's quota (saturating: other policies leave
+            // the quota at 0 and are unaffected).
+            state.horde_wave_nontokens_remaining =
+                state.horde_wave_nontokens_remaining.saturating_sub(1);
+
+            // Ending the wave clears the counter so the priority re-entry seam
+            // (which re-invokes this function once the spell resolves) reveals
+            // nothing more, leaving the rest of the library for the next Horde
+            // turn. See [`wave_ends_after_nontoken`] for the policy matrix.
+            if wave_ends_after_nontoken(
+                wave_policy(state),
+                revealed_rarity,
+                state.horde_wave_nontokens_remaining,
+            ) {
+                state.horde_wave_remaining = 0;
+            }
+            RevealOutcome::Pause(Box::new(state.waiting_for.clone()))
+        }
+        Err(_) => RevealOutcome::Done,
+    }
+}
+
+/// Turtle Team-Up: resolve a revealed Event. Banked Baxters fire on every
+/// reveal (Baxter's Experiments itself included — it is an Event), so the
+/// bank drains first and rides the dispatch as `fired`. The Event moves to
+/// the Boss graveyard FIRST (so "this card" and graveyard reads see post-move
+/// zones) — except Baxter's Experiments, which is banked beside the event
+/// deck (exile; horde tokens never cease to exist) for a later event to fire.
+/// A boss-deck library holds only tokens and Events, so the
+/// budget-consumption + empty-library semantics match the token path exactly.
+fn resolve_revealed_event(
+    state: &mut GameState,
+    horde: PlayerId,
+    card_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> crate::game::boss::HeroEventProgress {
+    let fired = std::mem::take(&mut state.baxter_set_aside);
+    if crate::game::boss::boss_name(state, card_id)
+        .is_some_and(|name| name == "Event: Baxter's Experiments")
+    {
+        crate::game::zones::move_to_zone(state, card_id, Zone::Exile, events);
+    } else {
+        crate::game::zones::move_to_zone(state, card_id, Zone::Graveyard, events);
+    }
+    crate::game::boss::resolve_boss_event(state, horde, card_id, &fired, 0, events)
 }
 
 /// The Amass flavor subtype of a revealed library token when it is an Army
@@ -618,10 +761,12 @@ fn amass_revealed_army(
 /// other created token — so ETB triggers fire and the Horde emblem's haste +
 /// must-attack apply. The original library placeholder object is then removed so
 /// no duplicate remains (the M2 "create + remove" lifecycle, chosen over a
-/// literal library→battlefield move so the shared CR 111.8 movement guards stay
-/// untouched). The fresh battlefield token does NOT carry `in_horde_library`
-/// (it is a normal token via `create_object`), so it will cease to exist
-/// normally (CR 704.5d) if it later leaves the battlefield.
+/// literal library→battlefield move). In a classic deck the fresh battlefield
+/// token does NOT carry `is_horde_deck_token` (it is a normal token via
+/// `create_object`), so it will cease to exist normally (CR 704.5d) if it
+/// later leaves the battlefield. In a boss-deck game it inherits the flag:
+/// dead Ninjas must linger in the Boss graveyard for Shredder's Challenge,
+/// so the flag (SBA exemption + movement carve-out) follows the instance.
 fn reveal_library_token(
     state: &mut GameState,
     card_id: ObjectId,
@@ -729,6 +874,35 @@ fn reveal_library_token(
         // cheap and keeps derived state correct in every case.
         crate::game::layers::flush_layers(state);
     }
+
+    // Turtle Team-Up: graft revealed Ninjas' non-keyword statics. The catalog
+    // `rules_text` carries them for display, but "can't block" / "can't be
+    // blocked" lines don't materialize through token injection, so the code
+    // synthesizer stamps them here. Name-keyed: every other deck's tokens
+    // no-op, and grafted statics need the same layer flush as above.
+    //
+    // The same loop inherits the Horde-deck-token flag in boss-deck games:
+    // dead Ninjas must linger in the Boss graveyard for Shredder's Challenge
+    // (and ride Villain Scheme! back), so the flag — SBA exemption plus
+    // movement carve-out — follows the instance past the battlefield. Classic
+    // decks skip this: their revealed tokens stay normal tokens that cease
+    // normally (CR 704.5d) on leaving the battlefield.
+    let revealed: Vec<ObjectId> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| !before.contains(id))
+        .collect();
+    let boss_game = has_boss_stages(state);
+    for id in revealed {
+        crate::game::boss::graft_ninja_abilities(state, id);
+        if boss_game {
+            if let Some(obj) = state.objects.get_mut(&id) {
+                obj.is_horde_deck_token = true;
+            }
+        }
+    }
+    crate::game::layers::flush_layers(state);
 
     // Remove the library placeholder so no duplicate token remains.
     crate::game::zones::remove_from_zone(state, card_id, Zone::Library, horde);

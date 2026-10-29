@@ -67513,6 +67513,7 @@ fn effect_filter_has_chosen_color(effect: &Effect) -> bool {
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::ChooseOneOf { .. }
+        | Effect::HordePlayCard { .. }
         | Effect::Unimplemented { .. } => false,
     }
 }

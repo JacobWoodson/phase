@@ -14818,6 +14818,105 @@ impl ZoneOpponentChooserPurpose {
     }
 }
 
+/// Turtle Team-Up: which hero-choice Event a [`WaitingFor::HeroEventChoice`]
+/// prompt belongs to, plus the event-specific running parameters. No CR
+/// section — casual product; the variants mirror the Event names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum HeroEventKind {
+    /// "Each hero sacrifices a tapped creature they control."
+    ChromeOverload,
+    /// "As a team, the heroes discard a total of two cards." `remaining` is
+    /// the running remainder across the hero sequence.
+    KrangStratagem { remaining: usize },
+    /// "As a team, the heroes choose a creature with the greatest power
+    /// among creatures they control. Destroy it. The bosses lose life equal
+    /// to that creature's power."
+    Smackdown,
+    /// "Each hero taps a creature they control and puts X stun counters on
+    /// it, where X is the number of bosses."
+    RatKingRevolution,
+    /// "Each hero returns X creatures they control to their owners' hands,
+    /// where X is the number of bosses."
+    SavantiCurse,
+    /// "As a team, the heroes choose a creature with the greatest power
+    /// among creatures they control. Destroy it."
+    Infiltration,
+    /// "As a team, the heroes choose three creatures they control. Destroy
+    /// each other creature the heroes control."
+    VillainMayhem,
+}
+
+/// One hero's recorded answer inside a [`WaitingFor::HeroEventChoice`]
+/// sequence. Answers accumulate on the prompt (the vote-ledger precedent)
+/// and apply as one batch when the queue drains, so multi-hero Events stay
+/// simultaneous.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeroEventAnswer {
+    pub hero: PlayerId,
+    pub cards: Vec<ObjectId>,
+}
+
+/// One application step of a drained hero-choice batch. Steps apply in order;
+/// after each step the driver checks whether a nested replacement prompt
+/// (regeneration, Library of Leng) took over, and if so parks the remainder
+/// in [`PendingHeroEvent`] for the replacement funnel to resume — the
+/// `pending_discard_batch` precedent. Steps carry ids and amounts only, never
+/// `GameEvent`s, so no persisted-event rebind is owed on load.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HeroEventApplyStep {
+    /// `hero` sacrifices `card` (Chrome Dome's Overload).
+    Sacrifice { hero: PlayerId, card: ObjectId },
+    /// `hero` discards `card` to a resolving Event (Krang's Stratagem).
+    Discard { hero: PlayerId, card: ObjectId },
+    /// Destroy `card` (Smackdown, Infiltration, Mayhem).
+    Destroy { card: ObjectId },
+    /// `player` loses `amount` life (Smackdown's power drain, Karai's Planning).
+    LoseLife { player: PlayerId, amount: i32 },
+    /// `player` gains `amount` life (Karai's Planning).
+    GainLife { player: PlayerId, amount: i32 },
+    /// Deal `amount` damage to `card` (Bebop's Rampage), sourced from the
+    /// resolving Event.
+    Damage { card: ObjectId, amount: u32 },
+    /// Move `card` to `dest` through the full zone pipeline (Shredder's
+    /// Challenge returns, Villain Scheme! restocks).
+    ZoneMove { card: ObjectId, dest: Zone },
+    /// Shuffle `player`'s library (Villain Scheme!, after the restock moves).
+    ShuffleLibrary { player: PlayerId },
+    /// Move fired Baxter cards to the Boss graveyard ("after the next event
+    /// is played, put this card into the event discard pile"). Ordered AFTER
+    /// the resolution's own steps and BEFORE any owed copies, so a copied
+    /// Scheme! can never recycle a Baxter that is still firing.
+    DiscardFiredBaxters { cards: Vec<ObjectId> },
+    /// Tap `card` (Rat King's Revolution).
+    Tap { card: ObjectId },
+    /// Put `count` `counter` counters on `card` (Rat King's stun).
+    AddCounters {
+        card: ObjectId,
+        counter: crate::types::counter::CounterType,
+        count: u32,
+    },
+    /// Return `card` to its owner's hand (Savanti Romero's Curse).
+    Bounce { card: ObjectId },
+}
+
+/// A hero-choice batch parked mid-application by a nested replacement prompt,
+/// resumed by `boss::drain_pending_hero_event` through the same
+/// post-replacement funnel as `pending_discard_batch` (arbitrary re-pauses
+/// compose: each resume re-enters the drain through the same hook).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingHeroEvent {
+    /// The resolving Event object (application source + re-dispatch identity).
+    /// Copies re-derive their kind from the Event title, so no kind rides here.
+    pub event_id: ObjectId,
+    /// The Boss seat (life-loss recipient, counter actor).
+    pub horde: PlayerId,
+    /// Steps still owed, in order.
+    pub steps: Vec<HeroEventApplyStep>,
+    /// Baxter's Experiments copies still owed after the steps complete.
+    pub copies_pending: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum WaitingFor {
@@ -15763,6 +15862,45 @@ pub enum WaitingFor {
         /// resolving discard (not discard costs or Ward).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         discard_frame: Option<crate::types::identifiers::DiscardFrameId>,
+    },
+    /// Turtle Team-Up: one hero's card-selection step inside a hero-choice
+    /// Event ("each hero …" sequences and "as a team" captain choices). The
+    /// pending queue rides on the prompt itself (the vote-ledger precedent):
+    /// `remaining_heroes` drains in seat order, `answers` accumulate, and the
+    /// handler batch-applies them when the queue empties. Answered with
+    /// `GameAction::SelectCards`; `count`/`up_to` validate exactly like
+    /// `DiscardChoice` (exact `count`, or `0..=count` when `up_to`).
+    HeroEventChoice {
+        /// The hero who must decide this step.
+        player: PlayerId,
+        /// Which Event this choice belongs to, plus its running parameters.
+        event: HeroEventKind,
+        /// The resolving Event object (batch-application source + Baxter
+        /// re-dispatch identity).
+        event_id: ObjectId,
+        /// The current offer (this hero's eligible cards).
+        cards: Vec<ObjectId>,
+        /// How many to select (`up_to` widens to `0..=count`).
+        count: usize,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        up_to: bool,
+        /// Heroes still to prompt after `player`, in seat order.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        remaining_heroes: Vec<PlayerId>,
+        /// Recorded answers, batch-applied when the queue drains.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        answers: Vec<HeroEventAnswer>,
+        /// Baxter's Experiments copies still owed: when the queue drains with
+        /// these outstanding, the event resolves again per copy.
+        #[serde(default)]
+        copies_pending: u32,
+        /// Fired Baxter cards held aside while this choice resolves ("after
+        /// the next event is played, put this card into the event discard
+        /// pile"): they hit the Boss graveyard when the queue drains, BEFORE
+        /// any owed copies resolve, so a copied Scheme! can never recycle a
+        /// Baxter that is still firing.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        fired_baxters: Vec<ObjectId>,
     },
     /// CR 608.2d: Player chooses object(s) from a zone during effect resolution.
     /// Generalizes the DiscardChoice pattern to sacrifice-from-battlefield and hand-to-battlefield.
@@ -18007,6 +18145,7 @@ impl WaitingFor {
             WaitingFor::ChooseOneOfBranch { .. } => "ChooseOneOfBranch",
             WaitingFor::ConniveDiscard { .. } => "ConniveDiscard",
             WaitingFor::DiscardChoice { .. } => "DiscardChoice",
+            WaitingFor::HeroEventChoice { .. } => "HeroEventChoice",
             WaitingFor::EffectZoneChoice { .. } => "EffectZoneChoice",
             WaitingFor::DrawnThisTurnTopdeckChoice { .. } => "DrawnThisTurnTopdeckChoice",
             WaitingFor::LearnChoice { .. } => "LearnChoice",
@@ -18257,6 +18396,7 @@ impl WaitingFor {
             | WaitingFor::CombatTaxPayment { player, .. }
             | WaitingFor::PhyrexianPayment { player, .. }
             | WaitingFor::DiscardChoice { player, .. }
+            | WaitingFor::HeroEventChoice { player, .. }
             | WaitingFor::MiracleReveal { player, .. }
             | WaitingFor::CommanderZoneChoice { player, .. }
             | WaitingFor::SeparatePilesChooseOpponent { player, .. }
@@ -18529,6 +18669,7 @@ impl WaitingFor {
             | WaitingFor::ChooseOneOfBranch { .. }
             | WaitingFor::ConniveDiscard { .. }
             | WaitingFor::DiscardChoice { .. }
+            | WaitingFor::HeroEventChoice { .. }
             | WaitingFor::EffectZoneChoice { .. }
             | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
             | WaitingFor::LearnChoice { .. }
@@ -18732,6 +18873,7 @@ impl WaitingFor {
             | WaitingFor::ChooseOneOfBranch { .. }
             | WaitingFor::ConniveDiscard { .. }
             | WaitingFor::DiscardChoice { .. }
+            | WaitingFor::HeroEventChoice { .. }
             | WaitingFor::EffectZoneChoice { .. }
             | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
             | WaitingFor::LearnChoice { .. }
@@ -23064,6 +23206,14 @@ declare_game_state! {
     /// box.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_discard_batch: Option<Box<PendingDiscardBatch>>,
+    /// Turtle Team-Up: a hero-choice batch parked mid-application by a nested
+    /// replacement prompt (regeneration, Library of Leng). Boxed like its
+    /// `pending_discard_batch` sibling — `GameState` moves by value under a
+    /// hard stack budget, so a multi-step parked record rides behind a box.
+    /// Populated only during the pause; drained by
+    /// `boss::drain_pending_hero_event` through the post-replacement funnel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_hero_event: Option<Box<PendingHeroEvent>>,
     /// CR 608.2c + CR 616.1: Progress for a replacement-suspended exile loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_exile_from_top_until: Option<Box<PendingExileFromTopUntil>>,
@@ -23962,6 +24112,27 @@ declare_game_state! {
     /// so setup-skipped turns never bump it. Only meaningful when `len >= 2`.
     #[serde(default)]
     pub active_horde_index: usize,
+    /// Turtle Team-Up: the Boss deck pile (11 Bosses, face down). Front = top;
+    /// stages deploy from here (`boss::deploy_bosses`), mirroring the
+    /// Archenemy `scheme_deck`. Empty for every non-boss-deck game.
+    #[serde(default, skip_serializing_if = "im::Vector::is_empty")]
+    pub boss_deck: im::Vector<ObjectId>,
+    /// Turtle Team-Up: the currently deployed Boss stage (1-based). `0` before
+    /// stage 1 deploys at setup and for every non-boss-deck game. Advances in
+    /// `boss::maybe_clear_boss_stage` when the Boss life hits zero on a
+    /// non-final stage; the final stage falling eliminates the Boss seat
+    /// instead (normal CR 704.5a loss — boss-deck games keep a real life
+    /// total, unlike the classic mill race).
+    #[serde(default)]
+    pub boss_stage: u8,
+    /// Turtle Team-Up: Baxter's Experiments cards set aside ("beside the
+    /// event deck") awaiting the next event. Fired copies move to the Boss
+    /// graveyard when they trigger, so Villain Scheme! can never touch a
+    /// live Baxter. At most one entry in practice (a single Baxter exists
+    /// and re-dispatch dedupes), but a Vec keeps the fire-on-next shape
+    /// honest. Empty for every non-boss-deck game.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub baxter_set_aside: Vec<ObjectId>,
     /// CR 725: The initiative designation (like monarch — one player at a time).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initiative: Option<PlayerId>,
@@ -29553,10 +29724,21 @@ impl GameState {
             // Set here, at the single point where the format config first meets
             // the seats, so every construction path agrees — not only the live
             // deck-loading one.
-            // Every Horde seat has no life total (damage mills it; exempt from the
-            // CR 704.5a life SBA) — its library is the real clock.
+            // Every classic-Horde seat has no life total (damage mills it;
+            // exempt from the CR 704.5a life SBA) — its library is the real
+            // clock. Boss-deck games (Turtle Team-Up) are the exception: the
+            // Boss seat keeps a real per-stage life total, seeded here from
+            // the ruleset's life table so every construction path agrees.
+            let boss_life = config
+                .horde_ruleset
+                .as_ref()
+                .and_then(|r| r.boss_stages.as_ref())
+                .map(|b| b.life_for_survivor_count(survivor_seats.len()));
             for &horde_seat in &horde_seats_designated {
-                players[horde_seat.0 as usize].has_no_life_total = true;
+                match boss_life {
+                    Some(life) => players[horde_seat.0 as usize].life = life,
+                    None => players[horde_seat.0 as usize].has_no_life_total = true,
+                }
             }
         }
 
@@ -29808,6 +29990,7 @@ impl GameState {
             pending_player_scope_sacrifice_choice: None,
             pending_player_scope_unless_payment: None,
             pending_discard_batch: None,
+            pending_hero_event: None,
             pending_exile_from_top_until: None,
             pending_mass_library_order_choice: None,
             pending_scoped_library_search: None,
@@ -29911,6 +30094,9 @@ impl GameState {
             horde_postcombat_activation_queue: Vec::new(),
             horde_seats: horde_seats_designated,
             active_horde_index: 0,
+            boss_deck: im::Vector::new(),
+            boss_stage: 0,
+            baxter_set_aside: Vec::new(),
             initiative: None,
             combat_prevention_tally: None,
             cancelled_casts: Vec::new(),
@@ -31685,6 +31871,7 @@ impl GameState {
         !self.resolution_stack.holds_unsettled_delivery_frame()
             && self.pending_player_scope_sacrifice_choice.is_none()
             && self.pending_discard_batch.is_none()
+            && self.pending_hero_event.is_none()
             && self.pending_combat_lifelink.is_none()
             && self.deferred_entry_events.is_empty()
             && self.pending_attack_trigger_events.is_empty()
@@ -32569,9 +32756,9 @@ pub(crate) fn object_content_eq(x: &GameObject, y: &GameObject) -> bool {
         // spell remains on the stack. Comparing it is fail-safe for loop detection.
         && x.cast_occurrence == y.cast_occurrence
         && x.spell_announcement == y.spell_announcement
-        // Horde-library provenance: compare fail-closed so a token mid-reveal
+        // Horde-deck-token provenance: compare fail-closed so a token mid-reveal
         // never equates to its pre-reveal self on this axis alone.
-        && x.in_horde_library == y.in_horde_library
+        && x.is_horde_deck_token == y.is_horde_deck_token
         && x.horde_library_rarity == y.horde_library_rarity
 }
 
@@ -32953,6 +33140,9 @@ fn _gamestate_partition_is_total(s: &GameState) {
         horde_postcombat_activation_queue: _,
         horde_seats: _,
         active_horde_index: _,
+        boss_deck: _,
+        boss_stage: _,
+        baxter_set_aside: _,
         initiative: _,
         combat_prevention_tally: _,
         // Post-rebase upstream additions (v0.21.x: #5515 discover + liminal mechanic).
@@ -32995,6 +33185,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_player_scope_sacrifice_choice: _,
         pending_player_scope_unless_payment: _,
         pending_discard_batch: _,
+        pending_hero_event: _,
         pending_exile_from_top_until: _,
         pending_mass_library_order_choice: _,
         pending_scoped_library_search: _,
@@ -33229,6 +33420,7 @@ impl PartialEq for GameState {
             && self.pending_player_scope_unless_payment
                 == other.pending_player_scope_unless_payment
             && self.pending_discard_batch == other.pending_discard_batch
+            && self.pending_hero_event == other.pending_hero_event
             && self.pending_exile_from_top_until == other.pending_exile_from_top_until
             && self.pending_combat_lifelink == other.pending_combat_lifelink
             && self.pending_mass_library_order_choice
@@ -33288,6 +33480,9 @@ impl PartialEq for GameState {
             && self.horde_postcombat_activation_queue == other.horde_postcombat_activation_queue
             && self.horde_seats == other.horde_seats
             && self.active_horde_index == other.active_horde_index
+            && self.boss_deck == other.boss_deck
+            && self.boss_stage == other.boss_stage
+            && self.baxter_set_aside == other.baxter_set_aside
     }
 }
 

@@ -909,6 +909,16 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 ..
             },
             GameAction::SelectCards { cards: chosen },
+        )
+        | (
+            WaitingFor::HeroEventChoice {
+                player: _,
+                cards,
+                count,
+                up_to,
+                ..
+            },
+            GameAction::SelectCards { cards: chosen },
         ) => {
             let exact = if *up_to { None } else { Some(*count) };
             selection_mismatch(chosen, cards, exact) || (*up_to && chosen.len() > *count)

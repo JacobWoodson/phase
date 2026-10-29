@@ -893,17 +893,26 @@ pub struct GameObject {
     /// (command zone), tracked via `Player::contraption_deck`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub in_contraption_deck: bool,
-    /// CR 704.5d exemption (casual Horde Magic variant): a token that lives in
-    /// the Horde's library does NOT cease to exist while flagged. Ordinarily a
-    /// token in any zone other than the battlefield is swept by the CR 704.5d
-    /// state-based action; the Horde deck seeds predefined tokens into its
-    /// library and reveals them onto the battlefield, so a library-resident
-    /// Horde token must survive until it is revealed. This flag gates ONLY the
-    /// `check_token_cease_to_exist` SBA (`sba.rs`) — it does not touch the
-    /// shared CR 111.8 movement guards. Not a CR-sanctioned rule; Horde Magic is
-    /// a casual format, so the flag names the mechanism rather than a rule.
-    #[serde(default)]
-    pub in_horde_library: bool,
+    /// Horde enemy-deck token instance (casual Horde Magic variant): a token
+    /// that IS a Horde deck card, so it lives outside the battlefield by
+    /// design — library placeholders, the Boss pile, the command zone, and
+    /// (in boss-deck games) graveyard instances awaiting recursion. While
+    /// flagged it is exempt from the CR 704.5d cease-to-exist sweep
+    /// (`check_token_cease_to_exist`) AND from the CR 111.8 "can't change
+    /// zones" movement freeze (`token_cannot_change_zones`): boss-deck loops
+    /// move these tokens by design (Events library↔graveyard, Shredder's
+    /// Challenge returns, stage-clear exiles). Classic decks never move
+    /// theirs, so the freeze carve-out is inert there. Not a CR-sanctioned
+    /// rule; Horde Magic is casual, so the flag names the mechanism.
+    /// (Renamed from `in_horde_library` when boss decks widened it past the
+    /// library; the alias keeps old saves loading.) Skipped on the wire when
+    /// false so hidden stubs of ordinary objects carry no horde marker.
+    #[serde(
+        default,
+        alias = "in_horde_library",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub is_horde_deck_token: bool,
     /// The card's rarity while it sits in the Horde library, consulted by
     /// `WaveTermination::UntilRarityAtLeast` to decide when a reveal-and-resolve
     /// wave ends (the D&D Horde: a wave ends when an uncommon-or-better card is
@@ -1987,10 +1996,10 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         // synchronously by `push_ability_entry` into the resolving
         // `ResolvedAbility`'s own `noted_mana_payment` snapshot (§5.2c).
         mana_spent_to_activate: _,
-        // Horde-library provenance: compared in `object_content_eq`
-        // (fail-closed — the reveal flag flips alongside the zone change,
+        // Horde-deck-token provenance: compared in `object_content_eq`
+        // (fail-closed — the flag flips alongside the zone change on reveal,
         // and rarity is immutable display info).
-        in_horde_library: _,
+        is_horde_deck_token: _,
         horde_library_rarity: _,
     } = o;
 }
@@ -3117,7 +3126,7 @@ impl GameObject {
             attraction_lights: Vec::new(),
             in_attraction_deck: false,
             in_contraption_deck: false,
-            in_horde_library: false,
+            is_horde_deck_token: false,
             horde_library_rarity: None,
             contraption_sprocket: None,
             stickers: Vec::new(),
