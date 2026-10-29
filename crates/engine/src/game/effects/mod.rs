@@ -5447,7 +5447,10 @@ fn effect_enters_battlefield(effect: &Effect) -> bool {
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::ChooseOneOf { .. }
-        | Effect::Unimplemented { .. } => false,
+        | Effect::Unimplemented { .. }
+        // Turtle Team-Up: plays cards off the boss library; the played cards'
+        // own instructions enter, not this one — not a ContinuationStep member.
+        | Effect::HordePlayCard { .. } => false,
     }
 }
 
@@ -9318,7 +9321,10 @@ fn effect_fields_read_filter_population(
         | Effect::SetDayNight { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
-        | Effect::Unimplemented { .. } => false,
+        | Effect::Unimplemented { .. }
+        // Turtle Team-Up: `count` is a bare u32 — no filter, target, or
+        // quantity field can read a filter population.
+        | Effect::HordePlayCard { .. } => false,
     }
 }
 

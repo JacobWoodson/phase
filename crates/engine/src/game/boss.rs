@@ -380,8 +380,7 @@ fn graft_boss_abilities(state: &mut GameState, boss_id: ObjectId) {
         // named Foot Disciple." ("The bosses attack" from the Boss seat's
         // perspective is `YouAttack`.)
         "Bebop, Porcine Punk" | "Rocksteady, Rowdy Rhino" => {
-            obj.trigger_definitions
-                .push(bosses_attack_put_counter_trigger());
+            obj.push_printed_trigger(bosses_attack_put_counter_trigger());
         }
         // "Ninjas the bosses control get +1/+0 for each boss in play."
         "Chrome Dome, Cyber-Ninja" => {
@@ -389,7 +388,7 @@ fn graft_boss_abilities(state: &mut GameState, boss_id: ObjectId) {
         }
         // "Whenever a creature the heroes control dies, the heroes lose 1 life."
         "Karai, Shadow Warrior" => {
-            obj.trigger_definitions.push(dies_trigger(
+            obj.push_printed_trigger(dies_trigger(
                 hero_creature_filter(),
                 "Whenever a creature the heroes control dies, the heroes lose 1 life.",
             ));
@@ -398,7 +397,7 @@ fn graft_boss_abilities(state: &mut GameState, boss_id: ObjectId) {
         // additional-card clause is a wave-size rule, read live by
         // `horde::wave_seed` via `is_krang_deployed`, not a grafted ability.)
         "Krang, Dimension X Overlord" => {
-            obj.trigger_definitions.push(krang_upkeep_trigger());
+            obj.push_printed_trigger(krang_upkeep_trigger());
         }
         // "When this boss enters, the bosses gain 5 life for each boss in
         // play." — applied synchronously by `deploy_stage`, not grafted: see
@@ -415,12 +414,11 @@ fn graft_boss_abilities(state: &mut GameState, boss_id: ObjectId) {
         // "Whenever one or more Ninjas the bosses control deal combat damage
         // to the heroes, the bosses play a card."
         "Savanti Romero, Temporal Rogue" => {
-            obj.trigger_definitions
-                .push(savanti_combat_damage_trigger());
+            obj.push_printed_trigger(savanti_combat_damage_trigger());
         }
         // "Whenever a creature the bosses control dies, the heroes lose 1 life."
         "Shredder, Foot Clan Overlord" => {
-            obj.trigger_definitions.push(dies_trigger(
+            obj.push_printed_trigger(dies_trigger(
                 boss_creature_filter(),
                 "Whenever a creature the bosses control dies, the heroes lose 1 life.",
             ));

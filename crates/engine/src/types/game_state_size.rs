@@ -67,6 +67,14 @@
 //! are already boxed, so nothing large went inline; the ceiling moved to
 //! 14,352.next_multiple_of(256) + 256 = 14,848.
 //!
+//! `GameState` re-measured on x86_64-pc-windows-msvc (`nightly-2026-04-19`) at
+//! 15,072 B when the Horde stack merged: ~110 B of small Horde bookkeeping
+//! (three `u32`s, three `Vec`s, a `usize`, a `u8`, an `im::Vector`, and an
+//! already-boxed `pending_hero_event`) plus upstream's accumulated small fields
+//! since the Horde base. No single large rarely-populated field went inline, so
+//! the ceiling moves by the rule to
+//! 15,072.next_multiple_of(256) + 256 = 15,360.
+//!
 //! Base `GameState` on x86_64-pc-windows-msvc measured 14,336 B at
 //! `nightly-2026-04-19`, exactly at the ceiling of that time. The attacked-player referent
 //! work adds `attack_target: Option<AttackTarget>` to `ZoneChangeCombatStatus`
@@ -90,7 +98,7 @@
 const _: () = {
     use core::mem::size_of;
     assert!(
-        size_of::<crate::types::game_state::GameState>() <= 14_848,
+        size_of::<crate::types::game_state::GameState>() <= 15_360,
         "GameState grew past its stack budget. It is moved by value through the \
          phase-server action + AI path, so an overrun is an uncatchable \
          guard-page abort, not a panic. Re-run the -Zprint-type-sizes command in \

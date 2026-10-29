@@ -48,7 +48,8 @@ use crate::types::identifiers::ObjectId;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
-    EtbTapState, ProposedEvent, TokenCharacteristics, TokenHostRequest, TokenSpec,
+    EtbTapState, ProposedEvent, TokenAttackRequest, TokenCharacteristics, TokenHostRequest,
+    TokenSpec,
 };
 use crate::types::zones::Zone;
 use std::collections::HashSet;
@@ -806,6 +807,7 @@ fn reveal_library_token(
         enter_with_counters: Vec::new(),
         tapped: false,
         enters_attacking: false,
+        attack_request: TokenAttackRequest::Unspecified,
         sacrifice_at: None,
         // Token-creation source (plumbing, not a rule): there is no card/ability
         // source for a Horde reveal (it is a turn-based action), so the library
@@ -822,6 +824,7 @@ fn reveal_library_token(
         copy: None,
         enter_tapped: EtbTapState::Unspecified,
         count: 1,
+        appended: Vec::new(),
         applied: HashSet::new(),
     };
     // CR 614.16: token-creation replacement effects apply to the revealed token.

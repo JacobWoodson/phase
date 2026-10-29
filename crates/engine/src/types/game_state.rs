@@ -26929,6 +26929,9 @@ fn visit_waiting_for_chains<'a>(
         | WaitingFor::ConniveDiscard { .. }
         | WaitingFor::DiscardChoice { .. }
         | WaitingFor::EffectZoneChoice { .. }
+        // Turtle Team-Up: self-contained card-selection prompt (ids/params only,
+        // batch-applied by the handler) — holds no suspended chain.
+        | WaitingFor::HeroEventChoice { .. }
         | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
         | WaitingFor::LearnChoice { .. }
         | WaitingFor::ManifestDreadChoice { .. }

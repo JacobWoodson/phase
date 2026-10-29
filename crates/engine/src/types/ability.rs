@@ -11170,7 +11170,10 @@ pub(crate) fn instruction_object_reach(effect: &Effect) -> InstructionObjectReac
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::ChooseOneOf { .. }
-        | Effect::Unimplemented { .. } => InstructionObjectReach::Unclassified,
+        | Effect::Unimplemented { .. }
+        // Turtle Team-Up: plays cards whose own instructions introduce objects;
+        // this instruction's reach is not classified.
+        | Effect::HordePlayCard { .. } => InstructionObjectReach::Unclassified,
     }
 }
 
@@ -11480,7 +11483,9 @@ pub(crate) fn battlefield_departure_slot(effect: &Effect) -> Option<&TargetFilte
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::ChooseOneOf { .. }
-        | Effect::Unimplemented { .. } => None,
+        | Effect::Unimplemented { .. }
+        // Turtle Team-Up: plays cards; moves nothing from the battlefield.
+        | Effect::HordePlayCard { .. } => None,
     }
 }
 
@@ -30211,6 +30216,9 @@ impl Effect {
             | Effect::VentureInto { .. }
             | Effect::VentureIntoDungeon
             | Effect::WinTheGame { .. }
+            // Turtle Team-Up: plays cards; this node publishes no created referent
+            // (a played card's own token creation is that node's answer).
+            | Effect::HordePlayCard { .. }
             => None,
         }
     }
