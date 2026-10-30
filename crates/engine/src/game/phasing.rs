@@ -89,6 +89,16 @@ pub fn phase_out_object(
         }
     }
 
+    // Horde advanced rule: a deployment that just phased out served its
+    // grafted phase-out — release its pending-phase-out pin (if any) so a
+    // later phase-in is an ordinary permanent subject to the legend rule (CR
+    // 704.5j). The empty-set guard keeps non-Horde games off this path.
+    if !state.horde_pending_phase_out.is_empty() {
+        state
+            .horde_pending_phase_out
+            .retain(|pinned| !phased.contains(&pinned.object_id));
+    }
+
     // CR 506.4 + CR 702.26b: Removal from combat happens once all cascades
     // settle, so concurrent attacker/blocker updates apply to the full set.
     for &id in &phased {

@@ -230,6 +230,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "revealed_cards",
         "player_actions_this_way",
         "city_blessing",
+        "horde_pending_phase_out",
     ] {
         add_spec(
             &mut specs,

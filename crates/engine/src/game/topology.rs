@@ -308,11 +308,25 @@ pub(crate) fn shared_resource_members(state: &GameState, player: PlayerId) -> Ve
     }
 }
 
-pub(crate) fn shared_resource_dedup_key(state: &GameState, player: PlayerId) -> TeamId {
+/// Dedup key for shared-resource aggregation ([`aggregate_over_teams`]). A side
+/// that shares life pools under its team; an individual seat pools under
+/// itself. The two namespaces are deliberately distinct variants rather than
+/// one shared `TeamId` space: under one-vs-many the survivor side IS
+/// `TeamId(1)` while a Horde seat anchored at seat 1 would also key as
+/// `TeamId(1)`, collapsing the Horde's pool into the survivors' (Repay in
+/// Kind would read the survivors' 40 as the minimum and raise the bosses
+/// instead of setting everyone to 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum SharedResourceKey {
+    SharedSide(TeamId),
+    IndividualSeat(PlayerId),
+}
+
+pub(crate) fn shared_resource_dedup_key(state: &GameState, player: PlayerId) -> SharedResourceKey {
     if side_shares_life(state, player) {
-        team_id(state, player)
+        SharedResourceKey::SharedSide(team_id(state, player))
     } else {
-        TeamId(player.0)
+        SharedResourceKey::IndividualSeat(player)
     }
 }
 

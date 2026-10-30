@@ -1353,6 +1353,14 @@ fn check_legend_rule(
                         *id,
                         has_legend_rule_exemption_static,
                     )
+                    // Horde advanced rule: a deployed legendary awaiting its
+                    // grafted ETB-triggered phase-out is treated as already
+                    // phased out — the graft resolves after this SBA check, so
+                    // without this two milled copies of one boss would hit
+                    // `ChooseLegend` and annihilate instead of both phasing
+                    // out. (Modern scope only: Horde games never declare the
+                    // pre-M14 legacy scope.)
+                    && !crate::game::horde::horde_phase_out_pending(state, *id)
             })
             .collect();
 

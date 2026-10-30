@@ -25384,6 +25384,23 @@ declare_game_state! {
     /// Runtime designation (assigned at setup), not a deck-intrinsic ruleset field.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub horde_seats: Vec<PlayerId>,
+    /// Horde Magic (advanced rule): incarnation-pinned legendary permanents the
+    /// damage→mill redirect deployed that are still awaiting their grafted
+    /// ETB-triggered phase-out (`horde::graft_legendary_phase_out_triggers`).
+    /// While pinned, the legend-rule SBA (CR 704.5j) treats them as already
+    /// phased out: the graft resolves after the next SBA check, and without
+    /// this two milled copies of one boss would hit `ChooseLegend` and
+    /// annihilate instead of both phasing out. Incarnation-pinned (CR 400.7),
+    /// not bare ids: a deployment that changes zones before its graft resolves
+    /// (bounced or flickered in the response window) is a NEW object that must
+    /// not inherit the exemption. Released when the deployment phases out
+    /// (`phasing::phase_out_object`), so a later phase-in is an ordinary
+    /// permanent subject to the legend rule. A stale pin (zone-changed
+    /// deployment) simply matches nothing; it is never consulted after its
+    /// incarnation lapses.
+    #[serde(default)]
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
+    pub horde_pending_phase_out: HashSet<ObjectIncarnationRef>,
     /// Horde Magic (LOTR "Two Towers"): which [`horde_seats`] commander drives the
     /// NEXT Horde turn. The rules have the two Horde commanders alternate turns
     /// (Reading B): the Horde side takes one turn per round (2HG-style), but the
@@ -32588,6 +32605,7 @@ impl GameState {
             horde_turn_index: 0,
             horde_postcombat_activation_queue: Vec::new(),
             horde_seats: horde_seats_designated,
+            horde_pending_phase_out: HashSet::new(),
             active_horde_index: 0,
             boss_deck: im::Vector::new(),
             boss_stage: 0,
@@ -35872,6 +35890,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         horde_turn_index: _,
         horde_postcombat_activation_queue: _,
         horde_seats: _,
+        horde_pending_phase_out: _,
         active_horde_index: _,
         boss_deck: _,
         boss_stage: _,
@@ -36221,6 +36240,7 @@ impl PartialEq for GameState {
             && self.horde_turn_index == other.horde_turn_index
             && self.horde_postcombat_activation_queue == other.horde_postcombat_activation_queue
             && self.horde_seats == other.horde_seats
+            && self.horde_pending_phase_out == other.horde_pending_phase_out
             && self.active_horde_index == other.active_horde_index
             && self.boss_deck == other.boss_deck
             && self.boss_stage == other.boss_stage

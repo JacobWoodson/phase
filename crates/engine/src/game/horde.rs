@@ -37,6 +37,7 @@
 
 use crate::game::effects::change_zone::{execute_zone_move, ZoneMoveResult};
 use crate::game::effects::token::apply_create_token_after_replacement;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     CardPlayMode, CastFromZoneDriver, Effect, ResolvedAbility, TargetFilter, TargetRef,
@@ -159,17 +160,46 @@ pub(crate) fn player_has_no_life_total(state: &GameState, id: PlayerId) -> bool 
 /// (CR 702.26a). Basic decks ([`HordeLegendaryDeath::Normal`], every currently
 /// shipped deck) mill straight to the graveyard.
 ///
-/// Called from `effects::life`'s no-life-total redirect. A per-card CR 616.1
-/// ordering pause is discarded — the redirect substitutes for a bare life
-/// mutation and has no resolution frame of its own to park a prompt against
-/// (mirroring the basic-path note at the call site).
+/// Outcome of the Horde damage→mill redirect ([`mill_from_loss`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MillFromLossOutcome {
+    /// The redirect settled: the mill was applied, prevented to nothing, or
+    /// transformed away from a mill. No prompt is parked.
+    Settled,
+    /// A replacement choice parked mid-redirect — either an event-level Mill
+    /// choice (CR 616.1 ordering / an optional mill replacement) or a per-card
+    /// CR 616.1 ordering choice inside the delivery batch. `state.waiting_for`
+    /// names the prompt and the caller must surface its own pause, never
+    /// proceed as if the redirect settled.
+    Paused,
+}
+
+/// Called from `effects::life`'s no-life-total redirect. The redirect proposes
+/// a real `ProposedEvent::Mill` through the replacement pipeline — the same
+/// seam an ordinary mill resolves through — so event-level mill replacements
+/// (the Bruvac doubling class) apply to the redirected count, and either pause
+/// channel (event-level choice or per-card CR 616.1 ordering) propagates to
+/// the caller as [`MillFromLossOutcome::Paused`] instead of being discarded.
+///
+/// Resume: an event-level pause completes through the shared
+/// `handle_replacement_choice` Mill arm, which delivers the basic mill; a
+/// per-card pause completes through `zone_pipeline`'s batch-tail drain. Both
+/// shared paths deliver basic-mill semantics, so two opt-in-advanced edges
+/// stay documented rather than silently fixed: (a) an event-level pause under
+/// the advanced ruleset resumes as a basic mill (milled legendaries are buried
+/// rather than deployed — reaching this needs an INTERACTIVE mill replacement,
+/// since Bruvac-class automatic doublings never pause); (b) a per-card pause
+/// under the advanced ruleset grafts only the legendaries that already
+/// entered — a tail legendary entering on resume misses its graft, which needs
+/// an interactive replacement choice on a legendary's battlefield entry (no
+/// printed card produces one: shock-style entry choices are land-locked and no
+/// legendary land carries one).
 pub(crate) fn mill_from_loss(
     state: &mut GameState,
     horde: PlayerId,
     count: u32,
     events: &mut Vec<GameEvent>,
-) {
-    use crate::game::zone_pipeline::{move_objects_simultaneously, ZoneMoveRequest};
+) -> MillFromLossOutcome {
     use crate::types::format::HordeLegendaryDeath;
 
     let legendary_rule = state
@@ -178,32 +208,82 @@ pub(crate) fn mill_from_loss(
         .as_ref()
         .map_or(HordeLegendaryDeath::Normal, |r| r.legendary_death);
 
-    // Basic decks: ordinary mill to the graveyard, routed through the shared mill
-    // building block so per-card graveyard replacements (Rest in Peace class)
-    // still consult exactly as an ordinary mill would (CR 701.17a-b).
-    if legendary_rule == HordeLegendaryDeath::Normal {
-        let _ = crate::game::effects::mill::apply_mill_after_replacement(
-            state,
-            ProposedEvent::Mill {
-                player_id: horde,
-                count,
-                destination: Zone::Graveyard,
-                applied: HashSet::new(),
-            },
-            events,
-        );
-        return;
+    // CR 614 + CR 616.1: propose the redirect as a Mill EVENT first, mirroring
+    // `effects::mill::resolve_mill`'s three-way match. Event-level mill
+    // replacements (Bruvac: "twice that many instead") fold their count here;
+    // a competing-choice pause parks here like any other mill.
+    match replacement::replace_event(
+        state,
+        ProposedEvent::Mill {
+            player_id: horde,
+            count,
+            destination: Zone::Graveyard,
+            applied: HashSet::new(),
+        },
+        events,
+    ) {
+        ReplacementResult::Execute(ProposedEvent::Mill { count, .. }) => {
+            // Basic decks: ordinary mill to the graveyard, routed through the
+            // shared mill building block so per-card graveyard replacements
+            // (Rest in Peace class) still consult exactly as an ordinary mill
+            // would (CR 701.17a-b). A per-card pause (`false`) propagates.
+            if legendary_rule == HordeLegendaryDeath::Normal {
+                // `EffectError` has no carrier on this path, so an application
+                // error maps to "delivered" (no pause) — mirroring the shared
+                // Mill arm in `handle_replacement_choice`.
+                let delivered = crate::game::effects::mill::apply_mill_after_replacement(
+                    state,
+                    ProposedEvent::Mill {
+                        player_id: horde,
+                        count,
+                        destination: Zone::Graveyard,
+                        applied: HashSet::new(),
+                    },
+                    events,
+                )
+                .unwrap_or(true);
+                return if delivered {
+                    MillFromLossOutcome::Settled
+                } else {
+                    MillFromLossOutcome::Paused
+                };
+            }
+            mill_from_loss_advanced(state, horde, count, events)
+        }
+        // A replacement transformed the redirect away from a mill: settled,
+        // mirroring `apply_mill_after_replacement`'s non-Mill `Ok(true)`.
+        ReplacementResult::Execute(_) => MillFromLossOutcome::Settled,
+        // Fully prevented: the redirect changed nothing. Settled.
+        ReplacementResult::Prevented => MillFromLossOutcome::Settled,
+        ReplacementResult::NeedsChoice(player) => {
+            state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
+            MillFromLossOutcome::Paused
+        }
     }
+}
 
-    // Advanced rule. Take the top `count` cards (CR 701.17b: no more than the
-    // library holds) and split them by the legendary-permanent test.
+/// Advanced legendary rule ([`HordeLegendaryDeath::EtbThenPhaseOut`]) delivery
+/// for [`mill_from_loss`]: `count` is the POST-replacement mill count. Takes
+/// the top `count` cards (CR 701.17b: no more than the library holds), puts
+/// legendary permanents onto the battlefield and buries the rest, grafting the
+/// ETB-triggered phase-out onto each entered legendary.
+fn mill_from_loss_advanced(
+    state: &mut GameState,
+    horde: PlayerId,
+    count: u32,
+    events: &mut Vec<GameEvent>,
+) -> MillFromLossOutcome {
+    use crate::game::zone_pipeline::{
+        move_objects_simultaneously, BatchMoveResult, ZoneMoveRequest,
+    };
+
     let Some(player) = state.players.iter().find(|p| p.id == horde) else {
-        return;
+        return MillFromLossOutcome::Settled;
     };
     let count = (count as usize).min(player.library.len());
     let milled: Vec<ObjectId> = player.library.iter().take(count).copied().collect();
     if milled.is_empty() {
-        return;
+        return MillFromLossOutcome::Settled;
     }
     let legendaries: Vec<ObjectId> = milled
         .iter()
@@ -229,8 +309,38 @@ pub(crate) fn mill_from_loss(
             ZoneMoveRequest::effect(id, dest, id)
         })
         .collect();
-    let _ = move_objects_simultaneously(state, reqs, events);
+    // CR 616.1: a per-card ordering pause parks `waiting_for` + the tail. Graft
+    // what already entered, then propagate the pause — the resume drain
+    // finishes the tail (see the `mill_from_loss` doc for the tail-graft edge).
+    if matches!(
+        move_objects_simultaneously(state, reqs, events),
+        BatchMoveResult::NeedsChoice
+    ) {
+        graft_legendary_phase_out_triggers(state, &legendaries);
+        return MillFromLossOutcome::Paused;
+    }
 
+    graft_legendary_phase_out_triggers(state, &legendaries);
+    MillFromLossOutcome::Settled
+}
+
+/// Whether `id` is a Horde-deployed legendary still awaiting its grafted
+/// ETB-triggered phase-out: its LIVE incarnation is pinned in
+/// [`GameState::horde_pending_phase_out`]. The legend-rule SBA consults this
+/// (CR 704.5j treats a pinned deployment as already phased out). A deployment
+/// that changed zones since the graft (incarnation bumped, CR 400.7) no longer
+/// matches its pin and is an ordinary permanent.
+pub(crate) fn horde_phase_out_pending(state: &GameState, id: ObjectId) -> bool {
+    state.objects.get(&id).is_some_and(|obj| {
+        state
+            .horde_pending_phase_out
+            .contains(&crate::types::identifiers::ObjectIncarnationRef::from_object(obj))
+    })
+}
+
+/// Graft the ETB-triggered phase-out onto each listed legendary that actually
+/// entered the battlefield.
+fn graft_legendary_phase_out_triggers(state: &mut GameState, legendaries: &[ObjectId]) {
     // CR 603.6 + CR 702.26: "ETB effects trigger, THEN immediately Phases Out."
     // The phase-out is grafted onto each entered legendary as an ETB-triggered
     // ability rather than performed synchronously here. This ordering is load-
@@ -243,7 +353,7 @@ pub(crate) fn mill_from_loss(
     // fire. Phasing out (vs. staying) makes the boss recur on the Horde's next
     // untap (CR 702.26a) and dodges the legend rule while out (CR 704.5j /
     // CR 702.26b), so two milled copies of one boss don't annihilate.
-    for id in legendaries {
+    for &id in legendaries {
         // A `Moved` replacement (Rest in Peace class) could still have diverted
         // the card, so only graft onto what actually entered.
         if state.battlefield.contains(&id) {
@@ -255,6 +365,16 @@ pub(crate) fn mill_from_loss(
                         crate::types::ability::TriggerDefinitionOccurrenceRef::Unmaterialized,
                         horde_legendary_phase_out_trigger(),
                     ));
+                // Pin the deployment incarnation for the legend-rule SBA: the
+                // graft resolves after the next SBA check, so until it does the
+                // rule must treat this deployment as already phased out (CR
+                // 704.5j) or two milled copies of one boss annihilate instead
+                // of both phasing out. Released on phase-out; a zone change
+                // before then bumps the incarnation and lapses the pin (CR
+                // 400.7).
+                state
+                    .horde_pending_phase_out
+                    .insert(crate::types::identifiers::ObjectIncarnationRef::from_object(obj));
             }
             // CR 603.2: the graft lands outside the ETB pipeline, after the
             // move's layer flush already rebuilt the derived trigger index —
@@ -360,9 +480,15 @@ pub(crate) fn horde_is_defeated(state: &GameState) -> bool {
             .find(|p| p.id == *seat)
             .is_none_or(|p| p.library.is_empty())
     });
+    // CR 702.26b: phased-out permanents are treated as though they don't
+    // exist, so only PHASED-IN creatures keep the Horde alive. Without this a
+    // single phased-out boss (the advanced rule phases every deployed boss out)
+    // would hold the creature clause open forever and the Horde could never be
+    // defeated by decking.
     let a_horde_controls_a_creature = state.battlefield.iter().any(|id| {
         state.objects.get(id).is_some_and(|obj| {
             seats.contains(&obj.controller)
+                && !obj.is_phased_out()
                 && obj
                     .card_types
                     .core_types
@@ -1588,6 +1714,203 @@ mod tests {
         assert!(
             state.objects[&boss].is_phased_out(),
             "the boss must phase out once its grafted ETB trigger resolves (CR 702.26)"
+        );
+    }
+
+    /// CR 704.5j + CR 702.26: two milled copies of one boss must BOTH survive
+    /// and phase out — never hit `ChooseLegend` and annihilate. The grafted
+    /// phase-out resolves after the next SBA check, so the pending-phase-out
+    /// pin must hold the legend rule off through that window; once both grafts
+    /// resolve, both bosses are phased out (invisible to the rule) and their
+    /// pins are released.
+    ///
+    /// Full lifecycle through production seams: the damage→mill redirect, a
+    /// real SBA pass, real trigger collection + stack resolution, and a second
+    /// SBA pass.
+    ///
+    /// Revert guard: without the pending-phase-out exemption in the legend-rule
+    /// grouping, the first SBA pass parks `ChooseLegend` — the no-prompt
+    /// assertion flips.
+    #[test]
+    fn duplicate_milled_bosses_survive_sbas_and_phase_out_together() {
+        use crate::game::zones::create_object;
+        use crate::types::card_type::{CoreType, Supertype};
+        use crate::types::format::HordeLegendaryDeath;
+        use crate::types::identifiers::CardId;
+
+        let mut ruleset = ChallengeDeck::CybermanHorde.default_ruleset();
+        ruleset.legendary_death = HordeLegendaryDeath::EtbThenPhaseOut;
+        let mut state = GameState::new(FormatConfig::horde(ruleset), 2, 42);
+        let horde = horde_seat(&state).expect("horde seat");
+
+        // Two copies of one boss on top of the library (same name — the
+        // legend-rule collision). 2/2 bodies so no other SBA has an opinion.
+        let mut bosses = Vec::new();
+        for (n, card) in [(1, 9001), (2, 9002)] {
+            let boss = create_object(
+                &mut state,
+                CardId(card),
+                horde,
+                "Boss".into(),
+                Zone::Library,
+            );
+            {
+                let o = state.objects.get_mut(&boss).unwrap();
+                o.card_types.supertypes.push(Supertype::Legendary);
+                o.card_types.core_types.push(CoreType::Creature);
+                o.base_card_types = o.card_types.clone();
+                o.power = Some(2);
+                o.toughness = Some(2);
+                o.base_power = Some(2);
+                o.base_toughness = Some(2);
+            }
+            bosses.push((n, boss));
+        }
+
+        // The redirect deploys both (production settle path).
+        let mut events = Vec::new();
+        let outcome = mill_from_loss(&mut state, horde, 2, &mut events);
+        assert_eq!(
+            outcome,
+            MillFromLossOutcome::Settled,
+            "no competing replacement — the redirect must settle"
+        );
+        for (n, boss) in &bosses {
+            assert!(
+                state.battlefield.contains(boss),
+                "boss copy {n} must deploy to the battlefield"
+            );
+            assert!(
+                state.objects[boss].is_phased_in(),
+                "boss copy {n} is phased in until its graft resolves"
+            );
+            assert!(
+                horde_phase_out_pending(&state, *boss),
+                "boss copy {n} must be pinned pending its grafted phase-out"
+            );
+        }
+
+        // THE WINDOW: the first SBA check runs while both same-name bosses are
+        // phased in. The pin must hold the legend rule off — no ChooseLegend
+        // prompt, nothing annihilated.
+        let mut sba_events = Vec::new();
+        crate::game::sba::check_state_based_actions(&mut state, &mut sba_events);
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ChooseLegend { .. }),
+            "pinned deployments are treated as already phased out — the legend \
+             rule must not prompt, waiting_for={:?}",
+            state.waiting_for
+        );
+        for (n, boss) in &bosses {
+            assert!(
+                state.battlefield.contains(boss),
+                "boss copy {n} must survive the SBA window"
+            );
+        }
+
+        // Both grafts resolve: process → order → resolve (mirror the single-
+        // boss lifecycle driver above).
+        crate::game::triggers::process_triggers(&mut state, &events);
+        crate::game::triggers::drain_order_triggers_with_identity(&mut state);
+        let mut guard = 0;
+        while !state.stack.is_empty() && guard < 8 {
+            let mut resolve_events = Vec::new();
+            crate::game::stack::resolve_top(&mut state, &mut resolve_events);
+            guard += 1;
+        }
+        assert!(
+            state.stack.is_empty(),
+            "both grafted triggers must resolve within the guard"
+        );
+        for (n, boss) in &bosses {
+            assert!(
+                state.objects[boss].is_phased_out(),
+                "boss copy {n} must phase out once its graft resolves (CR 702.26)"
+            );
+            assert!(
+                state.battlefield.contains(boss),
+                "phasing out is not leaving — boss copy {n} stays on the battlefield"
+            );
+            assert!(
+                !horde_phase_out_pending(&state, *boss),
+                "boss copy {n}'s pin must release on phase-out, so a later \
+                 phase-in is an ordinary permanent"
+            );
+        }
+
+        // Post-resolution SBA pass: phased-out bosses are invisible to the rule
+        // (live_battlefield_object) and unpinned — still no prompt, both stay.
+        let mut sba_events = Vec::new();
+        crate::game::sba::check_state_based_actions(&mut state, &mut sba_events);
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ChooseLegend { .. }),
+            "phased-out bosses must not trip the legend rule, waiting_for={:?}",
+            state.waiting_for
+        );
+        for (n, boss) in &bosses {
+            assert!(
+                state.battlefield.contains(boss),
+                "boss copy {n} must still be on the battlefield (phased out)"
+            );
+        }
+    }
+
+    /// CR 400.7: the pending-phase-out pin is incarnation-pinned, not a bare
+    /// id. A deployment bounced or flickered before its graft resolves is a NEW
+    /// object and must not inherit the legend-rule exemption when it returns
+    /// to the battlefield.
+    ///
+    /// Revert guard: pinning a bare `ObjectId` (or never comparing
+    /// incarnations) keeps the exemption live across the exile round-trip —
+    /// the post-return assertion flips.
+    #[test]
+    fn pending_phase_out_pin_expires_across_zone_changes() {
+        use crate::game::zones::{create_object, move_to_zone};
+        use crate::types::card_type::{CoreType, Supertype};
+        use crate::types::format::HordeLegendaryDeath;
+        use crate::types::identifiers::CardId;
+
+        let mut ruleset = ChallengeDeck::CybermanHorde.default_ruleset();
+        ruleset.legendary_death = HordeLegendaryDeath::EtbThenPhaseOut;
+        let mut state = GameState::new(FormatConfig::horde(ruleset), 2, 42);
+        let horde = horde_seat(&state).expect("horde seat");
+
+        let boss = create_object(
+            &mut state,
+            CardId(9001),
+            horde,
+            "Boss".into(),
+            Zone::Library,
+        );
+        {
+            let o = state.objects.get_mut(&boss).unwrap();
+            o.card_types.supertypes.push(Supertype::Legendary);
+            o.card_types.core_types.push(CoreType::Creature);
+        }
+
+        let mut events = Vec::new();
+        let outcome = mill_from_loss(&mut state, horde, 1, &mut events);
+        assert_eq!(outcome, MillFromLossOutcome::Settled);
+        assert!(
+            horde_phase_out_pending(&state, boss),
+            "the deployed boss must be pinned pending its grafted phase-out"
+        );
+
+        // Flicker the deployment before its graft resolves: exile and return.
+        // Same storage id, bumped incarnation (CR 400.7) — the pin lapses.
+        move_to_zone(&mut state, boss, Zone::Exile, &mut events);
+        assert!(
+            !horde_phase_out_pending(&state, boss),
+            "an exiled deployment is a new object — the pin must lapse"
+        );
+        move_to_zone(&mut state, boss, Zone::Battlefield, &mut events);
+        assert!(
+            state.battlefield.contains(&boss),
+            "reach-guard: the flickered boss really returned to the battlefield"
+        );
+        assert!(
+            !horde_phase_out_pending(&state, boss),
+            "the returned deployment must NOT inherit the legend-rule exemption"
         );
     }
 

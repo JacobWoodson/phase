@@ -16,10 +16,11 @@
 //! a positive reach-guard proving the input reached the seam under test.
 
 use engine::game::effects::life::{apply_damage_life_loss, apply_life_gain, resolve_lose};
+use engine::game::effects::phase_out::resolve as resolve_phase_out;
 use engine::game::sba::check_state_based_actions;
 use engine::game::scenario::GameRunner;
 use engine::game::zones::create_object;
-use engine::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetRef};
+use engine::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
@@ -365,5 +366,81 @@ fn survivor_at_zero_life_loses_horde_wins() {
         "with the survivor eliminated and the Horde undefeated, the Horde wins. \
          waiting_for={:?}",
         state.waiting_for
+    );
+}
+
+/// CR 702.26b: a phased-out creature is treated as though it doesn't exist, so
+/// only PHASED-IN creatures keep the Horde alive. Empty library + a Horde
+/// creature phased out by a Reality Ripple-shaped `Effect::PhaseOut` (driven
+/// through the real phase-out resolver) → the Horde is defeated and the
+/// survivor wins — even though the creature is still physically on the
+/// battlefield and will phase back in on the Horde's next untap.
+///
+/// Paired control: `horde_not_defeated_while_it_controls_a_creature` runs the
+/// identical setup with the creature phased IN and the game does NOT end.
+///
+/// Revert guard: without the phased-in filter in `horde_is_defeated`, the
+/// phased-out creature holds the creature clause open and no `GameOver`
+/// appears — the winner assertion flips.
+#[test]
+fn phased_out_creature_does_not_keep_horde_alive() {
+    let mut state = horde_state();
+    // Empty library (default), but the Horde controls a creature.
+    let zombie = add_creature(&mut state, HORDE);
+    stock_library(&mut state, SURVIVOR, 5);
+    state.players[SURVIVOR.0 as usize].life = 20;
+
+    // Reality Ripple: "Target artifact, creature, or land phases out." Drive
+    // the REAL phase-out resolver with the creature as the resolved target.
+    let ripple_card = CardId(state.next_object_id);
+    let ripple = create_object(
+        &mut state,
+        ripple_card,
+        SURVIVOR,
+        "Reality Ripple".to_string(),
+        Zone::Battlefield,
+    );
+    let ability = ResolvedAbility::new(
+        Effect::PhaseOut {
+            target: TargetFilter::SpecificObject { id: zombie },
+        },
+        vec![TargetRef::Object(zombie)],
+        ripple,
+        SURVIVOR,
+    );
+    let mut events = Vec::new();
+    resolve_phase_out(&mut state, &ability, &mut events).expect("phase out resolves");
+
+    // Reach-guard: the resolver genuinely phased the creature out (still on
+    // the battlefield — phasing out is not leaving).
+    assert!(
+        state.objects[&zombie].is_phased_out(),
+        "reach-guard: Reality Ripple must have phased the Horde creature out"
+    );
+    assert!(
+        state.battlefield.contains(&zombie),
+        "reach-guard: a phased-out permanent stays on the battlefield"
+    );
+
+    state.turn_number = 4;
+    state.phase = Phase::Upkeep;
+    state.active_player = SURVIVOR;
+    state.priority_player = SURVIVOR;
+    state.waiting_for = WaitingFor::Priority { player: SURVIVOR };
+
+    let mut runner = GameRunner::from_state(state);
+    runner.act(GameAction::PassPriority).expect("pass priority");
+
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(SURVIVOR)
+            }
+        ),
+        "the Horde's only creature is phased out (treated as though it doesn't \
+         exist) with an empty library — the Horde is defeated and the survivor \
+         wins. waiting_for={:?}",
+        runner.state().waiting_for
     );
 }

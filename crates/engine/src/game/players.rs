@@ -444,9 +444,10 @@ pub fn teammates(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
 /// each DISTINCT team's shared `team_life_total` exactly once (dedup by team).
 /// Min/Max = extremum over team totals; Sum = Σ team totals (no double-count).
 /// Empty population → 0. Off-team every player is its own singleton team, so
-/// this matches a per-individual fold: the dedup key falls back to `pid.0`,
-/// which is distinct per player even when two players share a `team_index`
-/// (e.g. a 1v1 where players 0 and 1 are both `team_index == 0`).
+/// this matches a per-individual fold: the dedup key is a per-seat variant,
+/// distinct per player even when two players share a `team_index` (e.g. a 1v1
+/// where players 0 and 1 are both `team_index == 0`) — and distinct from any
+/// shared-side key, so a Horde seat never collapses into the survivor pool.
 /// CR 810.9d is the confirming example: a per-team extremum (Repay in Kind)
 /// reads each team's total once, not each member.
 pub(crate) fn aggregate_over_teams<I>(
@@ -1152,10 +1153,10 @@ mod tests {
         );
     }
 
-    /// The dedup key falls back to `pid.0` off-team so two players that share a
+    /// The dedup key is a per-seat variant off-team so two players that share a
     /// `team_index` in a NON-team format are NOT collapsed. In Commander,
     /// players 0 and 1 both have `team_index == 0` (0/2 and 1/2); a bare
-    /// `team_index` key would drop one and break Sum. With the `pid.0` guard,
+    /// `team_index` key would drop one and break Sum. With the per-seat guard,
     /// Sum over [11, 7] is 18 (both counted as singleton teams).
     #[test]
     fn aggregate_over_teams_non_team_format_keeps_players_distinct() {
