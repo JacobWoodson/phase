@@ -783,7 +783,11 @@ pub fn grant_horde_emblem(state: &mut GameState, horde_seat: PlayerId, forced_at
         r.post_combat_activation
             == crate::types::format::HordePostCombatActivation::OncePerPermanent
     }) {
-        state.mark_unbounded_loop(horde_seat, &crate::game::mana_payment::INFINITE_MANA_AXES);
+        state.mark_unbounded_loop(
+            horde_seat,
+            &crate::game::mana_payment::INFINITE_MANA_AXES,
+            &crate::game::mana_payment::INFINITE_MANA_AXES,
+        );
         crate::game::mana_payment::refill_infinite_mana(state);
     }
 }
