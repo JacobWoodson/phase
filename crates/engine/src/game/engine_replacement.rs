@@ -1946,6 +1946,39 @@ fn handle_replacement_choice_inner(
                     }
                 }
             }
+            // Turtle Team-Up: resume a hero-event batch parked by a nested
+            // replacement prompt — the Prevented twin of the Execute arm's
+            // hook. Preventing one step (a regeneration shield saving one
+            // Mayhem destroy) modifies only that action (CR 608.2c); the
+            // remaining steps still run. Re-pauses re-park through this same
+            // hook, so nested pauses keep composing.
+            if state.pending_hero_event.is_some() {
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                match super::boss::drain_pending_hero_event(state, events) {
+                    super::boss::HeroEventDrainOutcome::Idle => {}
+                    super::boss::HeroEventDrainOutcome::PausedForReplacement => {
+                        super::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
+                            state,
+                            events,
+                            replacement_action_event_start,
+                        );
+                        return Ok(state.waiting_for.clone());
+                    }
+                    super::boss::HeroEventDrainOutcome::Completed => {
+                        effects::drain_pending_continuation(state, events);
+                        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                            super::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
+                                state,
+                                events,
+                                replacement_action_event_start,
+                            );
+                            return Ok(state.waiting_for.clone());
+                        }
+                    }
+                }
+            }
             state.waiting_for = WaitingFor::Priority {
                 player: state.active_player,
             };

@@ -415,9 +415,15 @@ export async function buildLocalAiDeckList(
       sticker_sheets: [],
       bracket_tier: "core",
     });
-    // One unfiltered catalog fetch serves the human Random fallback AND the AI
-    // survivor seats (Horde imposes no constructed-legality restriction).
-    const survivorCatalog = await buildLegalAiDeckCatalog({ selectedMatchType });
+    // One catalog fetch serves the human Random fallback AND the AI survivor
+    // seats: no format tag (the pool is unrestricted), but the picked
+    // challenge deck, so the engine validates each candidate against the
+    // challenge's survivor requirements (Commander shape for EDH hordes,
+    // unrestricted for constructed-block hordes).
+    const survivorCatalog = await buildLegalAiDeckCatalog({
+      selectedMatchType,
+      selectedChallengeDeck: formatConfig.horde_ruleset?.challenge_deck ?? null,
+    });
     let hordePlayerDeck = deck;
     let hordePlayerBracket = playerBracket ?? null;
     if (!hordePlayerDeck) {

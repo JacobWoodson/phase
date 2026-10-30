@@ -12,14 +12,16 @@
 use engine::game::deck_loading::{load_deck_into_state, DeckPayload};
 use engine::game::scenario::GameRunner;
 use engine::game::zones::create_object;
+use engine::types::ability::{ReplacementDefinition, TargetFilter};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::format::{ChallengeDeck, FormatConfig};
-use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::game_state::{GameState, ReplacementChoiceKind, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
 const HORDE: PlayerId = PlayerId(0);
@@ -496,4 +498,130 @@ fn infiltration_destroys_strongest_without_draining() {
         boss_life,
         "Infiltration drains no life, unlike Smackdown"
     );
+}
+
+/// Give `id` a regeneration shield (the `regenerate.rs` recipe, pushed live +
+/// base like `install_esix` — integration tests cannot reach the
+/// `pub(crate)` resolution installer) plus one shield counter. Two distinct
+/// automatic destroy preventions, so the destroy raises a CR 616.1 ordering
+/// prompt; either answer prevents the destruction.
+fn add_regen_shield_and_counter(state: &mut GameState, id: ObjectId) {
+    use std::sync::Arc;
+    let shield = ReplacementDefinition::new(ReplacementEvent::Destroy)
+        .valid_card(TargetFilter::SelfRef)
+        .description("Regenerate".to_string())
+        .regeneration_shield();
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.replacement_definitions = vec![shield.clone()].into();
+    obj.base_replacement_definitions = Arc::new(vec![shield]);
+    obj.counters.insert(CounterType::Shield, 1);
+}
+
+/// R2-#6: a prevented Mayhem destroy resumes the remaining steps. The first
+/// destroy pauses on the shield-ordering prompt; answering prevents that one
+/// destruction (CR 608.2c modifies only that action), and the three destroys
+/// still owed run instead of staying parked.
+///
+/// Revert guard: without the Prevented-arm hero drain, the remaining steps
+/// never resume — the wave never settles (budget unspent, `pending_hero_event`
+/// still parked) and the assertions flip.
+#[test]
+fn mayhem_prevented_destroy_resumes_remaining_steps() {
+    let mut state = hero_event_game();
+    // Created first: first in HERO1's battlefield order, so its destroy is
+    // the first step and parks the other three behind the prompt.
+    let shielded = add_hero_creature(&mut state, HERO1, "Shielded Bear", 2);
+    add_regen_shield_and_counter(&mut state, shielded);
+    let spared_a = add_hero_creature(&mut state, HERO1, "Spared A", 2);
+    let spared_b = add_hero_creature(&mut state, HERO1, "Spared B", 2);
+    let spared_c = add_hero_creature(&mut state, HERO2, "Spared C", 2);
+    let doomed_d = add_hero_creature(&mut state, HERO2, "Doomed D", 2);
+    let doomed_e = add_hero_creature(&mut state, HERO2, "Doomed E", 2);
+    let doomed_f = add_hero_creature(&mut state, HERO2, "Doomed F", 2);
+    add_library_event(&mut state, "Event: Villain Mayhem!");
+    let mut runner = GameRunner::from_state(state);
+    begin_wave_with_budget(&mut runner, 1);
+
+    // The team spares three; the shielded bear is NOT among them.
+    let mut answers = vec![vec![spared_a, spared_b, spared_c]];
+    let mut replacement_prompts = 0;
+    for _ in 0..80 {
+        let done = {
+            let st = runner.state();
+            st.horde_wave_remaining == 0
+                && st.stack.is_empty()
+                && matches!(st.waiting_for, WaitingFor::Priority { .. })
+        };
+        if done {
+            break;
+        }
+        match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } => {
+                if runner.act(GameAction::PassPriority).is_err() {
+                    break;
+                }
+            }
+            WaitingFor::HeroEventChoice { player, count, .. } => {
+                assert_eq!((*player, *count), (HERO1, 3));
+                let answer = answers.remove(0);
+                runner
+                    .act(GameAction::SelectCards { cards: answer })
+                    .expect("the spare set must be legal");
+            }
+            WaitingFor::ReplacementChoice {
+                player,
+                kind,
+                candidates,
+                ..
+            } => {
+                replacement_prompts += 1;
+                assert_eq!(
+                    *player, HERO1,
+                    "the shielded bear's controller orders the preventions"
+                );
+                assert_eq!(
+                    *kind,
+                    ReplacementChoiceKind::Order,
+                    "two automatic preventions raise an ordering prompt, got {candidates:?}"
+                );
+                assert_eq!(
+                    candidates.len(),
+                    2,
+                    "the shield and the counter are the two candidates, got {candidates:?}"
+                );
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("the ordering pick must be accepted");
+            }
+            other => panic!("unexpected prompt during the wave: {other:?}"),
+        }
+    }
+    assert!(answers.is_empty(), "the spare choice must fire");
+    assert_eq!(
+        replacement_prompts, 1,
+        "exactly one ordering prompt (the shielded destroy) must fire"
+    );
+    assert_wave_settled(&runner);
+    assert!(
+        runner.state().pending_hero_event.is_none(),
+        "the parked hero event must drain on resume"
+    );
+
+    let st = runner.state();
+    assert!(
+        st.battlefield.contains(&shielded),
+        "the prevented destroy leaves the shielded bear alive"
+    );
+    for survivor in [spared_a, spared_b, spared_c] {
+        assert!(
+            st.battlefield.contains(&survivor),
+            "the spared three survive"
+        );
+    }
+    for doomed in [doomed_d, doomed_e, doomed_f] {
+        assert!(
+            in_pile(st, HERO2, doomed, Zone::Graveyard),
+            "the remaining destroys still run after the prevented one"
+        );
+    }
 }

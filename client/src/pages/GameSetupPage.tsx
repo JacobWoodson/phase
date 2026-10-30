@@ -14,6 +14,8 @@ import { loopDetectionModeToQuery } from "../game/loopDetectionMode";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { AiOpponentConfig } from "../components/menu/AiOpponentConfig";
 import { HordeDeckSelector } from "../components/setup/HordeDeckSelector";
+import { hordeMinimumPlayers } from "../data/challengeDeckRegistry";
+import type { ChallengeDeck } from "../adapter/types";
 import {
   catalogRequestKey,
   useAiDeckCatalog,
@@ -170,7 +172,12 @@ export function GameSetupPage() {
     const defaults = setupDefaults(fmt) ?? FORMAT_DEFAULTS.Commander;
     setSelectedFormat(fmt);
     setFormatConfig(defaults);
-    setPlayerCount(restoredLastFormat ? lastPlayerCount : defaults.min_players);
+    // A co-Horde pick (e.g. Two Towers) stored from a prior session needs its
+    // extra seats even if the saved count predates the pick.
+    const restoredCount = restoredLastFormat ? lastPlayerCount : defaults.min_players;
+    const restoreFloor =
+      fmt === "Horde" ? hordeMinimumPlayers(usePreferencesStore.getState().hordeChallengeDeck) : 0;
+    setPlayerCount(Math.max(restoredCount, restoreFloor));
     setMatchType(restoredLastFormat ? lastMatchType : "Bo1");
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -179,14 +186,37 @@ export function GameSetupPage() {
     if (!defaults) return;
     setSelectedFormat(format);
     setFormatConfig(defaults);
-    setPlayerCount(defaults.min_players);
+    // The picked challenge deck may need co-Horde seats above the format's
+    // own range — the engine rejects undersized tables, so fold the deck's
+    // minimum into the fresh count rather than starting stranded.
+    const deckFloor =
+      format === "Horde"
+        ? hordeMinimumPlayers(usePreferencesStore.getState().hordeChallengeDeck)
+        : defaults.min_players;
+    const count = Math.max(defaults.min_players, deckFloor);
+    setPlayerCount(count);
     setLastFormat(format);
-    setLastPlayerCount(defaults.min_players);
-    if (defaults.min_players !== 2) {
+    setLastPlayerCount(count);
+    if (count !== 2) {
       setMatchType("Bo1");
       setLastMatchType("Bo1");
     }
     setSetupError(null);
+  }
+
+  function handleHordeDeckChange(deck: ChallengeDeck) {
+    setHordeChallengeDeck(deck);
+    // Same stranded-table guard when the pick changes mid-setup: a co-Horde
+    // deck needs extra seats the spinner would otherwise leave short.
+    const minimum = hordeMinimumPlayers(deck);
+    if (playerCount < minimum) {
+      setPlayerCount(minimum);
+      setLastPlayerCount(minimum);
+      if (minimum !== 2) {
+        setMatchType("Bo1");
+        setLastMatchType("Bo1");
+      }
+    }
   }
 
   // useCallback so the prop identity passed to MyDecks/SavedDeckTile2 stays
@@ -563,7 +593,14 @@ export function GameSetupPage() {
                       </div>
                       <input
                         type="range"
-                        min={formatConfig.min_players}
+                        min={
+                          formatConfig.format === "Horde"
+                            ? Math.max(
+                                formatConfig.min_players,
+                                hordeMinimumPlayers(hordeChallengeDeck),
+                              )
+                            : formatConfig.min_players
+                        }
                         max={formatConfig.max_players}
                         value={playerCount}
                         onChange={(e) => {
@@ -678,7 +715,7 @@ export function GameSetupPage() {
                 <>
                   <HordeDeckSelector
                     value={hordeChallengeDeck}
-                    onChange={setHordeChallengeDeck}
+                    onChange={handleHordeDeckChange}
                   />
                   <div className="border-t border-white/8" />
                 </>

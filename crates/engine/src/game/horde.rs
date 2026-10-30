@@ -651,8 +651,9 @@ fn reveal_and_resolve_top_card(
             // LOTR "Two Towers" rule "Orc Armies grow as a single army": a
             // revealed Army token does NOT enter as a fresh 0/0 (which would
             // die to SBAs immediately) — it AMASSES the Horde's single Army
-            // instead. Any other token enters normally.
-            amass_revealed_army(state, horde, card_id, &subtype, events);
+            // instead. Any other token enters normally. The Amass can pause
+            // on a replacement choice like an ordinary token reveal.
+            return amass_revealed_army(state, horde, card_id, &subtype, events);
         } else {
             // CR 111 + CR 111.1: a token can never be cast, so a revealed library
             // token is put directly onto the battlefield under the Horde's
@@ -808,6 +809,15 @@ fn resume_pending_horde_reveal(
             complete_token_reveal(state, card, horde, &pinned, &before, &revealed_name);
             RevealOutcome::Continue
         }
+        PendingHordeReveal::AmassArmy { card } => {
+            // The Amass replacement choice resolved and its stashed
+            // continuation already ran (counters placed). Remove the consumed
+            // library placeholder, then continue the wave.
+            // allow-raw-zone: consumed library placeholder destroyed after the Amass continuation settled (remove + object delete); not a CR 400.7 zone change, no ZoneChanged is emitted.
+            crate::game::zones::remove_from_zone(state, card, Zone::Library, horde);
+            state.objects.remove(&card);
+            RevealOutcome::Continue
+        }
     }
 }
 
@@ -906,19 +916,26 @@ fn revealed_army_subtype(state: &GameState, card_id: ObjectId) -> Option<String>
 /// entering as a fresh 0/0 token that would die to state-based actions. Composes
 /// the shared Amass resolver ([`crate::game::effects::amass::resolve`]): it grows
 /// the Army the Horde already controls, or creates it (0/0, then a +1/+1 counter
-/// → 1/1) if the Horde controls none. The library placeholder is then removed —
-/// the Orc Army grew the Horde's Army rather than materializing as this token.
+/// → 1/1) if the Horde controls none.
+///
+/// Like [`reveal_library_token`], a replacement choice parked mid-Amass (an
+/// Esix/Jinnie-style "instead" on the Army creation — the resolver reports
+/// `Ok` either way, so a non-Priority `waiting_for` afterwards is the pause
+/// signal) parks the reveal and pauses the wave; the placeholder is removed
+/// only once the continuation settles. A settled Amass (created or prevented —
+/// prevention consumes the reveal) removes the placeholder and continues.
 fn amass_revealed_army(
     state: &mut GameState,
     horde: PlayerId,
     card_id: ObjectId,
     subtype: &str,
     events: &mut Vec<GameEvent>,
-) {
+) -> RevealOutcome {
     use crate::types::ability::QuantityExpr;
     // CR 701.47a: Amass [subtype] 1 for the Horde. The revealed Orc Army card is
-    // the amass source; it is removed just below (amass grows a *different* object,
-    // the Horde's battlefield Army, so ordering is safe).
+    // the amass source; it is removed below once the Amass settles (amass grows
+    // a *different* object, the Horde's battlefield Army, so ordering is safe —
+    // and on a pause the placeholder must survive until the resume).
     let ability = ResolvedAbility::new(
         Effect::Amass {
             subtype: subtype.to_string(),
@@ -930,9 +947,19 @@ fn amass_revealed_army(
         horde,
     );
     let _ = crate::game::effects::amass::resolve(state, &ability, events);
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        // CR 614.1a: the Army creation (or a counter placement) needs a
+        // choice. Park the reveal — the placeholder stays until the choice
+        // resolves — and pause the wave for the priority re-entry seam.
+        state.pending_horde_reveal = Some(Box::new(
+            crate::types::game_state::PendingHordeReveal::AmassArmy { card: card_id },
+        ));
+        return RevealOutcome::Pause(Box::new(state.waiting_for.clone()));
+    }
     // allow-raw-zone: consumed library placeholder destroyed after the Amass authority resolved (remove + object delete); not a CR 400.7 zone change, no ZoneChanged is emitted.
     crate::game::zones::remove_from_zone(state, card_id, Zone::Library, horde);
     state.objects.remove(&card_id);
+    RevealOutcome::Continue
 }
 
 /// Reveal a token from the top of the Horde's library onto the battlefield.

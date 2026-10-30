@@ -20,6 +20,7 @@ use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{CopyTargetPurpose, ReplacementDefinition, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CoreType, Supertype};
+use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::format::{ChallengeDeck, FormatConfig, WaveTermination};
 use engine::types::game_state::{GameState, WaitingFor};
@@ -502,5 +503,247 @@ fn revealed_token_replacement_accept_creates_chosen_copy() {
     assert!(
         runner.state().pending_horde_reveal.is_none(),
         "the parked reveal must drain on resume"
+    );
+}
+
+/// Place an Orc Army creature token on top of `owner`'s library. Subtypes
+/// `["Orc", "Army"]` are the Amass dispatch key: the reveal amasses the
+/// Horde's single Army (CR 701.47a) instead of entering a fresh 0/0.
+fn add_library_army_token(state: &mut GameState, owner: PlayerId) -> ObjectId {
+    let id = add_library_token(state, owner, "Orc Army", 0, 0, true);
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.subtypes = vec!["Orc".to_string(), "Army".to_string()];
+    obj.base_card_types = obj.card_types.clone();
+    id
+}
+
+/// ARMY DECLINE: Esix prompts on the Army an Amass reveal creates, and
+/// declining grows the Horde's 1/1 Army — then the wave continues to the
+/// card behind the Army. Full public-action drive: wave → ReplacementChoice
+/// → decline → completion.
+///
+/// Revert guard: the pre-fix code ignored the Amass resolver's pause and
+/// deleted the placeholder mid-continuation — no prompt raises, the
+/// prompt assertion flips, and the Army never gets its counter.
+#[test]
+fn revealed_army_replacement_decline_amasses_then_continues_wave() {
+    let mut state = horde_game(2);
+    // Front of the library first: the Army reveals, then the Cyberman.
+    let placeholder = add_library_army_token(&mut state, HORDE);
+    add_library_token(&mut state, HORDE, "Cyberman", 2, 2, true);
+    install_esix(&mut state, HORDE);
+    add_copy_source(&mut state, HORDE, "Decoy Ox");
+
+    let mut runner = GameRunner::from_state(state);
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "Esix's optional substitution must prompt on the amassed Army, got {:?}",
+        runner.state().waiting_for
+    );
+    // The wave must NOT reveal past the open prompt: the Army's budget is
+    // spent but the card behind it is untouched and the placeholder survives
+    // until the continuation settles.
+    assert_eq!(
+        runner.state().horde_wave_remaining,
+        1,
+        "only the Army's budget may be spent while its prompt is open"
+    );
+    assert!(
+        runner.state().objects.contains_key(&placeholder),
+        "the Army placeholder must survive until the continuation settles"
+    );
+    assert!(
+        !runner
+            .state()
+            .battlefield
+            .iter()
+            .filter_map(|id| runner.state().objects.get(id))
+            .any(|obj| obj.controller == HORDE && obj.name == "Cyberman"),
+        "the card behind the Army must not reveal before its prompt is answered"
+    );
+    runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("decline Esix's substitution");
+    drive_wave_to_completion(&mut runner);
+
+    assert_eq!(
+        runner.state().horde_wave_remaining,
+        0,
+        "the wave must complete after the declined choice"
+    );
+    assert!(
+        !runner.state().objects.contains_key(&placeholder),
+        "the Army placeholder must be removed after the resumed reveal"
+    );
+    assert!(
+        runner.state().pending_horde_reveal.is_none(),
+        "the parked reveal must drain on resume"
+    );
+    let armies: Vec<_> = runner
+        .state()
+        .battlefield
+        .iter()
+        .filter_map(|id| runner.state().objects.get(id))
+        .filter(|obj| {
+            obj.controller == HORDE && obj.card_types.subtypes.iter().any(|s| s == "Army")
+        })
+        .collect();
+    assert_eq!(
+        armies.len(),
+        1,
+        "declining must grow exactly one Horde Army, got {}",
+        armies.len()
+    );
+    assert_eq!(
+        armies[0].counters.get(&CounterType::Plus1Plus1).copied(),
+        Some(1),
+        "the amassed Army must carry the +1/+1 counter"
+    );
+    assert_eq!(
+        (armies[0].power, armies[0].toughness),
+        (Some(1), Some(1)),
+        "the amassed Army must be 1/1"
+    );
+    // The wave continued past the Army to the card behind it.
+    assert!(
+        runner
+            .state()
+            .battlefield
+            .iter()
+            .filter_map(|id| runner.state().objects.get(id))
+            .any(|obj| obj.controller == HORDE && obj.name == "Cyberman"),
+        "the card behind the Army must still reveal after the resume"
+    );
+}
+
+/// ARMY ACCEPT: accepting Esix's substitution on the amassed Army creates a
+/// copy of the CHOSEN creature instead — and since the copy is no Army,
+/// there is nothing to put counters on — while the wave still completes
+/// (placeholder removed, budget spent, card behind revealed).
+///
+/// Revert guard: same as the decline row — pre-fix, no prompt raises and
+/// the assertions flip.
+#[test]
+fn revealed_army_replacement_accept_substitutes_then_continues_wave() {
+    let mut state = horde_game(2);
+    let placeholder = add_library_army_token(&mut state, HORDE);
+    add_library_token(&mut state, HORDE, "Cyberman", 2, 2, true);
+    install_esix(&mut state, HORDE);
+    let decoy = add_copy_source(&mut state, HORDE, "Decoy Ox");
+
+    let mut runner = GameRunner::from_state(state);
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "Esix's optional substitution must prompt on the amassed Army, got {:?}",
+        runner.state().waiting_for
+    );
+    // The wave must NOT reveal past the open prompt: the Army's budget is
+    // spent but the card behind it is untouched and the placeholder survives
+    // until the continuation settles.
+    assert_eq!(
+        runner.state().horde_wave_remaining,
+        1,
+        "only the Army's budget may be spent while its prompt is open"
+    );
+    assert!(
+        runner.state().objects.contains_key(&placeholder),
+        "the Army placeholder must survive until the continuation settles"
+    );
+    assert!(
+        !runner
+            .state()
+            .battlefield
+            .iter()
+            .filter_map(|id| runner.state().objects.get(id))
+            .any(|obj| obj.controller == HORDE && obj.name == "Cyberman"),
+        "the card behind the Army must not reveal before its prompt is answered"
+    );
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("accept Esix's substitution");
+
+    // Prompt 2 — the copy-source choice.
+    match &runner.state().waiting_for {
+        WaitingFor::CopyTargetChoice {
+            valid_targets,
+            purpose,
+            ..
+        } => {
+            assert_eq!(
+                *purpose,
+                CopyTargetPurpose::CopyTokenSource,
+                "the chosen-source arm must raise CopyTokenSource"
+            );
+            assert!(
+                valid_targets.contains(&decoy),
+                "the Decoy Ox must be a legal copy source, pool was {valid_targets:?}"
+            );
+        }
+        other => panic!("expected a CopyTargetChoice prompt, got {other:?}"),
+    }
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(decoy)),
+        })
+        .expect("choose Decoy Ox as the copy source");
+    drive_wave_to_completion(&mut runner);
+
+    assert_eq!(
+        runner.state().horde_wave_remaining,
+        0,
+        "the wave must complete after the accepted substitution"
+    );
+    assert!(
+        !runner.state().objects.contains_key(&placeholder),
+        "the Army placeholder must be removed after the substituted reveal"
+    );
+    assert!(
+        runner.state().pending_horde_reveal.is_none(),
+        "the parked reveal must drain on resume"
+    );
+    // The substitute is a Decoy Ox copy — no Army, so the Amass continuation
+    // finds nothing to put counters on.
+    let armies = runner
+        .state()
+        .battlefield
+        .iter()
+        .filter(|id| {
+            runner.state().objects.get(id).is_some_and(|o| {
+                o.controller == HORDE && o.card_types.subtypes.iter().any(|s| s == "Army")
+            })
+        })
+        .count();
+    assert_eq!(
+        armies, 0,
+        "the accepted substitute is no Army, so no Army must exist"
+    );
+    assert!(
+        runner
+            .state()
+            .battlefield
+            .iter()
+            .filter_map(|id| runner.state().objects.get(id))
+            .any(|obj| obj.controller == HORDE
+                && obj.is_token
+                && obj.name == "Decoy Ox"
+                && obj.power == Some(5)),
+        "the substitute must be a 5-power Decoy Ox copy token"
+    );
+    assert!(
+        runner
+            .state()
+            .battlefield
+            .iter()
+            .filter_map(|id| runner.state().objects.get(id))
+            .any(|obj| obj.controller == HORDE && obj.name == "Cyberman"),
+        "the card behind the Army must still reveal after the resume"
     );
 }

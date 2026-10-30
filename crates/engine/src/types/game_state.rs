@@ -16433,6 +16433,17 @@ pub enum PendingHordeReveal {
         /// of something else, which must not inherit the reveal's identity).
         revealed_name: String,
     },
+    /// Revealed Army token: the Amass instruction parked on a choice (an
+    /// Esix/Jinnie-style "instead" substitute on the Army creation, or a
+    /// counter-placement choice). Reachable — the Horde controls no Army, so
+    /// Amass creates one through the token-creation replacement pipeline
+    /// (CR 614.16 + CR 701.47a). Resume removes the consumed library
+    /// placeholder — the Amass continuation (counters) already settled when
+    /// the choice resolved — then continues the wave.
+    AmassArmy {
+        /// The revealed library placeholder, still in the library.
+        card: ObjectId,
+    },
 }
 
 /// A hero-choice batch parked mid-application by a nested replacement prompt,

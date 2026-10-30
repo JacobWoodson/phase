@@ -1291,6 +1291,21 @@ export function playerSlotsFromSeatView(view: SeatView): PlayerSlot[] {
   }));
 }
 
+/**
+ * Horde Magic: the lowest seat anchoring one contiguous run of AI seats
+ * covering the whole Horde roster (`rosterSize` = 1 + co-Horde decks), or
+ * -1 when the layout has no such run. The engine designates
+ * `archenemy..archenemy+N` as the Horde, and those seats must ALL be AI —
+ * the survivors are the humans — so the caller rejects a -1 layout rather
+ * than reassigning a human seat. Same rule as server-core's `horde_anchor`
+ * on the WS path.
+ */
+export function hordeAnchorSeat(seats: SeatKind[], rosterSize: number): number {
+  return seats.findIndex((_, s) =>
+    Array.from({ length: rosterSize }, (_, o) => seats[s + o]?.type === "Ai").every(Boolean),
+  );
+}
+
 function traceAdapter(side: "Host" | "Guest", event: string, data?: Record<string, unknown>): void {
   console.debug(`[P2P ${side} Adapter]`, performance.now().toFixed(1), event, data ?? {});
 }
@@ -2969,18 +2984,28 @@ export class P2PHostAdapter implements EngineAdapter {
       const playerCount = allowPartialStart
         ? orderedOpponents.length + 1
         : this.pregameSeatState.seats.length;
-      // Horde Magic: the Horde is the self-piloting deck, played by an AI seat —
-      // not the host (seat 0), who is a survivor. Point `archenemy_player` (the
-      // Horde seat) at the lowest-indexed AI seat so the engine designates that
-      // seat as the Horde: it loads the challenge-deck library there, seats the
-      // human(s) as the survivor team, and gives the survivors the first turn.
-      // Mirrors the server-core `rebuild_pregame_state` remap for the WS path.
+      // Horde Magic: the Horde is the self-piloting deck, played by AI seats —
+      // not the host (seat 0), who is a survivor. Point `archenemy_player`
+      // (the Horde anchor) at the lowest seat starting one contiguous run of
+      // AI seats covering the whole Horde roster, so the engine designates
+      // those seats as the Horde: it loads the challenge-deck libraries
+      // there, seats the humans as the survivor team, and gives the
+      // survivors the first turn. Same rule as server-core's
+      // `horde_anchor`/`start_game` gate on the WS path: a layout with no
+      // such run (e.g. Two Towers at [human, AI, human]) is rejected here
+      // rather than reassigning a human seat.
       let formatConfigForInit = this.formatConfig;
       if (formatConfigForInit?.format === "Horde") {
-        const hordeSeat = this.pregameSeatState.seats.findIndex((s) => s.type === "Ai");
-        if (hordeSeat > 0) {
-          formatConfigForInit = { ...formatConfigForInit, archenemy_player: hordeSeat };
+        const rosterSize = 1 + (formatConfigForInit.horde_ruleset?.co_horde_decks?.length ?? 0);
+        const hordeSeat = hordeAnchorSeat(this.pregameSeatState.seats, rosterSize);
+        if (hordeSeat <= 0) {
+          throw new AdapterError(
+            "P2P_ERROR",
+            `Cannot start Horde game: no run of ${rosterSize} contiguous AI seats for the Horde roster`,
+            false,
+          );
         }
+        formatConfigForInit = { ...formatConfigForInit, archenemy_player: hordeSeat };
       }
 
       if (this.disposed) await this.bailDisposed(false, "start");

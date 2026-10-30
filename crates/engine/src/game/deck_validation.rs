@@ -43,8 +43,11 @@ pub struct DeckCompatibilityRequest {
     pub signature_spell: Vec<String>,
     #[serde(default)]
     pub selected_format: Option<SelectedFormat>,
-    /// The Horde challenge deck the survivor is building against, when
-    /// `selected_format` is [`GameFormat::Horde`]. Its
+    /// The Horde challenge deck the survivor is building against: either
+    /// alongside `selected_format` ([`GameFormat::Horde`]) or INSTEAD of it
+    /// (the AI-survivor catalog validates candidates against the picked
+    /// challenge with no format tag — answered by resolving the deck's Horde
+    /// config). Its
     /// [`SurvivorDeckFormat`](crate::types::format::SurvivorDeckFormat) decides
     /// how survivor decks are validated: EDH-designed hordes (Sauron, Saruman)
     /// validate survivors as 100-card singleton Commander decks, while
@@ -3126,7 +3129,21 @@ fn evaluate_selected_format(
     bo3_ready: bool,
 ) -> (Option<bool>, Vec<String>) {
     let Some(selected) = request.selected_format.as_ref() else {
-        return (None, Vec::new());
+        // No selected format — but a selected challenge deck still carries
+        // survivor requirements: the AI-survivor catalog validates each
+        // candidate against the picked challenge without a format tag.
+        // Answer exactly as the seat path would by resolving the deck's
+        // Horde config (one recursion step — the resolved request takes the
+        // `Some` branch below). With no challenge deck either, there is
+        // nothing to answer.
+        let Some(deck) = request.selected_challenge_deck else {
+            return (None, Vec::new());
+        };
+        let mut resolved = request.clone();
+        resolved.selected_format = Some(SelectedFormat::Resolved(Box::new(FormatConfig::horde(
+            deck.default_ruleset(),
+        ))));
+        return evaluate_selected_format(db, &resolved, unknown_cards, bo3_ready);
     };
     let format = selected.tag();
 
@@ -6387,6 +6404,61 @@ mod tests {
             err.iter()
                 .any(|r| r.contains("color identity") || r.contains("Blue Intruder")),
             "an off-identity card is rejected for Sauron survivors: {err:?}"
+        );
+    }
+
+    /// The AI-survivor catalog path: with NO selected format but a selected
+    /// challenge deck, `evaluate_deck_compatibility` answers the survivor
+    /// verdict exactly as the seat path would — a 100-card EDH deck is
+    /// compatible with Sauron, a 60-card deck is not, and a
+    /// constructed-block Horde (Cyberman) accepts anything (unrestricted).
+    ///
+    /// Revert guard: without the challenge-deck branch the answer is `None`
+    /// ("no opinion") and the catalog drops every candidate.
+    #[test]
+    fn horde_challenge_deck_alone_answers_survivor_verdict() {
+        let db = horde_commander_test_db();
+        let commander = vec!["White General".to_string()];
+        let compat = |main: Vec<String>, deck: ChallengeDeck| {
+            evaluate_deck_compatibility(
+                &db,
+                &DeckCompatibilityRequest {
+                    main_deck: main,
+                    commander: commander.clone(),
+                    selected_format: None,
+                    selected_challenge_deck: Some(deck),
+                    ..Default::default()
+                },
+            )
+            .selected_format_compatible
+        };
+        assert_eq!(
+            compat(expand("Plains", 99), ChallengeDeck::SauronHorde),
+            Some(true),
+            "a 100-card EDH deck is a compatible Sauron survivor"
+        );
+        assert_eq!(
+            compat(expand("Plains", 60), ChallengeDeck::SauronHorde),
+            Some(false),
+            "a 60-card deck is an incompatible Sauron survivor"
+        );
+        assert_eq!(
+            compat(expand("Plains", 60), ChallengeDeck::CybermanHorde),
+            Some(true),
+            "a constructed-block Horde leaves survivors unrestricted"
+        );
+        let bare = evaluate_deck_compatibility(
+            &db,
+            &DeckCompatibilityRequest {
+                main_deck: expand("Plains", 60),
+                selected_format: None,
+                ..Default::default()
+            },
+        )
+        .selected_format_compatible;
+        assert_eq!(
+            bare, None,
+            "with neither format nor challenge deck there is still no opinion"
         );
     }
 

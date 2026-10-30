@@ -733,6 +733,20 @@ export function challengeDeckMetadata(
 }
 
 /**
+ * Minimum table size for a Horde game with the picked challenge deck: one
+ * survivor plus the Horde roster (the primary plus one seat per co-Horde
+ * deck, from the deck's engine-resolved ruleset). The engine rejects smaller
+ * tables (`validate_for_player_count`), so setup bumps the player count to
+ * this when the pick needs more seats. Unknown deck ⇒ the single-Horde
+ * floor of 2.
+ */
+export function hordeMinimumPlayers(deck: ChallengeDeck): number {
+  const meta = challengeDeckMetadata(deck);
+  const coHordes = meta?.resolved_config?.horde_ruleset?.co_horde_decks?.length ?? 0;
+  return 2 + coHordes;
+}
+
+/**
  * Apply a chosen challenge deck to a Horde `FormatConfig`.
  *
  * The engine owns the per-deck rules, so this applies the deck's whole
