@@ -1,12 +1,12 @@
 use crate::game::cost_payability::AbilityCostPayability;
 use crate::types::ability::{
-    is_variable_remove_counter_cost_count, AbilityBlockKind, AbilityBlockReason, AbilityCondition,
-    AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationManaPaymentRestriction,
-    AdditionalCost, AttachmentReferent, BoardWideCostModifier, CardPlayMode, CardSelectionMode,
-    CardTypeSetSource, CastCostModifier, CastTimingPermission, CastingPermission, ChoiceType,
-    CombatRelationSubject, ContinuousModification, ControllerRef, CostObjectCount,
-    CostPaidObjectSnapshot, CostReduction, CounterCostSelection, Duration, Effect, EffectKind,
-    FilterProp, GameRestriction, ModalSelectionCondition, NameStickerSet, ObjectScope,
+    filter_references_target_player, is_variable_remove_counter_cost_count, AbilityBlockKind,
+    AbilityBlockReason, AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
+    ActivationManaPaymentRestriction, AdditionalCost, AttachmentReferent, BoardWideCostModifier,
+    CardPlayMode, CardSelectionMode, CardTypeSetSource, CastCostModifier, CastTimingPermission,
+    CastingPermission, ChoiceType, CombatRelationSubject, ContinuousModification, ControllerRef,
+    CostObjectCount, CostPaidObjectSnapshot, CostReduction, CounterCostSelection, Duration, Effect,
+    EffectKind, FilterProp, GameRestriction, ModalSelectionCondition, NameStickerSet, ObjectScope,
     ParsedCondition, PlayerFilter, PlayerScope, ProhibitedActivity, QuantityExpr, QuantityRef,
     ResolvedAbility, RestrictionExpiry, RestrictionPlayerScope, StaticCondition, StaticDefinition,
     SubAbilityLink, TapCreaturesRequirement, TargetFilter, TargetRef, TypeFilter, TypedFilter,
@@ -43,8 +43,8 @@ use crate::types::resolved_commands::ManaPaymentRecipient;
 use crate::types::statics::{
     ActivationExemption, AdditionalCostTaxAction, CastFreeOrigin, CastFrequency,
     CastingProhibitionCondition, CostModifyMode, CostReductionReach, ExileCardPool, ExileCastCost,
-    ExileCastGrantee, ExileCastTiming, GraveyardPermissionPool, ProhibitionScope, StaticMode,
-    StaticModeKind,
+    ExileCastGrantee, ExileCastTiming, GraveyardPermissionPool, PermissionCastLimit,
+    ProhibitionScope, StaticMode, StaticModeKind,
 };
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
@@ -57,9 +57,9 @@ use super::ability_utils::{
     auto_select_targets_for_ability, begin_target_selection, begin_target_selection_for_ability,
     build_resolved_from_def, build_target_assignments_for_ability_with_limit, build_target_slots,
     build_target_slots_for_announcement, compute_unavailable_modes, declared_targets_in_chain,
-    filter_references_target_player, has_legal_target_assignment_for_ability,
-    modal_choice_for_player, simple_legal_target_assignment_exists_for_ability,
-    target_constraints_from_modal, unresolved_x_target_construction_error, TargetSlotBuildOutcome,
+    has_legal_target_assignment_for_ability, modal_choice_for_player,
+    simple_legal_target_assignment_exists_for_ability, target_constraints_from_modal,
+    unresolved_x_target_construction_error, TargetSlotBuildOutcome,
 };
 use super::casting_costs::{self, check_additional_cost_or_pay};
 use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
@@ -512,13 +512,14 @@ fn runtime_granted_equip_abilities(
 }
 
 /// CR 604.1 (seam 4: activated-ability-on-grant): synthesize graveyard activated
-/// abilities (Encore, Scavenge) for keywords granted to a graveyard card by a
-/// static. The `AddKeyword` layer seam installs only the keyword + triggers, so a
+/// abilities (Unearth, Encore, Scavenge, Embalm, Eternalize) for keywords granted
+/// to a graveyard card by a static or a continuous effect. The `AddKeyword` layer
+/// seam installs only the keyword + triggers, so a
 /// granted graveyard activated keyword carries no activatable ability without
 /// this on-the-fly synthesis. Mirrors `runtime_granted_cycling_abilities`: only
 /// keywords present in the *effective* (granted-inclusive) set but NOT printed on
-/// the card are synthesized, so a printed Encore/Scavenge ability (already in
-/// `obj.abilities`) is never double-counted.
+/// the card are synthesized, so a printed Unearth/Encore/Scavenge ability (already
+/// in `obj.abilities`) is never double-counted.
 fn runtime_granted_graveyard_activated_abilities(
     state: &GameState,
     source_id: ObjectId,
@@ -534,10 +535,19 @@ fn runtime_granted_graveyard_activated_abilities(
         .into_iter()
         .filter(|keyword| !obj.base_keywords.iter().any(|printed| printed == keyword))
         .filter_map(|keyword| {
-            // CR 702.128a / CR 702.129a / CR 702.141a: Embalm / Eternalize / Encore
-            // granted with a self-referential cost ("equal to its mana cost" or
-            // "where X is its mana value") carry `ManaCost::SelfManaCost` or
-            // `ManaCost::SelfManaValue`; concretize before synthesizing the
+            // CR 118.6: an unearth granted with a cost "equal to its mana cost" on a
+            // card with NO mana cost (Dryad Arbor) has an unpayable cost. Concretizing
+            // it would yield `ManaCost::NoCost`, which the payment path reads as free,
+            // so the ability is never offered instead.
+            if let Keyword::Unearth(cost) = &keyword {
+                if super::keywords::self_mana_cost_is_unpayable(state, source_id, cost) {
+                    return None;
+                }
+            }
+            // CR 702.84a / CR 702.128a / CR 702.129a / CR 702.141a: Unearth / Embalm /
+            // Eternalize / Encore granted with a self-referential cost ("equal to its
+            // mana cost" or "where X is its mana value") carry `ManaCost::SelfManaCost`
+            // or `ManaCost::SelfManaValue`; concretize before synthesizing the
             // activated ability (the activated-ability payment path would
             // otherwise treat those placeholders as free).
             let keyword = super::keywords::resolve_self_cost_graveyard_activated_keyword(
@@ -650,7 +660,7 @@ pub(crate) fn activation_ability_definition(
         let offset = ability_index.checked_sub(obj.abilities.len())?;
         // Must match the append order in `activated_ability_definitions`: printed
         // abilities first, then runtime-granted cycling, then runtime-granted
-        // graveyard activated (Encore/Scavenge), then runtime-granted
+        // graveyard activated (Unearth/Encore/Scavenge/Embalm), then runtime-granted
         // plot-from-library (Fblthp), then equip.
         // Identical order is REQUIRED for `ability_index` consistency.
         runtime_granted_cycling_abilities(state, source_id)
@@ -1364,6 +1374,7 @@ pub(crate) fn is_blocked_by_cant_play_lands(
                         source_id: *source,
                         source_controller,
                         ability: None,
+                        ability_targets: None,
                         // Restriction source is the current operation subject,
                         // not a deferred triggered-source read.
                         trigger_source: None,
@@ -3581,7 +3592,13 @@ pub(super) fn build_spell_meta(
 ) -> Option<SpellMeta> {
     let (spend_only_on_x_colors, spend_only_on_x_generic_count) =
         spend_only_on_x_info(state, object_id);
-    state.objects.get(&object_id).map(|obj| SpellMeta {
+    let obj = state.objects.get(&object_id)?;
+    // CR 611.2f: the grant's "is a [type] in addition to its other types"
+    // rider (The Tomb of Aclazotz) applies from the moment the spell is put on
+    // the stack, so the spell is paid for as that type (Cavern of Souls).
+    let with_rider = graveyard_rider_spell_projection(state, object_id, obj);
+    let obj = with_rider.as_ref().unwrap_or(obj);
+    Some(SpellMeta {
         types: object_type_names(obj),
         subtypes: obj.card_types.subtypes.clone(),
         keyword_kinds: effective_spell_keyword_kinds(state, caster, object_id),
@@ -3615,6 +3632,45 @@ pub(super) fn build_spell_meta(
         spend_only_on_x_colors,
         spend_only_on_x_generic_count,
     })
+}
+
+/// CR 611.2f + CR 613.1d: the spell `object_id` with the "is a [type] in
+/// addition to its other types" rider of the graveyard grant it is being cast
+/// under applied, through the per-object layer-4/5 authority the layer pass
+/// uses, or `None` when no such rider applies. The rider becomes a continuous
+/// effect once the cast is finalized; until then payment reads it here.
+fn graveyard_rider_spell_projection(
+    state: &GameState,
+    object_id: ObjectId,
+    obj: &GameObject,
+) -> Option<GameObject> {
+    let rider = &in_flight_graveyard_permission_latch(state, object_id)?.enters_modifications;
+    if !casting_costs::enters_rider_applies(state, object_id, rider) {
+        return None;
+    }
+    let mut projected = obj.clone();
+    for modification in &rider.modifications {
+        let _ = super::layers::apply_type_or_color_modification(
+            &mut projected,
+            modification,
+            None,
+            None,
+            &state.all_creature_types,
+        );
+    }
+    Some(projected)
+}
+
+/// CR 611.2f: `state` with the spell `spell_id` replaced by its rider
+/// projection, for reads that judge the spell through the object-filter
+/// authority by id rather than through an object in hand. `None` when no
+/// in-flight rider applies.
+fn graveyard_rider_projected_state(state: &GameState, spell_id: ObjectId) -> Option<GameState> {
+    let projected =
+        graveyard_rider_spell_projection(state, spell_id, state.objects.get(&spell_id)?)?;
+    let mut view = state.clone();
+    view.objects.insert(spell_id, projected);
+    Some(view)
 }
 
 /// CR 107.4f + CR 601.2f/h: Check an explicit Phyrexian payment route
@@ -3959,7 +4015,10 @@ fn own_exile_cast_permission(state: &GameState, obj: &GameObject, player: Player
                     graveyard_destination_replacement: None,
                     required_cast_keyword: None,
                     pool: GraveyardPermissionPool::OwnGraveyard,
-                }
+                    cast_limit: PermissionCastLimit::Unlimited,
+                    mana_spend_permission: None,
+                    ref enters_modifications,
+                } if enters_modifications.is_empty()
             ) && matches!(definition.affected, Some(TargetFilter::SelfRef))
         })
 }
@@ -4705,6 +4764,28 @@ pub(super) fn selected_exile_alt_cost_permission_graveyard_replacement(
     }
 }
 
+/// CR 603.2h + CR 601.2i: the CR 603.2h limit carried by the resolution cast elected
+/// for THIS cast (the selected permission's cleanup), read before the stack move drops
+/// it. Mirrors `selected_exile_alt_cost_permission_graveyard_replacement`, so a
+/// non-elected sibling permission's limit cannot be spent by this cast.
+pub(super) fn selected_resolution_cast_indicated_action(
+    state: &GameState,
+    object_id: ObjectId,
+    player: PlayerId,
+    casting_permission_index: Option<CastingPermissionIndex>,
+) -> Option<Box<crate::types::ability::IndicatedActionLimit>> {
+    let obj = state.objects.get(&object_id)?;
+    let permission =
+        selected_exile_alt_cost_permission(state, obj, player, casting_permission_index)?;
+    match permission {
+        crate::types::ability::CastingPermission::ExileWithAltCost {
+            resolution_cleanup: Some(cleanup),
+            ..
+        } => cleanup.indicated_action.clone(),
+        _ => None,
+    }
+}
+
 pub(super) fn exile_alt_cost_permissions_accept_resulting_mv(
     state: &GameState,
     object_id: ObjectId,
@@ -5231,6 +5312,22 @@ fn player_can_spend_as_any_color_for_spell(
     player_mana_spend_permission_for_optional_spell(state, player, Some(source_id)).is_some()
 }
 
+/// CR 601.2a: the latched terms of the graveyard grant the cast of `spell_id`
+/// is announced under, while that cast is being paid: on its pending cast, or,
+/// once the pending cast is consumed by finalization (or on a state priced for
+/// an offer), the transient `active_graveyard_permission_latch`.
+fn in_flight_graveyard_permission_latch(
+    state: &GameState,
+    spell_id: ObjectId,
+) -> Option<&crate::types::game_state::GraveyardPermissionLatch> {
+    state
+        .pending_cast
+        .as_deref()
+        .filter(|pending| pending.object_id == spell_id)
+        .and_then(|pending| pending.ability.context.graveyard_permission_latch.as_ref())
+        .or(state.active_graveyard_permission_latch.as_deref())
+}
+
 pub(super) fn player_mana_spend_permission_for_optional_spell(
     state: &GameState,
     player: PlayerId,
@@ -5277,6 +5374,14 @@ pub(super) fn player_mana_spend_permission_for_optional_spell(
                 })
         })
     });
+
+    // CR 601.2a + CR 609.4b: a cast announced under a graveyard permission pays
+    // under that grant's concession (Whispersteel Dagger), latched as the cast
+    // was announced -- also for a graveyard cast made for the card's own
+    // alternative cost, which the latch records the same way.
+    if let Some(latch) = in_flight_graveyard_permission_latch(state, spell_id) {
+        return with_static(latch.mana_spend_permission);
+    }
 
     // CR 601.2a + CR 609.4b: The static source recorded on the elected
     // `ExilePermission` is the only static permission whose rider applies.
@@ -5490,6 +5595,15 @@ struct GraveyardPermissionSource<'a> {
     required_cast_keyword: Option<KeywordKind>,
     /// CR 109.5 + CR 404.1: whose graveyards this permission reaches.
     pool: GraveyardPermissionPool,
+    /// CR 601.3: how many casts the grant authorizes; a `Single`
+    /// grant ends with the cast made through it.
+    cast_limit: PermissionCastLimit,
+    /// CR 609.4b: the grant's own any-color/any-type mana concession for the
+    /// spell cast through it (Whispersteel Dagger).
+    mana_spend_permission: Option<crate::types::ability::ManaSpendPermission>,
+    /// CR 614.1c + CR 613.1d: modifications the spell cast through this grant
+    /// keeps as a permanent (The Tomb of Aclazotz: "is a Vampire").
+    enters_modifications: &'a crate::types::ability::PendingEntersModifications,
 }
 
 /// The [`GraveyardPermissionPool`] membership check. It reads the live game
@@ -6140,7 +6254,17 @@ fn graveyard_permission_sources(
                         ref enters_with_counter,
                         required_cast_keyword,
                         pool,
-                    } if graveyard_permission_play_mode_matches(play_mode, play_mode_filter) => {
+                        cast_limit,
+                        mana_spend_permission,
+                        ref enters_modifications,
+                    } if graveyard_permission_play_mode_matches(play_mode, play_mode_filter)
+                        // CR 601.3: a `Single` grant is used up by ending the
+                        // effect that granted it; a printed static has no such
+                        // effect, so it would never be used up. Refused (fail
+                        // closed): the parser builds `Single` only for a
+                        // resolution-created grant.
+                        && cast_limit.is_unlimited() =>
+                    {
                         definition
                             .affected
                             .as_ref()
@@ -6160,6 +6284,9 @@ fn graveyard_permission_sources(
                                 enters_with_counter,
                                 required_cast_keyword,
                                 pool,
+                                cast_limit,
+                                mana_spend_permission,
+                                enters_modifications,
                             })
                     }
                     _ => None,
@@ -6263,6 +6390,9 @@ fn transient_graveyard_permission_sources(
                         ref enters_with_counter,
                         required_cast_keyword,
                         pool,
+                        cast_limit,
+                        mana_spend_permission,
+                        ref enters_modifications,
                     } = definition.mode
                     else {
                         return None;
@@ -6311,6 +6441,9 @@ fn transient_graveyard_permission_sources(
                             enters_with_counter,
                             required_cast_keyword,
                             pool,
+                            cast_limit,
+                            mana_spend_permission,
+                            enters_modifications,
                         })
                 },
             )
@@ -6575,8 +6708,21 @@ impl GraveyardCastAuthority {
                 permission: source.permission,
                 extra_cost: source.extra_cost.clone(),
                 enters_with_counter: source.enters_with_counter.clone(),
+                cast_limit: source.cast_limit,
+                mana_spend_permission: source.mana_spend_permission,
+                enters_modifications: source.enters_modifications.clone(),
             },
         }
+    }
+
+    /// CR 601.2a + CR 609.4b + CR 611.2f: `state` with this grant's payment
+    /// terms latched, as the cast's payment reads them: its mana concession
+    /// (Whispersteel Dagger) and its "is a [type] in addition to its other
+    /// types" rider (The Tomb of Aclazotz: a Vampire spell for Cavern of
+    /// Souls), so an offer prices the cast the way it will be paid. `None` when
+    /// the grant carries neither, or `state` already has them latched.
+    fn payment_terms_state(&self, state: &GameState) -> Option<GameState> {
+        latch_payment_terms_state(state, &self.latch)
     }
 
     /// The menu projection: the announcement plus the terms the menu displays.
@@ -6953,6 +7099,25 @@ fn graveyard_printed_cast_allowed(
     graveyard_permission_candidates(state, player, object_id)
         .iter()
         .any(|candidate| candidate.admits_cast_method(None))
+}
+
+/// CR 601.2a + CR 118.9b: `state` priced under the payment terms of the grant a
+/// printed-cost cast of graveyard card `object_id` would be announced under
+/// (see `GraveyardCastAuthority::payment_terms_state`). `None` from any other
+/// zone, when no single grant would authorize that cast (several are announced
+/// through the casting menu), or when the grant carries no terms.
+fn graveyard_printed_cast_terms_state(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Option<GameState> {
+    if state.objects.get(&object_id)?.zone != Zone::Graveyard {
+        return None;
+    }
+    resolve_graveyard_authority(state, player, object_id, None, None)
+        .ok()?
+        .authority()
+        .payment_terms_state(state)
 }
 
 /// CR 401.5 + CR 118.9 + CR 601.2a: Find the (single) top card of `player`'s
@@ -10621,8 +10786,14 @@ fn prepare_spell_cast_announced(
 
     // CR 601.2f: Apply every cost modifier (self-spell statics, battlefield statics,
     // affinity, one-shot reductions, cost floor) in CR-correct order.
+    // CR 611.2f: a graveyard grant's type rider (The Tomb of Aclazotz) already
+    // applies as the total cost is determined, so a "Vampire spells cost {1}
+    // less" modifier sees the spell as a Vampire.
+    let terms_state = graveyard_authority
+        .as_ref()
+        .and_then(|resolution| resolution.authority().payment_terms_state(state));
     apply_all_cost_modifiers(
-        state,
+        terms_state.as_ref().unwrap_or(state),
         player,
         object_id,
         &mut mana_cost,
@@ -14091,6 +14262,9 @@ fn spell_matches_cost_filter_for(
     if !state.objects.contains_key(&source_id) {
         return false;
     }
+    // CR 611.2f: the spell as cast, with its graveyard grant's type rider.
+    let with_rider = graveyard_rider_spell_projection(state, spell_id, spell_obj);
+    let spell_obj = with_rider.as_ref().unwrap_or(spell_obj);
 
     match filter {
         TargetFilter::Typed(_) => super::filter::spell_object_matches_filter_from_state_for(
@@ -18227,9 +18401,18 @@ pub fn handle_cast_spell_with_payment_mode(
             affordable: blitz_affordable,
         }) = blitz_offer(state, player, object_id, obj, OfferRoute::Unannounced)
         {
-            let normal_cost =
-                apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
-                    .unwrap_or_else(|| obj.mana_cost.clone());
+            // CR 601.2a + CR 118.9b: the printed-cost cast is priced under the
+            // terms it would be paid with, as the Blitz offer is, so a grant's
+            // concession that makes both payable leaves the player the choice.
+            let printed_terms = graveyard_printed_cast_terms_state(state, player, object_id);
+            let printed_state = printed_terms.as_ref().unwrap_or(state);
+            let normal_cost = apply_cost_modifiers_to_base(
+                printed_state,
+                player,
+                object_id,
+                obj.mana_cost.clone(),
+            )
+            .unwrap_or_else(|| obj.mana_cost.clone());
             // CR 601.2a: whether the PRINTED-cost cast is on offer at all.
             // From hand it always is. From the graveyard it is only on offer
             // when some permission authorizes an unconstrained cast (e.g.
@@ -18244,7 +18427,7 @@ pub fn handle_cast_spell_with_payment_mode(
             // get the choice — including from the graveyard under an
             // unconstrained permission.
             let normal_affordable = printed_cost_cast_allowed
-                && can_pay_cost_after_auto_tap(state, player, object_id, &normal_cost);
+                && can_pay_cost_after_auto_tap(printed_state, player, object_id, &normal_cost);
             if normal_affordable && blitz_affordable {
                 return Ok(WaitingFor::AlternativeCastChoice {
                     player,
@@ -18587,8 +18770,15 @@ pub fn handle_cast_spell_with_payment_mode(
             let from_hand = obj.zone == Zone::Hand;
             let printed_cost_cast_allowed =
                 from_hand || graveyard_printed_cast_allowed(state, player, object_id);
-            let (normal_cost, normal_cost_affordable) =
-                normal_cast_choice_cost_and_affordability(state, player, object_id, obj);
+            // CR 601.2a + CR 118.9b: priced under the printed cast's own
+            // terms, as the Blitz block's printed branch is.
+            let printed_terms = graveyard_printed_cast_terms_state(state, player, object_id);
+            let (normal_cost, normal_cost_affordable) = normal_cast_choice_cost_and_affordability(
+                printed_terms.as_ref().unwrap_or(state),
+                player,
+                object_id,
+                obj,
+            );
             let normal_affordable = printed_cost_cast_allowed && normal_cost_affordable;
             // CR 118.9b + CR 702.103a: bestow is an optional alternative cost,
             // so whenever both the printed and bestow casts are legal and
@@ -20791,8 +20981,11 @@ fn castable_spell_verdict_with_probe(
             .options
             .is_empty()
     {
+        // CR 601.2a + CR 609.4b: the payment mode is chosen under the
+        // terms the cast will pay with, so an off-color sacrificial source
+        // that only the concession makes a payer keeps its choice.
         return Some(CastableSpellVerdict {
-            payment_state: None,
+            payment_state: prepared_payment_terms_state(state, &prepared),
             prepared_cost: Some(prepared.mana_cost),
         });
     }
@@ -20946,12 +21139,48 @@ fn can_feasibly_pay_mana_cost_with_assist(
     })
 }
 
+/// CR 601.2a + CR 609.4b + CR 611.2f: `state` with the payment terms of a
+/// latched graveyard grant set (see `GraveyardCastAuthority::payment_terms_state`),
+/// for a cast whose latch rides its ability before it is the pending cast.
+/// `None` when the latch carries no terms or `state` already has it latched.
+pub(super) fn latch_payment_terms_state(
+    state: &GameState,
+    latch: &crate::types::game_state::GraveyardPermissionLatch,
+) -> Option<GameState> {
+    let has_terms = latch.mana_spend_permission.is_some() || !latch.enters_modifications.is_empty();
+    let latched = state.active_graveyard_permission_latch.as_deref() == Some(latch);
+    (has_terms && !latched).then(|| {
+        let mut priced = state.clone();
+        priced.active_graveyard_permission_latch = Some(Box::new(latch.clone()));
+        priced
+    })
+}
+
+/// CR 601.2a + CR 609.4b + CR 611.2f: `state` priced under the payment terms
+/// of the graveyard grant `prepared` is announced under, or `None` when it has
+/// none (see `GraveyardCastAuthority::payment_terms_state`).
+fn prepared_payment_terms_state(
+    state: &GameState,
+    prepared: &PreparedSpellCast,
+) -> Option<GameState> {
+    prepared
+        .graveyard_authority
+        .as_ref()
+        .and_then(|resolution| resolution.authority().payment_terms_state(state))
+}
+
 fn can_cast_prepared_now_with_probe(
     state: &GameState,
     player: PlayerId,
     prepared: &PreparedSpellCast,
     probe: Option<&PriorityCastProbe>,
 ) -> bool {
+    // CR 601.2a + CR 609.4b + CR 611.2f: an option announced under a graveyard
+    // grant is priced under that grant's payment terms (Whispersteel Dagger's
+    // concession, The Tomb of Aclazotz's Vampire rider), as its payment will
+    // be: every cost check below, the additional-cost branches included.
+    let terms_state = prepared_payment_terms_state(state, prepared);
+    let state = terms_state.as_ref().unwrap_or(state);
     let Some(obj) = state.objects.get(&prepared.object_id) else {
         return false;
     };
@@ -24867,10 +25096,20 @@ fn apply_mana_spell_grants(
     let Some(caster) = state.objects.get(&spell_id).map(|obj| obj.controller) else {
         return;
     };
+    // CR 611.2f: a graveyard grant's rider applies from the moment the spell is
+    // put on the stack, so the spend grants' filters judge the spell with it
+    // ("a creature spell that shares a creature type with your commander").
+    let rider_view = graveyard_rider_projected_state(state, spell_id);
     let has_cant_be_countered = spent_units.iter().any(|unit| {
         unit.grants.iter().any(|grant| {
             matches!(grant, ManaSpellGrant::CantBeCountered { filter }
-                if mana_grant_matches_spell(state, spell_id, caster, unit, filter))
+            if mana_grant_matches_spell(
+                rider_view.as_ref().unwrap_or(state),
+                spell_id,
+                caster,
+                unit,
+                filter,
+            ))
         })
     });
 
@@ -24939,7 +25178,13 @@ fn apply_mana_spell_grants(
             else {
                 continue;
             };
-            if !mana_grant_matches_spell(state, spell_id, caster, unit, filter) {
+            if !mana_grant_matches_spell(
+                rider_view.as_ref().unwrap_or(state),
+                spell_id,
+                caster,
+                unit,
+                filter,
+            ) {
                 continue;
             }
             let count =
@@ -24977,6 +25222,7 @@ fn apply_mana_spell_grants(
                 source_id: unit.source_id,
                 source_controller: Some(caster),
                 ability: None,
+                ability_targets: None,
                 // This reflexive cast check evaluates its current mana-source
                 // operation, not a delayed triggered source.
                 trigger_source: None,
@@ -24987,7 +25233,12 @@ fn apply_mana_spell_grants(
                 declared_slot_view: None,
                 granting_object: None,
             };
-            if !crate::game::filter::matches_target_filter(state, spell_id, filter, &filter_ctx) {
+            if !crate::game::filter::matches_target_filter(
+                rider_view.as_ref().unwrap_or(state),
+                spell_id,
+                filter,
+                &filter_ctx,
+            ) {
                 continue;
             }
             let timestamp = state.next_timestamp() as u32;
@@ -26399,7 +26650,14 @@ fn blitz_offer(
     // mana sub-cost and non-mana residual ("Discard a card" / "Pay 2 life"), then
     // apply active cost modifiers to the mana sub-cost only — CR 118.9d applies
     // modifiers to the alternative cost that is actually being paid.
+    //
+    // CR 611.2f + CR 118.9d: priced under the permission's terms, so a reduction
+    // reads the spell as the grant's rider makes it (a Vampire through the Tomb).
     let (mana_part, residual) = split_blitz_cost_components(&blitz_cost);
+    let terms_state = authority
+        .as_deref()
+        .and_then(|authority| authority.payment_terms_state(state));
+    let state = terms_state.as_ref().unwrap_or(state);
     let mana = mana_part
         .map(|m| apply_cost_modifiers_to_base(state, player, object_id, m.clone()).unwrap_or(m));
     // CR 601.2c: a creature spell cast for its blitz cost has no targets, so
@@ -26471,9 +26729,16 @@ fn bestow_offer(
     // CR 601.2f-h + CR 118.9d: split the (possibly compound) bestow cost into its
     // mana sub-cost and Collect-evidence residual, then apply active cost
     // modifiers to the mana sub-cost.
+    //
+    // CR 611.2f + CR 118.9d: priced under the permission's terms, as payment
+    // will price it.
     let (mana_part, residual) = split_bestow_cost_components(&bestow_cost);
+    let terms_state = authority
+        .as_deref()
+        .and_then(|authority| authority.payment_terms_state(&bestowed));
+    let priced = terms_state.as_ref().unwrap_or(&bestowed);
     let mana = mana_part.as_ref().map(|m| {
-        apply_cost_modifiers_to_base(&bestowed, player, object_id, m.clone())
+        apply_cost_modifiers_to_base(priced, player, object_id, m.clone())
             .unwrap_or_else(|| m.clone())
     });
     // CR 601.2c + CR 601.2f-h: bestow is on offer when its total is payable for
@@ -26485,7 +26750,7 @@ fn bestow_offer(
         .map(|target| vec![target])
         .collect();
     let offerable = alternative_cost_offer_payable(
-        &bestowed,
+        priced,
         player,
         object_id,
         CastingVariant::Bestow,
@@ -26534,6 +26799,10 @@ fn alternative_cost_offer_payable(
     residual: &Option<AbilityCost>,
     target_assignments: &[Vec<TargetRef>],
 ) -> bool {
+    // CR 601.2a + CR 609.4b + CR 611.2f: the alternative cost is priced under
+    // the permission's payment terms, as its payment will be.
+    let terms_state = authority.and_then(|authority| authority.payment_terms_state(state));
+    let state = terms_state.as_ref().unwrap_or(state);
     if !residual
         .as_ref()
         .is_none_or(|cost| cost.is_payable(state, player, object_id))
@@ -28015,8 +28284,14 @@ fn quantity_ref_is_board_state_relative(qty: &QuantityRef) -> bool {
                         relative &= !filter_references_target_player(filter);
                     }
                     CardTypeSetSource::Zone { .. } => {}
+                    // A member filter narrows the set; it cannot make a
+                    // look-back population target-relative. CR 608.2c +
+                    // CR 115.1: `TargetedObjects` joins this arm — its
+                    // announcement-bound members are look-back by identity
+                    // (live read with LKI fallback), never board-relative.
                     CardTypeSetSource::ExiledBySource
                     | CardTypeSetSource::TrackedSet { .. }
+                    | CardTypeSetSource::TargetedObjects { .. }
                     | CardTypeSetSource::TurnJournal { .. }
                     | CardTypeSetSource::AnyOf { .. } => relative = false,
                 },
@@ -31943,9 +32218,18 @@ fn card_type_set_source_reads_chosen_target(source: &CardTypeSetSource, read: Ta
         CardTypeSetSource::AnyOf { sources } => sources
             .iter()
             .any(|x| card_type_set_source_reads_chosen_target(x, read)),
-        CardTypeSetSource::Zone { .. }
-        | CardTypeSetSource::ExiledBySource
-        | CardTypeSetSource::TrackedSet { .. } => false,
+        CardTypeSetSource::TrackedSet { filter, .. } => filter
+            .as_ref()
+            .is_some_and(|x| target_filter_reads_chosen_target(x, read)),
+        CardTypeSetSource::Zone { .. } | CardTypeSetSource::ExiledBySource => false,
+        // CR 608.2c + CR 115.1: a targeted-objects population reads the
+        // ability's chosen targets, so it reads a chosen target by
+        // definition — routed through the single `targeted_objects_filter`
+        // authority rather than answered as a constant.
+        CardTypeSetSource::TargetedObjects { slot } => target_filter_reads_chosen_target(
+            &CardTypeSetSource::targeted_objects_filter(slot),
+            read,
+        ),
     }
 }
 
@@ -35224,6 +35508,7 @@ mod castable_zone_authority_tests {
                 reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
                 success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                 delayed_trigger_receipts: Vec::new(),
+                indicated_action: None,
             });
         }
         assert!(

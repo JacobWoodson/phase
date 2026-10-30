@@ -11623,6 +11623,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
                 chooser: Chooser::Controller.into(),
                 candidate_source: ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: true,
                 selection: CardSelectionMode::Chosen,
                 constraint: Some(ChooseFromZoneConstraint::DistinctCardTypes {
@@ -13607,6 +13608,9 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             enters_with_counter: Some(CounterType::Finality),
             required_cast_keyword: None,
             pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
+            cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+            mana_spend_permission: None,
+            enters_modifications: Default::default(),
         });
         let parsed = crate::parser::oracle::ParsedAbilities {
             abilities: Vec::new(),
@@ -13694,6 +13698,9 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             enters_with_counter: Some(CounterType::Finality),
             required_cast_keyword: None,
             pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
+            cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+            mana_spend_permission: None,
+            enters_modifications: Default::default(),
         });
         let parsed = crate::parser::oracle::ParsedAbilities {
             abilities: Vec::new(),
@@ -15591,6 +15598,9 @@ mod detect_condition_if_replacement_exemption_tests {
             enters_with_counter: Some(CounterType::Finality),
             required_cast_keyword: None,
             pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
+            cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+            mana_spend_permission: None,
+            enters_modifications: Default::default(),
         });
         let parsed = crate::parser::oracle::ParsedAbilities {
             abilities: Vec::new(),
@@ -15723,7 +15733,7 @@ mod detect_condition_if_replacement_exemption_tests {
         parsed_with_abilities(vec![host])
     }
 
-    /// The Tomb-of-Aclazotz depth-1 shape: the gains rider nested under the
+    /// The compound-rider depth-1 shape: the gains rider nested under the
     /// counter rider (`CastFromZone` → `AddPendingETBCounters` → APEM), the
     /// chain `cast_from_zone_enters_with_modifications` walks transitively.
     fn parsed_with_nested_gains_rider_carrier() -> ParsedAbilities {
@@ -15977,11 +15987,11 @@ mod detect_condition_if_replacement_exemption_tests {
         );
     }
 
-    /// CR 608.2c + CR 611.2a: the delivering walk is TRANSITIVE. The Tomb of
-    /// Aclazotz shape nests the gains rider under the counter rider
+    /// CR 608.2c + CR 611.2a: the delivering walk is TRANSITIVE. The
+    /// compound-rider shape nests the gains rider under the counter rider
     /// (`CastFromZone` → `AddPendingETBCounters` → APEM), which the runtime
     /// `cast_from_zone_enters_with_modifications` walks at depth 1. A depth-0-only
-    /// chain test would fail this row; the card's own clearance comes from its
+    /// chain test would fail this row; a real card's clearance comes from its
     /// condition slot, so this hand-built fixture is the only discriminator for
     /// transitivity.
     #[test]

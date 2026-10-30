@@ -1261,6 +1261,9 @@ pub fn resolve(
                     success_action:
                         crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                     delayed_trigger_receipts: Vec::new(),
+                    // CR 603.2h + CR 601.2i: carried to the commit; spent only if the spell becomes cast.
+                    indicated_action: crate::game::triggers::indicated_action_for(ability)
+                        .map(Box::new),
                 },
             },
         };
@@ -2219,6 +2222,9 @@ fn cast_stack_spell_copy_during_resolution(
     copy_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    // CR 603.2h: the lowering guard admits no cast indicated action that takes this
+    // route, which has no CR 601.2i commit carrier.
+    debug_assert!(crate::game::triggers::indicated_action_for(ability).is_none());
     let Some(obj) = state.objects.get(&copy_id).cloned() else {
         return Err(EffectError::InvalidParam(format!(
             "stack spell copy {copy_id:?} not found"
@@ -2357,6 +2363,8 @@ fn resolution_cast_request_for_single_target(
         reject_action,
         success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
         delayed_trigger_receipts: Vec::new(),
+        // CR 603.2h + CR 601.2i: carried to the commit; spent only if the spell becomes cast.
+        indicated_action: crate::game::triggers::indicated_action_for(ability).map(Box::new),
     };
     let graveyard_replacement = cast_from_zone_graveyard_destination(ability);
     // CR 608.2c + CR 611.2a: the gains-modifications rider (Strago and Relm's
@@ -2534,7 +2542,7 @@ fn cast_from_zone_graveyard_destination(
         .and_then(|s| graveyard_destination_rider(&s.effect, s.condition.as_ref()))
 }
 
-/// CR 614.1c + CR 122.1: Osteomancer Adept / The Tomb of Aclazotz class — the
+/// CR 614.1c + CR 122.1: Osteomancer Adept class — the
 /// parser represents "the creature cast this way enters with a [counter] counter
 /// on it" as a sequential `AddPendingETBCounters` rider on `CastFromZone`. The
 /// rider's target is the *future* spell cast via the granted permission, not the
@@ -2615,11 +2623,11 @@ fn cast_from_zone_enters_with_counter(
     }
 }
 
-/// CR 205.1b + CR 613.1d: The Tomb of Aclazotz class — extract the enters-with
+/// CR 205.1b + CR 613.1d: extract the enters-with
 /// continuous modifications ("… is a Vampire in addition to its other types")
 /// the cast-this-way creature gains. The `AddPendingEntersModifications` rider
 /// sits at depth 0 (a type-only grant, `CastFromZone.sub_ability`) or depth 1
-/// (nested under the enters-with-counter rider, as Tomb produces: the counter
+/// (nested under the enters-with-counter rider: the counter
 /// clause's own `sub_ability`). Walks the sub-ability chain and returns the
 /// first rider's modifications, or an empty `Vec` if none is present. Consumed
 /// as permission metadata (never resolved in place), mirroring
@@ -2671,6 +2679,9 @@ pub(crate) fn grant_lingering_permissions(
     target_ids: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<LingeringPermissionGrantResult, EffectError> {
+    // CR 603.2h: the lowering guard admits no cast indicated action that takes this
+    // route, which has no CR 601.2i commit carrier.
+    debug_assert!(crate::game::triggers::indicated_action_for(ability).is_none());
     let mut in_place_ids = Vec::new();
     let mut exile_delivery_ids = Vec::new();
     for &obj_id in target_ids {
@@ -2757,12 +2768,12 @@ fn record_lingering_permissions(
     // CR 614.1c + CR 122.1: "the creature cast this way enters with a [counter]
     // counter on it" — recorded on the granted permission so the cast
     // finalization (`casting_costs::finalize`) registers a pending ETB counter
-    // on the cast object (Osteomancer Adept, The Tomb of Aclazotz).
+    // on the cast object (Osteomancer Adept's rider shape).
     let enters_with_counter = cast_from_zone_enters_with_counter(ability);
     // CR 205.1b + CR 613.1d: "… is a [type] in addition to its other types" —
     // the additive type grant recorded on the granted permission so the cast
     // finalization applies it as a Permanent continuous effect on the cast
-    // object (The Tomb of Aclazotz).
+    // object.
     let enters_with_modifications = cast_from_zone_enters_with_modifications(ability);
 
     // CR 611.2b: set when a host-bound lifetime was attached below.
