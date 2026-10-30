@@ -12562,6 +12562,9 @@ pub fn latched_doubler_scope_plan(filter: &TargetFilter) -> Option<LatchedScopeP
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        // Archenemy attack-owner rider: names no one player (per-member
+        // force_attack fan-out only), so the latched capture can't judge it.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::AllPlayers => return None,
     })
@@ -19693,6 +19696,20 @@ pub mod tests {
         );
         assert_eq!(
             latched_doubler_scope(&state, &watcher, &live, &doubler),
+            None
+        );
+        // The Archenemy attack-owner rider names no one player (a per-member
+        // force_attack fan-out), so the latched capture can't judge it either.
+        assert!(!latched_doubler_scope_is_judged(
+            &TargetFilter::AffectedObjectOwner
+        ));
+        assert_eq!(
+            latched_doubler_scope(
+                &state,
+                &watcher,
+                &TargetFilter::AffectedObjectOwner,
+                &doubler
+            ),
             None
         );
     }
