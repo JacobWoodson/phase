@@ -35,6 +35,7 @@
 //!    and priority returns to the Horde with an empty stack, until the counter
 //!    reaches zero.
 
+use crate::game::effects::change_zone::{execute_zone_move, ZoneMoveResult};
 use crate::game::effects::token::apply_create_token_after_replacement;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
@@ -567,6 +568,12 @@ fn reveal_and_resolve_top_card(
     horde: PlayerId,
     events: &mut Vec<GameEvent>,
 ) -> RevealOutcome {
+    // Resume a reveal parked mid-move by a CR 616.1 replacement choice. This
+    // runs BEFORE the budget gate: the budget was already consumed for the
+    // parked card, and the tail below must run even when nothing remains.
+    if let Some(pending) = state.pending_horde_reveal.take() {
+        return resume_pending_horde_reveal(state, horde, *pending, events);
+    }
     // Wave budget exhausted (e.g. after the last card was a token that
     // decremented the counter to zero) — stop cleanly.
     if state.horde_wave_remaining == 0 {
@@ -640,13 +647,65 @@ fn reveal_and_resolve_top_card(
     // through the single free-cast authority (`cast_from_zone::resolve`'s
     // `driver_free_cast` gate, CR 608.2g), which casts from the card's current
     // (exile) zone at zero cost. X-cost nontokens resolve at X = 0 (CR 601.2b),
-    // exactly like Cascade/Discover.
-    crate::game::zones::move_to_zone(state, card_id, Zone::Exile, events);
+    // exactly like Cascade/Discover. The exile runs the full zone-change
+    // pipeline so replacements consult (Cascade's own shape — the card
+    // attributes its own wave move; a turn-based action has no ability
+    // source). A CR 616.1 choice parks the reveal in `pending_horde_reveal`
+    // for the resume above.
+    match execute_zone_move(
+        state,
+        card_id,
+        Zone::Library,
+        Zone::Exile,
+        card_id,
+        None,
+        false,
+        EtbTapState::Unspecified,
+        false,
+        None,
+        &[],
+        None,
+        false,
+        None,
+        None,
+        events,
+    ) {
+        ZoneMoveResult::Done => {}
+        ZoneMoveResult::NeedsChoice(player) => {
+            state.pending_horde_reveal = Some(Box::new(
+                crate::types::game_state::PendingHordeReveal::NontokenCast {
+                    card: card_id,
+                    revealed_rarity,
+                },
+            ));
+            state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
+            return RevealOutcome::Pause(Box::new(state.waiting_for.clone()));
+        }
+        // Non-battlefield destination: no Aura attachment choice can arise.
+        ZoneMoveResult::NeedsAuraAttachmentChoice => {
+            debug_assert!(false, "wave exile cannot need an attach choice");
+            return RevealOutcome::Done;
+        }
+    }
     if state.objects.get(&card_id).map(|o| o.zone) != Some(Zone::Exile) {
         // A replacement effect redirected the reveal; do not attempt to cast.
         return RevealOutcome::Done;
     }
 
+    cast_revealed_nontoken(state, horde, card_id, revealed_rarity, events)
+}
+
+/// Free-cast a revealed nontoken already in exile through the Cascade/Discover
+/// authority, then apply the wave quota + end-of-wave policy. Shared by the
+/// reveal path and the post-replacement resume — both reach here only with
+/// the card verified in exile.
+fn cast_revealed_nontoken(
+    state: &mut GameState,
+    horde: PlayerId,
+    card_id: ObjectId,
+    revealed_rarity: Option<Rarity>,
+    events: &mut Vec<GameEvent>,
+) -> RevealOutcome {
     let ability = free_cast_ability(card_id, horde);
     match crate::game::effects::cast_from_zone::resolve(state, &ability, events) {
         Ok(()) => {
@@ -673,6 +732,40 @@ fn reveal_and_resolve_top_card(
     }
 }
 
+/// Resume a wave reveal parked mid-move by a CR 616.1 replacement choice. The
+/// choice has resolved and the pipeline has delivered (or redirected) the
+/// move; run only the parked tail — never consume budget or reveal again.
+fn resume_pending_horde_reveal(
+    state: &mut GameState,
+    horde: PlayerId,
+    pending: crate::types::game_state::PendingHordeReveal,
+    events: &mut Vec<GameEvent>,
+) -> RevealOutcome {
+    use crate::types::game_state::PendingHordeReveal;
+    match pending {
+        PendingHordeReveal::NontokenCast {
+            card,
+            revealed_rarity,
+        } => {
+            if state.objects.get(&card).map(|o| o.zone) != Some(Zone::Exile) {
+                // A replacement effect redirected the reveal; do not attempt to cast.
+                return RevealOutcome::Done;
+            }
+            cast_revealed_nontoken(state, horde, card, revealed_rarity, events)
+        }
+        PendingHordeReveal::EventDispatch { card, fired } => {
+            // The one-shot fires from wherever the pipeline delivered the
+            // Event: pile redirection changes only where it lands.
+            match crate::game::boss::resolve_boss_event(state, horde, card, &fired, 0, events) {
+                crate::game::boss::HeroEventProgress::Settled => RevealOutcome::Continue,
+                crate::game::boss::HeroEventProgress::Prompted => {
+                    RevealOutcome::Pause(Box::new(state.waiting_for.clone()))
+                }
+            }
+        }
+    }
+}
+
 /// Turtle Team-Up: resolve a revealed Event. Banked Baxters fire on every
 /// reveal (Baxter's Experiments itself included — it is an Event), so the
 /// bank drains first and rides the dispatch as `fired`. The Event moves to
@@ -688,13 +781,57 @@ fn resolve_revealed_event(
     events: &mut Vec<GameEvent>,
 ) -> crate::game::boss::HeroEventProgress {
     let fired = std::mem::take(&mut state.baxter_set_aside);
-    if crate::game::boss::boss_name(state, card_id)
+    // The Event moves to its pile through the full zone-change pipeline so
+    // replacements consult (a graveyard-replacement exiles would-be discards);
+    // a CR 616.1 choice parks the dispatch in `pending_horde_reveal` for the
+    // wave resume. Baxter's Experiments banks in exile for a later event to
+    // fire; every other Event goes to the Boss graveyard (the event discard
+    // pile). The Event attributes its own pile move; a turn-based action has
+    // no ability source.
+    let dest = if crate::game::boss::boss_name(state, card_id)
         .is_some_and(|name| name == "Event: Baxter's Experiments")
     {
-        crate::game::zones::move_to_zone(state, card_id, Zone::Exile, events);
+        Zone::Exile
     } else {
-        crate::game::zones::move_to_zone(state, card_id, Zone::Graveyard, events);
+        Zone::Graveyard
+    };
+    match execute_zone_move(
+        state,
+        card_id,
+        Zone::Library,
+        dest,
+        card_id,
+        None,
+        false,
+        EtbTapState::Unspecified,
+        false,
+        None,
+        &[],
+        None,
+        false,
+        None,
+        None,
+        events,
+    ) {
+        ZoneMoveResult::Done => {}
+        ZoneMoveResult::NeedsChoice(player) => {
+            state.pending_horde_reveal = Some(Box::new(
+                crate::types::game_state::PendingHordeReveal::EventDispatch {
+                    card: card_id,
+                    fired: fired.clone(),
+                },
+            ));
+            state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
+            return crate::game::boss::HeroEventProgress::Prompted;
+        }
+        // Non-battlefield destination: no Aura attachment choice can arise.
+        ZoneMoveResult::NeedsAuraAttachmentChoice => {
+            debug_assert!(false, "event pile move cannot need an attach choice");
+            return crate::game::boss::HeroEventProgress::Settled;
+        }
     }
+    // The one-shot fires from wherever the pipeline delivered the Event (see
+    // the resume path): pile redirection changes only where it lands.
     crate::game::boss::resolve_boss_event(state, horde, card_id, &fired, 0, events)
 }
 
@@ -2320,5 +2457,353 @@ mod tests {
         );
         state.active_player = PlayerId(2);
         assert_eq!(active_horde_seat(&state), None, "not a Horde turn");
+    }
+
+    /// Wave-reveal test game: Cyberman Horde, FixedCount wave, budget seeded,
+    /// with the Horde seat active so the wave driver engages.
+    fn wave_test_game(wave: u32) -> (GameState, PlayerId) {
+        let mut ruleset = ChallengeDeck::CybermanHorde.default_ruleset();
+        ruleset.wave = WaveTermination::FixedCount(wave);
+        let mut state = GameState::new(FormatConfig::horde(ruleset), 2, 42);
+        let horde = horde_seat(&state).expect("horde seat");
+        state.active_player = horde;
+        state.horde_wave_remaining = wave;
+        (state, horde)
+    }
+
+    /// Vanilla castable 2/2 nontoken creature on `owner`'s library.
+    fn add_wave_creature(state: &mut GameState, owner: PlayerId, name: &str) -> ObjectId {
+        use crate::game::zones::create_object;
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::ManaCost;
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            name.to_string(),
+            Zone::Library,
+        );
+        let obj = state.objects.get_mut(&id).expect("created");
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![],
+            generic: 2,
+        };
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        obj.base_power = Some(2);
+        obj.base_toughness = Some(2);
+        id
+    }
+
+    /// Battlefield replacement source redirecting `card`'s moves destined for
+    /// `from_dest` to `to`. `optional` selects Optional defs (accept = 0,
+    /// decline = 1); otherwise Mandatory defs. One def applies silently
+    /// (Mandatory) or pauses alone (Optional); two force a CR 616.1 ordering
+    /// pause.
+    fn redirect_source(
+        state: &mut GameState,
+        owner: PlayerId,
+        card: ObjectId,
+        from_dest: Zone,
+        to: Zone,
+        optional: bool,
+        copies: usize,
+    ) {
+        use crate::game::zones::create_object;
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, ReplacementMode,
+        };
+        use crate::types::identifiers::CardId;
+        use crate::types::replacements::ReplacementEvent;
+        let source = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            "Redirector".to_string(),
+            Zone::Battlefield,
+        );
+        let def = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: to,
+                    target: TargetFilter::Any,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            ))
+            .destination_zone(from_dest)
+            .valid_card(TargetFilter::SpecificObject { id: card });
+        let def = if optional {
+            def.mode(ReplacementMode::Optional { decline: None })
+        } else {
+            def
+        };
+        let obj = state.objects.get_mut(&source).expect("source");
+        for _ in 0..copies {
+            obj.replacement_definitions.push(def.clone());
+        }
+    }
+
+    /// A CR 616.1 pause on the nontoken reveal exile parks the reveal; after
+    /// the choice declines the redirect, the wave resumes and casts the card
+    /// for free. Revert guard: the raw mover never prompts, so the
+    /// ReplacementChoice assertion fails without the pipeline.
+    #[test]
+    fn wave_reveal_pause_for_choice_resumes_to_cast_after_decline() {
+        use crate::types::actions::GameAction;
+        let (mut state, horde) = wave_test_game(2);
+        let card = add_wave_creature(&mut state, horde, "Wave Bear");
+        state.players[horde.0 as usize].library = crate::im::vector![card];
+        redirect_source(
+            &mut state,
+            horde,
+            card,
+            Zone::Exile,
+            Zone::Graveyard,
+            true,
+            1,
+        );
+
+        let mut events = Vec::new();
+        let paused = maybe_reveal_next(&mut state, &mut events);
+        assert!(
+            matches!(paused, Some(WaitingFor::ReplacementChoice { .. })),
+            "the Optional redirect must pause the reveal, got {paused:?}"
+        );
+        assert!(
+            matches!(
+                state.pending_horde_reveal.as_deref(),
+                Some(crate::types::game_state::PendingHordeReveal::NontokenCast {
+                    card: pending,
+                    ..
+                }) if *pending == card
+            ),
+            "the parked card must ride the pending record"
+        );
+        assert_eq!(state.horde_wave_remaining, 1, "budget consumed once");
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseReplacement { index: 1 },
+        )
+        .expect("decline the redirect");
+        let resumed = maybe_reveal_next(&mut state, &mut events);
+        assert!(
+            state.pending_horde_reveal.is_none(),
+            "resume drains the record"
+        );
+        assert!(
+            !matches!(resumed, Some(WaitingFor::ReplacementChoice { .. })),
+            "no second prompt after the choice resolves"
+        );
+        assert_eq!(
+            state.objects.get(&card).map(|o| o.zone),
+            Some(Zone::Stack),
+            "the declined redirect casts the card for free"
+        );
+        assert_eq!(
+            state.horde_wave_remaining, 1,
+            "resume spends no fresh budget"
+        );
+    }
+
+    /// Accepting the redirect on a nontoken reveal sends the card to the
+    /// replacement zone and ends the wave without casting.
+    #[test]
+    fn wave_reveal_pause_for_choice_redirect_accept_skips_cast() {
+        use crate::types::actions::GameAction;
+        let (mut state, horde) = wave_test_game(2);
+        let card = add_wave_creature(&mut state, horde, "Wave Bear");
+        state.players[horde.0 as usize].library = crate::im::vector![card];
+        redirect_source(
+            &mut state,
+            horde,
+            card,
+            Zone::Exile,
+            Zone::Graveyard,
+            true,
+            1,
+        );
+
+        let mut events = Vec::new();
+        let paused = maybe_reveal_next(&mut state, &mut events);
+        assert!(
+            matches!(paused, Some(WaitingFor::ReplacementChoice { .. })),
+            "the Optional redirect must pause the reveal, got {paused:?}"
+        );
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseReplacement { index: 0 },
+        )
+        .expect("accept the redirect");
+        let resumed = maybe_reveal_next(&mut state, &mut events);
+        assert!(resumed.is_none(), "a redirected reveal ends the wave");
+        assert!(
+            state.pending_horde_reveal.is_none(),
+            "resume drains the record"
+        );
+        assert_eq!(
+            state.objects.get(&card).map(|o| o.zone),
+            Some(Zone::Graveyard),
+            "the accepted redirect moves the card instead of casting it"
+        );
+        assert!(state.stack.is_empty(), "nothing is cast after a redirect");
+    }
+
+    /// A lone mandatory replacement applies silently (no pause): the nontoken
+    /// reveal lands in the replacement zone and the wave ends without casting.
+    /// This is the Rest-in-Peace shape the raw mover ignored.
+    #[test]
+    fn wave_reveal_single_mandatory_redirect_applies_without_pause() {
+        let (mut state, horde) = wave_test_game(2);
+        let card = add_wave_creature(&mut state, horde, "Wave Bear");
+        state.players[horde.0 as usize].library = crate::im::vector![card];
+        redirect_source(
+            &mut state,
+            horde,
+            card,
+            Zone::Exile,
+            Zone::Graveyard,
+            false,
+            1,
+        );
+
+        let mut events = Vec::new();
+        let outcome = maybe_reveal_next(&mut state, &mut events);
+        assert!(
+            outcome.is_none(),
+            "one mandatory replacement applies silently, got {outcome:?}"
+        );
+        assert!(state.pending_horde_reveal.is_none(), "no pause, no record");
+        assert_eq!(
+            state.objects.get(&card).map(|o| o.zone),
+            Some(Zone::Graveyard),
+            "the silent redirect moves the card instead of casting it"
+        );
+        assert!(state.stack.is_empty(), "nothing is cast after a redirect");
+    }
+
+    /// Two matching mandatory replacements pause for CR 616.1 ordering; after
+    /// the order is chosen the redirect applies and the wave ends uncast.
+    #[test]
+    fn wave_reveal_ordering_choice_applies_redirect_after_answer() {
+        use crate::types::actions::GameAction;
+        let (mut state, horde) = wave_test_game(2);
+        let card = add_wave_creature(&mut state, horde, "Wave Bear");
+        state.players[horde.0 as usize].library = crate::im::vector![card];
+        redirect_source(
+            &mut state,
+            horde,
+            card,
+            Zone::Exile,
+            Zone::Graveyard,
+            false,
+            2,
+        );
+
+        let mut events = Vec::new();
+        let paused = maybe_reveal_next(&mut state, &mut events);
+        assert!(
+            matches!(paused, Some(WaitingFor::ReplacementChoice { .. })),
+            "two matching replacements must pause for ordering, got {paused:?}"
+        );
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseReplacement { index: 0 },
+        )
+        .expect("choose the first replacement");
+        let resumed = maybe_reveal_next(&mut state, &mut events);
+        assert!(resumed.is_none(), "a redirected reveal ends the wave");
+        assert!(
+            state.pending_horde_reveal.is_none(),
+            "resume drains the record"
+        );
+        assert_eq!(
+            state.objects.get(&card).map(|o| o.zone),
+            Some(Zone::Graveyard),
+            "the ordered redirect moves the card instead of casting it"
+        );
+        assert!(state.stack.is_empty(), "nothing is cast after a redirect");
+    }
+
+    /// A lone mandatory graveyard replacement exiles a would-be discarded
+    /// Event silently, and the dispatch still runs from exile: Karai's
+    /// Planning drains each hero for 3 and feeds the Bosses.
+    #[test]
+    fn revealed_event_discard_consults_replacements_and_dispatches() {
+        use crate::database::card_db::CardDatabase;
+        use crate::game::deck_loading::load_horde_library;
+        let ruleset = ChallengeDeck::TurtleTeamUpHorde.default_ruleset();
+        let mut state = GameState::new(FormatConfig::horde(ruleset), 2, 42);
+        let horde = horde_seat(&state).expect("horde seat");
+        state.active_player = horde;
+        load_horde_library(
+            &mut state,
+            &CardDatabase::default(),
+            horde,
+            ChallengeDeck::TurtleTeamUpHorde,
+        );
+        let event = state.players[horde.0 as usize]
+            .library
+            .iter()
+            .copied()
+            .find(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|o| o.name == "Event: Karai's Planning")
+            })
+            .expect("the event deck holds Karai's Planning");
+        state.players[horde.0 as usize].library = crate::im::vector![event];
+        state.horde_wave_remaining = 1;
+        redirect_source(
+            &mut state,
+            horde,
+            event,
+            Zone::Graveyard,
+            Zone::Exile,
+            false,
+            1,
+        );
+        let hero = PlayerId(1);
+        let hero_life = state.players[hero.0 as usize].life;
+        let boss_life = state.players[horde.0 as usize].life;
+
+        let mut events = Vec::new();
+        let outcome = maybe_reveal_next(&mut state, &mut events);
+        assert!(
+            outcome.is_none(),
+            "one mandatory replacement applies silently, got {outcome:?}"
+        );
+        assert_eq!(
+            state.objects.get(&event).map(|o| o.zone),
+            Some(Zone::Exile),
+            "the graveyard replacement exiles the would-be discard"
+        );
+        assert_eq!(
+            state.players[hero.0 as usize].life,
+            hero_life - 3,
+            "the dispatched Planning still drains each hero"
+        );
+        assert_eq!(
+            state.players[horde.0 as usize].life,
+            boss_life + 3,
+            "the dispatched Planning still feeds the Bosses"
+        );
     }
 }

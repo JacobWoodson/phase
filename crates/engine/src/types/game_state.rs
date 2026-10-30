@@ -16383,6 +16383,37 @@ pub enum HeroEventApplyStep {
     Bounce { card: ObjectId },
 }
 
+/// A Horde wave reveal parked mid-move by a CR 616.1 replacement choice,
+/// resumed at the top of `horde::reveal_and_resolve_top_card` when the
+/// priority re-entry seam re-invokes the wave after the choice resolves.
+/// The wave budget was already consumed for the parked card, so the resume
+/// runs only the post-move tail (free-cast or Event dispatch) and never
+/// reveals again. Populated only during the pause.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PendingHordeReveal {
+    /// Nontoken wave reveal: the library→exile move paused. Resume casts the
+    /// card for free when it reached exile, else ends the wave (redirected
+    /// reveals are not cast — the standing wave policy).
+    NontokenCast {
+        /// The revealed card, mid-move to exile.
+        card: ObjectId,
+        /// Library rarity captured before the move, for the
+        /// `UntilRarityAtLeast` end-of-wave check.
+        revealed_rarity: Option<crate::types::card::Rarity>,
+    },
+    /// Revealed Event: the move out of the library paused. Resume dispatches
+    /// the Event from wherever the pipeline delivered it: the one-shot is
+    /// the Event's resolution (product order is resolve-then-discard), so a
+    /// redirected pile move changes only where the Event lands, never
+    /// whether it fires.
+    EventDispatch {
+        /// The revealed Event, mid-move out of the library.
+        card: ObjectId,
+        /// Banked Baxters taken before the move; they ride the dispatch.
+        fired: Vec<ObjectId>,
+    },
+}
+
 /// A hero-choice batch parked mid-application by a nested replacement prompt,
 /// resumed by `boss::drain_pending_hero_event` through the same
 /// post-replacement funnel as `pending_discard_batch` (arbitrary re-pauses
@@ -24366,6 +24397,14 @@ declare_game_state! {
     /// `boss::drain_pending_hero_event` through the post-replacement funnel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_hero_event: Option<Box<PendingHeroEvent>>,
+    /// Horde Magic: a wave reveal parked mid-move by a CR 616.1 replacement
+    /// choice. Boxed like its `pending_hero_event` sibling — `GameState`
+    /// moves by value under a hard stack budget, so a parked record rides
+    /// behind a box. Populated only during the pause; drained at the top of
+    /// `horde::reveal_and_resolve_top_card` when the priority re-entry seam
+    /// re-invokes the wave after the choice resolves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_horde_reveal: Option<Box<PendingHordeReveal>>,
     /// CR 608.2c + CR 616.1: Progress for a replacement-suspended exile loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_exile_from_top_until: Option<Box<PendingExileFromTopUntil>>,
@@ -32394,6 +32433,7 @@ impl GameState {
             pending_player_scope_unless_payment: None,
             pending_discard_batch: None,
             pending_hero_event: None,
+            pending_horde_reveal: None,
             pending_exile_from_top_until: None,
             pending_mass_library_order_choice: None,
             pending_scoped_library_search: None,
@@ -35798,6 +35838,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_player_scope_unless_payment: _,
         pending_discard_batch: _,
         pending_hero_event: _,
+        pending_horde_reveal: _,
         pending_exile_from_top_until: _,
         pending_mass_library_order_choice: _,
         pending_scoped_library_search: _,

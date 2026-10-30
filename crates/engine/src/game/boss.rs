@@ -22,6 +22,7 @@
 //! command-zone card types — plus the Event one-shot dispatch the Horde wave
 //! loop consults on each reveal.
 
+use crate::game::effects::change_zone::{execute_zone_move, ZoneMoveResult};
 use crate::game::game_object::GameObject;
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{
@@ -848,10 +849,10 @@ fn apply_event_steps(
     copies: u32,
     events: &mut Vec<crate::types::events::GameEvent>,
 ) -> HeroEventProgress {
-    if !fired.is_empty() {
-        steps.push(HeroEventApplyStep::DiscardFiredBaxters {
-            cards: fired.to_vec(),
-        });
+    // One step per Baxter: a CR 616.1 pause mid-list must park the remainder
+    // as steps — the stepper can only suspend BETWEEN steps, not inside one.
+    for card in fired {
+        steps.push(HeroEventApplyStep::DiscardFiredBaxters { cards: vec![*card] });
     }
     apply_hero_event_steps(state, horde, event_id, steps, copies, events)
 }
@@ -1406,10 +1407,9 @@ fn finish_hero_event(
     events: &mut Vec<crate::types::events::GameEvent>,
 ) -> HeroEventProgress {
     let mut steps = build_answer_steps(state, horde, &kind, &answers);
-    if !fired_baxters.is_empty() {
-        steps.push(HeroEventApplyStep::DiscardFiredBaxters {
-            cards: fired_baxters,
-        });
+    // One step per Baxter (see `apply_event_steps`): pauses park BETWEEN steps.
+    for card in fired_baxters {
+        steps.push(HeroEventApplyStep::DiscardFiredBaxters { cards: vec![card] });
     }
     apply_hero_event_steps(state, horde, event_id, steps, copies_pending, events)
 }
@@ -1635,7 +1635,51 @@ fn apply_one_hero_event_step(
             }
         }
         HeroEventApplyStep::ZoneMove { card, dest } => {
-            crate::game::zones::move_to_zone(state, *card, *dest, events);
+            // The Event-caused move runs the full zone-change pipeline so
+            // replacements consult (entry replacements for Battlefield
+            // reanimation, graveyard replacements for discards). A CR 616.1
+            // choice sets the replacement prompt; the stepper's park detector
+            // suspends the remaining steps and the post-replacement funnel
+            // drains them. The Event attributes the move.
+            let Some(from) = state.objects.get(card).map(|o| o.zone) else {
+                // Built from live objects; a missing card means an earlier
+                // step consumed it — nothing to move.
+                return;
+            };
+            if from == *dest {
+                // Already there: a same-zone "move" is a non-event — no
+                // prompt, no delivery.
+                return;
+            }
+            match execute_zone_move(
+                state,
+                *card,
+                from,
+                *dest,
+                event_id,
+                None,
+                false,
+                crate::types::zones::EtbTapState::Unspecified,
+                false,
+                None,
+                &[],
+                None,
+                false,
+                None,
+                None,
+                events,
+            ) {
+                ZoneMoveResult::Done => {}
+                ZoneMoveResult::NeedsChoice(player) => {
+                    state.waiting_for =
+                        crate::game::replacement::replacement_choice_waiting_for(player, state);
+                }
+                // ZoneMove producers move non-Aura cards (Ninjas, Events);
+                // no Aura attachment choice can arise.
+                ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                    debug_assert!(false, "event ZoneMove cannot need an attach choice");
+                }
+            }
         }
         HeroEventApplyStep::ShuffleLibrary { player } => {
             let GameState { players, rng, .. } = state;
@@ -1645,8 +1689,54 @@ fn apply_one_hero_event_step(
             }
         }
         HeroEventApplyStep::DiscardFiredBaxters { cards } => {
+            // Single-card invariant (both producers emit one step per
+            // Baxter): a pause must leave the remainder as PARKED steps, and
+            // cards inside this step would be dropped instead.
+            debug_assert!(
+                cards.len() <= 1,
+                "DiscardFiredBaxters carries at most one card per step"
+            );
             for card in cards {
-                crate::game::zones::move_to_zone(state, *card, Zone::Graveyard, events);
+                let Some(from) = state.objects.get(card).map(|o| o.zone) else {
+                    // A banked Baxter that left exile under an earlier step
+                    // has nothing to discard.
+                    continue;
+                };
+                if from == Zone::Graveyard {
+                    // Already discarded (e.g. a redirected bank): a same-zone
+                    // "move" is a non-event — no prompt, no delivery.
+                    continue;
+                }
+                match execute_zone_move(
+                    state,
+                    *card,
+                    from,
+                    Zone::Graveyard,
+                    event_id,
+                    None,
+                    false,
+                    crate::types::zones::EtbTapState::Unspecified,
+                    false,
+                    None,
+                    &[],
+                    None,
+                    false,
+                    None,
+                    None,
+                    events,
+                ) {
+                    ZoneMoveResult::Done => {}
+                    ZoneMoveResult::NeedsChoice(player) => {
+                        state.waiting_for =
+                            crate::game::replacement::replacement_choice_waiting_for(player, state);
+                        break;
+                    }
+                    // Graveyard destination: no Aura attachment choice can arise.
+                    ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                        debug_assert!(false, "baxter discard cannot need an attach choice");
+                        break;
+                    }
+                }
             }
         }
         HeroEventApplyStep::Tap { card } => {
@@ -2839,5 +2929,210 @@ mod tests {
         );
         assert!(seat.library.contains(&scheme));
         assert!(state.baxter_set_aside.is_empty());
+    }
+
+    /// Battlefield replacement source redirecting `card`'s moves destined for
+    /// `from_dest` to `to`, as one Optional def (accept = 0, decline = 1).
+    fn optional_redirect_source(
+        state: &mut GameState,
+        owner: PlayerId,
+        card: ObjectId,
+        from_dest: Zone,
+        to: Zone,
+    ) {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, ReplacementMode,
+            TargetFilter,
+        };
+        use crate::types::replacements::ReplacementEvent;
+        let source = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            "Redirector".to_string(),
+            Zone::Battlefield,
+        );
+        let def = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: to,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            ))
+            .destination_zone(from_dest)
+            .valid_card(TargetFilter::SpecificObject { id: card })
+            .mode(ReplacementMode::Optional { decline: None });
+        state
+            .objects
+            .get_mut(&source)
+            .expect("source")
+            .replacement_definitions
+            .push(def);
+    }
+
+    /// A CR 616.1 pause on a ZoneMove step parks the remaining steps; after
+    /// the choice declines the redirect, the post-replacement funnel drains
+    /// them and every card lands. Revert guard: the raw mover never prompts,
+    /// so the park assertion fails without the pipeline.
+    #[test]
+    fn hero_event_zonemove_pauses_for_choice_and_resumes_remaining_steps() {
+        use crate::types::actions::GameAction;
+        let (mut state, horde) = turtle_teamup_game(2);
+        let event = move_event_to_predispatch_zone(&mut state, horde, "Event: Villain Scheme!");
+        let first_id = CardId(state.next_object_id);
+        let first = create_object(
+            &mut state,
+            first_id,
+            horde,
+            "Stranded One".to_string(),
+            Zone::Graveyard,
+        );
+        let second_id = CardId(state.next_object_id);
+        let second = create_object(
+            &mut state,
+            second_id,
+            horde,
+            "Stranded Two".to_string(),
+            Zone::Graveyard,
+        );
+        optional_redirect_source(&mut state, horde, first, Zone::Library, Zone::Exile);
+        let steps = vec![
+            HeroEventApplyStep::ZoneMove {
+                card: first,
+                dest: Zone::Library,
+            },
+            HeroEventApplyStep::ZoneMove {
+                card: second,
+                dest: Zone::Library,
+            },
+        ];
+
+        let mut events = Vec::new();
+        let progress = apply_hero_event_steps(&mut state, horde, event, steps, 0, &mut events);
+        assert_eq!(
+            progress,
+            HeroEventProgress::Prompted,
+            "the redirect pauses the batch"
+        );
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "the pause parks a replacement prompt, got {:?}",
+            state.waiting_for
+        );
+        let parked = state
+            .pending_hero_event
+            .as_deref()
+            .expect("parked remainder");
+        assert_eq!(
+            parked.steps,
+            vec![HeroEventApplyStep::ZoneMove {
+                card: second,
+                dest: Zone::Library,
+            }],
+            "only the unapplied step parks"
+        );
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseReplacement { index: 1 },
+        )
+        .expect("decline the redirect");
+        let seat = state
+            .players
+            .iter()
+            .find(|p| p.id == horde)
+            .expect("horde seat");
+        assert!(seat.library.contains(&first), "the first card completes");
+        assert!(
+            seat.library.contains(&second),
+            "the drained step moves the second"
+        );
+        assert!(
+            state.pending_hero_event.is_none(),
+            "the funnel drains the park"
+        );
+    }
+
+    /// Baxter discards apply one step per card, so a CR 616.1 pause on the
+    /// first Baxter parks the second as its own step; declining resumes it.
+    #[test]
+    fn fired_baxter_discard_parks_second_baxter_across_pause() {
+        use crate::types::actions::GameAction;
+        let (mut state, horde) = turtle_teamup_game(2);
+        let event = move_event_to_predispatch_zone(&mut state, horde, "Event: Villain Scheme!");
+        let banked: Vec<ObjectId> = ["Baxter One", "Baxter Two"]
+            .into_iter()
+            .map(|name| {
+                let cid = CardId(state.next_object_id);
+                let id = create_object(&mut state, cid, horde, name.to_string(), Zone::Exile);
+                let obj = state.objects.get_mut(&id).expect("banked");
+                obj.is_token = true;
+                obj.is_horde_deck_token = true;
+                id
+            })
+            .collect();
+        optional_redirect_source(&mut state, horde, banked[0], Zone::Graveyard, Zone::Exile);
+
+        let mut events = Vec::new();
+        let progress = apply_event_steps(
+            &mut state,
+            horde,
+            event,
+            Vec::new(),
+            &banked,
+            0,
+            &mut events,
+        );
+        assert_eq!(
+            progress,
+            HeroEventProgress::Prompted,
+            "the redirect pauses the batch"
+        );
+        let parked = state
+            .pending_hero_event
+            .as_deref()
+            .expect("parked remainder");
+        assert_eq!(
+            parked.steps,
+            vec![HeroEventApplyStep::DiscardFiredBaxters {
+                cards: vec![banked[1]],
+            }],
+            "the second Baxter parks as its own single-card step"
+        );
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseReplacement { index: 1 },
+        )
+        .expect("decline the redirect");
+        let seat = state
+            .players
+            .iter()
+            .find(|p| p.id == horde)
+            .expect("horde seat");
+        assert!(
+            seat.graveyard.contains(&banked[0]),
+            "the first Baxter discards"
+        );
+        assert!(
+            seat.graveyard.contains(&banked[1]),
+            "the drained step discards the second"
+        );
+        assert!(
+            state.pending_hero_event.is_none(),
+            "the funnel drains the park"
+        );
     }
 }
