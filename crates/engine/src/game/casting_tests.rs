@@ -16341,37 +16341,14 @@ fn snuff_out_alt_cost_paid_resolves_destroy_on_chosen_target() {
     ));
 }
 
-// End-to-end variant of the previous test: load Snuff Out from the actual
-// card export so any parser/export drift in `abilities`, `casting_options`,
-// or `condition` shape would surface here.
+// Load Snuff Out from the card database and drive public casting, alternative-cost
+// payment, and priority-based resolution so parser/export drift and announcement
+// carrier lifecycle regressions surface without bypassing action boundaries.
 #[test]
 fn snuff_out_from_card_database_alt_cost_destroys_target() {
-    use std::path::PathBuf;
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("client")
-        .join("public")
-        .join("card-data.json");
-    if !path.exists() {
-        eprintln!(
-            "skipping: {} not found (run ./scripts/gen-card-data.sh)",
-            path.display()
-        );
-        return;
-    }
-    // The full export contains a deserialization quirk on an unrelated card
-    // in some builds. Extract Snuff Out's record directly via jq-style lookup
-    // so this regression test is robust to that.
-    let raw = std::fs::read_to_string(&path).expect("card-data.json readable");
-    let map: serde_json::Map<String, serde_json::Value> =
-        serde_json::from_str(&raw).expect("card-data.json is a JSON object");
-    let snuff_value = map
-        .get("snuff out")
-        .expect("Snuff Out should be in the export keyed by lowercase name");
-    let snuff: crate::types::card::CardFace =
-        serde_json::from_value(snuff_value.clone()).expect("Snuff Out record parses as CardFace");
-    let snuff = &snuff;
+    let snuff = crate::test_support::shared_card_db()
+        .get_face_by_name("Snuff Out")
+        .expect("Snuff Out should be in the card database");
 
     let mut state = setup_game_at_main_phase();
     state.players[0].life = 20;
@@ -16401,19 +16378,22 @@ fn snuff_out_from_card_database_alt_cost_destroys_target() {
         "Nonblack Bear".to_string(),
         Zone::Battlefield,
     );
-    state
-        .objects
-        .get_mut(&target_id)
-        .unwrap()
-        .card_types
-        .core_types
-        .push(CoreType::Creature);
+    // CR 208.5 + CR 704.5f: give the creature positive P/T so zero toughness
+    // cannot move it to the graveyard before Snuff Out resolves.
+    {
+        let target = state.objects.get_mut(&target_id).unwrap();
+        target.card_types.core_types.push(CoreType::Creature);
+        target.power = Some(2);
+        target.toughness = Some(2);
+        target.base_power = Some(2);
+        target.base_toughness = Some(2);
+    }
 
     // Route through the production action boundary (as the hand-built sibling
     // does): targeting now stages announcement events, which requires the
     // boundary's end_action to drain the spell trigger carrier.
     let card_id = state.objects[&spell_id].card_id;
-    crate::game::engine::apply_as_current(
+    apply_as_current(
         &mut state,
         GameAction::CastSpell {
             object_id: spell_id,
@@ -16423,23 +16403,53 @@ fn snuff_out_from_card_database_alt_cost_destroys_target() {
         },
     )
     .expect("Snuff Out should reach the alternative-cost choice");
-    assert!(
-        matches!(
-            state.waiting_for,
-            WaitingFor::OptionalCostChoice {
-                cost: AdditionalCost::Choice(AbilityCost::PayLife { .. }, _),
-                ..
-            }
-        ),
-        "expected pay-life alternative cost prompt, got {:?}",
-        state.waiting_for
+
+    // CR 118.9 + CR 118.9a: offer the printed four-life alternative instead
+    // of the printed mana cost, without replacing the exported casting option.
+    let WaitingFor::OptionalCostChoice {
+        player,
+        cost,
+        pending_cast,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!(
+            "expected pay-life alternative cost prompt, got {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(*player, PlayerId(0));
+    assert_eq!(
+        *cost,
+        AdditionalCost::Choice(
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 4 },
+            },
+            AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![ManaCostShard::Black],
+                    generic: 3,
+                },
+            },
+        )
+    );
+    // CR 601.2c: the pending announcement retains this spell and its one target.
+    assert_eq!(pending_cast.object_id, spell_id);
+    assert_eq!(pending_cast.card_id, card_id);
+    assert_eq!(
+        pending_cast.ability.targets.as_slice(),
+        &[TargetRef::Object(target_id)]
     );
 
-    crate::game::engine::apply_as_current(&mut state, GameAction::DecideOptionalCost { pay: true })
+    apply_as_current(&mut state, GameAction::DecideOptionalCost { pay: true })
         .expect("paying 4 life should commit Snuff Out to the stack");
 
+    // CR 118.3b + CR 601.2h + CR 601.2i: pay four life exactly once and finish
+    // casting the same spell, with priority restored before it resolves.
     assert_eq!(state.players[0].life, 16);
     assert_eq!(state.stack.len(), 1);
+    assert_eq!(state.stack[0].id, spell_id);
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
 
     let StackEntryKind::Spell {
         ability: Some(ability),
@@ -16455,16 +16465,54 @@ fn snuff_out_from_card_database_alt_cost_destroys_target() {
              targets = {:?}",
         ability.targets
     );
+    assert_eq!(
+        ability.targets[0],
+        TargetRef::Object(target_id),
+        "Snuff Out must preserve the exact target through alternative-cost payment"
+    );
+    // CR 117.5 + CR 704.5f: the target survives priority's state-based actions;
+    // its eventual graveyard movement must come from resolving the destroy effect.
+    assert_eq!(state.objects[&target_id].zone, Zone::Battlefield);
+    assert_eq!(state.objects[&target_id].toughness, Some(2));
 
     let mut events = Vec::new();
-    crate::game::stack::resolve_top(&mut state, &mut events);
+    // CR 117.4: resolve only by passing priority through the public action path.
+    for _ in 0..8 {
+        match &state.waiting_for {
+            WaitingFor::Priority { .. } if !state.stack.is_empty() => {
+                let result = apply_as_current(&mut state, GameAction::PassPriority)
+                    .expect("priority should pass until Snuff Out resolves");
+                events.extend(result.events);
+            }
+            WaitingFor::Priority { .. } => break,
+            other => panic!("unexpected prompt while resolving Snuff Out: {other:?}"),
+        }
+    }
 
+    // CR 701.8a + CR 701.8b: destruction moves this creature to its owner's
+    // graveyard and must be attributed to Snuff Out, not zero-toughness cleanup.
     let target_zone = state.objects.get(&target_id).map(|o| o.zone);
     assert_eq!(
         target_zone,
         Some(Zone::Graveyard),
         "Snuff Out should have destroyed the target creature on resolution"
     );
+    assert!(state.players[1].graveyard.contains(&target_id));
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            GameEvent::CreatureDestroyed { object_id, source_id }
+                if *object_id == target_id && *source_id == Some(spell_id)
+        )),
+        "Snuff Out must emit destruction of the exact target with itself as source"
+    );
+    // CR 608.2n: the instant goes to its owner's graveyard after resolution.
+    assert_eq!(state.objects[&spell_id].zone, Zone::Graveyard);
+    assert!(state.players[0].graveyard.contains(&spell_id));
+    assert_eq!(state.players[0].life, 16);
+    // CR 117.5: completion includes settled priority, not merely an empty stack.
+    assert!(state.stack.is_empty());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
 }
 
 /// CR 601.2 + CR 118.9a + CR 903.8 (issue #2000): Dracogenesis lets Dragon
