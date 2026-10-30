@@ -38,7 +38,7 @@ use engine::parser::oracle_static::parse_static_line;
 use engine::types::ability::{
     AbilityCondition, AbilityDefinition, ChosenAttribute, Effect, GameRestriction,
     ProhibitedActivity, ResolvedAbility, RestrictionExpiry, RestrictionPlayerScope,
-    StaticCondition, TargetFilter,
+    StaticCondition, TargetFilter, UnlessPayScaling,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -1121,14 +1121,13 @@ fn jace_non_planeswalker_subtype_scope_stays_unsupported() {
     );
 }
 
-/// Row 9 — static tax shape + runtime (stop-item 2, decision (a) accept+test,
-/// as revised at implementation): the subtype-defended combinator feeds the
-/// static tax path, so a Ghostly-Prison-with-Jaces sentence lowers SUPPORTED
-/// (`CantAttack` + `attack_defended` + `UnlessPay{2}`) and the runtime tax
-/// fires at {2} (unpaid Jace attack fails, paid commits). The non-Jace
-/// scoping leg is a returned stop-item, not pinned here: the combat-tax
-/// path reads only `UnlessPay.defended` (currently `None` for this shape),
-/// so the runtime tax is unscoped pending out-of-scope wiring.
+/// Rows 9/9b — subtype-defended static TAX, scoped end to end (fix round 2,
+/// decision (a)): the subject-led shape lowers SUPPORTED (`CantAttack` +
+/// `attack_defended` + `UnlessPay{2, Flat, defended}`) because the
+/// `:2709` attach stamps `UnlessPay.defended` from `attack_defended`, and the
+/// runtime tax (`compute_combat_tax`) filters by it — unpaid Jace attacks are
+/// taxed (illegal unfunded), paid Jace attacks commit, and unpaid non-Jace /
+/// controller attacks are untaxed (legal with an empty pool).
 ///
 /// Probe text re-derived at implementation from the real Ghostly Prison
 /// sentence ("Creatures can't attack you unless their controller pays {2}
@@ -1145,6 +1144,23 @@ fn add_jace_tax(scenario: &mut GameScenario, player: PlayerId) -> ObjectId {
     let mut builder = scenario.add_creature(player, "Ghostly Prison Jaces", 2, 2);
     builder.with_static_definition(def);
     builder.id()
+}
+
+/// Fresh tax board: P0 controls the Ghostly-Prison-with-Jaces static, a Jace
+/// planeswalker, and a non-Jace planeswalker; P1 has one ready attacker and
+/// an empty pool. Active player is P1 at pre-combat main with priority.
+fn jace_tax_board() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    add_jace_tax(&mut scenario, P0);
+    let attacker = scenario.add_creature(P1, "P1 Bear", 2, 2).id();
+    let mut runner = scenario.build();
+    let jace = add_planeswalker(runner.state_mut(), P0, "Jace", "Jace");
+    let chandra = add_planeswalker(runner.state_mut(), P0, "Chandra", "Chandra");
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+    (runner, attacker, jace, chandra)
 }
 
 /// Deposit exactly {2} generic into P1's pool for the paid-tax leg.
@@ -1177,9 +1193,29 @@ fn jace_subtype_defended_tax_shape_and_runtime() {
         }),
         "the shared combinator scopes the tax to Jaces you control"
     );
+    // Reach-guard: `attack_defended` proves the line reached the subject-led
+    // path (not an upstream decline) — the stamp below keys off exactly it.
+    // RED-first on the stamp (fix reverted): `UnlessPay.defended` stays
+    // `None` while `attack_defended` stays `Some` — the refuted premise.
     match &def.condition {
-        Some(StaticCondition::UnlessPay { cost, .. }) => {
+        Some(StaticCondition::UnlessPay {
+            cost,
+            scaling,
+            defended,
+        }) => {
             assert_eq!(cost.mana_value(), 2, "the tax costs {{2}}, got {cost:?}");
+            assert_eq!(
+                *scaling,
+                UnlessPayScaling::Flat,
+                "the subject-led route carries no per-affected tail, got {scaling:?}"
+            );
+            assert_eq!(
+                *defended,
+                Some(AttackTargetFilter::SubtypePlaneswalkersYouControl {
+                    subtype: "Jace".to_string()
+                }),
+                "the :2709 stamp scopes the tax payload to Jaces you control"
+            );
         }
         other => panic!("expected an UnlessPay tax condition, got {other:?}"),
     }
@@ -1187,16 +1223,7 @@ fn jace_subtype_defended_tax_shape_and_runtime() {
     // Runtime board: P0 controls the tax source, a Jace, and a non-Jace
     // planeswalker; P1 has one attacker. No Jace trigger on board — only the
     // static tax is under test, so no optional prompt can interfere.
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    add_jace_tax(&mut scenario, P0);
-    let attacker = scenario.add_creature(P1, "P1 Bear", 2, 2).id();
-    let mut runner = scenario.build();
-    let jace = add_planeswalker(runner.state_mut(), P0, "Jace", "Jace");
-    let chandra = add_planeswalker(runner.state_mut(), P0, "Chandra", "Chandra");
-    runner.state_mut().active_player = P1;
-    runner.state_mut().priority_player = P1;
-    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+    let (mut runner, attacker, jace, chandra) = jace_tax_board();
 
     // Unpaid Jace attack: the preview reports the tax unaffordable, the
     // declaration still opens the tax prompt, and accepting fails without
@@ -1267,16 +1294,56 @@ fn jace_subtype_defended_tax_shape_and_runtime() {
     );
     assert_eq!(mana_total(&runner, P1), 0, "the {{2}} tax left P1's pool");
 
-    // STOP-ITEM (returned to the orchestrator, not pinned): the non-Jace
-    // scoping leg — "an unpaid attack on a non-Jace planeswalker is untaxed."
-    // The subject-led shape lowers through `parse_subject_combat_rule_static`
-    // (evasion.rs) + the generic trailing-unless handler, whose
-    // `UnlessPay.defended` is hardcoded `None` (condition.rs:11180-11184).
-    // The combat-tax path reads ONLY `UnlessPay.defended` (combat.rs:4073) —
-    // never `attack_defended` — so the runtime tax is currently UNSCOPED
-    // (a Chandra attack is taxed too, measured). Scoping it needs
-    // `UnlessPay.defended` wiring at the evasion.rs trailing-unless attach,
-    // which is outside this run's frozen scope list (evasion.rs is test-only
-    // per r6). Deliberately NOT pinned as correct behavior.
-    let _ = chandra;
+    // Row 9b continued — SCOPED legs (fix round 2): the stamped
+    // `UnlessPay.defended` means the tax fires ONLY on Jace-subtype targets.
+    // REVERT-FAIL (stamp reverted → `defended: None`): the preview below
+    // reports unaffordable and the declaration opens a tax prompt — the
+    // over-broad-tax direction (unpaid non-Jace attacks illegally taxed).
+    for (target, label) in [
+        (AttackTarget::Planeswalker(chandra), "Chandra"),
+        (AttackTarget::Player(P0), "Jace's controller"),
+    ] {
+        let (mut fresh, fresh_attacker, _, _) = jace_tax_board();
+        let attacks = vec![(fresh_attacker, target)];
+        assert!(
+            attack_tax_is_affordable(fresh.state(), &attacks),
+            "an unfunded {label} attack must see no tax (empty pool is affordable)"
+        );
+        fresh.pass_both_players();
+        fresh
+            .act(GameAction::DeclareAttackers {
+                attacks,
+                bands: vec![],
+            })
+            .unwrap_or_else(|e| panic!("the untaxed {label} attack must declare directly: {e:?}"));
+        assert!(
+            !matches!(
+                fresh.state().waiting_for,
+                WaitingFor::CombatTaxPayment { .. }
+            ),
+            "no tax prompt may open for the untaxed {label} attack"
+        );
+        assert!(
+            fresh.state().combat.as_ref().is_some_and(|combat| combat
+                .attackers
+                .iter()
+                .any(|a| a.object_id == fresh_attacker)),
+            "the untaxed {label} attack commits"
+        );
+    }
 }
+
+// Row 9 Goblins-tax shape — STOP-ITEM (returned, not pinned): the plan's
+// "Goblins … unless … pays → None" premise is refuted by measurement.
+// `parse_static_line("Creatures can't attack Goblins you control unless
+// their controller pays {2}.")` yields `Some(CantAttack,
+// affected=Typed(Creature), attack_defended=None, UnlessPay{{2}, Flat,
+// defended=None})` — an UNSCOPED {2} tax (observed). The predicate's
+// defended arm fails closed correctly (subtype gate rejects "Goblin"), but
+// the subject path then accepts the leftover scope text as an untaxed
+// trailing-`unless` and attaches an unscoped tax. Pinning that would
+// enshrine an over-broad tax (fix-round-1 precedent: never pin measured
+// over-broad behavior). Smallest fix site: decline at the `:2709` attach
+// when the predicate consumed no defended scope yet trailing text precedes
+// the `unless` — a NEW decline behavior, outside this round's stamp-only
+// scope, returned for a design decision.
