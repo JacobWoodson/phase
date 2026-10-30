@@ -2431,7 +2431,7 @@ fn eligible_unless_sacrifice_permanents(
                     obj.controller == player
                         && !obj.is_emblem
                         && crate::game::filter::matches_target_filter(state, **id, filter, &ctx)
-                        // CR 118.3 + CR 702.21a: an object its payer is barred
+                        // CR 118.3 + CR 701.21a: an object its payer is barred
                         // from sacrificing (Call for Aid's "you can't sacrifice
                         // those creatures", a printed bar) is not a legal
                         // payment candidate. Offering it lets an impossible

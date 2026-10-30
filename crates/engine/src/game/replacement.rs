@@ -11955,9 +11955,17 @@ fn candidate_materiality(
     // this it fell through to `Disjoint` and the CR 616.1 order choice was
     // silently skipped. CR 615.3: the one-shot `PreventionOneShot` shield (Awe
     // Strike) writes the same `Damage` field and is equally order-material.
+    // CR 614.9 + CR 616.1e: a resolution-created redirection (Jade Monolith)
+    // rewrites the damage's recipient, so applying it first can make a
+    // recipient-scoped competitor (Shielded Passage) inapplicable. It joins the
+    // same `Damage` write as the durable `Prevention` + `redirect_target` form
+    // (Pariah); with `execute` and every side field unset it otherwise fell
+    // through to `Disjoint` and the ordering choice was skipped.
     if matches!(
         repl_def.shield_kind,
-        ShieldKind::Prevention { .. } | ShieldKind::PreventionOneShot
+        ShieldKind::Prevention { .. }
+            | ShieldKind::PreventionOneShot
+            | ShieldKind::Redirection { .. }
     ) {
         return CandidateMateriality::Writes {
             field: EventField::Damage,
