@@ -91,6 +91,12 @@
 //! ChooseOneOfBranch more than 200 B apart, so `WaitingFor` carries an intentional
 //! `#[allow(clippy::large_enum_variant)]`; the GameState ceiling above is the bound.
 //!
+//! `GameState` re-measured on x86_64-unknown-linux-gnu (`nightly-2026-04-19`) at
+//! 14,880 B when the loop shortcut's ∞ mark gained `unbounded_rising`, a 24 B map
+//! populated only while a mark stands — not a large rarely-populated field, and
+//! boxing it saves 16 B and stays over; the ceiling moved to
+//! 14,880.next_multiple_of(256) + 256 = 15,360.
+//!
 //! When one of these fires, re-run the measurement above and change the number
 //! deliberately — do not widen a ceiling to make a build pass.
 //!
