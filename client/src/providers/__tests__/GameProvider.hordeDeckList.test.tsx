@@ -25,7 +25,7 @@ vi.mock("../../services/aiDeckCatalog", () => ({
   })),
 }));
 
-const t = ((key: string) => key) as unknown as TFunction;
+const t = ((key: string) => key) as unknown as TFunction<["game", "multiplayer"]>;
 const humanDeck: ParsedDeck = {
   main: [{ count: 60, name: "Forest" }],
   sideboard: [],
