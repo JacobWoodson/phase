@@ -4910,10 +4910,11 @@ fn selection_projection(
             count,
             event_id,
             up_to: true,
+            min,
             ..
         } => Some(SelectionProjection {
             object_ids: cards.clone(),
-            constraint: count_constraint(0, *count),
+            constraint: count_constraint(*min, *count),
             confirm: ConfirmSemantics::Explicit,
             intent: InteractionIntentCode::Choose,
             action: SelectionAction::SelectCards,

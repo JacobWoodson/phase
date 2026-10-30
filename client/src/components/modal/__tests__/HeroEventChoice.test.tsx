@@ -98,6 +98,31 @@ describe("HeroEventChoice modal", () => {
     expect(dispatchMock).toHaveBeenCalledWith({ type: "SelectCards", data: { cards: [] } });
   });
 
+  it("KrangStratagem min floor: confirm disabled below min, range subtitle renders", () => {
+    setWaitingFor(
+      buildHeroEventChoiceWaitingFor({
+        data: {
+          player: 0,
+          event: { type: "KrangStratagem", data: { remaining: 2 } },
+          event_id: 9,
+          cards: cardIds,
+          count: 2,
+          up_to: true,
+          min: 1,
+          copies_pending: 0,
+        },
+      }),
+      cards,
+    );
+    render(<CardChoiceModal />);
+    expect(screen.getByText(/Choose 1 to 2 cards/)).toBeInTheDocument();
+    // Below the floor the confirm stays disabled.
+    expect(screen.getByRole("button", { name: /Discard \(/ })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: /Bravo/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Discard \(1\/2\)/ }));
+    expect(dispatchMock).toHaveBeenCalledWith({ type: "SelectCards", data: { cards: [2] } });
+  });
+
   it("SavantiCurse exact-2: plural subtitle, two picks dispatch both", () => {
     setWaitingFor(
       buildHeroEventChoiceWaitingFor({

@@ -2838,8 +2838,13 @@ function HeroEventModal({
 
   if (!objects) return null;
 
-  // CR 701.9b: "up to N" allows 0..=count; exact requires precisely count.
-  const isReady = isUpTo ? selected.size <= data.count : selected.size === data.count;
+  // CR 701.9b: "up to N" allows min..=count (min floors the team
+  // contribution where the engine sets one, e.g. Krang's Stratagem); exact
+  // requires precisely count.
+  const min = data.min ?? 0;
+  const isReady = isUpTo
+    ? selected.size >= min && selected.size <= data.count
+    : selected.size === data.count;
 
   let title: string;
   let subtitle: string;
@@ -2859,12 +2864,19 @@ function HeroEventModal({
       break;
     case "KrangStratagem":
       title = t("cardChoice.heroEvent.krangStratagem.title");
-      subtitle = isUpTo
-        ? t("cardChoice.heroEvent.krangStratagem.subtitleUpTo", {
-            count: data.count,
-            remaining: data.event.data.remaining,
-          })
-        : t("cardChoice.heroEvent.krangStratagem.subtitleExact", { count: data.count });
+      subtitle =
+        isUpTo && min > 0
+          ? t("cardChoice.heroEvent.krangStratagem.subtitleMin", {
+              min,
+              count: data.count,
+              remaining: data.event.data.remaining,
+            })
+          : isUpTo
+            ? t("cardChoice.heroEvent.krangStratagem.subtitleUpTo", {
+                count: data.count,
+                remaining: data.event.data.remaining,
+              })
+            : t("cardChoice.heroEvent.krangStratagem.subtitleExact", { count: data.count });
       badgeLabel = t("cardChoice.badges.discard");
       tone = EFFECT_ZONE_VISUAL_CLASSES.Sacrifice;
       buttonLabel = t("cardChoice.buttons.discardCount", {

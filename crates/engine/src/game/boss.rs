@@ -1116,7 +1116,11 @@ fn hero_creatures(state: &GameState, hero: PlayerId) -> Vec<ObjectId> {
         .copied()
         .filter(|id| {
             state.objects.get(id).is_some_and(|o| {
-                o.controller == hero && o.card_types.core_types.contains(&CoreType::Creature)
+                // CR 702.26b: phased-out permanents are treated as though
+                // they don't exist; they are never eligible sacrifices.
+                o.controller == hero
+                    && o.card_types.core_types.contains(&CoreType::Creature)
+                    && !o.is_phased_out()
             })
         })
         .collect()
@@ -1142,6 +1146,10 @@ enum HeroEventOffer {
         cards: Vec<ObjectId>,
         count: usize,
         up_to: bool,
+        /// Minimum selection when `up_to` (0 for exact prompts). Krang's
+        /// Stratagem floors the current hero's contribution at what the
+        /// later heroes cannot cover, so the team total cannot fall short.
+        min: usize,
     },
 }
 
@@ -1154,6 +1162,7 @@ fn single_pick_offer(offer: Vec<ObjectId>) -> HeroEventOffer {
             cards: offer,
             count: 1,
             up_to: false,
+            min: 0,
         },
     }
 }
@@ -1212,6 +1221,7 @@ fn hero_event_offer(
                     cards: creatures,
                     count: want,
                     up_to: false,
+                    min: 0,
                 }
             }
         }
@@ -1229,10 +1239,25 @@ fn hero_event_offer(
                 .iter()
                 .any(|other| !hero_hand(state, *other).is_empty());
             if cover_after {
+                // "As a team, the heroes discard a total of two cards" (CR
+                // 701.9b): floor this hero's contribution at what the later
+                // heroes cannot cover, so the team total cannot fall short
+                // however the later prompts resolve. Floored at 0 (a hero
+                // whose successors can cover everything may still pass), and
+                // never above `remaining` (the prompt's own ceiling). No
+                // soft-lock: cover_after means later_total >= 1 and
+                // remaining <= 2, so min <= 1 <= hand.len() (empty hands
+                // Skip above).
+                let later_discardable: usize = heroes_after
+                    .iter()
+                    .map(|other| hero_hand(state, *other).len())
+                    .sum();
+                let min = remaining.saturating_sub(later_discardable);
                 HeroEventOffer::Prompt {
                     cards: hand,
                     count: *remaining,
                     up_to: true,
+                    min,
                 }
             } else if hand.len() <= *remaining {
                 HeroEventOffer::Auto(hand)
@@ -1241,6 +1266,7 @@ fn hero_event_offer(
                     cards: hand,
                     count: *remaining,
                     up_to: false,
+                    min: 0,
                 }
             }
         }
@@ -1261,6 +1287,7 @@ fn hero_event_offer(
                     cards: pool,
                     count: 3,
                     up_to: false,
+                    min: 0,
                 }
             }
         }
@@ -1342,6 +1369,7 @@ fn advance_hero_event_queue(
                 cards,
                 count,
                 up_to,
+                min,
             } => {
                 queue.remove(0);
                 state.waiting_for = WaitingFor::HeroEventChoice {
@@ -1351,6 +1379,7 @@ fn advance_hero_event_queue(
                     cards,
                     count,
                     up_to,
+                    min,
                     remaining_heroes: queue,
                     answers,
                     copies_pending,

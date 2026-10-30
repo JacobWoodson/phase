@@ -2250,10 +2250,11 @@ pub fn candidate_actions_broad_with_probe(
             count,
             cards,
             up_to,
+            min,
             ..
         } => {
             let sizes = if *up_to {
-                (0..=*count).collect()
+                (*min..=*count).collect()
             } else {
                 vec![*count]
             };

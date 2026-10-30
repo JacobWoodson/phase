@@ -6432,6 +6432,7 @@ pub(super) fn handle_resolution_choice(
                 cards,
                 count,
                 up_to,
+                min,
                 remaining_heroes,
                 answers,
                 copies_pending,
@@ -6448,6 +6449,13 @@ pub(super) fn handle_resolution_choice(
                 return Err(EngineError::InvalidAction(format!(
                     "Must choose at most {} card(s), got {}",
                     count,
+                    chosen.len()
+                )));
+            }
+            if up_to && chosen.len() < min {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must choose at least {} card(s), got {}",
+                    min,
                     chosen.len()
                 )));
             }

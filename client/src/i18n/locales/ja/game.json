@@ -1939,6 +1939,8 @@
         "title": "Krang's Stratagem",
         "subtitleUpTo_one": "Choose up to {{count}} card to discard (team owes {{remaining}} total)",
         "subtitleUpTo_other": "Choose up to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleMin_one": "Choose {{min}} to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleMin_other": "Choose {{min}} to {{count}} cards to discard (team owes {{remaining}} total)",
         "subtitleExact_one": "Choose {{count}} card to discard",
         "subtitleExact_other": "Choose {{count}} cards to discard"
       },

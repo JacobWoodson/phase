@@ -17603,8 +17603,10 @@ pub enum WaitingFor {
     /// pending queue rides on the prompt itself (the vote-ledger precedent):
     /// `remaining_heroes` drains in seat order, `answers` accumulate, and the
     /// handler batch-applies them when the queue empties. Answered with
-    /// `GameAction::SelectCards`; `count`/`up_to` validate exactly like
-    /// `DiscardChoice` (exact `count`, or `0..=count` when `up_to`).
+    /// `GameAction::SelectCards`; `count`/`up_to`/`min` validate like
+    /// `DiscardChoice` with a floor (exact `count`, or `min..=count` when
+    /// `up_to`; `min` is 0 except where the team total needs a contribution
+    /// floor, e.g. Krang's Stratagem).
     HeroEventChoice {
         /// The hero who must decide this step.
         player: PlayerId,
@@ -17615,10 +17617,14 @@ pub enum WaitingFor {
         event_id: ObjectId,
         /// The current offer (this hero's eligible cards).
         cards: Vec<ObjectId>,
-        /// How many to select (`up_to` widens to `0..=count`).
+        /// How many to select (`up_to` widens to `min..=count`).
         count: usize,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         up_to: bool,
+        /// Minimum selection when `up_to` (0 for exact prompts and for
+        /// up-to prompts with no contribution floor).
+        #[serde(default, skip_serializing_if = "is_zero_usize")]
+        min: usize,
         /// Heroes still to prompt after `player`, in seat order.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         remaining_heroes: Vec<PlayerId>,

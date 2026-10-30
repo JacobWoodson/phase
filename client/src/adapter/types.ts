@@ -3097,7 +3097,7 @@ export type WaitingFor =
   | { type: "ChooseObjectsSelection"; data: { player: PlayerId; eligible: TargetRef[]; min: number; max?: number; trigger_event?: GameEvent } }
   | { type: "ConniveDiscard"; data: { player: PlayerId; conniver_id: ObjectId; source_id: ObjectId; cards: ObjectId[]; count: number } }
   | { type: "DiscardChoice"; data: { player: PlayerId; count: number; cards: ObjectId[]; source_id: ObjectId; effect_kind: string; up_to?: boolean; unless_filter?: TargetFilter } }
-  | { type: "HeroEventChoice"; data: { player: PlayerId; event: HeroEventKind; event_id: ObjectId; cards: ObjectId[]; count: number; up_to?: boolean; remaining_heroes?: PlayerId[]; answers?: HeroEventAnswer[]; copies_pending: number; fired_baxters?: ObjectId[] } }
+  | { type: "HeroEventChoice"; data: { player: PlayerId; event: HeroEventKind; event_id: ObjectId; cards: ObjectId[]; count: number; up_to?: boolean; min?: number; remaining_heroes?: PlayerId[]; answers?: HeroEventAnswer[]; copies_pending: number; fired_baxters?: ObjectId[] } }
   | { type: "ManifestDreadChoice"; data: { player: PlayerId; cards: ObjectId[]; source_id: ObjectId } }
   | { type: "LearnChoice"; data: { player: PlayerId; hand_cards: ObjectId[] } }
   | { type: "ClashChooseOpponent"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown } }

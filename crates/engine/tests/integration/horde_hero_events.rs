@@ -230,6 +230,52 @@ fn wave_prompts_hero_event_then_continues() {
     );
 }
 
+/// R5-#7 — CR 702.26b: phased-out permanents are treated as though they
+/// don't exist, so hero-event offers never include them. HERO1's only tapped
+/// creature phases out through the production phasing authority; the Chrome
+/// Dome's Overload wave finds nothing eligible, prompts nobody, and the
+/// phased-out creature survives (it must not be auto-sacrificed).
+///
+/// Revert guard: without the phased-out filter the lone creature is
+/// auto-sacrificed with no prompt — the zone assertion flips.
+#[test]
+fn chrome_overload_skips_phased_out_hero_creature() {
+    use engine::game::game_object::PhaseOutCause;
+    use engine::game::phasing::phase_out_object;
+
+    let mut state = hero_event_game();
+    let bear = add_hero_creature(&mut state, HERO1, "Hero Bear", 2);
+    state.objects.get_mut(&bear).unwrap().tapped = true;
+    add_library_event(&mut state, "Event: Chrome Dome's Overload");
+
+    // Real phasing through the production authority (the Teferi's Protection
+    // class), not a status flip: cascade, status, and events all run.
+    let mut phase_events = Vec::new();
+    let phased = phase_out_object(&mut state, bear, PhaseOutCause::Directly, &mut phase_events);
+    assert!(
+        phased.contains(&bear),
+        "reach-guard: the bear really phased out"
+    );
+
+    let mut runner = GameRunner::from_state(state);
+    begin_wave_with_budget(&mut runner, 1);
+    // No prompts expected: the phased-out bear is invisible to the offer, so
+    // both heroes Skip — any prompt panics via the driver's guard.
+    let mut answers = vec![];
+    drive_wave_with_answers(&mut runner, &mut answers, |_| {
+        panic!("no hero-event prompt may fire for a phased-out creature");
+    });
+    assert_wave_settled(&runner);
+
+    let obj = runner.state().objects.get(&bear).expect("bear survives");
+    assert_eq!(
+        obj.zone,
+        Zone::Battlefield,
+        "the phased-out bear must not be sacrificed"
+    );
+    assert!(obj.is_phased_out(), "the bear is still phased out");
+}
+
 #[test]
 fn krang_team_discard_rejects_overcount_then_completes() {
     let mut state = hero_event_game();
@@ -245,6 +291,7 @@ fn krang_team_discard_rejects_overcount_then_completes() {
             player,
             count,
             up_to,
+            min,
             ..
         } = &runner.state().waiting_for
         else {
@@ -254,6 +301,12 @@ fn krang_team_discard_rejects_overcount_then_completes() {
             );
         };
         assert_eq!((*player, *count, *up_to), (HERO1, 2, true));
+        // R5-#6: HERO2 can still discard 1, so HERO1 owes at least
+        // 2 - 1 = 1 — the team total cannot fall short.
+        assert_eq!(
+            *min, 1,
+            "the first hero's minimum covers what later heroes cannot"
+        );
         // An over-count answer is rejected and must not consume the prompt.
         let bad = runner.act(GameAction::SelectCards {
             cards: vec![a1, a2, b1],
@@ -268,6 +321,20 @@ fn krang_team_discard_rejects_overcount_then_completes() {
                 WaitingFor::HeroEventChoice { .. }
             ),
             "a rejected answer leaves the prompt pending"
+        );
+        // An under-minimum answer is likewise refused: choosing none here
+        // would strand the team at one discard after HERO2 auto-covers.
+        let empty = runner.act(GameAction::SelectCards { cards: vec![] });
+        assert!(
+            empty.is_err(),
+            "an empty answer against a minimum-1 prompt is illegal"
+        );
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::HeroEventChoice { .. }
+            ),
+            "a refused answer leaves the prompt pending"
         );
     });
     assert_wave_settled(&runner);
