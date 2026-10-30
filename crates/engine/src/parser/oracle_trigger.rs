@@ -6511,8 +6511,7 @@ fn attack_clause_names_attacked_player(def: &TriggerDefinition) -> bool {
             def.valid_target.is_some()
         }
         Some(
-            AttackTargetFilter::Planeswalker
-            | AttackTargetFilter::SubtypePlaneswalkersYouControl { .. }
+            AttackTargetFilter::Planeswalker { .. }
             | AttackTargetFilter::Battle
             | AttackTargetFilter::Owner
             | AttackTargetFilter::OwnerOrPlaneswalker
@@ -9800,7 +9799,7 @@ fn parse_attackers_to_controller_min_condition(input: &str) -> OracleResult<'_, 
             tag("you or planeswalkers you control"),
         ),
         value(
-            AttackTargetFilter::Planeswalker,
+            AttackTargetFilter::Planeswalker { subtype: None },
             tag("planeswalkers you control"),
         ),
         value(AttackTargetFilter::Player, tag("you")),
@@ -15593,7 +15592,10 @@ fn try_parse_event(
                         tag(" you and/or one or more planeswalkers you control"),
                     )),
                 ),
-                value(AttackTargetFilter::Planeswalker, tag(" a planeswalker")),
+                value(
+                    AttackTargetFilter::Planeswalker { subtype: None },
+                    tag(" a planeswalker"),
+                ),
                 value(
                     AttackTargetFilter::Player,
                     preceded(tag(" "), parse_one_of_your_opponents),

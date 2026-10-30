@@ -3045,7 +3045,7 @@ pub(crate) fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxPa
             tag_no_case::<_, _, OracleError<'_>>(" you or planeswalkers you control"),
         ),
         value(
-            AttackTargetFilter::Planeswalker,
+            AttackTargetFilter::Planeswalker { subtype: None },
             tag_no_case::<_, _, OracleError<'_>>(" planeswalkers you control"),
         ),
         value(

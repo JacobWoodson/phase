@@ -17888,7 +17888,7 @@ fn attack_target_matches_controller_scope(
             crate::game::combat::AttackTarget::Player(player_id),
         ) => player_matches(player_id),
         (
-            AttackTargetFilter::Planeswalker,
+            AttackTargetFilter::Planeswalker { subtype: None },
             crate::game::combat::AttackTarget::Planeswalker(object_id),
         )
         | (
@@ -17915,18 +17915,18 @@ fn attack_target_filters_compatible(
         (trigger_filter, condition_filter),
         (AttackTargetFilter::Player, AttackTargetFilter::Player)
             | (
-                AttackTargetFilter::Planeswalker,
-                AttackTargetFilter::Planeswalker
+                AttackTargetFilter::Planeswalker { subtype: None },
+                AttackTargetFilter::Planeswalker { subtype: None }
             )
             | (AttackTargetFilter::Battle, AttackTargetFilter::Battle)
             | (
                 AttackTargetFilter::PlayerOrPlaneswalker,
                 AttackTargetFilter::PlayerOrPlaneswalker
                     | AttackTargetFilter::Player
-                    | AttackTargetFilter::Planeswalker
+                    | AttackTargetFilter::Planeswalker { subtype: None }
             )
             | (
-                AttackTargetFilter::Player | AttackTargetFilter::Planeswalker,
+                AttackTargetFilter::Player | AttackTargetFilter::Planeswalker { subtype: None },
                 AttackTargetFilter::PlayerOrPlaneswalker
             )
     )
@@ -21181,8 +21181,8 @@ pub mod tests {
         for (trigger_filter, condition_filter) in [
             (AttackTargetFilter::Player, AttackTargetFilter::Player),
             (
-                AttackTargetFilter::Planeswalker,
-                AttackTargetFilter::Planeswalker,
+                AttackTargetFilter::Planeswalker { subtype: None },
+                AttackTargetFilter::Planeswalker { subtype: None },
             ),
             (AttackTargetFilter::Battle, AttackTargetFilter::Battle),
             (
@@ -21191,7 +21191,7 @@ pub mod tests {
             ),
             (
                 AttackTargetFilter::PlayerOrPlaneswalker,
-                AttackTargetFilter::Planeswalker,
+                AttackTargetFilter::Planeswalker { subtype: None },
             ),
             (
                 AttackTargetFilter::PlayerOrPlaneswalker,
@@ -21202,7 +21202,7 @@ pub mod tests {
                 AttackTargetFilter::PlayerOrPlaneswalker,
             ),
             (
-                AttackTargetFilter::Planeswalker,
+                AttackTargetFilter::Planeswalker { subtype: None },
                 AttackTargetFilter::PlayerOrPlaneswalker,
             ),
         ] {
@@ -54602,14 +54602,14 @@ pub mod tests {
 
     /// Row 10b — the subtype-defended restriction scope never matches a
     /// controller-scoped attack ("whenever you attack ...") position. The
-    /// `match` falls to `_ => false`, which compiles silently on a new
-    /// variant — this pin is the revert-fail mechanism (deletion is the
-    /// revert).
+    /// `match` falls to `_ => false`, which compiles silently on a widened
+    /// arm — this pin is the revert-fail mechanism (widening the arm to
+    /// `{ .. }` is the revert).
     #[test]
     fn subtype_defended_scope_never_matches_controller_scope() {
         let state = setup();
-        let subtype = AttackTargetFilter::SubtypePlaneswalkersYouControl {
-            subtype: "Jace".to_string(),
+        let subtype = AttackTargetFilter::Planeswalker {
+            subtype: Some("Jace".to_string()),
         };
         for target in [
             crate::game::combat::AttackTarget::Player(PlayerId(0)),
@@ -54627,9 +54627,10 @@ pub mod tests {
                 "restriction-only subtype scope must not match a controller-scoped attack"
             );
         }
-        // Paired positive: the sibling arm still matches its own position
-        // (a P0-controlled planeswalker under a You-scoped controller), so
-        // the negatives above prove the variant — not the harness — rejects.
+        // Paired positive: the unparameterized arm still matches its own
+        // position (a P0-controlled planeswalker under a You-scoped
+        // controller), so the negatives above prove the parameter — not the
+        // harness — rejects.
         let mut live = setup();
         let walker_card = CardId(live.next_object_id);
         let walker = create_object(
@@ -54645,9 +54646,9 @@ pub mod tests {
                 crate::game::combat::AttackTarget::Planeswalker(walker),
                 PlayerId(0),
                 &ControllerRef::You,
-                &AttackTargetFilter::Planeswalker,
+                &AttackTargetFilter::Planeswalker { subtype: None },
             ),
-            "reach-guard: the sibling Planeswalker arm still matches a controlled planeswalker"
+            "reach-guard: the unparameterized Planeswalker arm still matches a controlled planeswalker"
         );
     }
 
@@ -54656,15 +54657,15 @@ pub mod tests {
     /// non-match by default — this pin is the revert-fail mechanism.
     #[test]
     fn subtype_defended_scope_never_compatible_with_attack_filters() {
-        let subtype = AttackTargetFilter::SubtypePlaneswalkersYouControl {
-            subtype: "Jace".to_string(),
+        let subtype = AttackTargetFilter::Planeswalker {
+            subtype: Some("Jace".to_string()),
         };
         let every_filter = || {
             [
                 AttackTargetFilter::Player,
-                AttackTargetFilter::Planeswalker,
-                AttackTargetFilter::SubtypePlaneswalkersYouControl {
-                    subtype: "Jace".to_string(),
+                AttackTargetFilter::Planeswalker { subtype: None },
+                AttackTargetFilter::Planeswalker {
+                    subtype: Some("Jace".to_string()),
                 },
                 AttackTargetFilter::PlayerOrPlaneswalker,
                 AttackTargetFilter::Battle,

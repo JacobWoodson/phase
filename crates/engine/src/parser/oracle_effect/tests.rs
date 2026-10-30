@@ -41836,7 +41836,9 @@ fn public_attack_prohibition_parser_preserves_legacy_anaphora_and_connector() {
         Effect::AddRestriction {
             restriction: GameRestriction::ProhibitActivity {
                 activity: ProhibitedActivity::Attack {
-                    defended: crate::types::triggers::AttackTargetFilter::Planeswalker,
+                    defended: crate::types::triggers::AttackTargetFilter::Planeswalker {
+                        subtype: None,
+                    },
                     protected_player: None,
                 },
                 ..
@@ -41854,7 +41856,7 @@ fn scoped_cant_attack_prohibition_supports_both_verbs_and_all_defended_scopes() 
             ("you", AttackTargetFilter::Player),
             (
                 "planeswalkers you control",
-                AttackTargetFilter::Planeswalker,
+                AttackTargetFilter::Planeswalker { subtype: None },
             ),
             (
                 "you or planeswalkers you control",

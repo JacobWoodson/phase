@@ -6826,7 +6826,9 @@ fn parse_subtype_planeswalkers_you_control_nom(
     }
     Ok((
         input,
-        crate::types::triggers::AttackTargetFilter::SubtypePlaneswalkersYouControl { subtype },
+        crate::types::triggers::AttackTargetFilter::Planeswalker {
+            subtype: Some(subtype),
+        },
     ))
 }
 
@@ -6848,7 +6850,7 @@ pub(crate) fn parse_cant_attack_defended_scope_nom(
             tag(" you or planeswalkers you control"),
         ),
         value(
-            AttackTargetFilter::Planeswalker,
+            AttackTargetFilter::Planeswalker { subtype: None },
             tag(" planeswalkers you control"),
         ),
         // CR 205.3j: subtype-defended scope sits after the generic planeswalker

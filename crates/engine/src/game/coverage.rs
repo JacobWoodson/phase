@@ -5155,10 +5155,12 @@ fn fmt_attack_target_filter(filter: &crate::types::triggers::AttackTargetFilter)
     use crate::types::triggers::AttackTargetFilter as ATF;
     match filter {
         ATF::Player => "a player".to_string(),
-        ATF::Planeswalker => "a planeswalker".to_string(),
+        ATF::Planeswalker { subtype: None } => "a planeswalker".to_string(),
         // CR 205.3j: subtype-defended scope — the subtype name rides the label
         // so each defended subtype stays distinguishable in parse details.
-        ATF::SubtypePlaneswalkersYouControl { subtype } => format!("{subtype}s you control"),
+        ATF::Planeswalker {
+            subtype: Some(subtype),
+        } => format!("{subtype}s you control"),
         ATF::PlayerOrPlaneswalker => "a player or planeswalker".to_string(),
         ATF::Battle => "a battle".to_string(),
         // CR 108.3 vs CR 109.4: the OWNER (who started the game with the card),
@@ -15575,14 +15577,15 @@ mod tests {
              collapse to the same sticky signature"
         );
 
-        // (4) Every variant earns its own label. A formatter arm that aliased
-        // two scopes would print a predicate the card does not have, and the
-        // parse-details / Alt-hover overlay is what bug triage reads.
+        // (4) Every variant — and each `Planeswalker` subtype arm — earns
+        // its own label. A formatter arm that aliased two scopes would print
+        // a predicate the card does not have, and the parse-details /
+        // Alt-hover overlay is what bug triage reads.
         let labels: std::collections::HashSet<String> = [
             AttackTargetFilter::Player,
-            AttackTargetFilter::Planeswalker,
-            AttackTargetFilter::SubtypePlaneswalkersYouControl {
-                subtype: "Jace".to_string(),
+            AttackTargetFilter::Planeswalker { subtype: None },
+            AttackTargetFilter::Planeswalker {
+                subtype: Some("Jace".to_string()),
             },
             AttackTargetFilter::PlayerOrPlaneswalker,
             AttackTargetFilter::Battle,

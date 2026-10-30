@@ -6,7 +6,7 @@
 //! this turn" was a parser `Effect::Unimplemented` leaf. This suite locks in:
 //!   1. PARSE (row 1): the trigger chain lowers to `PayCost { payer:
 //!      TriggeringPlayer }` (parent) with an `AddRestriction { ScopedPlayer,
-//!      EndOfTurn, Attack { SubtypePlaneswalkersYouControl { Jace } } }` leaf,
+//!      EndOfTurn, Attack { Planeswalker { subtype: Some(Jace) } } }` leaf,
 //!      zero `Unimplemented` in the trigger chain.
 //!   2. RUNTIME (rows 2–6): decline bans attacks on Jace planeswalkers only,
 //!      paid {2} suppresses the ban, the prompt addresses the triggering
@@ -22,7 +22,7 @@
 //!
 //! CR 508.1c: attack restrictions checked at declare-attackers. CR 508.5: the
 //! defended planeswalker compares on controller (CR 109.4). CR 205.3j:
-//! planeswalker subtypes. CR 514.2 + CR 500.7: end-of-turn expiry. CR 118.12:
+//! planeswalker subtypes. CR 514.2: end-of-turn expiry. CR 118.12:
 //! the named "they" both chooses and pays. (CR numbers inherited from the
 //! in-code authorities cited in the implementation; docs/MagicCompRules.txt is
 //! absent in this checkout.)
@@ -377,8 +377,8 @@ fn jace_trigger_clause_parses_to_subtype_defended_restriction() {
             );
             assert_eq!(
                 *defended,
-                AttackTargetFilter::SubtypePlaneswalkersYouControl {
-                    subtype: "Jace".to_string()
+                AttackTargetFilter::Planeswalker {
+                    subtype: Some("Jace".to_string())
                 },
                 "the defended scope names the Jace subtype"
             );
@@ -571,40 +571,59 @@ fn jace_ban_covers_stolen_late_and_animated_attackers() {
     );
 }
 
-/// Row 2d — defended live-vs-snapshot: AFTER the ban resolves, Jace changes
-/// controller. Legality follows the NEW controller (live comparison, following
-/// the `Planeswalker` arm pattern). Donated-Jace (controller != owner)
-/// follows the controller, not the owner.
+/// Row 2d — defended live-vs-snapshot: AFTER the ban resolves, Jace moves
+/// from P0 to P2. Legality follows the NEW controller (live comparison).
+/// CR 611.2c: the ban modifies the rules of the game, so "Jaces you control"
+/// is read live — not snapshotted at resolution.
 ///
-/// REVERT-FAIL: a snapshot comparison keeps the moved Jace banned.
+/// The attacker is the RESTRICTED player (P1) throughout: the
+/// declare-attackers gate skips the defended-scope check for an unaffected
+/// attacker, so only P1's attacks can prove or disprove the defended set.
+///
+/// REVERT-FAIL (owner comparison): the moved Jace's owner is still P0, so an
+/// owner-anchored comparison keeps it defended and the first attack stays
+/// illegal. REVERT-FAIL (snapshot): a resolution-time snapshot likewise keeps
+/// the moved Jace banned.
 #[test]
 fn jace_defended_set_follows_live_controller() {
-    let (mut runner, jace, attacker) = jace_scenario();
+    let (mut runner, jace, amy_attacker, _) = jace_three_player_scenario();
     let jace_b = add_planeswalker(runner.state_mut(), P0, "Jace B", "Jace");
 
     fire_begin_combat(&mut runner);
     drive_to_optional_prompt(&mut runner);
     answer_optional(&mut runner, P1, false);
     assert!(
-        !attack_is_legal(&runner, P1, attacker, AttackTarget::Planeswalker(jace)),
+        !attack_is_legal(&runner, P1, amy_attacker, AttackTarget::Planeswalker(jace)),
         "pre-change reach-guard: Jace is banned before the move"
     );
+    assert!(
+        !attack_is_legal(
+            &runner,
+            P1,
+            amy_attacker,
+            AttackTarget::Planeswalker(jace_b)
+        ),
+        "pre-change reach-guard: Jace B is banned before the move"
+    );
 
-    // Donate Jace: controller P1, owner still P0.
+    // Donate Jace to P2: controller P2, owner still P0.
     runner
         .state_mut()
         .objects
         .get_mut(&jace)
         .unwrap()
-        .controller = P1;
-    // Enemy attacker for the moved Jace (same self-attack caveat as row 2b).
-    let p0_bear = add_bear(runner.state_mut(), P0, "P0 Bear");
+        .controller = P2;
     assert!(
-        attack_is_legal(&runner, P0, p0_bear, AttackTarget::Planeswalker(jace)),
-        "the moved Jace is no longer defended (defense follows the controller, not the owner)"
+        attack_is_legal(&runner, P1, amy_attacker, AttackTarget::Planeswalker(jace)),
+        "the moved Jace is no longer defended (defense follows the live controller, not the owner or a snapshot)"
     );
     assert!(
-        !attack_is_legal(&runner, P1, attacker, AttackTarget::Planeswalker(jace_b)),
+        !attack_is_legal(
+            &runner,
+            P1,
+            amy_attacker,
+            AttackTarget::Planeswalker(jace_b)
+        ),
         "P0's remaining Jace stays defended"
     );
 }
@@ -986,8 +1005,8 @@ fn jace_unbound_scoped_player_falls_back_to_controller() {
             affected_players: RestrictionPlayerScope::ScopedPlayer,
             expiry: RestrictionExpiry::EndOfTurn,
             activity: ProhibitedActivity::Attack {
-                defended: AttackTargetFilter::SubtypePlaneswalkersYouControl {
-                    subtype: "Jace".to_string(),
+                defended: AttackTargetFilter::Planeswalker {
+                    subtype: Some("Jace".to_string()),
                 },
                 protected_player: None,
             },
@@ -1191,8 +1210,8 @@ fn jace_subtype_defended_tax_shape_and_runtime() {
     );
     assert_eq!(
         def.attack_defended,
-        Some(AttackTargetFilter::SubtypePlaneswalkersYouControl {
-            subtype: "Jace".to_string()
+        Some(AttackTargetFilter::Planeswalker {
+            subtype: Some("Jace".to_string())
         }),
         "the shared combinator scopes the tax to Jaces you control"
     );
@@ -1214,8 +1233,8 @@ fn jace_subtype_defended_tax_shape_and_runtime() {
             );
             assert_eq!(
                 *defended,
-                Some(AttackTargetFilter::SubtypePlaneswalkersYouControl {
-                    subtype: "Jace".to_string()
+                Some(AttackTargetFilter::Planeswalker {
+                    subtype: Some("Jace".to_string())
                 }),
                 "the :2709 stamp scopes the tax payload to Jaces you control"
             );

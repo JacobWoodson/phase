@@ -164,8 +164,7 @@ pub(crate) fn eval_recipient_attacking_owner_target(
         // Not produced by the block-evasion parser path. Kept explicit (no
         // wildcard) so future widening is compiler-flagged.
         AttackTargetFilter::Player
-        | AttackTargetFilter::Planeswalker
-        | AttackTargetFilter::SubtypePlaneswalkersYouControl { .. }
+        | AttackTargetFilter::Planeswalker { .. }
         | AttackTargetFilter::PlayerOrPlaneswalker
         | AttackTargetFilter::PlayerOrPermanents
         | AttackTargetFilter::Monarch
@@ -349,8 +348,8 @@ mod tests {
             !eval_recipient_attacking_owner_target(
                 &state,
                 attacker,
-                &AttackTargetFilter::SubtypePlaneswalkersYouControl {
-                    subtype: "Jace".to_string()
+                &AttackTargetFilter::Planeswalker {
+                    subtype: Some("Jace".to_string())
                 }
             ),
             "the subtype-defended scope is not an owner-evasion exception"

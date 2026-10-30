@@ -2283,7 +2283,7 @@ pub(super) fn attack_target_type_matches(
             crate::types::triggers::AttackTargetFilter::Player,
             crate::game::combat::AttackTarget::Player(_)
         ) | (
-            crate::types::triggers::AttackTargetFilter::Planeswalker,
+            crate::types::triggers::AttackTargetFilter::Planeswalker { subtype: None },
             crate::game::combat::AttackTarget::Planeswalker(_)
         ) | (
             crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker,
@@ -19320,13 +19320,13 @@ mod tests {
     /// Row 10a — the subtype-defended restriction scope never appears in an
     /// "attacked:" trigger position, so the pure type matcher rejects it for
     /// every attack target. The `matches!` has no wildcard, which compiles
-    /// silently on a new variant — this pin is the revert-fail mechanism
-    /// (deletion is the revert).
+    /// silently on a widened arm — this pin is the revert-fail mechanism
+    /// (widening the arm to `{ .. }` is the revert).
     #[test]
     fn subtype_defended_scope_never_matches_attack_trigger_position() {
         use crate::types::triggers::AttackTargetFilter;
-        let subtype = AttackTargetFilter::SubtypePlaneswalkersYouControl {
-            subtype: "Jace".to_string(),
+        let subtype = AttackTargetFilter::Planeswalker {
+            subtype: Some("Jace".to_string()),
         };
         for target in [
             crate::game::combat::AttackTarget::Player(PlayerId(0)),
@@ -19338,14 +19338,14 @@ mod tests {
                 "restriction-only subtype scope must not match an attack-trigger position"
             );
         }
-        // Paired positive: the pinned value is the real production variant,
-        // and sibling arms still match their own positions.
+        // Paired positive: the pinned value is the real production shape,
+        // and the unparameterized arm still matches its own position.
         assert!(
             attack_target_type_matches(
                 crate::game::combat::AttackTarget::Planeswalker(ObjectId(7)),
-                &AttackTargetFilter::Planeswalker,
+                &AttackTargetFilter::Planeswalker { subtype: None },
             ),
-            "reach-guard: the sibling Planeswalker arm still matches"
+            "reach-guard: the unparameterized Planeswalker arm still matches"
         );
     }
 
@@ -19356,8 +19356,8 @@ mod tests {
     fn subtype_defended_scope_never_binds_attacked_player() {
         use crate::types::triggers::AttackTargetFilter;
         let mut trigger = make_trigger(TriggerMode::Attacks);
-        trigger.attack_target_filter = Some(AttackTargetFilter::SubtypePlaneswalkersYouControl {
-            subtype: "Jace".to_string(),
+        trigger.attack_target_filter = Some(AttackTargetFilter::Planeswalker {
+            subtype: Some("Jace".to_string()),
         });
         assert!(
             !you_attack_binds_attacked_player(&trigger),
