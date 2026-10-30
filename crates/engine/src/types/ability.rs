@@ -3068,6 +3068,30 @@ pub enum ChosenAttribute {
 }
 
 impl ChosenAttribute {
+    /// The chosen creature type, if this is a creature-type choice.
+    pub fn creature_type(&self) -> Option<&str> {
+        match self {
+            Self::CreatureType(chosen) => Some(chosen.as_str()),
+            Self::Color(_)
+            | Self::BasicLandType(_)
+            | Self::CardType(_)
+            | Self::OddOrEven(_)
+            | Self::CardName(_)
+            | Self::Number(_)
+            | Self::RevealedNumber(_)
+            | Self::Player(_)
+            | Self::TwoColors(_)
+            | Self::TributeOutcome(_)
+            | Self::Keyword(_)
+            | Self::Label(_)
+            | Self::Card(_)
+            | Self::Counter(_)
+            | Self::Direction(_)
+            | Self::CopiableSnapshot(_)
+            | Self::NotedManaSpent(_) => None,
+        }
+    }
+
     /// Which category of choice this represents.
     pub fn choice_type(&self) -> ChoiceType {
         match self {
@@ -20283,6 +20307,10 @@ pub enum AbilityCost {
         /// None means reveal any card (self-reveal).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<TargetFilter>,
+        /// The revealed cards must share this quality (e.g., "two cards
+        /// that share a color" → `SharedQuality::Color`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shared_quality: Option<SharedQuality>,
     },
     /// Behold a matching object as a casting cost.
     Behold {
@@ -45983,6 +46011,16 @@ pub struct ResolvedAbility {
     /// `WhenYouDo` gate and the `ParentTarget` guards still read it on resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_target_missing_reason: Option<ParentTargetMissingReason>,
+    /// CR 608.2e + CR 603.10d: the boundary of the fan-out control-change
+    /// instruction this node belongs to. Set ONLY by a fan-out driver
+    /// (`effects::stamp_fan_out_control_boundary`) on its driver-local
+    /// template, before its first seat; parked seats clone that template, so a
+    /// resumed seat publishes against the same boundary. Never set on a stack
+    /// entry, so copies never inherit it, and a following sequential
+    /// instruction is a different node. Rules-authoritative: viewer copies drop
+    /// it (it can carry hidden information).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_change_instruction: Option<crate::types::events::ControlChangeInstructionCarrier>,
 }
 
 impl Serialize for ResolvedAbility {
@@ -46101,6 +46139,7 @@ impl PartialEq for ResolvedAbility {
             modal: a_modal,
             mode_abilities: a_mode_abilities,
             parent_target_missing_reason: a_parent_target_missing_reason,
+            control_change_instruction: a_control_change_instruction,
         } = self;
         let Self {
             effect: b_effect,
@@ -46178,6 +46217,7 @@ impl PartialEq for ResolvedAbility {
             modal: b_modal,
             mode_abilities: b_mode_abilities,
             parent_target_missing_reason: b_parent_target_missing_reason,
+            control_change_instruction: b_control_change_instruction,
         } = other;
 
         a_effect == b_effect
@@ -46257,6 +46297,7 @@ impl PartialEq for ResolvedAbility {
             && a_modal == b_modal
             && a_mode_abilities == b_mode_abilities
             && a_parent_target_missing_reason == b_parent_target_missing_reason
+            && a_control_change_instruction == b_control_change_instruction
     }
 }
 
@@ -46714,6 +46755,7 @@ impl ResolvedAbility {
             modal: None,
             mode_abilities: Vec::new(),
             parent_target_missing_reason: None,
+            control_change_instruction: None,
         }
     }
 
@@ -54156,6 +54198,7 @@ mod tests {
             AbilityCost::Reveal {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
+                shared_quality: None,
             }
         );
         let missing: AbilityCost = serde_json::from_str(r#"{"type":"Reveal"}"#).unwrap();
@@ -54164,6 +54207,7 @@ mod tests {
         let symbolic = AbilityCost::Reveal {
             count: variable_x(),
             filter: Some(red_card_filter()),
+            shared_quality: None,
         };
         let json = serde_json::to_string(&symbolic).unwrap();
         assert_eq!(
@@ -54179,6 +54223,7 @@ mod tests {
         let reveal = AbilityCost::Reveal {
             count: variable_x(),
             filter: Some(red_card_filter()),
+            shared_quality: None,
         };
         let mut visited = Vec::new();
         reveal.for_each_quantity_expr(&mut |quantity| visited.push(quantity.clone()));
@@ -54208,6 +54253,7 @@ mod tests {
             AbilityCost::Reveal {
                 count: QuantityExpr::Fixed { value: 3 },
                 filter: Some(red_card_filter()),
+                shared_quality: None,
             }
         );
 
@@ -54479,6 +54525,7 @@ mod tests {
                     AbilityCost::Reveal {
                         count: QuantityExpr::Fixed { value: 1 },
                         filter: None,
+                        shared_quality: None,
                     },
                     vec![CostCategory::Reveals],
                 ),
