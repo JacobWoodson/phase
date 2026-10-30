@@ -386,11 +386,28 @@ fn masterstroke_seized_creatures_attack_owners_then_expire() {
     );
 
     // Haste is live, so both are able: cross-declaration refused, correct
-    // declaration accepted.
+    // declaration accepted. Both creatures attack so the refusal isolates
+    // DEFENDER enforcement: with only the wrong-defender creature named,
+    // the missing must-attack attacker would refuse the declaration on its
+    // own.
     runner.advance_to_combat();
     assert!(
-        declare(&mut runner, vec![(owned_by_p1, AttackTarget::Player(P2))]).is_err(),
+        declare(
+            &mut runner,
+            vec![
+                (owned_by_p1, AttackTarget::Player(P2)),
+                (owned_by_p2, AttackTarget::Player(P2)),
+            ]
+        )
+        .is_err(),
         "P1's creature must not attack P2"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareAttackers { .. }
+        ),
+        "a refused declaration must leave the prompt in place"
     );
     declare(
         &mut runner,

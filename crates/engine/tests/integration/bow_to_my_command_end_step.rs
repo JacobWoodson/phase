@@ -56,7 +56,8 @@
 //! departure reconciliation — the concession row strands the chain with the
 //! survivors never prompted and Bow face up. Drop the paying-team check from
 //! the reconciliation — the stolen-creature row abandons Bow off the
-//! archenemy's returned 4 power and taps it.
+//! archenemy's returned 4 power and taps it. Drop the creature re-check —
+//! the animator row taps the de-animated Sol Ring as part of the payment.
 
 use engine::database::synthesis::synthesize_archenemy;
 use engine::game::deck_loading::create_scheme_deck_card;
@@ -71,6 +72,7 @@ use engine::types::card_type::{CoreType, Supertype};
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{CostResume, PayCostKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 
@@ -80,6 +82,10 @@ const P3: PlayerId = PlayerId(3);
 const BOW_TO_MY_COMMAND: &str = "(An ongoing scheme remains face up until it's abandoned.)\nAs you set this scheme in motion, choose an opponent.\nCreatures the chosen player controls can't attack you or planeswalkers you control.\nAt the beginning of your opponents' end step, they may tap any number of untapped creatures they control with total power 8 or greater. If they do, abandon this scheme.";
 
 const ACT_OF_TREASON: &str = "Gain control of target creature until end of turn. Untap that creature. It gains haste until end of turn. (It can attack and {T} this turn.)";
+
+const MARCH_OF_THE_MACHINES: &str = "Each noncreature artifact is an artifact creature with power and toughness each equal to its mana value. (Equipment that's a creature can't equip a creature.)";
+
+const SOL_RING: &str = "{T}: Add {C}{C}.";
 
 fn scheme_face(name: &str, oracle: &str) -> CardFace {
     let parsed = parse_oracle_text(oracle, name, &[], &["Scheme".to_string()], &[]);
@@ -903,6 +909,271 @@ fn bow_end_step_conceded_stolen_creature_pays_nothing() {
     assert!(
         !runner.state().objects[&bow].face_down,
         "Bow must stay face up on a combined 4"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "the payment continuation must complete, not strand"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "clean drain back to priority, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// March setup: P0 archenemy with the 10/10 beater, P1 with Sol Ring
+/// (a 1/1 artifact creature under March) plus a 4/4 bear, P2 with a 4/4
+/// bear, P3 with March of the Machines and no creatures, Bow set in motion
+/// with P1 chosen, P1 active in precombat main. Returns the runner, Bow's
+/// id, P1's bear, P2's bear, the Sol Ring, March, and the beater.
+fn setup_end_step_game_4p_with_march() -> (
+    GameRunner,
+    ObjectId,
+    ObjectId,
+    ObjectId,
+    ObjectId,
+    ObjectId,
+    ObjectId,
+) {
+    let mut format = FormatConfig::archenemy();
+    format.archenemy_player = Some(P0);
+    let mut scenario = GameScenario::new_with_format(format, 4, 42);
+    scenario.at_phase(Phase::Draw);
+    let sol_ring = scenario
+        .add_artifact_from_oracle(P1, "Sol Ring", SOL_RING)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![],
+        })
+        .id();
+    let p1_bear = scenario.add_creature(P1, "Hero P1 Bear", 4, 4).id();
+    let p2_bear = scenario.add_creature(P2, "Hero P2 Bear", 4, 4).id();
+    let march = scenario
+        .add_enchantment_from_oracle(P3, "March of the Machines", MARCH_OF_THE_MACHINES)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 3,
+            shards: vec![ManaCostShard::Blue],
+        })
+        .id();
+    let beater = scenario.add_creature(P0, "Archenemy Beater", 10, 10).id();
+    for i in 0..7 {
+        scenario.add_card_to_library_top(P0, &format!("P0 Filler {i}"));
+        scenario.add_card_to_library_top(P1, &format!("P1 Filler {i}"));
+        scenario.add_card_to_library_top(P2, &format!("P2 Filler {i}"));
+        scenario.add_card_to_library_top(P3, &format!("P3 Filler {i}"));
+    }
+    let mut runner = scenario.build();
+
+    let face = scheme_face("Bow to My Command", BOW_TO_MY_COMMAND);
+    create_scheme_deck_card(runner.state_mut(), &face, P0);
+    runner.state_mut().archenemy = Some(P0);
+    runner.state_mut().active_player = P0;
+
+    // CR 904.9: entering the archenemy's precombat main sets Bow in motion.
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::NamedChoice { .. }),
+        "expected the as-choice prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "1".to_string(),
+        })
+        .expect("choosing P1 must be accepted");
+    runner.advance_to_priority_window();
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "as-choice must drain to priority, got {:?}",
+        runner.state().waiting_for
+    );
+
+    let bow = *runner
+        .state()
+        .command_zone
+        .iter()
+        .find(|id| runner.state().objects[*id].name == "Bow to My Command")
+        .expect("Bow must be face up in the command zone");
+    assert!(
+        !runner.state().objects[&bow].face_down,
+        "Bow must be face up after being set in motion"
+    );
+
+    // Hand P1 the shared heroes' turn at precombat main; the test drives to
+    // the heroes' shared end step.
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+    (runner, bow, p1_bear, p2_bear, sol_ring, march, beater)
+}
+
+/// CR 800.4a + CR 805.6 + CR 118.12: P3's March of the Machines animates
+/// P1's Sol Ring into a 1/1 artifact creature; P1 answers the collective
+/// payment with it plus a 4-power bear, then P3 concedes while P2 is
+/// answering. March leaves with its owner (CR 800.4a) and the layer pass
+/// turns Sol Ring back into a noncreature artifact BEFORE the departure
+/// reconciliation runs — so the reconciliation must prune it from
+/// `selected`: it contributes no power and taps nothing. P1's and P2's own
+/// 4s still reach the combined 8, Bow is abandoned, and the continuation
+/// drains instead of stranding.
+#[test]
+fn bow_end_step_conceded_animator_artifact_pays_nothing() {
+    let (mut runner, bow, p1_bear, p2_bear, sol_ring, march, beater) =
+        setup_end_step_game_4p_with_march();
+
+    advance_to_p1_end_step(&mut runner);
+
+    // Reach guard: March animates Sol Ring into an artifact creature.
+    assert!(
+        runner.state().objects[&sol_ring]
+            .card_types
+            .core_types
+            .contains(&CoreType::Creature),
+        "reach-guard: March must animate Sol Ring before the end step"
+    );
+
+    let mut reached_optional = false;
+    let mut p1_answered = false;
+    let mut conceded = false;
+    let mut saw_pruned_resume = false;
+    let mut prompted_after: Vec<PlayerId> = Vec::new();
+    for _ in 0..80 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .unwrap();
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                reached_optional = true;
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .unwrap();
+            }
+            WaitingFor::PayCost {
+                player,
+                choices,
+                resume,
+                ..
+            } => {
+                let CostResume::TeamTapPayment { selected, .. } = resume else {
+                    panic!("expected the collective-payment session, got {resume:?}");
+                };
+                if player == P1 {
+                    assert!(!p1_answered, "P1 must answer exactly once before conceding");
+                    assert!(
+                        selected.is_empty(),
+                        "P1 answers first with an empty session, got {selected:?}"
+                    );
+                    assert!(
+                        choices.contains(&sol_ring),
+                        "the animated Sol Ring must be offered to P1, got {choices:?}"
+                    );
+                    p1_answered = true;
+                    runner
+                        .act(GameAction::SelectCards {
+                            cards: vec![sol_ring, p1_bear],
+                        })
+                        .expect("P1's animated ring and bear must be selectable");
+                    continue;
+                }
+                if player == P2 && !conceded {
+                    assert_eq!(
+                        selected,
+                        vec![sol_ring, p1_bear],
+                        "P1's answer must have accumulated the ring and bear before the concession"
+                    );
+                    conceded = true;
+                    runner
+                        .act(GameAction::Concede { player_id: P3 })
+                        .expect("concede must be accepted mid-prompt");
+                    // March leaves with its owner; Sol Ring is a noncreature again.
+                    assert!(
+                        !runner.state().battlefield.contains(&march),
+                        "CR 800.4a: March must leave with conceding P3"
+                    );
+                    assert!(
+                        !runner.state().objects[&sol_ring]
+                            .card_types
+                            .core_types
+                            .contains(&CoreType::Creature),
+                        "Sol Ring must be a noncreature artifact once March leaves"
+                    );
+                    continue;
+                }
+                assert_eq!(
+                    player, P2,
+                    "only the surviving contributor pays after the concession, got {player:?}"
+                );
+                assert_eq!(
+                    selected,
+                    vec![p1_bear],
+                    "reconciliation must prune the de-animated ring from selected, got {selected:?}"
+                );
+                saw_pruned_resume = true;
+                prompted_after.push(player);
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![p2_bear],
+                    })
+                    .unwrap();
+            }
+            WaitingFor::Priority { .. } => {
+                if runner.state().stack.is_empty() {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            other => panic!("unexpected prompt {other:?}"),
+        }
+    }
+
+    assert!(
+        reached_optional,
+        "the team may must be offered (1 + 4 + 4 reaches 8)"
+    );
+    assert!(p1_answered, "P1 must have answered with the ring and bear");
+    assert!(conceded, "P3 must have conceded mid-payment");
+    assert!(
+        saw_pruned_resume,
+        "P2 must be re-prompted on the pruned session after the concession"
+    );
+    assert_eq!(
+        prompted_after,
+        vec![P2],
+        "P2 must keep answering after the concession"
+    );
+    assert!(
+        !runner.state().objects[&sol_ring].tapped,
+        "the de-animated ring must tap nothing"
+    );
+    assert!(
+        runner.state().objects[&p1_bear].tapped,
+        "P1's bear paid and must be tapped"
+    );
+    assert!(
+        runner.state().objects[&p2_bear].tapped,
+        "P2's bear paid and must be tapped"
+    );
+    assert!(
+        !runner.state().objects[&beater].tapped,
+        "the archenemy's beater must never be touched"
+    );
+    // CR 701.33b / CR 314.2: abandoned to the bottom of the scheme deck, face
+    // down, out of the command zone.
+    assert!(
+        !runner.state().command_zone.contains(&bow),
+        "Bow must leave the command zone once abandoned"
+    );
+    assert!(
+        runner.state().objects[&bow].face_down,
+        "abandoned Bow must be face down"
+    );
+    assert!(
+        runner.state().scheme_deck.contains(&bow),
+        "abandoned Bow must be back in the scheme deck"
     );
     assert!(
         runner.state().stack.is_empty(),

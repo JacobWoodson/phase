@@ -13847,6 +13847,8 @@ fn apply_non_priority_pass_action(
                 eligible,
                 selected,
                 remaining,
+                filter,
+                ability,
             } => super::costs::handle_team_tap_payment_selection(
                 state,
                 *player,
@@ -13857,6 +13859,8 @@ fn apply_non_priority_pass_action(
                 eligible,
                 selected,
                 remaining,
+                filter,
+                ability,
                 &mut events,
             )?,
             CostResume::TurnFaceUp {

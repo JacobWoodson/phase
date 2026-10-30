@@ -284,6 +284,8 @@ fn pay_collective_tap_creatures_cost(
             eligible,
             selected: Vec::new(),
             remaining: members[index + 1..].to_vec(),
+            filter: Box::new(filter.clone()),
+            ability: Box::new(ability.clone()),
         },
     };
     Ok(PaymentOutcome::Paused {
@@ -314,6 +316,8 @@ pub(crate) fn handle_team_tap_payment_selection(
     eligible: &[ObjectId],
     selected: &[ObjectId],
     remaining: &[PlayerId],
+    filter: &TargetFilter,
+    ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     // Fail closed on a prompt/session mismatch: session prompts are always
@@ -376,6 +380,8 @@ pub(crate) fn handle_team_tap_payment_selection(
                 eligible: eligible.to_vec(),
                 selected,
                 remaining: after,
+                filter: Box::new(filter.clone()),
+                ability: Box::new(ability.clone()),
             },
         };
         return Ok(state.waiting_for.clone());
@@ -434,10 +440,12 @@ fn settle_team_tap_payment(
 ///
 /// A departed hero's required cost "is not paid": departed heroes are
 /// pruned from `remaining` and their creatures from `eligible`/`selected`.
-/// Selections revalidate against the surviving PAYING-team members, not just
-/// liveness: a steal ending under CR 800.4a can return a selected creature
-/// to a living non-payer (the archenemy), and it must neither count nor tap.
-/// The current prompt holder keeps answering when alive; otherwise the
+/// Both lists revalidate by re-running the gate's eligibility authority
+/// over the surviving PAYING-team members — not just liveness: a steal
+/// ending under CR 800.4a can return a selected creature to a living
+/// non-payer (the archenemy), and an animation ending the same way can leave
+/// a selected permanent a noncreature; neither must count nor tap. The
+/// current prompt holder keeps answering when alive; otherwise the
 /// next surviving contributor is prompted, or — with nobody left to ask —
 /// the surviving selections settle explicitly and the continuation drains.
 /// No-op unless `waiting_for` is a collective-payment prompt.
@@ -457,6 +465,8 @@ pub(crate) fn reconcile_team_tap_payment_after_departure(
                 eligible,
                 selected,
                 remaining,
+                filter,
+                ability,
             },
         ..
     } = state.waiting_for.clone()
@@ -467,20 +477,24 @@ pub(crate) fn reconcile_team_tap_payment_after_departure(
     // answers for the same side, and `team_id` is seat-based so it resolves
     // even when the holder is the departed player.
     let paying_team = super::topology::team_members(state, player);
-    let live_creature = |state: &GameState, id: &ObjectId| {
-        state.battlefield.contains(id)
-            && state.objects.get(id).is_some_and(|obj| {
-                super::players::is_alive(state, obj.controller)
-                    && paying_team.contains(&obj.controller)
-            })
-    };
+    let survivors: Vec<PlayerId> = paying_team
+        .iter()
+        .copied()
+        .filter(|hero| super::players::is_alive(state, *hero))
+        .collect();
+    // Re-run the gate's eligibility authority over the survivors and
+    // intersect both lists with it: team membership, living controller,
+    // battlefield presence, tapped state, and the cost filter's
+    // creature-ness live in exactly one place, so the gate and the
+    // reconciliation cannot drift apart again.
+    let fresh = find_eligible_team_tap_creatures_targets(state, &survivors, &ability, &filter);
     let eligible: Vec<ObjectId> = eligible
         .into_iter()
-        .filter(|id| live_creature(state, id))
+        .filter(|id| fresh.contains(id))
         .collect();
     let selected: Vec<ObjectId> = selected
         .into_iter()
-        .filter(|id| live_creature(state, id))
+        .filter(|id| fresh.contains(id))
         .collect();
     let remaining: Vec<PlayerId> = remaining
         .into_iter()
@@ -521,6 +535,8 @@ pub(crate) fn reconcile_team_tap_payment_after_departure(
                 eligible,
                 selected,
                 remaining: after,
+                filter,
+                ability,
             },
         };
     } else {

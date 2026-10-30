@@ -858,6 +858,8 @@ export type CostResume =
       eligible: ObjectId[];
       selected: ObjectId[];
       remaining: PlayerId[];
+      filter: unknown;
+      ability: unknown;
     };
 
 export type ManaColor = "White" | "Blue" | "Black" | "Red" | "Green";

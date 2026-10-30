@@ -422,6 +422,8 @@ describe("getBoardChoiceView", () => {
             eligible: [4, 5],
             selected: [],
             remaining: [2],
+            filter: {},
+            ability: {},
           },
         },
       },
