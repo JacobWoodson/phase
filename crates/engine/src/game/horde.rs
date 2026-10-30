@@ -748,6 +748,7 @@ fn amass_revealed_army(
         horde,
     );
     let _ = crate::game::effects::amass::resolve(state, &ability, events);
+    // allow-raw-zone: consumed library placeholder destroyed after the Amass authority resolved (remove + object delete); not a CR 400.7 zone change, no ZoneChanged is emitted.
     crate::game::zones::remove_from_zone(state, card_id, Zone::Library, horde);
     state.objects.remove(&card_id);
 }
@@ -908,6 +909,7 @@ fn reveal_library_token(
     crate::game::layers::flush_layers(state);
 
     // Remove the library placeholder so no duplicate token remains.
+    // allow-raw-zone: placeholder destroyed after the fresh token entered via the token-creation pipeline (M2 create + remove); not a CR 400.7 zone change, no ZoneChanged is emitted.
     crate::game::zones::remove_from_zone(state, card_id, Zone::Library, horde);
     state.objects.remove(&card_id);
 }

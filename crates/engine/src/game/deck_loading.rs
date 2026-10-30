@@ -1000,6 +1000,7 @@ pub fn load_horde_library(
         state.objects.remove(id);
     }
     if let Some(player) = state.players.iter_mut().find(|p| p.id == horde_seat) {
+        // allow-raw-zone: pregame setup swaps the stale library for the fixed challenge deck; begins from outside the game, not a zone move (CR 400.11).
         player.library.clear();
     }
 
@@ -1051,10 +1052,8 @@ pub fn load_horde_library(
     // from the game seed) so the reveal order is random yet reproducible.
     let GameState { players, rng, .. } = state;
     if let Some(player) = players.iter_mut().find(|p| p.id == horde_seat) {
-        crate::util::im_ext::shuffle_vector(
-            &mut player.library,
-            rng.draw(crate::types::game_state::RandomDraw::Placement),
-        );
+        let placement = rng.draw(crate::types::game_state::RandomDraw::Placement);
+        crate::util::im_ext::shuffle_vector(&mut player.library, placement);
     }
 }
 

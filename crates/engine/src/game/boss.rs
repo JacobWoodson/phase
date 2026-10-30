@@ -186,9 +186,7 @@ fn create_boss_deck_card(
     obj.keywords = body.keywords.clone();
     obj.base_keywords = body.keywords.clone();
     obj.face_down = true;
-    // allow-raw-zone: new Boss pile object is born into command-zone bookkeeping,
-    // then held in the Boss pile (face down) instead of the command-zone list —
-    // the scheme-deck birth pattern.
+    // allow-raw-zone: new Boss pile object is born into command-zone bookkeeping (scheme-deck birth pattern).
     state.command_zone.retain(|id| *id != obj_id);
     obj_id
 }
@@ -249,8 +247,7 @@ fn deploy_stage(
             obj.face_down = false;
             obj.controller = owner;
         }
-        // allow-raw-zone: Boss deployment stays in the command zone (face-down
-        // pile → face up), the scheme set-in-motion pattern.
+        // allow-raw-zone: Boss deployment stays in the command zone (face-down pile to face up; scheme set-in-motion pattern).
         state.command_zone.push_back(boss_id);
         graft_boss_abilities(state, boss_id);
         deployed.push(boss_id);
@@ -1643,10 +1640,8 @@ fn apply_one_hero_event_step(
         HeroEventApplyStep::ShuffleLibrary { player } => {
             let GameState { players, rng, .. } = state;
             if let Some(seat) = players.iter_mut().find(|p| p.id == *player) {
-                crate::util::im_ext::shuffle_vector(
-                    &mut seat.library,
-                    rng.draw(crate::types::game_state::RandomDraw::Placement),
-                );
+                let placement = rng.draw(crate::types::game_state::RandomDraw::Placement);
+                crate::util::im_ext::shuffle_vector(&mut seat.library, placement);
             }
         }
         HeroEventApplyStep::DiscardFiredBaxters { cards } => {
