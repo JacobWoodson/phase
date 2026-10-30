@@ -559,6 +559,10 @@
     "addPackFromSet": "添加补充包",
     "addPackOf": "添加一个 {{name}} 的补充包",
     "botDifficulty": "机器人难度",
+    "pickEnhancements": {
+      "label": "使用带有选牌增强的内置 AI",
+      "hint": "对于有指南的赛制(目前为 Mirrodin、Darksteel 和 Fifth Dawn),机器人会遵循书面选牌顺序指南。中等及以上难度生效。"
+    },
     "candidateCount": "已选 {{selected}} 个候选系列",
     "candidateSets": "候选系列",
     "chooseSet": "选择系列",

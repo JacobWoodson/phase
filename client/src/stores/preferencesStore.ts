@@ -335,6 +335,7 @@ function buildDefaultPreferences(): PreferencesState {
     aiSeats: [defaultAiSeat()],
     cedhMode: false,
     hordeChallengeDeck: DEFAULT_CHALLENGE_DECK,
+    draftPickEnhancements: false,
     aiArchetypeFilter: "Any",
     aiCoverageFloor: DEFAULT_AI_COVERAGE_FLOOR,
     aiBracketFilter: [] as CommanderBracket[],
@@ -459,6 +460,9 @@ interface PreferencesState {
    *  engine's `ChallengeDeck::registry()` (mirrored in `challengeDeckRegistry`)
    *  is the source of truth for which decks exist; this only remembers the pick. */
   hordeChallengeDeck: ChallengeDeck;
+  /** Draft bots (Medium and above) apply the built-in per-format draft guides
+   *  to their picks. Off by default; formats without a guide are unaffected. */
+  draftPickEnhancements: boolean;
   aiArchetypeFilter: AiArchetypeFilter;
   aiCoverageFloor: number;
   aiBracketFilter: CommanderBracket[];
@@ -555,6 +559,7 @@ interface PreferencesActions {
   setCedhMode: (enabled: boolean) => void;
   /** Remember which Horde challenge deck the survivors face. */
   setHordeChallengeDeck: (deck: ChallengeDeck) => void;
+  setDraftPickEnhancements: (enabled: boolean) => void;
   setAiArchetypeFilter: (filter: AiArchetypeFilter) => void;
   setAiCoverageFloor: (floor: number) => void;
   setAiBracketFilter: (brackets: CommanderBracket[]) => void;
@@ -756,6 +761,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
         }),
       setCedhMode: (enabled) => set({ cedhMode: enabled }),
       setHordeChallengeDeck: (deck) => set({ hordeChallengeDeck: deck }),
+      setDraftPickEnhancements: (enabled) => set({ draftPickEnhancements: enabled }),
       setAiArchetypeFilter: (filter) => set({ aiArchetypeFilter: filter }),
       setAiCoverageFloor: (floor) => set({ aiCoverageFloor: floor }),
       setAiBracketFilter: (brackets) => set({ aiBracketFilter: brackets }),

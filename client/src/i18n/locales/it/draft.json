@@ -119,6 +119,10 @@
   },
   "setSelector": {
     "botDifficulty": "Difficoltà bot",
+    "pickEnhancements": {
+      "label": "Usa l'IA integrata con miglioramenti alle scelte del draft",
+      "hint": "I bot seguono una guida scritta sull'ordine di scelta per i formati che ne hanno una (al momento Mirrodin, Darksteel e Fifth Dawn). Si applica dalla difficoltà media in su."
+    },
     "difficultyLevels": {
       "VeryEasy": "Molto facile",
       "Easy": "Facile",
