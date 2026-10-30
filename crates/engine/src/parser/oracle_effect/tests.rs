@@ -80197,20 +80197,28 @@ fn keeper_dispose_sentence_two_requires_a_bare_defended_scope() {
     );
 }
 
-/// N10 + N11 — the two sentence-two deferrals stay deferred, on
-/// rules-correctness grounds, driven on the REAL cards rather than a synthetic
-/// subject swap.
+/// N10 + N11 — the sentence-two deferrals, driven on the REAL cards rather
+/// than a synthetic subject swap. The broadcast leg (Chronomantic Escape) and
+/// the player-subject leg (Champions of Minas Tirith) stay deferred on
+/// rules-correctness grounds: a broadcast subject's affected set must stay
+/// LIVE (CR 611.2c, second sentence — which is what Chronomantic Escape's
+/// printed ruling says), and a player-scoped subject is not an object
+/// restriction at all (CR 508.1c).
 ///
-/// A broadcast subject's affected set must stay LIVE (CR 611.2c, second
-/// sentence — which is what Chronomantic Escape's printed ruling says), and a
-/// player-scoped subject is not an object restriction at all (CR 508.1c).
-/// "Fixing" either by widening the subject match of the sentence-two branch is
-/// the failure this row exists to catch: each card must keep the
-/// `Effect::Unimplemented` gap it carries at BASE_SHA, so coverage stays
-/// honestly red. Paired positive: Promise of Loyalty's anaphoric subject IS
-/// claimed, in the same test, so a blanket decline cannot green this row.
+/// The controller-anaphor leg (Web of Inertia, "creatures they control") IS
+/// claimed: the N10/N11 premise is discharged for this shape — the affected
+/// player latches at fire time (`add_restriction.rs:145-149`) while the
+/// creature set stays live (per-pairing `attacker_controller` read at
+/// `combat.rs:5566`, compared at `:5591-5612`), enforced through the
+/// bare-`Player` defended arm (`restrictions.rs:2476`).
+/// "Fixing" either remaining decline by widening the subject match of the
+/// sentence-two branch is the failure this row exists to catch: each of those
+/// cards must keep the `Effect::Unimplemented` gap it carries at BASE_SHA, so
+/// coverage stays honestly red. Paired positives: Promise of Loyalty's
+/// anaphoric subject IS claimed, and so is Inertia's, in the same test, so a
+/// blanket decline cannot green this row.
 #[test]
-fn sentence_two_broadcast_and_player_subjects_stay_declined() {
+fn sentence_two_broadcast_and_player_subjects_stay_declined_while_anaphoric_claims_hold() {
     fn has_cant_attack_gap(def: &AbilityDefinition) -> bool {
         let mut current = Some(def);
         while let Some(ability) = current {
@@ -80241,7 +80249,10 @@ fn sentence_two_broadcast_and_player_subjects_stay_declined() {
         escape.abilities
     );
 
-    // Web of Inertia, verbatim second sentence of its trigger body.
+    // Web of Inertia, verbatim: the controller-anaphor leg ("creatures they
+    // control") IS claimed — head ChangeZone exile-a-card choice (target
+    // Typed, controller ScopedPlayer) with the AddRestriction sub-ability
+    // gated on the decline.
     let inertia = parse_oracle_text(
         "At the beginning of combat on each opponent's turn, that player may exile a card from their graveyard. If the player doesn't, creatures they control can't attack you this turn.",
         "Web of Inertia",
@@ -80249,14 +80260,88 @@ fn sentence_two_broadcast_and_player_subjects_stay_declined() {
         &["Enchantment".to_string()],
         &[],
     );
-    assert!(
-        inertia
+    {
+        use crate::types::triggers::AttackTargetFilter;
+        let execute = inertia
             .triggers
             .iter()
-            .any(|trigger| trigger.execute.as_deref().is_some_and(has_cant_attack_gap)),
-        "Web of Inertia's broadcast restriction must stay an honest gap: {:?}",
-        inertia.triggers
-    );
+            .find_map(|trigger| trigger.execute.as_deref())
+            .expect("Web of Inertia has a beginning-of-combat trigger execute chain");
+        match execute.effect.as_ref() {
+            Effect::ChangeZone {
+                target,
+                origin,
+                destination,
+                ..
+            } => {
+                assert_eq!(
+                    *origin,
+                    Some(Zone::Graveyard),
+                    "the exile choice takes a graveyard card"
+                );
+                assert_eq!(*destination, Zone::Exile, "the choice exiles");
+                match target {
+                    TargetFilter::Typed(choice) => assert_eq!(
+                        choice.controller,
+                        Some(ControllerRef::ScopedPlayer),
+                        "the declining opponent chooses their own card"
+                    ),
+                    other => panic!("expected a Typed exile choice, got {other:?}"),
+                }
+            }
+            other => panic!("expected the ChangeZone exile-choice head, got {other:?}"),
+        }
+        assert!(execute.optional, "reach-guard: the head carries the may");
+        let ban = execute
+            .sub_ability
+            .as_deref()
+            .expect("the decline chains to the attack prohibition");
+        assert_eq!(
+            ban.condition,
+            Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::effect_performed())
+            }),
+            "the ban is gated on the opponent having declined the exile"
+        );
+        match ban.effect.as_ref() {
+            Effect::AddRestriction {
+                restriction:
+                    GameRestriction::ProhibitActivity {
+                        affected_players,
+                        expiry,
+                        activity,
+                        ..
+                    },
+            } => {
+                assert_eq!(
+                    *affected_players,
+                    RestrictionPlayerScope::ScopedPlayer,
+                    "'creatures they control' binds the phase's active player"
+                );
+                assert_eq!(
+                    *expiry,
+                    RestrictionExpiry::EndOfTurn,
+                    "this-turn cleanup owns expiry (CR 514.2)"
+                );
+                assert_eq!(
+                    *activity,
+                    ProhibitedActivity::Attack {
+                        defended: AttackTargetFilter::Player,
+                        protected_player: None,
+                    },
+                    "bare \"you\" defends the controller only"
+                );
+            }
+            other => panic!("expected AddRestriction(Attack) leaf, got {other:?}"),
+        }
+        for node in [execute, ban] {
+            assert!(
+                !matches!(node.effect.as_ref(), Effect::Unimplemented { .. }),
+                "zero Unimplemented in the Inertia chain: {:?}",
+                node.effect
+            );
+        }
+    }
 
     // Champions of Minas Tirith, verbatim second triggered ability.
     let champions = parse_oracle_text(

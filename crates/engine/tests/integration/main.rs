@@ -1675,6 +1675,7 @@ mod warning_source_shield_persists_across_damage_steps;
 mod warped_space_alt_cost_from_exile;
 mod wba_fodder_multiset;
 mod wba_loop_firewall_interposition;
+mod web_of_inertia;
 mod wedding_announcement_transform;
 mod wedding_ring_etb_token_copy;
 mod well_of_lost_dreams_may_pay_x;
