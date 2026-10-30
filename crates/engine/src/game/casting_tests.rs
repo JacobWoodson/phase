@@ -21709,6 +21709,7 @@ fn exact_permission_does_not_inherit_sibling_etb_counter() {
                             success_action:
                                 crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                             delayed_trigger_receipts: Vec::new(),
+                            indicated_action: None,
                         }
                     }),
                     duration: Some(Duration::UntilEndOfTurn),
@@ -21804,6 +21805,7 @@ fn exact_permission_does_not_inherit_sibling_permanent_modification() {
                             success_action:
                                 crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                             delayed_trigger_receipts: Vec::new(),
+                            indicated_action: None,
                         }
                     }),
                     duration: Some(Duration::UntilEndOfTurn),
@@ -21894,6 +21896,7 @@ fn resolution_cast_request_mods_apply_exactly_once() {
             reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
             success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
             delayed_trigger_receipts: Vec::new(),
+            indicated_action: None,
         };
         let initiation = initiate_cast_during_resolution(
             &mut state,
@@ -22033,6 +22036,7 @@ fn resolution_request_mods_do_not_leak_from_sibling_permission() {
                             success_action:
                                 crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                             delayed_trigger_receipts: Vec::new(),
+                            indicated_action: None,
                         }
                     }),
                     duration: Some(Duration::UntilEndOfTurn),
@@ -48697,6 +48701,7 @@ fn resolution_offer_grant(
             reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
             success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
             delayed_trigger_receipts: Vec::new(),
+            indicated_action: None,
         }),
         duration: None,
         graveyard_replacement: None,
@@ -56199,6 +56204,7 @@ fn declining_a_paid_offer_withdraws_only_the_triggers_it_recorded() {
                 reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
                 success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                 delayed_trigger_receipts: vec![second],
+                indicated_action: None,
             },
         },
     };
@@ -56298,6 +56304,7 @@ fn cancelling_an_accepted_paid_offer_withdraws_its_tail_receipt() {
                         source_id: origin.source_id,
                     },
                 ],
+                indicated_action: None,
             },
         },
     };
@@ -56671,6 +56678,7 @@ fn graveyard_paid_offer_uses_exact_appended_permission_over_conflicting_sibling(
                 reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
                 success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                 delayed_trigger_receipts: Vec::new(),
+                indicated_action: None,
             }),
             duration: None,
             graveyard_replacement: Some(
@@ -56797,6 +56805,7 @@ fn free_during_resolution_cast_auto_resolves_with_empty_pool() {
         reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
         success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
         delayed_trigger_receipts: Vec::new(),
+        indicated_action: None,
     };
     let initiation = initiate_cast_during_resolution(
         &mut state,
@@ -56910,6 +56919,7 @@ fn resolution_test_request(filter: TargetFilter) -> ResolutionCastRequest {
             reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
             success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
             delayed_trigger_receipts: Vec::new(),
+            indicated_action: None,
         },
         face_policy,
         cast_transformed: false,
@@ -57870,6 +57880,7 @@ fn exact_resolution_offer_does_not_inherit_sibling_cast_transformed() {
         reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
         success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
         delayed_trigger_receipts: Vec::new(),
+        indicated_action: None,
     };
     initiate_cast_during_resolution(
         &mut state,
@@ -57946,6 +57957,7 @@ fn exact_resolution_offer_does_not_consume_sibling_once_per_turn_permission() {
         reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
         success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
         delayed_trigger_receipts: Vec::new(),
+        indicated_action: None,
     };
     initiate_cast_during_resolution(
         &mut state,
@@ -58020,6 +58032,7 @@ fn exact_resolution_offer_without_concession_does_not_inherit_later_any_color_si
                     success_action:
                         crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                     delayed_trigger_receipts: Vec::new(),
+                    indicated_action: None,
                 }),
                 duration: None,
                 graveyard_replacement: None,

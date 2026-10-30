@@ -4716,6 +4716,28 @@ pub(super) fn selected_exile_alt_cost_permission_graveyard_replacement(
     }
 }
 
+/// CR 603.2h + CR 601.2i: the CR 603.2h limit carried by the resolution cast elected
+/// for THIS cast (the selected permission's cleanup), read before the stack move drops
+/// it. Mirrors `selected_exile_alt_cost_permission_graveyard_replacement`, so a
+/// non-elected sibling permission's limit cannot be spent by this cast.
+pub(super) fn selected_resolution_cast_indicated_action(
+    state: &GameState,
+    object_id: ObjectId,
+    player: PlayerId,
+    casting_permission_index: Option<CastingPermissionIndex>,
+) -> Option<Box<crate::types::ability::IndicatedActionLimit>> {
+    let obj = state.objects.get(&object_id)?;
+    let permission =
+        selected_exile_alt_cost_permission(state, obj, player, casting_permission_index)?;
+    match permission {
+        crate::types::ability::CastingPermission::ExileWithAltCost {
+            resolution_cleanup: Some(cleanup),
+            ..
+        } => cleanup.indicated_action.clone(),
+        _ => None,
+    }
+}
+
 pub(super) fn exile_alt_cost_permissions_accept_resulting_mv(
     state: &GameState,
     object_id: ObjectId,
@@ -35252,6 +35274,7 @@ mod castable_zone_authority_tests {
                 reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
                 success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                 delayed_trigger_receipts: Vec::new(),
+                indicated_action: None,
             });
         }
         assert!(
