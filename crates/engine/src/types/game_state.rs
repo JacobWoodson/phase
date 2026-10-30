@@ -2635,6 +2635,48 @@ pub struct ExploitRecord {
     pub sacrificed_incarnation: Option<u64>,
 }
 
+/// CR 120.3f + CR 120.1 + CR 616.1: post-loss work a non-combat
+/// player-damage leg still owes after its life loss paused (the Horde
+/// damage→mill redirect parking a mill/batch choice, or co-applicable
+/// life-loss replacements). Stashed by `apply_damage_after_replacement` on
+/// the deferral; drained by `drain_pending_damage_post_loss` once the loss
+/// fully settles. Combat damage never stashes (combat drops deferred
+/// portions), and creature damage cannot pause here (only the player life-loss
+/// call defers), so the target is always a player and toxic never applies.
+///
+/// The staged cursor runs each step exactly once: `EmitAndRecord` is
+/// infallible (event push + record push), while `LifelinkGain` can re-park
+/// on co-applicable life-gain replacements — the drain keeps the current
+/// stage then, so the next answer resumes the gain without re-emitting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingDamagePostLoss {
+    pub source_id: ObjectId,
+    /// CR 400.7: the source incarnation captured with the damage context —
+    /// authoritative if the source changes zones across the pause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_incarnation: Option<u64>,
+    pub controller: PlayerId,
+    pub target: PlayerId,
+    /// The post-replacement damage amount (== `primary_amount`: players have
+    /// no excess and the excess-redirect rider is creature-only).
+    pub actual_amount: u32,
+    pub has_lifelink: bool,
+    /// CR 702.15b + CR 120.4a: lifelink already-dealt bonus deferred from an
+    /// earlier leg of the same modified event (redirect legs).
+    #[serde(default)]
+    pub lifelink_bonus: u32,
+    pub stage: DamagePostLossStage,
+}
+
+/// Cursor for [`PendingDamagePostLoss`]: which post-loss step still owes work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DamagePostLossStage {
+    /// Push the `DamageDealt` event and the CR 120.1 record, then advance.
+    EmitAndRecord,
+    /// Apply the lifelink gain (may re-park on gain replacements).
+    LifelinkGain,
+}
+
 /// CR 608.2i + CR 608.2h: source characteristics snapshot at damage time
 /// (look-back; criteria need not still hold). Queries such as "opponents who
 /// were dealt combat damage by ~ or a Dragon this turn" (Estinien Varlineau)
@@ -7414,6 +7456,23 @@ pub enum BatchCompletion {
         /// actually departed the library, so the set is a candidate list rather
         /// than a result.
         cards: Vec<ObjectId>,
+    },
+    /// Horde advanced legendary rule
+    /// ([`crate::types::format::HordeLegendaryDeath::EtbThenPhaseOut`]) + CR
+    /// 701.17a + CR 603.2c + CR 702.26 + CR 616.1: a damage-to-mill batch
+    /// settled. Publishes the ordinary `Milled` events for every card that
+    /// left the library, then synchronously phases out the deployed legendary
+    /// cohort. Runs after the batch's own trigger collection on both the
+    /// synchronous and resumed paths, so printed ETBs are already collected
+    /// and no SBA check can observe the phased-in window.
+    HordeMillFromLossDeliveryComplete {
+        player_id: PlayerId,
+        /// Every card the mill attempted (candidate list, as in
+        /// `MilledDeliveryComplete`): each non-library card yields `Milled`.
+        milled: Vec<ObjectId>,
+        /// The legendary permanents this batch deployed. Each still on the
+        /// battlefield phases out synchronously (CR 702.26).
+        legendary_cohort: Vec<ObjectId>,
     },
 }
 
@@ -24481,6 +24540,13 @@ declare_game_state! {
     /// re-invokes the wave after the choice resolves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_horde_reveal: Option<Box<PendingHordeReveal>>,
+    /// CR 120.3f + CR 120.1 + CR 616.1: post-loss work a non-combat
+    /// player-damage leg still owes after its life loss paused. Boxed like
+    /// its `pending_horde_reveal` sibling — populated only during the pause;
+    /// drained by `deal_damage::drain_pending_damage_post_loss` through the
+    /// post-replacement funnel once the loss fully settles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_damage_post_loss: Option<Box<PendingDamagePostLoss>>,
     /// CR 608.2c + CR 616.1: Progress for a replacement-suspended exile loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_exile_from_top_until: Option<Box<PendingExileFromTopUntil>>,
@@ -25416,23 +25482,6 @@ declare_game_state! {
     /// Runtime designation (assigned at setup), not a deck-intrinsic ruleset field.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub horde_seats: Vec<PlayerId>,
-    /// Horde Magic (advanced rule): incarnation-pinned legendary permanents the
-    /// damage→mill redirect deployed that are still awaiting their grafted
-    /// ETB-triggered phase-out (`horde::graft_legendary_phase_out_triggers`).
-    /// While pinned, the legend-rule SBA (CR 704.5j) treats them as already
-    /// phased out: the graft resolves after the next SBA check, and without
-    /// this two milled copies of one boss would hit `ChooseLegend` and
-    /// annihilate instead of both phasing out. Incarnation-pinned (CR 400.7),
-    /// not bare ids: a deployment that changes zones before its graft resolves
-    /// (bounced or flickered in the response window) is a NEW object that must
-    /// not inherit the exemption. Released when the deployment phases out
-    /// (`phasing::phase_out_object`), so a later phase-in is an ordinary
-    /// permanent subject to the legend rule. A stale pin (zone-changed
-    /// deployment) simply matches nothing; it is never consulted after its
-    /// incarnation lapses.
-    #[serde(default)]
-    #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
-    pub horde_pending_phase_out: HashSet<ObjectIncarnationRef>,
     /// Horde Magic (LOTR "Two Towers"): which [`horde_seats`] commander drives the
     /// NEXT Horde turn. The rules have the two Horde commanders alternate turns
     /// (Reading B): the Horde side takes one turn per round (2HG-style), but the
@@ -26323,7 +26372,8 @@ fn visit_batch_completion_chains<'a>(
         | BatchCompletion::MeldExile { .. }
         | BatchCompletion::MeldEntry { .. }
         | BatchCompletion::MeldRedirect { .. }
-        | BatchCompletion::MilledDeliveryComplete { .. } => Ok(()),
+        | BatchCompletion::MilledDeliveryComplete { .. }
+        | BatchCompletion::HordeMillFromLossDeliveryComplete { .. } => Ok(()),
     }
 }
 
@@ -32533,6 +32583,7 @@ impl GameState {
             pending_discard_batch: None,
             pending_hero_event: None,
             pending_horde_reveal: None,
+            pending_damage_post_loss: None,
             pending_exile_from_top_until: None,
             pending_mass_library_order_choice: None,
             pending_scoped_library_search: None,
@@ -32638,7 +32689,6 @@ impl GameState {
             horde_turn_index: 0,
             horde_postcombat_activation_queue: Vec::new(),
             horde_seats: horde_seats_designated,
-            horde_pending_phase_out: HashSet::new(),
             active_horde_index: 0,
             boss_deck: im::Vector::new(),
             boss_stage: 0,
@@ -35951,7 +36001,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         horde_turn_index: _,
         horde_postcombat_activation_queue: _,
         horde_seats: _,
-        horde_pending_phase_out: _,
         active_horde_index: _,
         boss_deck: _,
         boss_stage: _,
@@ -35996,11 +36045,17 @@ fn _gamestate_partition_is_total(s: &GameState) {
         //     only SHRINKS as the batch drains and it is `None` outside a pause, so a differing
         //     value is correctly not a fixed-point repeat and COMPARING it can never suppress a
         //     legitimate loop's detection.
+        //   - `pending_damage_post_loss`: COMPARED (hand-written `impl PartialEq` conjunct) — a
+        //     paused damage-leg interaction state, classified like `pending_discard_batch`. Its
+        //     stage cursor only ADVANCES toward clearing and it is `None` outside a pause (and at
+        //     every Priority sample beat — the drain consumes it before priority is restored), so
+        //     COMPARING it can never suppress a legitimate loop's detection.
         pending_player_scope_sacrifice_choice: _,
         pending_player_scope_unless_payment: _,
         pending_discard_batch: _,
         pending_hero_event: _,
         pending_horde_reveal: _,
+        pending_damage_post_loss: _,
         pending_exile_from_top_until: _,
         pending_mass_library_order_choice: _,
         pending_scoped_library_search: _,
@@ -36241,6 +36296,7 @@ impl PartialEq for GameState {
             && self.pending_player_scope_unless_payment
                 == other.pending_player_scope_unless_payment
             && self.pending_discard_batch == other.pending_discard_batch
+            && self.pending_damage_post_loss == other.pending_damage_post_loss
             && self.pending_hero_event == other.pending_hero_event
             && self.pending_exile_from_top_until == other.pending_exile_from_top_until
             && self.pending_combat_lifelink == other.pending_combat_lifelink
@@ -36301,7 +36357,6 @@ impl PartialEq for GameState {
             && self.horde_turn_index == other.horde_turn_index
             && self.horde_postcombat_activation_queue == other.horde_postcombat_activation_queue
             && self.horde_seats == other.horde_seats
-            && self.horde_pending_phase_out == other.horde_pending_phase_out
             && self.active_horde_index == other.active_horde_index
             && self.boss_deck == other.boss_deck
             && self.boss_stage == other.boss_stage

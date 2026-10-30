@@ -1358,6 +1358,30 @@ fn handle_replacement_choice_inner(
                 }
             }
 
+            // CR 120.3f + CR 120.1 + CR 616.1: a non-combat player-damage leg
+            // whose life loss paused (Horde mill redirect or loss replacements)
+            // owes its post-loss work (the `DamageDealt` event, the CR 120.1
+            // record, the lifelink gain). The loss is fully settled once the
+            // batch drain above retires with no re-park, so drain the stashed
+            // stages here — before outer continuations, matching sync order
+            // (each damage target completes before later instructions resume).
+            // A lifelink gain that re-parks keeps the `LifelinkGain` stage for
+            // the next answer; propagate its prompt.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && state.pending_damage_post_loss.is_some()
+                && state.active_batch_delivery().is_none()
+            {
+                let outcome = crate::game::effects::deal_damage::drain_pending_damage_post_loss(
+                    state, events,
+                );
+                if matches!(
+                    outcome,
+                    crate::game::effects::deal_damage::DamagePostLossDrainOutcome::PausedForReplacement
+                ) {
+                    waiting_for = state.waiting_for.clone();
+                }
+            }
+
             // CR 614.6 + CR 616.1: settling a batch parked above its member's
             // delivery-tail child exposes that child's counter-removal queue. Finish
             // it here, in the same order as the queue drain above, before any parked

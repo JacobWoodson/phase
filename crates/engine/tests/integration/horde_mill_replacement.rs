@@ -9,11 +9,13 @@
 //! proceeded as if the redirect settled.
 
 use engine::game::effects::life::{apply_damage_life_loss, ReplacementDeferred};
+use engine::game::scenario::GameRunner;
 use engine::game::zones::create_object;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, Effect, QuantityExpr, QuantityRef, ReplacementDefinition,
     ReplacementPlayerScope, TargetFilter,
 };
+use engine::types::actions::GameAction;
 use engine::types::card_type::{CoreType, Supertype};
 use engine::types::format::{ChallengeDeck, FormatConfig, HordeLegendaryDeath};
 use engine::types::game_state::{GameState, WaitingFor};
@@ -259,19 +261,21 @@ fn horde_redirect_basic_mill_pause_propagates_as_deferred() {
 }
 
 /// CR 616.1 + the advanced legendary rule: a per-card pause inside the
-/// advanced branch also propagates as `Deferred`, AND the legendary that
-/// already entered keeps its grafted phase-out trigger (the graft runs for
-/// entered legendaries before the pause returns).
+/// advanced branch propagates as `Deferred`, and NOTHING phases out while the
+/// batch is parked — the deployment completion runs once, after the resumed
+/// tail delivers. Answering the prompt resumes the drain, which delivers the
+/// tail and phases out the entered legendary.
 ///
 /// Setup: the library top is a legendary permanent (battlefield-bound, so no
 /// graveyard redirect applies to it and it enters cleanly), followed by plain
 /// cards whose first delivery collides the two graveyard→exile redirects.
 ///
 /// Revert guard: the old `let _ =` on the batch returned `Ok(3)` — the
-/// `is_err` assertion flips; skipping the graft-on-pause leaves the entered
-/// legendary with no trigger — the graft assertion flips.
+/// `is_err` assertion flips; dropping the completion from the parked tail
+/// leaves the entered legendary phased in after the resume — the phase-out
+/// assertion flips.
 #[test]
-fn horde_redirect_advanced_mill_pause_grafts_entered_legendary() {
+fn horde_redirect_advanced_mill_pause_defers_then_phases_out_on_resume() {
     let mut state = advanced_horde_state();
 
     // Library top first: `create_object` pushes to the back of the deque and
@@ -308,7 +312,7 @@ fn horde_redirect_advanced_mill_pause_grafts_entered_legendary() {
     }
 
     // PRECONDITIONS: the advanced ruleset is active, the legendary is the mill
-    // head, and it starts with no triggers (so the graft below is countable).
+    // head, and it starts with no triggers (so no trigger below is ours).
     assert_eq!(
         state
             .format_config
@@ -334,8 +338,9 @@ fn horde_redirect_advanced_mill_pause_grafts_entered_legendary() {
         "the legendary starts with no triggers"
     );
 
+    let mut runner = GameRunner::from_state(state);
     let mut events = Vec::new();
-    let result = apply_damage_life_loss(&mut state, HORDE, 3, &mut events);
+    let result = apply_damage_life_loss(runner.state_mut(), HORDE, 3, &mut events);
 
     // The pause propagates through the advanced branch too.
     assert_eq!(
@@ -344,34 +349,69 @@ fn horde_redirect_advanced_mill_pause_grafts_entered_legendary() {
         "an advanced-branch per-card pause must surface as Deferred"
     );
     assert!(
-        matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
         "the per-card ordering prompt must be parked in waiting_for"
     );
     // The legendary entered BEFORE the pause (battlefield-bound, no redirect
-    // applied) and was grafted before the pause returned.
+    // applied) — phased in, with no trigger grafted: the completion runs
+    // once, after the resumed tail delivers.
     assert!(
-        state.battlefield.contains(&legendary),
+        runner.state().battlefield.contains(&legendary),
         "the battlefield-bound legendary must have entered before the pause"
     );
-    assert_eq!(
-        state
+    assert!(
+        runner.state().objects[&legendary].is_phased_in(),
+        "nothing phases out while the batch is parked"
+    );
+    assert!(
+        runner
+            .state()
             .objects
             .get(&legendary)
             .unwrap()
             .trigger_definitions
-            .len(),
-        1,
-        "the entered legendary must carry its grafted phase-out trigger"
+            .is_empty(),
+        "no trigger may be grafted onto the entered legendary"
     );
     // Only the legendary left the library: the pausing plain card and its tail
     // are still parked.
     assert_eq!(
-        state.players[HORDE.0 as usize].library.len(),
+        runner.state().players[HORDE.0 as usize].library.len(),
         9,
         "only the pre-pause legendary has left the library"
     );
     assert!(
-        state.players[HORDE.0 as usize].graveyard.is_empty(),
+        runner.state().players[HORDE.0 as usize]
+            .graveyard
+            .is_empty(),
         "nothing has reached the graveyard while the batch is parked"
+    );
+
+    // Answer every prompt (bounded): the resume drain delivers the tail and
+    // runs the stashed completion exactly once.
+    for _ in 0..10 {
+        if !matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ) {
+            break;
+        }
+        runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .expect("answer the CR 616.1 ordering prompt");
+    }
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "all replacement prompts must be answerable"
+    );
+    assert!(
+        runner.state().objects[&legendary].is_phased_out(),
+        "the entered legendary must phase out once the resumed tail delivers"
     );
 }

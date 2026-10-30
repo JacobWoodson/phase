@@ -10121,6 +10121,17 @@ pub(crate) fn run_batch_completion(
         BatchCompletion::MilledDeliveryComplete { player_id, cards } => {
             effects::mill::complete_mill_delivery(state, player_id, cards, events)
         }
+        BatchCompletion::HordeMillFromLossDeliveryComplete {
+            player_id,
+            milled,
+            legendary_cohort,
+        } => crate::game::horde::complete_advanced_mill_from_loss(
+            state,
+            player_id,
+            milled,
+            legendary_cohort,
+            events,
+        ),
         BatchCompletion::ReturnAsAuraNoTargetComplete { source_id } => {
             effects::return_as_aura::complete_no_target_delivery(source_id, events)
         }

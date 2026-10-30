@@ -5557,7 +5557,8 @@ fn batch_completion_may_apply_with_entry(
         | BatchCompletion::MeldExile { .. }
         | BatchCompletion::MeldEntry { .. }
         | BatchCompletion::MeldRedirect { .. }
-        | BatchCompletion::MilledDeliveryComplete { .. } => false,
+        | BatchCompletion::MilledDeliveryComplete { .. }
+        | BatchCompletion::HordeMillFromLossDeliveryComplete { .. } => false,
     }
 }
 

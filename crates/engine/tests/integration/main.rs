@@ -585,6 +585,7 @@ mod heroic_sacrifice_redirect;
 mod hit_the_mother_lode;
 mod hogaak_cant_spend_mana_1095;
 mod hollow_one_cost_reduction;
+mod horde_advanced_deployment;
 mod horde_cyberman_deck;
 mod horde_deck_card_names;
 mod horde_hero_events;

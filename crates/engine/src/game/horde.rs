@@ -37,7 +37,6 @@
 
 use crate::game::effects::change_zone::{execute_zone_move, ZoneMoveResult};
 use crate::game::effects::token::apply_create_token_after_replacement;
-use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     CardPlayMode, CastFromZoneDriver, Effect, ResolvedAbility, TargetFilter, TargetRef,
@@ -183,17 +182,15 @@ pub(crate) enum MillFromLossOutcome {
 ///
 /// Resume: an event-level pause completes through the shared
 /// `handle_replacement_choice` Mill arm, which delivers the basic mill; a
-/// per-card pause completes through `zone_pipeline`'s batch-tail drain. Both
-/// shared paths deliver basic-mill semantics, so two opt-in-advanced edges
-/// stay documented rather than silently fixed: (a) an event-level pause under
-/// the advanced ruleset resumes as a basic mill (milled legendaries are buried
-/// rather than deployed — reaching this needs an INTERACTIVE mill replacement,
-/// since Bruvac-class automatic doublings never pause); (b) a per-card pause
-/// under the advanced ruleset grafts only the legendaries that already
-/// entered — a tail legendary entering on resume misses its graft, which needs
-/// an interactive replacement choice on a legendary's battlefield entry (no
-/// printed card produces one: shock-style entry choices are land-locked and no
-/// legendary land carries one).
+/// per-card pause completes through `zone_pipeline`'s batch-tail drain, which
+/// runs the stashed [`BatchCompletion`](crate::types::game_state::BatchCompletion)
+/// once the tail delivers — so the advanced deployment work (ordinary `Milled`
+/// events + the synchronous cohort phase-out) survives a per-card pause. One
+/// opt-in-advanced edge stays documented rather than silently fixed: an
+/// event-level pause under the advanced ruleset resumes as a basic mill
+/// (milled legendaries are buried rather than deployed — reaching this needs
+/// an INTERACTIVE mill replacement, since Bruvac-class automatic doublings
+/// never pause).
 pub(crate) fn mill_from_loss(
     state: &mut GameState,
     horde: PlayerId,
@@ -265,8 +262,10 @@ pub(crate) fn mill_from_loss(
 /// Advanced legendary rule ([`HordeLegendaryDeath::EtbThenPhaseOut`]) delivery
 /// for [`mill_from_loss`]: `count` is the POST-replacement mill count. Takes
 /// the top `count` cards (CR 701.17b: no more than the library holds), puts
-/// legendary permanents onto the battlefield and buries the rest, grafting the
-/// ETB-triggered phase-out onto each entered legendary.
+/// legendary permanents onto the battlefield and buries the rest. The
+/// post-delivery work (ordinary `Milled` events + the synchronous cohort
+/// phase-out) rides the batch as a `BatchCompletion`, so a CR 616.1 pause
+/// carries it across to the resumed tail instead of dropping it.
 fn mill_from_loss_advanced(
     state: &mut GameState,
     horde: PlayerId,
@@ -274,8 +273,9 @@ fn mill_from_loss_advanced(
     events: &mut Vec<GameEvent>,
 ) -> MillFromLossOutcome {
     use crate::game::zone_pipeline::{
-        move_objects_simultaneously, BatchMoveResult, ZoneMoveRequest,
+        move_objects_simultaneously_then, BatchMoveResult, ZoneMoveRequest,
     };
+    use crate::types::game_state::BatchCompletion;
 
     let Some(player) = state.players.iter().find(|p| p.id == horde) else {
         return MillFromLossOutcome::Settled;
@@ -309,105 +309,60 @@ fn mill_from_loss_advanced(
             ZoneMoveRequest::effect(id, dest, id)
         })
         .collect();
-    // CR 616.1: a per-card ordering pause parks `waiting_for` + the tail. Graft
-    // what already entered, then propagate the pause — the resume drain
-    // finishes the tail (see the `mill_from_loss` doc for the tail-graft edge).
+    // CR 616.1: a per-card ordering pause parks `waiting_for` + the tail AND
+    // the completion above; the resume drain delivers the tail and runs the
+    // completion once, so the phase-out work survives the pause either way.
     if matches!(
-        move_objects_simultaneously(state, reqs, events),
+        move_objects_simultaneously_then(
+            state,
+            reqs,
+            Some(BatchCompletion::HordeMillFromLossDeliveryComplete {
+                player_id: horde,
+                milled: milled.clone(),
+                legendary_cohort: legendaries.clone(),
+            }),
+            events,
+        ),
         BatchMoveResult::NeedsChoice
     ) {
-        graft_legendary_phase_out_triggers(state, &legendaries);
         return MillFromLossOutcome::Paused;
     }
 
-    graft_legendary_phase_out_triggers(state, &legendaries);
     MillFromLossOutcome::Settled
 }
 
-/// Whether `id` is a Horde-deployed legendary still awaiting its grafted
-/// ETB-triggered phase-out: its LIVE incarnation is pinned in
-/// [`GameState::horde_pending_phase_out`]. The legend-rule SBA consults this
-/// (CR 704.5j treats a pinned deployment as already phased out). A deployment
-/// that changed zones since the graft (incarnation bumped, CR 400.7) no longer
-/// matches its pin and is an ordinary permanent.
-pub(crate) fn horde_phase_out_pending(state: &GameState, id: ObjectId) -> bool {
-    state.objects.get(&id).is_some_and(|obj| {
-        state
-            .horde_pending_phase_out
-            .contains(&crate::types::identifiers::ObjectIncarnationRef::from_object(obj))
-    })
-}
-
-/// Graft the ETB-triggered phase-out onto each listed legendary that actually
-/// entered the battlefield.
-fn graft_legendary_phase_out_triggers(state: &mut GameState, legendaries: &[ObjectId]) {
-    // CR 603.6 + CR 702.26: "ETB effects trigger, THEN immediately Phases Out."
-    // The phase-out is grafted onto each entered legendary as an ETB-triggered
-    // ability rather than performed synchronously here. This ordering is load-
-    // bearing: the shared trigger scan collects the legendary's OWN printed ETB
-    // abilities while it is still phased in, alongside this grafted trigger; when
-    // the grafted trigger resolves the legendary phases out. A synchronous
-    // `phase_out_object` here would flip `is_phased_out` before that scan, and
-    // `active_trigger_definitions` drops every trigger of a phased-out permanent —
-    // silently suppressing the legendary's own ETBs, which the rule requires to
-    // fire. Phasing out (vs. staying) makes the boss recur on the Horde's next
-    // untap (CR 702.26a) and dodges the legend rule while out (CR 704.5j /
-    // CR 702.26b), so two milled copies of one boss don't annihilate.
-    for &id in legendaries {
-        // A `Moved` replacement (Rest in Peace class) could still have diverted
-        // the card, so only graft onto what actually entered.
+/// Complete an advanced Horde damage-to-mill batch: publish the ordinary
+/// `Milled` events, then synchronously phase out the deployed legendary
+/// cohort. Runs after the batch's own trigger collection on both the
+/// synchronous and resumed paths — printed ETBs are already collected (CR
+/// 603.6), and no SBA check runs before this completion on either path, so
+/// the legend rule (CR 704.5j, which has no pending-phase-out exception)
+/// never observes the phased-in window.
+pub(crate) fn complete_advanced_mill_from_loss(
+    state: &mut GameState,
+    player_id: PlayerId,
+    milled: Vec<ObjectId>,
+    legendary_cohort: Vec<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) -> crate::game::zone_pipeline::BatchMoveResult {
+    // Ordinary mill event publication: the same per-card `Milled` events an
+    // ordinary mill emits, so milled triggers (Zellix class) fire.
+    let result =
+        crate::game::effects::mill::complete_mill_delivery(state, player_id, milled, events);
+    // Synchronous cohort phase-out (CR 702.26). A `Moved` replacement (Rest
+    // in Peace class) could still have diverted a cohort member, so only
+    // phase out what actually entered.
+    for id in legendary_cohort {
         if state.battlefield.contains(&id) {
-            if let Some(obj) = state.objects.get_mut(&id) {
-                // Synthetic graft: `Unmaterialized` occurrence (the production
-                // pattern for non-printed triggers — see token grafts).
-                obj.trigger_definitions
-                    .push(crate::types::ability::TriggerEntry::new(
-                        crate::types::ability::TriggerDefinitionOccurrenceRef::Unmaterialized,
-                        horde_legendary_phase_out_trigger(),
-                    ));
-                // Pin the deployment incarnation for the legend-rule SBA: the
-                // graft resolves after the next SBA check, so until it does the
-                // rule must treat this deployment as already phased out (CR
-                // 704.5j) or two milled copies of one boss annihilate instead
-                // of both phasing out. Released on phase-out; a zone change
-                // before then bumps the incarnation and lapses the pin (CR
-                // 400.7).
-                state
-                    .horde_pending_phase_out
-                    .insert(crate::types::identifiers::ObjectIncarnationRef::from_object(obj));
-            }
-            // CR 603.2: the graft lands outside the ETB pipeline, after the
-            // move's layer flush already rebuilt the derived trigger index —
-            // without a reindex the new trigger is invisible to candidate
-            // collection and silently never fires (caught by
-            // `PHASE_TRIGGER_INDEX_AUDIT`, never by the matcher).
-            crate::game::trigger_index::reindex_object_triggers(state, id);
+            crate::game::phasing::phase_out_object(
+                state,
+                id,
+                crate::game::game_object::PhaseOutCause::Directly,
+                events,
+            );
         }
     }
-}
-
-/// The synthetic "when this enters the battlefield, phase it out" trigger the
-/// advanced legendary rule ([`crate::types::format::HordeLegendaryDeath::EtbThenPhaseOut`])
-/// grafts onto a milled legendary (see [`mill_from_loss`]). Modeling the phase-out
-/// as an ETB-triggered ability — rather than phasing out synchronously — is what
-/// lets the legendary's own printed ETB abilities still fire (CR 603.6): they are
-/// collected by the normal trigger scan while the permanent is phased in, then
-/// this trigger resolves and phases it out (CR 702.26). `TargetFilter::SelfRef`
-/// scopes both the trigger (fires only for THIS object's entry, not any other
-/// permanent's) and the phase-out target to the source.
-fn horde_legendary_phase_out_trigger() -> crate::types::ability::TriggerDefinition {
-    use crate::types::ability::{AbilityDefinition, AbilityKind, TriggerDefinition};
-    use crate::types::triggers::TriggerMode;
-
-    TriggerDefinition::new(TriggerMode::ChangesZone)
-        .destination(Zone::Battlefield)
-        .valid_card(TargetFilter::SelfRef)
-        .execute(AbilityDefinition::new(
-            AbilityKind::Database,
-            Effect::PhaseOut {
-                target: TargetFilter::SelfRef,
-            },
-        ))
+    result
 }
 
 /// A card that is both Legendary (CR 205.4a supertype) and a permanent type
@@ -1666,8 +1621,8 @@ mod tests {
         };
 
         // The redirect DEPLOYED the boss: it entered the battlefield, not the
-        // graveyard. It phases out only when its grafted ETB trigger resolves
-        // (driven below) — so its own ETBs get to fire first.
+        // graveyard — and the completion phased it out synchronously, before
+        // this call returned (no trigger resolution needed).
         assert!(
             state.battlefield.contains(&boss),
             "the legendary boss must enter the battlefield"
@@ -1675,6 +1630,10 @@ mod tests {
         assert!(
             !in_horde_graveyard(&state, boss),
             "the boss must not be milled to the graveyard"
+        );
+        assert!(
+            state.objects[&boss].is_phased_out(),
+            "the boss must phase out synchronously on deployment (CR 702.26)"
         );
 
         // Grunt (non-legendary) and Bolt (legendary but non-permanent) mill normally.
@@ -1687,8 +1646,8 @@ mod tests {
             "a legendary INSTANT can't enter the battlefield — it mills normally"
         );
 
-        // CR 603.6: the boss's entering-the-battlefield event fired — its own ETBs
-        // and the grafted phase-out both key off it.
+        // CR 603.6: the boss's entering-the-battlefield event fired — its own
+        // ETBs key off it.
         assert!(
             events.iter().any(|e| matches!(
                 e,
@@ -1701,36 +1660,28 @@ mod tests {
             "the boss's enters-the-battlefield event must fire"
         );
 
-        // CR 702.26: driving the grafted ETB trigger to resolution phases the boss
-        // out — the "then immediately Phases Out" half of the rule.
-        crate::game::triggers::process_triggers(&mut state, &events);
-        crate::game::triggers::drain_order_triggers_with_identity(&mut state);
-        let mut guard = 0;
-        while !state.stack.is_empty() && guard < 8 {
-            let mut resolve_events = Vec::new();
-            crate::game::stack::resolve_top(&mut state, &mut resolve_events);
-            guard += 1;
+        // CR 701.17a + CR 603.2c: the advanced delivery publishes the ordinary
+        // `Milled` events — one per card that left the library.
+        for id in [boss, grunt, bolt] {
+            assert!(
+                events.iter().any(|e| matches!(
+                    e,
+                    GameEvent::Milled { object_id, .. } if *object_id == id
+                )),
+                "every milled card must publish its Milled event"
+            );
         }
-        assert!(
-            state.objects[&boss].is_phased_out(),
-            "the boss must phase out once its grafted ETB trigger resolves (CR 702.26)"
-        );
     }
 
     /// CR 704.5j + CR 702.26: two milled copies of one boss must BOTH survive
-    /// and phase out — never hit `ChooseLegend` and annihilate. The grafted
-    /// phase-out resolves after the next SBA check, so the pending-phase-out
-    /// pin must hold the legend rule off through that window; once both grafts
-    /// resolve, both bosses are phased out (invisible to the rule) and their
-    /// pins are released.
+    /// and phase out — never hit `ChooseLegend` and annihilate. The completion
+    /// phases both out synchronously, before the redirect returns, so no SBA
+    /// check can observe the phased-in window (CR 704.5j has no
+    /// pending-phase-out exception, so there is no exemption to consult).
     ///
-    /// Full lifecycle through production seams: the damage→mill redirect, a
-    /// real SBA pass, real trigger collection + stack resolution, and a second
-    /// SBA pass.
-    ///
-    /// Revert guard: without the pending-phase-out exemption in the legend-rule
-    /// grouping, the first SBA pass parks `ChooseLegend` — the no-prompt
-    /// assertion flips.
+    /// Revert guard: skipping the synchronous phase-out leaves both copies
+    /// phased in, and the SBA pass parks `ChooseLegend` — the no-prompt
+    /// assertion flips (and one copy would be annihilated on answer).
     #[test]
     fn duplicate_milled_bosses_survive_sbas_and_phase_out_together() {
         use crate::game::zones::create_object;
@@ -1781,70 +1732,20 @@ mod tests {
                 "boss copy {n} must deploy to the battlefield"
             );
             assert!(
-                state.objects[boss].is_phased_in(),
-                "boss copy {n} is phased in until its graft resolves"
-            );
-            assert!(
-                horde_phase_out_pending(&state, *boss),
-                "boss copy {n} must be pinned pending its grafted phase-out"
-            );
-        }
-
-        // THE WINDOW: the first SBA check runs while both same-name bosses are
-        // phased in. The pin must hold the legend rule off — no ChooseLegend
-        // prompt, nothing annihilated.
-        let mut sba_events = Vec::new();
-        crate::game::sba::check_state_based_actions(&mut state, &mut sba_events);
-        assert!(
-            !matches!(state.waiting_for, WaitingFor::ChooseLegend { .. }),
-            "pinned deployments are treated as already phased out — the legend \
-             rule must not prompt, waiting_for={:?}",
-            state.waiting_for
-        );
-        for (n, boss) in &bosses {
-            assert!(
-                state.battlefield.contains(boss),
-                "boss copy {n} must survive the SBA window"
-            );
-        }
-
-        // Both grafts resolve: process → order → resolve (mirror the single-
-        // boss lifecycle driver above).
-        crate::game::triggers::process_triggers(&mut state, &events);
-        crate::game::triggers::drain_order_triggers_with_identity(&mut state);
-        let mut guard = 0;
-        while !state.stack.is_empty() && guard < 8 {
-            let mut resolve_events = Vec::new();
-            crate::game::stack::resolve_top(&mut state, &mut resolve_events);
-            guard += 1;
-        }
-        assert!(
-            state.stack.is_empty(),
-            "both grafted triggers must resolve within the guard"
-        );
-        for (n, boss) in &bosses {
-            assert!(
                 state.objects[boss].is_phased_out(),
-                "boss copy {n} must phase out once its graft resolves (CR 702.26)"
-            );
-            assert!(
-                state.battlefield.contains(boss),
-                "phasing out is not leaving — boss copy {n} stays on the battlefield"
-            );
-            assert!(
-                !horde_phase_out_pending(&state, *boss),
-                "boss copy {n}'s pin must release on phase-out, so a later \
-                 phase-in is an ordinary permanent"
+                "boss copy {n} must phase out synchronously on deployment (CR 702.26)"
             );
         }
 
-        // Post-resolution SBA pass: phased-out bosses are invisible to the rule
-        // (live_battlefield_object) and unpinned — still no prompt, both stay.
+        // The SBA check runs with both same-name bosses already phased out:
+        // phased-out permanents are invisible to the rule (CR 702.26b), so no
+        // ChooseLegend prompt parks and nothing is annihilated.
         let mut sba_events = Vec::new();
         crate::game::sba::check_state_based_actions(&mut state, &mut sba_events);
         assert!(
             !matches!(state.waiting_for, WaitingFor::ChooseLegend { .. }),
-            "phased-out bosses must not trip the legend rule, waiting_for={:?}",
+            "both copies phased out before this SBA check — the legend rule \
+             must not prompt, waiting_for={:?}",
             state.waiting_for
         );
         for (n, boss) in &bosses {
@@ -1853,65 +1754,6 @@ mod tests {
                 "boss copy {n} must still be on the battlefield (phased out)"
             );
         }
-    }
-
-    /// CR 400.7: the pending-phase-out pin is incarnation-pinned, not a bare
-    /// id. A deployment bounced or flickered before its graft resolves is a NEW
-    /// object and must not inherit the legend-rule exemption when it returns
-    /// to the battlefield.
-    ///
-    /// Revert guard: pinning a bare `ObjectId` (or never comparing
-    /// incarnations) keeps the exemption live across the exile round-trip —
-    /// the post-return assertion flips.
-    #[test]
-    fn pending_phase_out_pin_expires_across_zone_changes() {
-        use crate::game::zones::{create_object, move_to_zone};
-        use crate::types::card_type::{CoreType, Supertype};
-        use crate::types::format::HordeLegendaryDeath;
-        use crate::types::identifiers::CardId;
-
-        let mut ruleset = ChallengeDeck::CybermanHorde.default_ruleset();
-        ruleset.legendary_death = HordeLegendaryDeath::EtbThenPhaseOut;
-        let mut state = GameState::new(FormatConfig::horde(ruleset), 2, 42);
-        let horde = horde_seat(&state).expect("horde seat");
-
-        let boss = create_object(
-            &mut state,
-            CardId(9001),
-            horde,
-            "Boss".into(),
-            Zone::Library,
-        );
-        {
-            let o = state.objects.get_mut(&boss).unwrap();
-            o.card_types.supertypes.push(Supertype::Legendary);
-            o.card_types.core_types.push(CoreType::Creature);
-        }
-
-        let mut events = Vec::new();
-        let outcome = mill_from_loss(&mut state, horde, 1, &mut events);
-        assert_eq!(outcome, MillFromLossOutcome::Settled);
-        assert!(
-            horde_phase_out_pending(&state, boss),
-            "the deployed boss must be pinned pending its grafted phase-out"
-        );
-
-        // Flicker the deployment before its graft resolves: exile and return.
-        // Same storage id, bumped incarnation (CR 400.7) — the pin lapses.
-        move_to_zone(&mut state, boss, Zone::Exile, &mut events);
-        assert!(
-            !horde_phase_out_pending(&state, boss),
-            "an exiled deployment is a new object — the pin must lapse"
-        );
-        move_to_zone(&mut state, boss, Zone::Battlefield, &mut events);
-        assert!(
-            state.battlefield.contains(&boss),
-            "reach-guard: the flickered boss really returned to the battlefield"
-        );
-        assert!(
-            !horde_phase_out_pending(&state, boss),
-            "the returned deployment must NOT inherit the legend-rule exemption"
-        );
     }
 
     /// Negative control: under the basic rule (`Normal`, every shipped deck), a
@@ -1964,10 +1806,11 @@ mod tests {
 
     /// Rules fidelity, the crux of the advanced rule: "ETB effects trigger, THEN
     /// immediately Phases Out." The milled legendary's OWN enters-the-battlefield
-    /// trigger must be collected by the real scan (CR 603.6) — modeling the
-    /// phase-out as a grafted ETB trigger keeps the legendary phased in through
-    /// collection, so `active_trigger_definitions` doesn't drop its own ETBs. This
-    /// drives the real `process_triggers` collection path.
+    /// trigger must be collected by the batch's eager scan (CR 603.6), which runs
+    /// BEFORE the completion's synchronous phase-out. Asserted on the staged
+    /// `deferred_triggers` queue directly — no manual `process_triggers`
+    /// re-scan (a re-scan over the raw event vec would hide a collection miss,
+    /// since production only consults unconsumed events).
     #[test]
     fn milled_legendarys_own_etb_still_fires_despite_phasing_out() {
         use crate::game::zones::create_object;
@@ -2009,23 +1852,26 @@ mod tests {
         let mut events = Vec::new();
         mill_from_loss(&mut state, horde, 1, &mut events);
 
-        // The boss entered PHASED IN — the phase-out is a grafted ETB trigger, so
-        // the normal scan collects its own printed ETBs first. A minimal Horde
-        // state has no other trigger sources, so an empty stack after collection
-        // would mean the ETB was suppressed — the rules bug this guards.
+        // The boss entered and the completion already phased it out — and the
+        // eager scan collected its own ETB first. A minimal Horde state has no
+        // other trigger sources, so a missing staged trigger means the ETB was
+        // suppressed — the rules bug this guards.
         assert!(
             state.battlefield.contains(&boss),
             "the boss must enter the battlefield"
         );
-        crate::game::triggers::process_triggers(&mut state, &events);
-        crate::game::triggers::drain_order_triggers_with_identity(&mut state);
         assert!(
-            !state.stack.is_empty(),
-            "the milled legendary's own ETB trigger must be collected, not suppressed \
-             by the phase-out"
+            state.objects[&boss].is_phased_out(),
+            "the boss must already be phased out (synchronous completion)"
         );
-        // (Phase-out-via-resolution is covered by the deploy test, whose boss has
-        // no draw ETB, so it avoids resolving a draw against an emptied library.)
+        assert!(
+            state
+                .deferred_triggers
+                .iter()
+                .any(|ctx| ctx.pending.source_id == boss),
+            "the milled legendary's own ETB trigger must be collected by the \
+             batch's eager scan, not suppressed by the phase-out"
+        );
     }
 
     // ── Post-combat activation (advanced rule) ──────────────────────────────

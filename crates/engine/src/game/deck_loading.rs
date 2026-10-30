@@ -1522,7 +1522,16 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             )
             .collect()
     };
+    // Horde Magic: a Horde seat's submitted deck is wholly replaced by its
+    // engine-supplied challenge deck (`load_horde_library` below), so its
+    // payload `commander` slot is an inert placeholder — placing it would seat
+    // a phantom commander the Horde never owns. Skip the same seats whose
+    // libraries are replaced.
+    let horde_seats = crate::game::horde::horde_seats(state);
     for (owner, entries) in commander_decks {
+        if horde_seats.contains(&owner) {
+            continue;
+        }
         for entry in entries {
             for _ in 0..entry.count {
                 create_commander_from_card_face(state, &entry.card, owner);

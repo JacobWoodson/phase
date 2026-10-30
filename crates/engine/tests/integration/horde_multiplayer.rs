@@ -564,6 +564,93 @@ fn commander_format_horde_wires_survivor_commanders() {
     );
 }
 
+/// R4-#5 — a POPULATED Horde placeholder commander slot must not place: the
+/// Horde seat's submitted deck is wholly replaced by its engine-supplied
+/// challenge deck (`load_horde_library`), so whatever sits in seat 0's
+/// `commander` slot is inert — while the survivors' commanders still load.
+/// Companion to `commander_format_horde_wires_survivor_commanders`, whose
+/// Horde payload is EMPTY and therefore never exercises the skip.
+///
+/// Revert guard: placing submitted commanders for every seat seats the
+/// placeholder in the command zone — the absence assertion flips. Skipping
+/// too broadly (survivors included) unseats the real EDH commander — the
+/// presence assertion flips.
+#[test]
+fn populated_horde_placeholder_commander_is_not_placed() {
+    let ruleset = ChallengeDeck::SauronHorde.default_ruleset();
+    let config = FormatConfig::horde(ruleset);
+    let mut state = GameState::new(config, 2, 42);
+    let survivor = PlayerId(1);
+
+    // Seat 0 = Horde with a POPULATED placeholder slot (the shape a deck
+    // builder submits before the engine replaces the whole seat deck);
+    // seat 1 = survivor with a real EDH deck.
+    let mut placeholder = CardFace {
+        name: "Horde Placeholder".to_string(),
+        ..CardFace::default()
+    };
+    placeholder.card_type.supertypes.push(Supertype::Legendary);
+    placeholder.card_type.core_types.push(CoreType::Creature);
+    let payload = DeckPayload {
+        player: PlayerDeckPayload {
+            main_deck: vec![DeckEntry {
+                card: plains_face(),
+                count: 99,
+            }],
+            commander: vec![DeckEntry {
+                card: placeholder,
+                count: 1,
+            }],
+            ..PlayerDeckPayload::default()
+        },
+        opponent: PlayerDeckPayload {
+            main_deck: vec![DeckEntry {
+                card: plains_face(),
+                count: 99,
+            }],
+            commander: vec![DeckEntry {
+                card: survivor_commander_face(),
+                count: 1,
+            }],
+            ..PlayerDeckPayload::default()
+        },
+        ..DeckPayload::default()
+    };
+    load_deck_into_state(&mut state, &payload);
+
+    // The survivor's commander still loads.
+    let placed = state
+        .command_zone
+        .iter()
+        .map(|id| &state.objects[id])
+        .find(|o| o.is_commander && o.owner == survivor);
+    assert!(
+        placed.is_some(),
+        "the survivor's commander is placed in the command zone"
+    );
+    assert_eq!(
+        placed.unwrap().name,
+        "Survivor General",
+        "the placed commander is the survivor's chosen EDH commander"
+    );
+
+    // The populated Horde placeholder seats nothing.
+    assert!(
+        !state
+            .command_zone
+            .iter()
+            .any(|id| { state.objects[id].is_commander && state.objects[id].owner == HORDE }),
+        "no Horde-seat commander may be placed from the replaced placeholder slot"
+    );
+    assert!(
+        !state
+            .command_zone
+            .iter()
+            .any(|id| state.objects[id].name == "Horde Placeholder"),
+        "the placeholder card itself must not appear in the command zone"
+    );
+}
+
 /// Two-Horde wave dispatch: EVERY Horde commander's precombat main seeds a
 /// wave — not just the primary (archenemy) seat. Two Towers alternates Sauron
 /// (seat 0) and Saruman (seat 1) Horde turns (Reading B); the precombat
