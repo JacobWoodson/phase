@@ -54599,6 +54599,100 @@ pub mod tests {
         normalize_deferred_trigger_order(&unmarked, &mut fresh);
         assert_eq!(sources(&fresh), vec![3, 2]);
     }
+
+    /// Row 10b — the subtype-defended restriction scope never matches a
+    /// controller-scoped attack ("whenever you attack ...") position. The
+    /// `match` falls to `_ => false`, which compiles silently on a new
+    /// variant — this pin is the revert-fail mechanism (deletion is the
+    /// revert).
+    #[test]
+    fn subtype_defended_scope_never_matches_controller_scope() {
+        let state = setup();
+        let subtype = AttackTargetFilter::SubtypePlaneswalkersYouControl {
+            subtype: "Jace".to_string(),
+        };
+        for target in [
+            crate::game::combat::AttackTarget::Player(PlayerId(0)),
+            crate::game::combat::AttackTarget::Planeswalker(ObjectId(7)),
+            crate::game::combat::AttackTarget::Battle(ObjectId(9)),
+        ] {
+            assert!(
+                !attack_target_matches_controller_scope(
+                    &state,
+                    target,
+                    PlayerId(0),
+                    &ControllerRef::You,
+                    &subtype,
+                ),
+                "restriction-only subtype scope must not match a controller-scoped attack"
+            );
+        }
+        // Paired positive: the sibling arm still matches its own position
+        // (a P0-controlled planeswalker under a You-scoped controller), so
+        // the negatives above prove the variant — not the harness — rejects.
+        let mut live = setup();
+        let walker_card = CardId(live.next_object_id);
+        let walker = create_object(
+            &mut live,
+            walker_card,
+            PlayerId(0),
+            "Jace".to_string(),
+            Zone::Battlefield,
+        );
+        assert!(
+            attack_target_matches_controller_scope(
+                &live,
+                crate::game::combat::AttackTarget::Planeswalker(walker),
+                PlayerId(0),
+                &ControllerRef::You,
+                &AttackTargetFilter::Planeswalker,
+            ),
+            "reach-guard: the sibling Planeswalker arm still matches a controlled planeswalker"
+        );
+    }
+
+    /// Row 10c — the subtype-defended restriction scope is never compatible
+    /// with any attack-trigger filter. `matches!` without a wildcard is
+    /// non-match by default — this pin is the revert-fail mechanism.
+    #[test]
+    fn subtype_defended_scope_never_compatible_with_attack_filters() {
+        let subtype = AttackTargetFilter::SubtypePlaneswalkersYouControl {
+            subtype: "Jace".to_string(),
+        };
+        let every_filter = || {
+            [
+                AttackTargetFilter::Player,
+                AttackTargetFilter::Planeswalker,
+                AttackTargetFilter::SubtypePlaneswalkersYouControl {
+                    subtype: "Jace".to_string(),
+                },
+                AttackTargetFilter::PlayerOrPlaneswalker,
+                AttackTargetFilter::Battle,
+                AttackTargetFilter::Owner,
+                AttackTargetFilter::OwnerOrPlaneswalker,
+                AttackTargetFilter::PlayerOrPermanents,
+                AttackTargetFilter::Monarch,
+            ]
+        };
+        for other in every_filter() {
+            assert!(
+                !attack_target_filters_compatible(&subtype, &other),
+                "restriction-only subtype scope is incompatible in trigger position"
+            );
+            assert!(
+                !attack_target_filters_compatible(&other, &subtype),
+                "restriction-only subtype scope is incompatible in condition position"
+            );
+        }
+        // Paired positive: sibling compatibility still holds.
+        assert!(
+            attack_target_filters_compatible(
+                &AttackTargetFilter::Player,
+                &AttackTargetFilter::Player,
+            ),
+            "reach-guard: Player remains compatible with itself"
+        );
+    }
 }
 
 /// Regression tests for the foundational trigger double-fire defect

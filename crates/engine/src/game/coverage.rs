@@ -5151,25 +5151,28 @@ fn fmt_trigger_constraint(c: &crate::types::ability::TriggerConstraint) -> Strin
 /// not the controller (CR 109.4); a donated or stolen permanent has different
 /// players in those two roles. The parse-details / Alt-hover overlay is what bug
 /// triage reads, so a label weaker than the predicate reads there as an engine bug.
-fn fmt_attack_target_filter(filter: &crate::types::triggers::AttackTargetFilter) -> &'static str {
+fn fmt_attack_target_filter(filter: &crate::types::triggers::AttackTargetFilter) -> String {
     use crate::types::triggers::AttackTargetFilter as ATF;
     match filter {
-        ATF::Player => "a player",
-        ATF::Planeswalker => "a planeswalker",
-        ATF::PlayerOrPlaneswalker => "a player or planeswalker",
-        ATF::Battle => "a battle",
+        ATF::Player => "a player".to_string(),
+        ATF::Planeswalker => "a planeswalker".to_string(),
+        // CR 205.3j: subtype-defended scope — the subtype name rides the label
+        // so each defended subtype stays distinguishable in parse details.
+        ATF::SubtypePlaneswalkersYouControl { subtype } => format!("{subtype}s you control"),
+        ATF::PlayerOrPlaneswalker => "a player or planeswalker".to_string(),
+        ATF::Battle => "a battle".to_string(),
         // CR 108.3 vs CR 109.4: the OWNER (who started the game with the card),
         // which need not be the current controller.
-        ATF::Owner => "its owner",
+        ATF::Owner => "its owner".to_string(),
         // CR 108.3 + CR 109.4: the owning player, plus the planeswalkers that
         // same player controls.
-        ATF::OwnerOrPlaneswalker => "its owner or planeswalkers its owner controls",
+        ATF::OwnerOrPlaneswalker => "its owner or planeswalkers its owner controls".to_string(),
         // CR 310.5 + CR 506.2: battles may be attacked, so this scope covers them
         // as well as planeswalkers — unlike `PlayerOrPlaneswalker`.
-        ATF::PlayerOrPermanents => "a player or permanents they control",
+        ATF::PlayerOrPermanents => "a player or permanents they control".to_string(),
         // CR 725.1: the monarch is a player designation, and no player is the
         // monarch until an effect creates one.
-        ATF::Monarch => "the monarch",
+        ATF::Monarch => "the monarch".to_string(),
     }
 }
 
@@ -15575,9 +15578,12 @@ mod tests {
         // (4) Every variant earns its own label. A formatter arm that aliased
         // two scopes would print a predicate the card does not have, and the
         // parse-details / Alt-hover overlay is what bug triage reads.
-        let labels: std::collections::HashSet<&'static str> = [
+        let labels: std::collections::HashSet<String> = [
             AttackTargetFilter::Player,
             AttackTargetFilter::Planeswalker,
+            AttackTargetFilter::SubtypePlaneswalkersYouControl {
+                subtype: "Jace".to_string(),
+            },
             AttackTargetFilter::PlayerOrPlaneswalker,
             AttackTargetFilter::Battle,
             AttackTargetFilter::Owner,
@@ -15590,7 +15596,7 @@ mod tests {
         .collect();
         assert_eq!(
             labels.len(),
-            8,
+            9,
             "every AttackTargetFilter variant must map to a distinct label: {labels:?}"
         );
     }

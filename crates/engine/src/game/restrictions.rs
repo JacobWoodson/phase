@@ -2477,6 +2477,21 @@ pub(crate) fn attack_target_matches_defended_scope(
         (AttackTargetFilter::Planeswalker, AttackTarget::Planeswalker(pw_id)) => {
             permanent_controller(*pw_id) == Some(source_controller)
         }
+        // CR 205.3j + CR 508.1c: "can't attack [Subtype]s you control" — live
+        // controller comparison, following the `Planeswalker` pattern above
+        // (not the `Owner*` exception): only a planeswalker bearing the named
+        // subtype that the protected player currently controls is defended.
+        // Every other pairing (players, battles, other subtypes) is false.
+        (
+            AttackTargetFilter::SubtypePlaneswalkersYouControl { subtype },
+            AttackTarget::Planeswalker(pw_id),
+        ) => {
+            permanent_controller(*pw_id) == Some(source_controller)
+                && state
+                    .objects
+                    .get(pw_id)
+                    .is_some_and(|obj| obj.card_types.subtypes.iter().any(|s| s == subtype))
+        }
         (AttackTargetFilter::PlayerOrPlaneswalker, AttackTarget::Player(p)) => {
             *p == source_controller
         }
