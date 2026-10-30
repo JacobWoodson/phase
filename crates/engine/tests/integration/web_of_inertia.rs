@@ -3,9 +3,10 @@
 //! creatures they control can't attack you this turn."
 //!
 //! Row 11b (runtime pin for the guard-test row 11 parse shape): declining
-//! installs a `ScopedPlayer` / `EndOfTurn` / `Attack { defended: Player }`
-//! ban through the bare-`Player` defended arm (`restrictions.rs:2476`) — the
-//! arm rows 2/2c/4 (subtype-defended, `:2485-2494`) cannot reach.
+//! installs a `ScopedPlayer` (at parse; lowered to `SpecificPlayer` at
+//! creation) / `EndOfTurn` / `Attack { defended: Player }` ban through the
+//! bare-`Player` defended arm (`restrictions.rs:2476`) — the arm rows 2/2c/4
+//! (subtype-defended, `:2485-2494`) cannot reach.
 //!
 //! CR 508.1c: attack restrictions checked at declare-attackers. CR 109.5: the
 //! defended "you" snapshots the resolving controller. (CR numbers inherited

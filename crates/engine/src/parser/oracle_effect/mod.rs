@@ -6676,7 +6676,9 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
 /// returns `None`), and the Willie/Sandswirl "this turn" duration (no
 /// `AbilityDefinition` duration override; the restriction's own `EndOfTurn`
 /// expiry owns cleanup, CR 514.2). Affected players ride `ScopedPlayer`, which
-/// the phase trigger stamps to the active player at fire time.
+/// the phase trigger stamps to the active player at fire time (the stamp is
+/// Phase-mode-only, so this recognizer assumes its clause fires from a phase
+/// trigger).
 fn try_parse_controlled_creatures_cant_attack_prohibition(
     tp: TextPair<'_>,
 ) -> Option<ParsedEffectClause> {

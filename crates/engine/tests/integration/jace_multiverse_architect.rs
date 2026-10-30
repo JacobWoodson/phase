@@ -1132,7 +1132,10 @@ fn jace_non_planeswalker_subtype_scope_stays_unsupported() {
 /// Probe text re-derived at implementation from the real Ghostly Prison
 /// sentence ("Creatures can't attack you unless their controller pays {2}
 /// for each creature they control that's attacking you."), with the defended
-/// "you" replaced by "Jaces you control".
+/// "you" replaced by "Jaces you control". The probe keeps the "for each"
+/// tail, which lowers to `Flat` scaling; the runtime legs use a single
+/// attacker, for which `Flat` and per-attacker scaling are equivalent —
+/// multi-attacker scaling of the dropped tail is unpinned.
 const JACE_TAX_ORACLE: &str = "Creatures can't attack Jaces you control unless their controller pays {2} for each creature they control that's attacking you.";
 
 /// Ghostly-Prison-with-Jaces combat-tax static, carried by a 2/2 creature
