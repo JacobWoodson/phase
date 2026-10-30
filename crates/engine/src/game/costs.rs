@@ -434,6 +434,9 @@ fn settle_team_tap_payment(
 ///
 /// A departed hero's required cost "is not paid": departed heroes are
 /// pruned from `remaining` and their creatures from `eligible`/`selected`.
+/// Selections revalidate against the surviving PAYING-team members, not just
+/// liveness: a steal ending under CR 800.4a can return a selected creature
+/// to a living non-payer (the archenemy), and it must neither count nor tap.
 /// The current prompt holder keeps answering when alive; otherwise the
 /// next surviving contributor is prompted, or — with nobody left to ask —
 /// the surviving selections settle explicitly and the continuation drains.
@@ -460,12 +463,16 @@ pub(crate) fn reconcile_team_tap_payment_after_departure(
     else {
         return Ok(());
     };
+    // The paying team is the prompt holder's team: every session member
+    // answers for the same side, and `team_id` is seat-based so it resolves
+    // even when the holder is the departed player.
+    let paying_team = super::topology::team_members(state, player);
     let live_creature = |state: &GameState, id: &ObjectId| {
         state.battlefield.contains(id)
-            && state
-                .objects
-                .get(id)
-                .is_some_and(|obj| super::players::is_alive(state, obj.controller))
+            && state.objects.get(id).is_some_and(|obj| {
+                super::players::is_alive(state, obj.controller)
+                    && paying_team.contains(&obj.controller)
+            })
     };
     let eligible: Vec<ObjectId> = eligible
         .into_iter()

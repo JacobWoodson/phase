@@ -12704,6 +12704,7 @@ fn target_filter_has_unsupported_selected_ref(filter: &TargetFilter, nested: boo
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AllPlayers => false,
     }
 }
@@ -12889,7 +12890,10 @@ fn player_filter_has_unsupported_selected_ref(player: &PlayerFilter) -> bool {
         PlayerFilter::AnyOf { filters } => filters
             .iter()
             .any(player_filter_has_unsupported_selected_ref),
-        PlayerFilter::AllExcept { exclude } => player_filter_has_unsupported_selected_ref(exclude),
+        PlayerFilter::AllExcept {
+            exclude,
+            relation: _,
+        } => player_filter_has_unsupported_selected_ref(exclude),
         PlayerFilter::PlayerAttribute { attr, value, .. } => {
             quantity_ref_has_unsupported_selected_ref(attr)
                 || quantity_expr_has_unsupported_selected_ref(value)
@@ -13068,6 +13072,8 @@ fn quantity_ref_has_unsupported_selected_ref(qty: &QuantityRef) -> bool {
         | QuantityRef::Speed { player }
         | QuantityRef::LifeGainedThisTurn { player }
         | QuantityRef::CardsDrawnThisTurn { player }
+        | QuantityRef::CardsDrawnLastTurn { player }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { player }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player }
         | QuantityRef::CardsDiscardedThisTurn { player }
         | QuantityRef::PlayerChosenNumber { player }
@@ -28281,6 +28287,7 @@ impl TargetFilter {
             | TargetFilter::HasChosenName
             | TargetFilter::Named { .. }
             | TargetFilter::Owner
+            | TargetFilter::AffectedObjectOwner
             | TargetFilter::AllPlayers => false,
         }
     }

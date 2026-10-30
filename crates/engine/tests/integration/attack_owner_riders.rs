@@ -270,9 +270,19 @@ fn dead_shall_serve_reanimated_creatures_attack_their_owners() {
         runner.state().waiting_for
     );
 
-    // Cross-declarations violate the owner-pinned requirements.
+    // Cross-declarations violate the owner-pinned requirements. Both
+    // creatures attack so the refusal isolates DEFENDER enforcement: with
+    // only the wrong-defender creature named, the missing must-attack
+    // attacker would refuse the declaration on its own.
     assert!(
-        declare(&mut runner, vec![(owned_by_p1, AttackTarget::Player(P2))]).is_err(),
+        declare(
+            &mut runner,
+            vec![
+                (owned_by_p1, AttackTarget::Player(P2)),
+                (owned_by_p2, AttackTarget::Player(P2)),
+            ]
+        )
+        .is_err(),
         "P1's creature must not attack P2"
     );
     assert!(
@@ -283,7 +293,14 @@ fn dead_shall_serve_reanimated_creatures_attack_their_owners() {
         "a refused declaration must leave the prompt in place"
     );
     assert!(
-        declare(&mut runner, vec![(owned_by_p2, AttackTarget::Player(P1))]).is_err(),
+        declare(
+            &mut runner,
+            vec![
+                (owned_by_p1, AttackTarget::Player(P1)),
+                (owned_by_p2, AttackTarget::Player(P1)),
+            ]
+        )
+        .is_err(),
         "P2's creature must not attack P1"
     );
     // A full pass violates both requirements (both are able).

@@ -33,6 +33,13 @@
 //! and concedes — the session passes to the surviving heroes instead of
 //! stranding, P2 + P3 tap for a combined 8, and Bow is abandoned.
 //!
+//! One stolen-creature row (CR 800.4a + CR 805.6): P1 answers with a 4-power
+//! creature stolen from P0, then concedes while P2 is answering. The steal
+//! ends on the way out and the creature returns to the archenemy — a living
+//! non-payer — so it contributes no power and taps nothing: P2's own 4
+//! leaves the combined total at 4, Bow stays face up, and the continuation
+//! still drains.
+//!
 //! One signed-power row (CR 107.1b): P1 controls 4, 4 and −1 power. The
 //! prompt is still offered (the can-pay gate sums positive-only power as an
 //! upper bound: 8), but submitting all three is refused (signed total 7)
@@ -47,7 +54,9 @@
 //! eight row offers P0's creature instead of P1's. Drop the collective flag —
 //! the split-eight row offers only P1's 4 power and never abandons. Drop the
 //! departure reconciliation — the concession row strands the chain with the
-//! survivors never prompted and Bow face up.
+//! survivors never prompted and Bow face up. Drop the paying-team check from
+//! the reconciliation — the stolen-creature row abandons Bow off the
+//! archenemy's returned 4 power and taps it.
 
 use engine::database::synthesis::synthesize_archenemy;
 use engine::game::deck_loading::create_scheme_deck_card;
@@ -69,6 +78,8 @@ const P2: PlayerId = PlayerId(2);
 const P3: PlayerId = PlayerId(3);
 
 const BOW_TO_MY_COMMAND: &str = "(An ongoing scheme remains face up until it's abandoned.)\nAs you set this scheme in motion, choose an opponent.\nCreatures the chosen player controls can't attack you or planeswalkers you control.\nAt the beginning of your opponents' end step, they may tap any number of untapped creatures they control with total power 8 or greater. If they do, abandon this scheme.";
+
+const ACT_OF_TREASON: &str = "Gain control of target creature until end of turn. Untap that creature. It gains haste until end of turn. (It can attack and {T} this turn.)";
 
 fn scheme_face(name: &str, oracle: &str) -> CardFace {
     let parsed = parse_oracle_text(oracle, name, &[], &["Scheme".to_string()], &[]);
@@ -676,6 +687,222 @@ fn bow_end_step_conceding_current_hero_passes_payment_to_survivors() {
     assert!(
         runner.state().scheme_deck.contains(&bow),
         "abandoned Bow must be back in the scheme deck"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "the payment continuation must complete, not strand"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "clean drain back to priority, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// Stolen-creature setup: P0 archenemy with the 10/10 beater plus a 4/4
+/// mark, P1 with a zero-cost Act of Treason in hand and no creatures of
+/// their own, P2 with one 4/4, P3 empty, Bow set in motion with P1 chosen,
+/// P1 active in precombat main. Returns the runner, Bow's id, P2's
+/// creatures, the mark, the beater, and the treason spell id.
+fn setup_end_step_game_4p_with_steal() -> (
+    GameRunner,
+    ObjectId,
+    Vec<ObjectId>,
+    ObjectId,
+    ObjectId,
+    ObjectId,
+) {
+    let mut format = FormatConfig::archenemy();
+    format.archenemy_player = Some(P0);
+    let mut scenario = GameScenario::new_with_format(format, 4, 42);
+    scenario.at_phase(Phase::Draw);
+    let p2_creatures = vec![scenario.add_creature(P2, "Hero P2 Bear 0", 4, 4).id()];
+    let mark = scenario.add_creature(P0, "Archenemy Mark", 4, 4).id();
+    let beater = scenario.add_creature(P0, "Archenemy Beater", 10, 10).id();
+    let steal = scenario
+        .add_spell_to_hand_from_oracle(P1, "Act of Treason", false, ACT_OF_TREASON)
+        .with_mana_cost(engine::types::mana::ManaCost::zero())
+        .id();
+    for i in 0..7 {
+        scenario.add_card_to_library_top(P0, &format!("P0 Filler {i}"));
+        scenario.add_card_to_library_top(P1, &format!("P1 Filler {i}"));
+        scenario.add_card_to_library_top(P2, &format!("P2 Filler {i}"));
+        scenario.add_card_to_library_top(P3, &format!("P3 Filler {i}"));
+    }
+    let mut runner = scenario.build();
+
+    let face = scheme_face("Bow to My Command", BOW_TO_MY_COMMAND);
+    create_scheme_deck_card(runner.state_mut(), &face, P0);
+    runner.state_mut().archenemy = Some(P0);
+    runner.state_mut().active_player = P0;
+
+    // CR 904.9: entering the archenemy's precombat main sets Bow in motion.
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::NamedChoice { .. }),
+        "expected the as-choice prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "1".to_string(),
+        })
+        .expect("choosing P1 must be accepted");
+    runner.advance_to_priority_window();
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "as-choice must drain to priority, got {:?}",
+        runner.state().waiting_for
+    );
+
+    let bow = *runner
+        .state()
+        .command_zone
+        .iter()
+        .find(|id| runner.state().objects[*id].name == "Bow to My Command")
+        .expect("Bow must be face up in the command zone");
+    assert!(
+        !runner.state().objects[&bow].face_down,
+        "Bow must be face up after being set in motion"
+    );
+
+    // Hand P1 the shared heroes' turn at precombat main; the test casts the
+    // steal, then drives to the heroes' shared end step.
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+    (runner, bow, p2_creatures, mark, beater, steal)
+}
+
+/// CR 800.4a + CR 805.6 + CR 118.12: P1 steals P0's 4-power mark, answers
+/// the collective payment with it, then concedes while P2 is answering.
+/// The steal ends on the way out (CR 800.4a) and the mark returns to the
+/// archenemy — alive, but not on the paying team — so the reconciliation
+/// must prune it from `selected`: it contributes no power and taps nothing.
+/// P2's own 4 leaves the combined total at 4, Bow stays face up, and the
+/// continuation still drains instead of stranding.
+#[test]
+fn bow_end_step_conceded_stolen_creature_pays_nothing() {
+    let (mut runner, bow, p2_creatures, mark, beater, steal) = setup_end_step_game_4p_with_steal();
+
+    runner.cast(steal).target_object(mark).resolve();
+    assert_eq!(
+        runner.state().objects[&mark].controller,
+        P1,
+        "reach-guard: the steal must be in force before the end step"
+    );
+
+    advance_to_p1_end_step(&mut runner);
+
+    let mut reached_optional = false;
+    let mut p1_answered = false;
+    let mut conceded = false;
+    let mut prompted_after: Vec<PlayerId> = Vec::new();
+    for _ in 0..80 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .unwrap();
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                reached_optional = true;
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .unwrap();
+            }
+            WaitingFor::PayCost { player, resume, .. } => {
+                let CostResume::TeamTapPayment { selected, .. } = resume else {
+                    panic!("expected the collective-payment session, got {resume:?}");
+                };
+                if player == P1 {
+                    assert!(!p1_answered, "P1 must answer exactly once before conceding");
+                    assert!(
+                        selected.is_empty(),
+                        "P1 answers first with an empty session, got {selected:?}"
+                    );
+                    p1_answered = true;
+                    runner
+                        .act(GameAction::SelectCards { cards: vec![mark] })
+                        .expect("P1's stolen mark must be selectable");
+                    continue;
+                }
+                if player == P2 && !conceded {
+                    assert_eq!(
+                        selected,
+                        vec![mark],
+                        "P1's answer must have accumulated the mark before the concession"
+                    );
+                    conceded = true;
+                    runner
+                        .act(GameAction::Concede { player_id: P1 })
+                        .expect("concede must be accepted mid-prompt");
+                    continue;
+                }
+                assert_eq!(
+                    player, P2,
+                    "only the surviving contributor pays after the concession, got {player:?}"
+                );
+                prompted_after.push(player);
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: p2_creatures.clone(),
+                    })
+                    .unwrap();
+            }
+            WaitingFor::Priority { .. } => {
+                if runner.state().stack.is_empty() {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            other => panic!("unexpected prompt {other:?}"),
+        }
+    }
+
+    assert!(
+        reached_optional,
+        "the team may must be offered (stolen 4 + P2's 4 reaches 8)"
+    );
+    assert!(p1_answered, "P1 must have answered with the mark");
+    assert!(conceded, "P1 must have conceded mid-payment");
+    assert_eq!(
+        prompted_after,
+        vec![P2],
+        "P2 must keep answering after the concession"
+    );
+    assert!(
+        runner.state().battlefield.contains(&mark),
+        "the mark stays on the battlefield — its owner never left"
+    );
+    assert_eq!(
+        runner.state().objects[&mark].controller,
+        P0,
+        "CR 800.4a: the steal ends and the mark returns to the archenemy"
+    );
+    assert!(
+        !runner.state().objects[&mark].tapped,
+        "the returned mark must tap nothing"
+    );
+    for id in &p2_creatures {
+        assert!(
+            !runner.state().objects[id].tapped,
+            "shortfall: nothing taps when the combined 4 misses 8"
+        );
+    }
+    assert!(
+        !runner.state().objects[&beater].tapped,
+        "the archenemy's beater must never be touched"
+    );
+    assert!(
+        runner.state().command_zone.contains(&bow),
+        "Bow must stay face up in the command zone"
+    );
+    assert!(
+        !runner.state().objects[&bow].face_down,
+        "Bow must stay face up on a combined 4"
     );
     assert!(
         runner.state().stack.is_empty(),
