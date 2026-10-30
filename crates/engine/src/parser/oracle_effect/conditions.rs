@@ -10617,7 +10617,7 @@ mod tests {
         assert_eq!(
             parse("a spell was warped this turn"),
             Some(AbilityCondition::SpellCastWithVariantThisTurn {
-                variant: crate::types::game_state::CastingVariant::Warp,
+                variant: crate::types::game_state_kinds::CastingVariant::Warp,
             })
         );
     }
@@ -12475,7 +12475,7 @@ mod tests {
         assert_eq!(
             condition,
             Some(AbilityCondition::DayNightIs {
-                state: crate::types::game_state::DayNight::Night
+                state: crate::types::game_state_kinds::DayNight::Night
             })
         );
     }
