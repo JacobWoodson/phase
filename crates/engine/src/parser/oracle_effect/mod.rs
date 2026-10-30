@@ -6770,9 +6770,11 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
 /// returns `None`), and the Willie/Sandswirl "this turn" duration (no
 /// `AbilityDefinition` duration override; the restriction's own `EndOfTurn`
 /// expiry owns cleanup, CR 514.2). Affected players ride `ScopedPlayer`, which
-/// the phase trigger stamps to the active player at fire time (the stamp is
-/// Phase-mode-only, so this recognizer assumes its clause fires from a phase
-/// trigger).
+/// the phase trigger stamps to the active player at fire time. The stamp is
+/// Phase-mode-only, and this recognizer cannot see the enclosing trigger mode
+/// — so `lower_trigger_ir` demotes its product under any other trigger to an
+/// honest gap unless the coordinated channel proves the binding
+/// (`demote_unbound_scoped_attack_restrictions`).
 fn try_parse_controlled_creatures_cant_attack_prohibition(
     tp: TextPair<'_>,
 ) -> Option<ParsedEffectClause> {

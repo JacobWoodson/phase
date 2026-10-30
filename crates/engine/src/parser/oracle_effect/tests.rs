@@ -80153,6 +80153,101 @@ fn sentence_two_broadcast_and_player_subjects_stay_declined_while_anaphoric_clai
     );
 }
 
+/// CR 603.2 + CR 608.2c: the controlled-creatures prohibition ("creatures
+/// they control can't attack [scope] this turn") rides `ScopedPlayer`, which
+/// only the phase trigger's fire-time stamp binds. Under a non-phase trigger
+/// the scope stays unbound and resolution would fall back to the ability's
+/// controller — restricting the wrong player — so `lower_trigger_ir` demotes
+/// the node to an honest gap. The paired positive under a phase trigger
+/// proves the gate targets the binding, not the clause shape.
+///
+/// REVERT-FAIL (gate removed): the spell-cast chain carries a supported
+/// `AddRestriction`.
+#[test]
+fn controlled_creatures_prohibition_gated_on_phase_trigger_scope() {
+    use crate::parser::oracle_trigger::parse_trigger_line;
+    use crate::types::triggers::TriggerMode;
+
+    fn chain_nodes(
+        trigger: &crate::types::ability::TriggerDefinition,
+    ) -> Vec<&crate::types::ability::AbilityDefinition> {
+        let mut nodes = Vec::new();
+        let mut queue = trigger.execute.as_deref().into_iter().collect::<Vec<_>>();
+        while let Some(node) = queue.pop() {
+            nodes.push(node);
+            queue.extend(node.sub_ability.as_deref());
+            queue.extend(node.else_ability.as_deref());
+            queue.extend(node.mode_abilities.iter());
+        }
+        nodes
+    }
+
+    // Negative: a spell-cast trigger proves no scoped-player binding, so the
+    // prohibition demotes to this gate's gap tag (not some other decline).
+    let cast = parse_trigger_line(
+        "Whenever an opponent casts a spell, creatures they control can't attack you this turn.",
+        "Scope Probe",
+    );
+    assert_eq!(
+        cast.mode,
+        TriggerMode::SpellCast,
+        "reach-guard: the probe fires from a non-phase trigger, got {:?}",
+        cast.mode
+    );
+    let cast_nodes = chain_nodes(&cast);
+    assert!(
+        !cast_nodes
+            .iter()
+            .any(|node| matches!(node.effect.as_ref(), Effect::AddRestriction { .. })),
+        "no supported restriction survives under a non-phase trigger: {:?}",
+        cast_nodes
+            .iter()
+            .map(|node| format!("{:?}", node.effect))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        cast_nodes.iter().any(|node| matches!(
+            node.effect.as_ref(),
+            Effect::Unimplemented { name, .. }
+                if name == "unbound_scoped_player_attack_restriction"
+        )),
+        "the scope gate mints the gap: {:?}",
+        cast_nodes
+            .iter()
+            .map(|node| format!("{:?}", node.effect))
+            .collect::<Vec<_>>()
+    );
+
+    // Paired positive: the same clause under a phase trigger keeps its
+    // supported `ScopedPlayer` restriction — the fire-time stamp binds it.
+    let combat = parse_trigger_line(
+        "At the beginning of combat on each opponent's turn, creatures they control can't attack you this turn.",
+        "Scope Probe",
+    );
+    assert_eq!(
+        combat.mode,
+        TriggerMode::Phase,
+        "reach-guard: the positive fires from a phase trigger, got {:?}",
+        combat.mode
+    );
+    assert!(
+        chain_nodes(&combat).iter().any(|node| matches!(
+            node.effect.as_ref(),
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::ScopedPlayer,
+                    ..
+                },
+            }
+        )),
+        "the phase-trigger binding survives the gate: {:?}",
+        chain_nodes(&combat)
+            .iter()
+            .map(|node| format!("{:?}", node.effect))
+            .collect::<Vec<_>>()
+    );
+}
+
 /// V13 — the recognizer does not absorb the category-choice class that
 /// `sequence::parse_choose_and_sacrifice_rest_followup` owns. No edit was made
 /// to that seam; this is the check that none was needed.

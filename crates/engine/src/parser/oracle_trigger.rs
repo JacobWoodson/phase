@@ -2313,6 +2313,72 @@ fn filter_uses_departure_attachment_prop(filter: &TargetFilter) -> bool {
     }
 }
 
+/// CR 603.2 + CR 608.2c: a `ScopedPlayer` attack restriction is bound in exactly
+/// two enclosing contexts — the phase trigger's fire-time stamp (active player)
+/// and the coordinated per-iteration channel (marked by a `ScopedPlayerMatches`
+/// condition, e.g. City Hall's chaos trigger). The controlled-creatures
+/// recognizer (`try_parse_controlled_creatures_cant_attack_prohibition`) runs
+/// inside `parse_effect_clause`, which cannot see the enclosing trigger mode,
+/// so under any other trigger the scope stays unbound and `add_restriction`
+/// falls back to the ability's controller — restricting the wrong player while
+/// reporting the clause as supported. Demote such nodes to an honest gap.
+///
+/// Runs in `lower_trigger_ir`, where `def.mode` is known. The phase-trigger
+/// case (Jace, Web of Inertia, Advokist, Second Doctor) passes through
+/// untouched, as do coordinated bodies carrying the binding proof.
+fn demote_unbound_scoped_attack_restrictions(ability: &mut AbilityDefinition, mode: &TriggerMode) {
+    use crate::types::ability::{GameRestriction, ProhibitedActivity, RestrictionPlayerScope};
+
+    let is_scoped_attack = matches!(
+        ability.effect.as_ref(),
+        Effect::AddRestriction {
+            restriction: GameRestriction::ProhibitActivity {
+                affected_players: RestrictionPlayerScope::ScopedPlayer,
+                activity: ProhibitedActivity::Attack { .. },
+                ..
+            },
+        }
+    );
+    let bound = ability
+        .condition
+        .as_ref()
+        .is_some_and(condition_binds_scoped_player);
+    if is_scoped_attack && !bound {
+        let fragment = ability.description.clone().unwrap_or_else(|| {
+            format!(
+                "attack restriction under a non-Phase trigger ({mode:?}) cannot bind its player"
+            )
+        });
+        *ability.effect =
+            Effect::unimplemented("unbound_scoped_player_attack_restriction", fragment);
+    }
+    if let Some(sub) = ability.sub_ability.as_deref_mut() {
+        demote_unbound_scoped_attack_restrictions(sub, mode);
+    }
+    if let Some(other) = ability.else_ability.as_deref_mut() {
+        demote_unbound_scoped_attack_restrictions(other, mode);
+    }
+    for mode_ability in &mut ability.mode_abilities {
+        demote_unbound_scoped_attack_restrictions(mode_ability, mode);
+    }
+}
+
+/// Whether a condition tree carries the coordinated per-iteration binding proof
+/// for `ScopedPlayer`. Fail-closed (same shape as
+/// `filter_uses_departure_attachment_prop` above): an unrecognized combinator
+/// answers false, and any blast radius from that surfaces in the parse-diff
+/// receipt rather than as a silently misbound restriction.
+fn condition_binds_scoped_player(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::ScopedPlayerMatches { .. } => true,
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            conditions.iter().any(condition_binds_scoped_player)
+        }
+        AbilityCondition::Not { condition } => condition_binds_scoped_player(condition),
+        _ => false,
+    }
+}
+
 pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     let mut def = ir.partial_def.clone();
     let modifiers = &ir.modifiers;
@@ -2552,6 +2618,16 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
                 def.description.clone().unwrap_or_default(),
             ),
         )));
+    }
+    // CR 603.2 + CR 608.2c: the phase stamp is Phase-mode-only, so a
+    // `ScopedPlayer` attack restriction under any other trigger is unbound
+    // unless the coordinated channel proves the binding. Demote those nodes
+    // (see `demote_unbound_scoped_attack_restrictions`); the phase-trigger
+    // case passes through untouched.
+    if def.mode != TriggerMode::Phase {
+        if let Some(ability) = execute.as_deref_mut() {
+            demote_unbound_scoped_attack_restrictions(ability, &def.mode);
+        }
     }
     def.execute = execute;
     def.optional = modifiers.optional;

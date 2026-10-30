@@ -55198,32 +55198,12 @@ pub mod tests {
     /// `match` falls to `_ => false`, which compiles silently on a widened
     /// arm — this pin is the revert-fail mechanism (widening the arm to
     /// `{ .. }` is the revert).
+    ///
+    /// The planeswalker negative and the paired positive share ONE live
+    /// P0-controlled planeswalker in ONE state: the negative rejects because
+    /// of the subtype parameter, never because the object lookup misses.
     #[test]
     fn subtype_defended_scope_never_matches_controller_scope() {
-        let state = setup();
-        let subtype = AttackTargetFilter::Planeswalker {
-            subtype: Some("Jace".to_string()),
-        };
-        for target in [
-            crate::game::combat::AttackTarget::Player(PlayerId(0)),
-            crate::game::combat::AttackTarget::Planeswalker(ObjectId(7)),
-            crate::game::combat::AttackTarget::Battle(ObjectId(9)),
-        ] {
-            assert!(
-                !attack_target_matches_controller_scope(
-                    &state,
-                    target,
-                    PlayerId(0),
-                    &ControllerRef::You,
-                    &subtype,
-                ),
-                "restriction-only subtype scope must not match a controller-scoped attack"
-            );
-        }
-        // Paired positive: the unparameterized arm still matches its own
-        // position (a P0-controlled planeswalker under a You-scoped
-        // controller), so the negatives above prove the parameter — not the
-        // harness — rejects.
         let mut live = setup();
         let walker_card = CardId(live.next_object_id);
         let walker = create_object(
@@ -55233,16 +55213,58 @@ pub mod tests {
             "Jace".to_string(),
             Zone::Battlefield,
         );
+        let target = crate::game::combat::AttackTarget::Planeswalker(walker);
+        // Negative: the subtype parameter rejects a live controlled walker.
+        // REVERT-FAIL (arm widened to `{ .. }`): the live lookup succeeds and
+        // this assertion fails.
+        assert!(
+            !attack_target_matches_controller_scope(
+                &live,
+                target,
+                PlayerId(0),
+                &ControllerRef::You,
+                &AttackTargetFilter::Planeswalker {
+                    subtype: Some("Jace".to_string()),
+                },
+            ),
+            "restriction-only subtype scope must not match a controller-scoped attack"
+        );
+        // Paired positive on the SAME object and state: the unparameterized
+        // arm accepts, so the negative above proves the parameter — not the
+        // harness — rejects.
         assert!(
             attack_target_matches_controller_scope(
                 &live,
-                crate::game::combat::AttackTarget::Planeswalker(walker),
+                target,
                 PlayerId(0),
                 &ControllerRef::You,
                 &AttackTargetFilter::Planeswalker { subtype: None },
             ),
             "reach-guard: the unparameterized Planeswalker arm still matches a controlled planeswalker"
         );
+        // The other target types fall through for both parameter arms.
+        for target in [
+            crate::game::combat::AttackTarget::Player(PlayerId(0)),
+            crate::game::combat::AttackTarget::Battle(ObjectId(9)),
+        ] {
+            for filter in [
+                AttackTargetFilter::Planeswalker {
+                    subtype: Some("Jace".to_string()),
+                },
+                AttackTargetFilter::Planeswalker { subtype: None },
+            ] {
+                assert!(
+                    !attack_target_matches_controller_scope(
+                        &live,
+                        target,
+                        PlayerId(0),
+                        &ControllerRef::You,
+                        &filter,
+                    ),
+                    "non-planeswalker targets never match a planeswalker scope: {target:?}"
+                );
+            }
+        }
     }
 
     /// Row 10c — the subtype-defended restriction scope is never compatible
