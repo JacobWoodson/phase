@@ -254,7 +254,8 @@ export function GameSetupPage() {
     const pileName = pileSourceParam(pile.source);
     // Horde: carry the picked challenge deck in the URL so it survives reload and
     // lands in the saved game record. GamePage applies it to the FormatConfig via
-    // `withChallengeDeck` (which swaps in that deck's whole HordeRuleset).
+    // `withChallengeDeck` (which applies that deck's whole engine-resolved
+    // configuration: HordeRuleset plus survivor deck-shape axes).
     const hordeDeckParam =
       formatConfig.format === "Horde" ? `&hordeDeck=${hordeChallengeDeck}` : "";
     const pileParam = pileName ? `&pile=${encodeURIComponent(pileName)}` : "";

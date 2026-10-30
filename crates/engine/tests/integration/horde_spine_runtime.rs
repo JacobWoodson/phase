@@ -557,3 +557,91 @@ fn horde_post_combat_activates_permanent_abilities_through_the_turn_engine() {
         "the post-combat activation queue must drain"
     );
 }
+
+/// Integration (advanced rule, persistent mana): the Horde's infinite mana
+/// survives step transitions to the post-combat queue. Same turn-engine drive
+/// as above (upkeep to post-combat main through REAL phase transitions and
+/// their step-end drains), but the artifact's ability costs `{1}, {T}` and the
+/// loader's mark is applied by the real `grant_horde_emblem` — the `{1}` is
+/// payable only if the mark survives the drains.
+///
+/// Revert guard: without the drain exemption the first step end clears the
+/// axes, `refill_infinite_mana` no-ops at the post-combat kick, the ability is
+/// unaffordable, and the artifact stays untapped.
+#[test]
+fn horde_post_combat_pays_mana_costs_from_persistent_horde_mana() {
+    use engine::types::ability::{AbilityCost, AbilityDefinition, AbilityKind, Effect};
+    use engine::types::format::HordePostCombatActivation;
+    use engine::types::mana::ManaCost;
+    use std::sync::Arc;
+
+    let mut r = ruleset(0, true);
+    r.post_combat_activation = HordePostCombatActivation::OncePerPermanent;
+    let mut state = GameState::new(FormatConfig::horde(r), 2, 42);
+    state.turn_number = 4;
+    state.active_player = HORDE;
+    state.phase = Phase::Upkeep;
+    state.priority_player = HORDE;
+    state.waiting_for = WaitingFor::Priority { player: HORDE };
+
+    // The Horde needs a non-empty library, else it is already defeated
+    // (`horde_is_defeated`: empty library + no creature) and the game ends before
+    // the turn can advance. `FixedCount(0)` means these are never revealed.
+    for i in 0..3 {
+        add_library_creature(&mut state, HORDE, &format!("Filler {i}"), 2);
+    }
+    // Real production mark, as deck loading applies at game start (`false`:
+    // skip the forced-attackers combat package — this beat is about mana).
+    grant_horde_emblem(&mut state, HORDE, false);
+
+    // A Horde ARTIFACT with a mana-plus-tap "{1}, {T}: Proliferate" ability.
+    // As a non-creature it never attacks and is never summoning-sick, so it
+    // reaches post-combat main untapped; only the mana component can stop it.
+    let card_id = CardId(state.next_object_id);
+    let rock = create_object(
+        &mut state,
+        card_id,
+        HORDE,
+        "Manaspring Engine".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&rock).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.base_card_types = obj.card_types.clone();
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(AbilityKind::Activated, Effect::Proliferate).cost(
+                AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::generic(1),
+                        },
+                        AbilityCost::Tap,
+                    ],
+                },
+            ),
+        );
+    }
+
+    let mut runner = GameRunner::from_state(state);
+    runner.advance_to_phase(Phase::PostCombatMain);
+
+    // Drive priority until the activated ability resolves (bounded).
+    for _ in 0..40 {
+        if runner.state().objects[&rock].tapped && runner.state().stack.is_empty() {
+            break;
+        }
+        if runner.act(GameAction::PassPriority).is_err() {
+            break;
+        }
+    }
+
+    assert!(
+        runner.state().objects[&rock].tapped,
+        "the Horde must pay {{1}} from its persistent infinite mana and tap post-combat"
+    );
+    assert!(
+        runner.state().horde_postcombat_activation_queue.is_empty(),
+        "the post-combat activation queue must drain"
+    );
+}

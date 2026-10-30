@@ -27,6 +27,50 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       post_combat_activation: "None",
       survivor_deck_format: "Constructed",
     },
+    resolved_config: {
+      "format": "Horde",
+      "starting_life": 100,
+      "min_players": 2,
+      "max_players": 5,
+      "deck_size": {
+        "type": "Minimum",
+        "data": 60
+      },
+      "singleton": false,
+      "command_zone": true,
+      "commander_damage_threshold": null,
+      "range_of_influence": null,
+      "team_based": false,
+      "archenemy_player": 0,
+      "uses_commander": false,
+      "supplies_fixed_deck": false,
+      "sideboard_policy": {
+        "type": "Forbidden"
+      },
+      "default_deck_copy_limit": {
+        "type": "Unlimited"
+      },
+      "allow_debug_actions": false,
+      "horde_ruleset": {
+        "challenge_deck": "CybermanHorde",
+        "wave": {
+          "type": "UntilNonToken",
+          "data": {
+            "count": {
+              "type": "Fixed",
+              "data": 1
+            }
+          }
+        },
+        "survivor_setup_turns": 3,
+        "combined_base_life": 100,
+        "per_extra_survivor_life_delta": -15,
+        "horde_creatures_forced_attackers": true,
+        "legendary_death": "Normal",
+        "post_combat_activation": "None",
+        "survivor_deck_format": "Constructed"
+      }
+    },
     rules: [
       { label: "Waves", detail: "Reveals until the first nontoken card is cast" },
       { label: "Survivor life", detail: "100 life shared, -15 per extra survivor" },
@@ -58,6 +102,45 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       legendary_death: "Normal",
       post_combat_activation: "None",
       survivor_deck_format: "Constructed",
+    },
+    resolved_config: {
+      "format": "Horde",
+      "starting_life": 100,
+      "min_players": 2,
+      "max_players": 5,
+      "deck_size": {
+        "type": "Minimum",
+        "data": 60
+      },
+      "singleton": false,
+      "command_zone": true,
+      "commander_damage_threshold": null,
+      "range_of_influence": null,
+      "team_based": false,
+      "archenemy_player": 0,
+      "uses_commander": false,
+      "supplies_fixed_deck": false,
+      "sideboard_policy": {
+        "type": "Forbidden"
+      },
+      "default_deck_copy_limit": {
+        "type": "Unlimited"
+      },
+      "allow_debug_actions": false,
+      "horde_ruleset": {
+        "challenge_deck": "DndHorde",
+        "wave": {
+          "type": "UntilRarityAtLeast",
+          "data": "uncommon"
+        },
+        "survivor_setup_turns": 3,
+        "combined_base_life": 100,
+        "per_extra_survivor_life_delta": -15,
+        "horde_creatures_forced_attackers": true,
+        "legendary_death": "Normal",
+        "post_combat_activation": "None",
+        "survivor_deck_format": "Constructed"
+      }
     },
     rules: [
       { label: "Waves", detail: "A wave ends at the first uncommon or better card" },
@@ -94,6 +177,53 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       post_combat_activation: "None",
       survivor_deck_format: "Constructed",
     },
+    resolved_config: {
+      "format": "Horde",
+      "starting_life": 100,
+      "min_players": 2,
+      "max_players": 5,
+      "deck_size": {
+        "type": "Minimum",
+        "data": 60
+      },
+      "singleton": false,
+      "command_zone": true,
+      "commander_damage_threshold": null,
+      "range_of_influence": null,
+      "team_based": false,
+      "archenemy_player": 0,
+      "uses_commander": false,
+      "supplies_fixed_deck": false,
+      "sideboard_policy": {
+        "type": "Forbidden"
+      },
+      "default_deck_copy_limit": {
+        "type": "Unlimited"
+      },
+      "allow_debug_actions": false,
+      "horde_ruleset": {
+        "challenge_deck": "ZombiesHorde",
+        "wave": {
+          "type": "UntilNonToken",
+          "data": {
+            "count": {
+              "type": "Snaking",
+              "data": {
+                "min": 1,
+                "max": 3
+              }
+            }
+          }
+        },
+        "survivor_setup_turns": 3,
+        "combined_base_life": 100,
+        "per_extra_survivor_life_delta": -15,
+        "horde_creatures_forced_attackers": true,
+        "legendary_death": "Normal",
+        "post_combat_activation": "None",
+        "survivor_deck_format": "Constructed"
+      }
+    },
     rules: [
       {
         label: "Waves",
@@ -129,6 +259,45 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       post_combat_activation: "None",
       survivor_deck_format: "Constructed",
     },
+    resolved_config: {
+      "format": "Horde",
+      "starting_life": 100,
+      "min_players": 2,
+      "max_players": 5,
+      "deck_size": {
+        "type": "Minimum",
+        "data": 60
+      },
+      "singleton": false,
+      "command_zone": true,
+      "commander_damage_threshold": null,
+      "range_of_influence": null,
+      "team_based": false,
+      "archenemy_player": 0,
+      "uses_commander": false,
+      "supplies_fixed_deck": false,
+      "sideboard_policy": {
+        "type": "Forbidden"
+      },
+      "default_deck_copy_limit": {
+        "type": "Unlimited"
+      },
+      "allow_debug_actions": false,
+      "horde_ruleset": {
+        "challenge_deck": "SliversHorde",
+        "wave": {
+          "type": "UntilRarityAtLeast",
+          "data": "uncommon"
+        },
+        "survivor_setup_turns": 3,
+        "combined_base_life": 100,
+        "per_extra_survivor_life_delta": -15,
+        "horde_creatures_forced_attackers": true,
+        "legendary_death": "Normal",
+        "post_combat_activation": "None",
+        "survivor_deck_format": "Constructed"
+      }
+    },
     rules: [
       { label: "Waves", detail: "A wave ends at the first uncommon or better card" },
       { label: "Survivor life", detail: "100 life shared, -15 per extra survivor" },
@@ -161,6 +330,45 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       post_combat_activation: "None",
       survivor_deck_format: "Constructed",
     },
+    resolved_config: {
+      "format": "Horde",
+      "starting_life": 100,
+      "min_players": 2,
+      "max_players": 5,
+      "deck_size": {
+        "type": "Minimum",
+        "data": 60
+      },
+      "singleton": false,
+      "command_zone": true,
+      "commander_damage_threshold": null,
+      "range_of_influence": null,
+      "team_based": false,
+      "archenemy_player": 0,
+      "uses_commander": false,
+      "supplies_fixed_deck": false,
+      "sideboard_policy": {
+        "type": "Forbidden"
+      },
+      "default_deck_copy_limit": {
+        "type": "Unlimited"
+      },
+      "allow_debug_actions": false,
+      "horde_ruleset": {
+        "challenge_deck": "HumansGodzillaHorde",
+        "wave": {
+          "type": "UntilRarityAtLeast",
+          "data": "uncommon"
+        },
+        "survivor_setup_turns": 3,
+        "combined_base_life": 100,
+        "per_extra_survivor_life_delta": -15,
+        "horde_creatures_forced_attackers": true,
+        "legendary_death": "Normal",
+        "post_combat_activation": "None",
+        "survivor_deck_format": "Constructed"
+      }
+    },
     rules: [
       { label: "Waves", detail: "A wave ends at the first uncommon or better card" },
       { label: "Survivor life", detail: "100 life shared, -15 per extra survivor" },
@@ -192,6 +400,46 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       legendary_death: "EtbThenPhaseOut",
       post_combat_activation: "None",
       survivor_deck_format: "Commander",
+    },
+    resolved_config: {
+      "format": "Horde",
+      "starting_life": 100,
+      "min_players": 2,
+      "max_players": 5,
+      "deck_size": {
+        "type": "Exactly",
+        "data": 100
+      },
+      "singleton": true,
+      "command_zone": true,
+      "commander_damage_threshold": 21,
+      "range_of_influence": null,
+      "team_based": false,
+      "archenemy_player": 0,
+      "uses_commander": true,
+      "supplies_fixed_deck": false,
+      "sideboard_policy": {
+        "type": "Forbidden"
+      },
+      "default_deck_copy_limit": {
+        "type": "UpTo",
+        "data": 1
+      },
+      "allow_debug_actions": false,
+      "horde_ruleset": {
+        "challenge_deck": "SauronHorde",
+        "wave": {
+          "type": "UntilRarityAtLeast",
+          "data": "uncommon"
+        },
+        "survivor_setup_turns": 3,
+        "combined_base_life": 100,
+        "per_extra_survivor_life_delta": -15,
+        "horde_creatures_forced_attackers": true,
+        "legendary_death": "EtbThenPhaseOut",
+        "post_combat_activation": "None",
+        "survivor_deck_format": "Commander"
+      }
     },
     rules: [
       { label: "Waves", detail: "A wave ends at the first uncommon or better card" },
@@ -233,6 +481,46 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       post_combat_activation: "None",
       survivor_deck_format: "Commander",
     },
+    resolved_config: {
+      "format": "Horde",
+      "starting_life": 100,
+      "min_players": 2,
+      "max_players": 5,
+      "deck_size": {
+        "type": "Exactly",
+        "data": 100
+      },
+      "singleton": true,
+      "command_zone": true,
+      "commander_damage_threshold": 21,
+      "range_of_influence": null,
+      "team_based": false,
+      "archenemy_player": 0,
+      "uses_commander": true,
+      "supplies_fixed_deck": false,
+      "sideboard_policy": {
+        "type": "Forbidden"
+      },
+      "default_deck_copy_limit": {
+        "type": "UpTo",
+        "data": 1
+      },
+      "allow_debug_actions": false,
+      "horde_ruleset": {
+        "challenge_deck": "SarumanHorde",
+        "wave": {
+          "type": "UntilRarityAtLeast",
+          "data": "uncommon"
+        },
+        "survivor_setup_turns": 3,
+        "combined_base_life": 100,
+        "per_extra_survivor_life_delta": -15,
+        "horde_creatures_forced_attackers": true,
+        "legendary_death": "EtbThenPhaseOut",
+        "post_combat_activation": "None",
+        "survivor_deck_format": "Commander"
+      }
+    },
     rules: [
       { label: "Waves", detail: "A wave ends at the first uncommon or better card" },
       { label: "Survivor life", detail: "100 life shared, -15 per extra survivor" },
@@ -273,6 +561,49 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       legendary_death: "EtbThenPhaseOut",
       post_combat_activation: "None",
       survivor_deck_format: "Commander",
+    },
+    resolved_config: {
+      "format": "Horde",
+      "starting_life": 100,
+      "min_players": 2,
+      "max_players": 5,
+      "deck_size": {
+        "type": "Exactly",
+        "data": 100
+      },
+      "singleton": true,
+      "command_zone": true,
+      "commander_damage_threshold": 21,
+      "range_of_influence": null,
+      "team_based": false,
+      "archenemy_player": 0,
+      "uses_commander": true,
+      "supplies_fixed_deck": false,
+      "sideboard_policy": {
+        "type": "Forbidden"
+      },
+      "default_deck_copy_limit": {
+        "type": "UpTo",
+        "data": 1
+      },
+      "allow_debug_actions": false,
+      "horde_ruleset": {
+        "challenge_deck": "LotrTwoTowersHorde",
+        "wave": {
+          "type": "UntilRarityAtLeast",
+          "data": "uncommon"
+        },
+        "survivor_setup_turns": 3,
+        "combined_base_life": 100,
+        "per_extra_survivor_life_delta": -15,
+        "horde_creatures_forced_attackers": true,
+        "legendary_death": "EtbThenPhaseOut",
+        "post_combat_activation": "None",
+        "survivor_deck_format": "Commander",
+        "co_horde_decks": [
+          "SarumanHorde"
+        ]
+      }
     },
     rules: [
       { label: "Waves", detail: "A wave ends at the first uncommon or better card" },
@@ -319,6 +650,54 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
         life_at_four_survivors: 30,
       },
     },
+    resolved_config: {
+      "format": "Horde",
+      "starting_life": 100,
+      "min_players": 2,
+      "max_players": 5,
+      "deck_size": {
+        "type": "Minimum",
+        "data": 60
+      },
+      "singleton": false,
+      "command_zone": true,
+      "commander_damage_threshold": null,
+      "range_of_influence": null,
+      "team_based": false,
+      "archenemy_player": 0,
+      "uses_commander": false,
+      "supplies_fixed_deck": false,
+      "sideboard_policy": {
+        "type": "Forbidden"
+      },
+      "default_deck_copy_limit": {
+        "type": "Unlimited"
+      },
+      "allow_debug_actions": false,
+      "horde_ruleset": {
+        "challenge_deck": "TurtleTeamUpHorde",
+        "wave": {
+          "type": "FixedCount",
+          "data": 2
+        },
+        "survivor_setup_turns": 0,
+        "combined_base_life": 10,
+        "per_extra_survivor_life_delta": 10,
+        "horde_creatures_forced_attackers": true,
+        "legendary_death": "Normal",
+        "post_combat_activation": "None",
+        "survivor_deck_format": "Constructed",
+        "boss_stages": {
+          "stage_sizes": [
+            1,
+            2,
+            3
+          ],
+          "life_base": 20,
+          "life_at_four_survivors": 30
+        }
+      }
+    },
     rules: [
       { label: "Waves", detail: "Reveals 2 cards each Horde turn" },
       { label: "Survivor life", detail: "10 life shared, +10 per extra survivor" },
@@ -356,11 +735,15 @@ export function challengeDeckMetadata(
 /**
  * Apply a chosen challenge deck to a Horde `FormatConfig`.
  *
- * The engine owns the per-deck rules, so this swaps in the deck's whole
- * `HordeRuleset` (wave policy, setup turns, life deltas) rather than mutating
- * `challenge_deck` alone — picking a deck must not leave another deck's wave
- * rule attached. Returns `config` untouched for non-Horde formats or an
- * unknown deck.
+ * The engine owns the per-deck rules, so this applies the deck's whole
+ * engine-resolved configuration — the `HordeRuleset` (wave policy, setup
+ * turns, life deltas) AND the survivor deck-shape axes (`deck_size`,
+ * `singleton`, commander fields) derived from it by `FormatConfig::horde` —
+ * rather than mutating `challenge_deck` alone. Picking a deck must leave
+ * neither another deck's wave rule nor its EDH/constructed shape attached.
+ * Setup-screen edits (`starting_life`), the transport remap
+ * (`archenemy_player`), and host seat choices (`min/max_players`) stay.
+ * Returns `config` untouched for non-Horde formats or an unknown deck.
  */
 export function withChallengeDeck(
   config: FormatConfig,
@@ -369,5 +752,14 @@ export function withChallengeDeck(
   if (config.format !== "Horde") return config;
   const meta = challengeDeckMetadata(deck);
   if (!meta) return config;
-  return { ...config, horde_ruleset: meta.default_ruleset };
+  const resolved = meta.resolved_config;
+  return {
+    ...config,
+    horde_ruleset: meta.default_ruleset,
+    deck_size: resolved.deck_size,
+    singleton: resolved.singleton,
+    uses_commander: resolved.uses_commander,
+    commander_damage_threshold: resolved.commander_damage_threshold,
+    default_deck_copy_limit: resolved.default_deck_copy_limit,
+  };
 }

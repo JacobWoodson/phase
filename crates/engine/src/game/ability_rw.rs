@@ -2324,6 +2324,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::PartySize { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::TrackedSetSize
         | QuantityRef::FilteredTrackedSetSize { .. }
@@ -6768,6 +6769,9 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
             reads_event_live()
         }
         QuantityRef::GraveyardSize { .. } => reads_zone_membership(),
+        // Turtle Team-Up: a command-zone pile census — zone membership like
+        // GraveyardSize, global (not per-source member-bound).
+        QuantityRef::DeployedBossCount => reads_zone_membership(),
         QuantityRef::ObjectCount { filter }
         | QuantityRef::ObjectCountDistinct { filter, .. }
         | QuantityRef::ObjectCountBySharedQuality { filter, .. }

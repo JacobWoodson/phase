@@ -2721,6 +2721,14 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             restrict: _,
         } => Axes::CONSERVATIVE,
         QuantityRef::CardsExiledBySource => Axes::NONE,
+        // Turtle Team-Up: a live command-zone pile census (sibling read like
+        // ObjectCount, but filterless — no filter to scan, no history/event).
+        QuantityRef::DeployedBossCount => Axes {
+            event: false,
+            sibling: true,
+            projected: false,
+            history: HistoryReads::NONE,
+        },
         QuantityRef::ExiledCardPower { index: _ } => Axes::NONE,
         QuantityRef::ZoneCardCount {
             filter,

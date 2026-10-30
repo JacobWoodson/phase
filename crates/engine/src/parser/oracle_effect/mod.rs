@@ -15547,6 +15547,7 @@ fn quantity_ref_reads_chain_local_result(reference: &QuantityRef) -> bool {
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::Devotion { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::ZoneCardCount { .. }
         | QuantityRef::BasicLandTypeCount { .. }

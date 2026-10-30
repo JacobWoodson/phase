@@ -775,7 +775,10 @@ pub fn grant_horde_emblem(state: &mut GameState, horde_seat: PlayerId, forced_at
     // it, so gate on the ruleset axis. Reuses the standard unbounded-mana
     // machinery — mark the axes, then `mana_payment::refill_infinite_mana` (run
     // after every action) keeps the pool topped so activation mana costs are
-    // payable. Real non-mana costs (tap/sacrifice) are still paid normally.
+    // payable. The mark is PERSISTENT: the step-end drain exempts seats under
+    // `horde::has_horde_infinite_mana` from both the pool-empty and the axis
+    // de-realization, so the mana survives to the post-combat queue. Real
+    // non-mana costs (tap/sacrifice) are still paid normally.
     if state.format_config.horde_ruleset.as_ref().is_some_and(|r| {
         r.post_combat_activation
             == crate::types::format::HordePostCombatActivation::OncePerPermanent

@@ -16,8 +16,10 @@
 use engine::game::sba::check_state_based_actions;
 use engine::game::scenario::GameRunner;
 use engine::game::zones::{create_object, move_to_zone};
+use engine::parser::oracle::parse_oracle_text;
+use engine::types::ability::{CopyTargetPurpose, ReplacementDefinition, TargetRef};
 use engine::types::actions::GameAction;
-use engine::types::card_type::CoreType;
+use engine::types::card_type::{CoreType, Supertype};
 use engine::types::events::GameEvent;
 use engine::types::format::{ChallengeDeck, FormatConfig, WaveTermination};
 use engine::types::game_state::{GameState, WaitingFor};
@@ -267,5 +269,238 @@ fn mixed_wave_yields_one_token_and_one_nontoken_under_horde() {
     assert_eq!(
         nontokens, 1,
         "the nontoken half of the wave must resolve exactly one permanent (loop reached it)"
+    );
+}
+
+/// Verbatim Esix, Fractal Bloom Oracle text (copied from
+/// `esix_fractal_bloom.rs`, whose helpers are private by design): "The first
+/// time you would create one or more tokens during each of your turns, you may
+/// instead choose a creature other than Esix and create that many tokens that
+/// are copies of that creature."
+fn esix_replacement() -> ReplacementDefinition {
+    use engine::types::replacements::ReplacementEvent;
+    let oracle = "Flying\n\
+        The first time you would create one or more tokens during each of your turns, you may \
+        instead choose a creature other than Esix and create that many tokens that are copies \
+        of that creature.";
+    parse_oracle_text(
+        oracle,
+        "Esix, Fractal Bloom",
+        &["Flying".to_string()],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Fractal".to_string()],
+    )
+    .replacements
+    .into_iter()
+    .find(|r| r.event == ReplacementEvent::CreateToken)
+    .expect("Esix must parse to a CreateToken replacement")
+}
+
+/// Install Esix on the battlefield under `controller` with its parsed
+/// replacement live. Mirrors `esix_fractal_bloom.rs::install_esix`.
+fn install_esix(state: &mut GameState, controller: PlayerId) -> ObjectId {
+    use std::sync::Arc;
+    let id = create_object(
+        state,
+        CardId(state.next_object_id),
+        controller,
+        "Esix, Fractal Bloom".to_string(),
+        Zone::Battlefield,
+    );
+    let reps = vec![esix_replacement()];
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types = vec![CoreType::Creature];
+    obj.card_types.supertypes = vec![Supertype::Legendary];
+    obj.card_types.subtypes = vec!["Fractal".to_string()];
+    obj.base_card_types = obj.card_types.clone();
+    obj.power = Some(4);
+    obj.toughness = Some(4);
+    obj.base_power = Some(4);
+    obj.base_toughness = Some(4);
+    obj.replacement_definitions = reps.clone().into();
+    obj.base_replacement_definitions = Arc::new(reps);
+    id
+}
+
+/// A Horde creature that can serve as Esix's chosen copy source, with a
+/// copiable subtype on both live and base types (copies read the base).
+fn add_copy_source(state: &mut GameState, controller: PlayerId, name: &str) -> ObjectId {
+    let id = create_object(
+        state,
+        CardId(state.next_object_id),
+        controller,
+        name.to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types = vec![CoreType::Creature];
+    obj.card_types.subtypes = vec!["Ox".to_string()];
+    obj.base_card_types = obj.card_types.clone();
+    obj.power = Some(5);
+    obj.toughness = Some(4);
+    obj.base_power = Some(5);
+    obj.base_toughness = Some(4);
+    id
+}
+
+/// Drive priority until the wave budget is spent, the stack is empty, AND any
+/// parked reveal drained (bounded). The pending clause is load-bearing: a
+/// mid-wave replacement choice consumes its budget BEFORE parking, so a
+/// budget/stack-only check exits before the re-entry seam resumes the park.
+/// Used AFTER answering a mid-wave prompt.
+fn drive_wave_to_completion(runner: &mut GameRunner) {
+    for _ in 0..60 {
+        if runner.state().horde_wave_remaining == 0
+            && runner.state().stack.is_empty()
+            && runner.state().pending_horde_reveal.is_none()
+        {
+            break;
+        }
+        if runner.act(GameAction::PassPriority).is_err() {
+            break;
+        }
+    }
+}
+
+/// DECLINE: a token-creation replacement the Horde controls (Esix) prompts on
+/// a revealed token, and declining falls through to the original token.
+/// Full public-action drive: wave → ReplacementChoice → decline → completion.
+///
+/// Revert guard: the pre-fix code swallowed `NeedsChoice` like prevention —
+/// no prompt raises, the wave consumes the card with no token, and both the
+/// prompt assertion and the battlefield-token assertion flip.
+#[test]
+fn revealed_token_replacement_decline_creates_original_token() {
+    let mut state = horde_game(1);
+    let placeholder = add_library_token(&mut state, HORDE, "Cyberman", 2, 2, true);
+    install_esix(&mut state, HORDE);
+    add_copy_source(&mut state, HORDE, "Decoy Ox");
+
+    let mut runner = GameRunner::from_state(state);
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "Esix's optional substitution must prompt on the revealed token, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("decline Esix's substitution");
+    drive_wave_to_completion(&mut runner);
+
+    assert_eq!(
+        runner.state().horde_wave_remaining,
+        0,
+        "the wave must complete after the declined choice"
+    );
+    let bf_tokens = horde_battlefield_tokens(runner.state());
+    assert_eq!(
+        bf_tokens.len(),
+        1,
+        "declining must create the original revealed token, got {} battlefield tokens",
+        bf_tokens.len()
+    );
+    let bf = runner.state().objects.get(&bf_tokens[0]).unwrap();
+    assert_eq!(
+        (bf.name.as_str(), bf.power, bf.toughness),
+        ("Cyberman", Some(2), Some(2)),
+        "the battlefield token must be the revealed body, not a copy"
+    );
+    assert!(
+        !runner.state().objects.contains_key(&placeholder),
+        "the library placeholder must be removed after the resumed reveal"
+    );
+    assert!(
+        runner.state().pending_horde_reveal.is_none(),
+        "the parked reveal must drain on resume"
+    );
+}
+
+/// ACCEPT: accepting Esix's substitution on a revealed token creates a copy
+/// of the CHOSEN creature instead of the revealed body, and the wave still
+/// completes (placeholder removed, budget spent).
+///
+/// Revert guard: same as the decline row — pre-fix, no prompt raises and the
+/// card is consumed with no token and no choice.
+#[test]
+fn revealed_token_replacement_accept_creates_chosen_copy() {
+    let mut state = horde_game(1);
+    let placeholder = add_library_token(&mut state, HORDE, "Cyberman", 2, 2, true);
+    install_esix(&mut state, HORDE);
+    let decoy = add_copy_source(&mut state, HORDE, "Decoy Ox");
+
+    let mut runner = GameRunner::from_state(state);
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "Esix's optional substitution must prompt on the revealed token, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("accept Esix's substitution");
+
+    // Prompt 2 — the copy-source choice.
+    match &runner.state().waiting_for {
+        WaitingFor::CopyTargetChoice {
+            valid_targets,
+            purpose,
+            ..
+        } => {
+            assert_eq!(
+                *purpose,
+                CopyTargetPurpose::CopyTokenSource,
+                "the chosen-source arm must raise CopyTokenSource"
+            );
+            assert!(
+                valid_targets.contains(&decoy),
+                "the Decoy Ox must be a legal copy source, pool was {valid_targets:?}"
+            );
+        }
+        other => panic!("expected a CopyTargetChoice prompt, got {other:?}"),
+    }
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(decoy)),
+        })
+        .expect("choose Decoy Ox as the copy source");
+    drive_wave_to_completion(&mut runner);
+
+    assert_eq!(
+        runner.state().horde_wave_remaining,
+        0,
+        "the wave must complete after the accepted substitution"
+    );
+    let bf_tokens = horde_battlefield_tokens(runner.state());
+    assert_eq!(
+        bf_tokens.len(),
+        1,
+        "accepting must create exactly one substitute token, got {}",
+        bf_tokens.len()
+    );
+    let bf = runner.state().objects.get(&bf_tokens[0]).unwrap();
+    assert_eq!(
+        bf.name.as_str(),
+        "Decoy Ox",
+        "the substitute must copy the CHOSEN creature, not the revealed body"
+    );
+    assert_eq!(
+        (bf.power, bf.toughness),
+        (Some(5), Some(4)),
+        "the copy must carry the chosen creature's P/T, not the 2/2 Cyberman spec"
+    );
+    assert!(
+        !runner.state().objects.contains_key(&placeholder),
+        "the library placeholder must be removed after the substituted reveal"
+    );
+    assert!(
+        runner.state().pending_horde_reveal.is_none(),
+        "the parked reveal must drain on resume"
     );
 }

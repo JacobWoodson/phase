@@ -1936,6 +1936,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             }
         }
         QuantityRef::CardsExiledBySource => "cards exiled with source".into(),
+        QuantityRef::DeployedBossCount => "deployed bosses".into(),
         QuantityRef::ExiledCardPower { index } => format!("power of exiled card {index}"),
         QuantityRef::ZoneCardCount {
             zone,
@@ -11000,6 +11001,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ("DistinctSubtypes", batch_filter_support(source))
         }
         QuantityRef::CardsExiledBySource => ("CardsExiledBySource", Handled),
+        QuantityRef::DeployedBossCount => ("DeployedBossCount", Handled),
         QuantityRef::ExiledCardPower { .. } => ("ExiledCardPower", Handled),
         QuantityRef::ZoneCardCount { .. } => ("ZoneCardCount", Handled),
         QuantityRef::BasicLandTypeCount { .. } => ("BasicLandTypeCount", Handled),

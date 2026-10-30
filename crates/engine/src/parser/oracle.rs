@@ -1974,6 +1974,7 @@ fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) 
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::Devotion { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::TrackedSetSize

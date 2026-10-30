@@ -9800,6 +9800,7 @@ pub(crate) fn quantity_ref_grammar_any(
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::Devotion { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::TrackedSetSize
@@ -10625,6 +10626,7 @@ fn rewrite_quantity_ref_filter_props<C>(
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::Devotion { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::TrackedSetSize
@@ -13113,6 +13115,7 @@ fn quantity_ref_has_unsupported_selected_ref(qty: &QuantityRef) -> bool {
         | QuantityRef::NameStickerLetterCount { .. }
         | QuantityRef::SelfManaValue
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::TrackedSetSize
         | QuantityRef::ExiledFromHandThisResolution
@@ -14239,6 +14242,16 @@ pub enum QuantityRef {
     /// with ~" conditional statics (Veteran Survivor, etc.) — composes with
     /// `StaticCondition::QuantityComparison` rather than requiring a dedicated variant.
     CardsExiledBySource,
+    /// Turtle Team-Up: the number of Bosses currently deployed (face-up Boss
+    /// cards in the command zone). Chrome Dome's "+1/+0 for each boss in play"
+    /// reads this live so the bonus tracks stage transitions without
+    /// re-grafting. Not expressible as `ObjectCount { filter }`: there is no
+    /// Boss `TypeFilter` member, no face-up predicate, and undeployed
+    /// (face-down) Bosses share `Zone::Command`, so even a Boss+InZone filter
+    /// would over-count. No CR section (casual product) — the product booklet
+    /// is the authority. Synthesized only (Boss grafts never go through the
+    /// Oracle parser).
+    DeployedBossCount,
     /// CR 607.2b: The power of a specific card exiled by the source, indexed by order.
     /// Its only producer is The Mimeoplasm's entry replacement, which reads the second
     /// card exiled "this way" (the per-turn ledger) for counter placement. Readers of
@@ -14937,6 +14950,7 @@ impl QuantityRef {
             | QuantityRef::SharedCardTypes { .. }
             | QuantityRef::DistinctSubtypes { .. }
             | QuantityRef::CardsExiledBySource
+            | QuantityRef::DeployedBossCount
             | QuantityRef::ExiledCardPower { .. }
             | QuantityRef::ZoneCardCount { .. }
             | QuantityRef::BasicLandTypeCount { .. }
@@ -15092,6 +15106,7 @@ impl QuantityRef {
             | QuantityRef::TargetZoneCardCount { .. }
             | QuantityRef::Devotion { .. }
             | QuantityRef::CardsExiledBySource
+            | QuantityRef::DeployedBossCount
             | QuantityRef::ExiledCardPower { .. }
             | QuantityRef::BasicLandTypeCount { .. }
             | QuantityRef::TrackedSetSize
@@ -15201,6 +15216,7 @@ impl QuantityRef {
             | QuantityRef::SharedCardTypes { .. }
             | QuantityRef::DistinctSubtypes { .. }
             | QuantityRef::CardsExiledBySource
+            | QuantityRef::DeployedBossCount
             | QuantityRef::ExiledCardPower { .. }
             | QuantityRef::ZoneCardCount { .. }
             | QuantityRef::BasicLandTypeCount { .. }
@@ -16607,7 +16623,7 @@ pub(crate) fn quantity_ref_object_scope_read(qty: &QuantityRef) -> ObjectScopeRe
         | QuantityRef::SpellsCastThisTurn { .. } | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SpellsCastThisGame { .. } | QuantityRef::EventContextPlayerCount { .. }
         | QuantityRef::TargetZoneCardCount { .. } | QuantityRef::Devotion { .. }
-        | QuantityRef::BasicLandTypeCount { .. } | QuantityRef::CardsExiledBySource
+        | QuantityRef::BasicLandTypeCount { .. } | QuantityRef::CardsExiledBySource | QuantityRef::DeployedBossCount
         // Numbers, counters on players, and resolution/turn records.
         | QuantityRef::LifeAboveStarting | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount | QuantityRef::TriggeringScryBottomCount

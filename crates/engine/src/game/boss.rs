@@ -358,10 +358,6 @@ fn graft_boss_abilities(state: &mut GameState, boss_id: ObjectId) {
     let Some(name) = boss_name(state, boss_id).map(str::to_string) else {
         return;
     };
-    // Chrome Dome's bonus bakes the CURRENT deployed count: the boss count
-    // changes only at deploy/clear, and every transition re-grafts, so the
-    // baked value cannot go stale between transitions.
-    let boss_count = bosses_in_command_zone(state).len() as i32;
     let Some(obj) = state.objects.get_mut(&boss_id) else {
         return;
     };
@@ -382,7 +378,7 @@ fn graft_boss_abilities(state: &mut GameState, boss_id: ObjectId) {
         }
         // "Ninjas the bosses control get +1/+0 for each boss in play."
         "Chrome Dome, Cyber-Ninja" => {
-            obj.static_definitions.push(chrome_dome_static(boss_count));
+            obj.static_definitions.push(chrome_dome_static());
         }
         // "Whenever a creature the heroes control dies, the heroes lose 1 life."
         "Karai, Shadow Warrior" => {
@@ -515,14 +511,21 @@ fn grant_keyword_static(
     def
 }
 
-/// Chrome Dome's "+1/+0 for each boss in play" with the current deployed count
-/// baked in (re-grafted at every stage transition — see
-/// `graft_boss_abilities`).
-fn chrome_dome_static(boss_count: i32) -> crate::types::ability::StaticDefinition {
-    use crate::types::ability::{ContinuousModification, StaticDefinition};
+/// Chrome Dome's "+1/+0 for each boss in play" as a LIVE quantity: the
+/// layer system re-resolves `DeployedBossCount` every pass, so the bonus
+/// tracks stage transitions (deploy/clear) with no re-grafting — grafting
+/// once at deploy is correct no matter when later stages arrive.
+fn chrome_dome_static() -> crate::types::ability::StaticDefinition {
+    use crate::types::ability::{
+        ContinuousModification, QuantityExpr, QuantityRef, StaticDefinition,
+    };
     let mut def = StaticDefinition::continuous()
         .affected(ninjas_you_control_filter())
-        .modifications(vec![ContinuousModification::AddPower { value: boss_count }]);
+        .modifications(vec![ContinuousModification::AddDynamicPower {
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::DeployedBossCount,
+            },
+        }]);
     def.active_zones = vec![Zone::Command];
     def.description =
         Some("Ninjas the bosses control get +1/+0 for each boss in play.".to_string());
@@ -1993,6 +1996,84 @@ mod tests {
         assert!(
             !crate::game::horde::horde_is_defeated(&state),
             "the Horde is not defeated mid-fight"
+        );
+    }
+
+    /// Chrome Dome's "+1/+0 for each boss in play" is a LIVE count: rigged
+    /// first in the two-boss stage 2, the grafted static grants +2/+0 once
+    /// the second Boss deploys (no re-graft), and the bonus is gone after
+    /// the next clear exiles Chrome Dome with its stage.
+    ///
+    /// Revert guard: baking the graft-time count grants +1/+0 (Chrome Dome
+    /// grafts first, when only one Boss is deployed) — the +2 assertion flips.
+    #[test]
+    fn chrome_dome_bonus_tracks_deployed_boss_count_live() {
+        let (mut state, horde) = turtle_teamup_game(2);
+        // Rig stage 2's first deploy to Chrome Dome (stage sizes are [1,2,3];
+        // stage 1 already deployed one Boss at setup).
+        let chrome = state
+            .boss_deck
+            .iter()
+            .copied()
+            .find(|id| boss_name(&state, *id) == Some("Chrome Dome, Cyber-Ninja"))
+            .expect("the Boss pile holds Chrome Dome");
+        let mut pile: Vec<ObjectId> = state.boss_deck.iter().copied().collect();
+        pile.retain(|id| *id != chrome);
+        pile.insert(0, chrome);
+        state.boss_deck = pile.into_iter().collect();
+
+        let ninja = mk_creature(&mut state, horde, "Foot Ninja", &[], &["Ninja"]);
+
+        // Clear stage 1 through the real SBA loop → stage 2 deploys
+        // [Chrome Dome, next], Chrome Dome grafted first at count 1.
+        state
+            .players
+            .iter_mut()
+            .find(|p| p.id == horde)
+            .expect("horde seat")
+            .life = 0;
+        crate::game::sba::check_state_based_actions(&mut state, &mut Vec::new());
+        assert_eq!(state.boss_stage, 2, "the clear must advance to stage 2");
+        let deployed = bosses_in_command_zone(&state);
+        assert_eq!(deployed.len(), 2, "stage 2 deploys two Bosses");
+        assert_eq!(
+            deployed[0], chrome,
+            "Chrome Dome deploys (and grafts) first"
+        );
+
+        // The rigged deploy path marks nothing dirty (production zone moves
+        // do), so force the full pass explicitly.
+        crate::game::layers::mark_layers_full(&mut state);
+        crate::game::layers::flush_layers(&mut state);
+        let ninja_obj = state.objects.get(&ninja).expect("ninja");
+        assert_eq!(
+            (ninja_obj.power, ninja_obj.toughness),
+            (Some(4), Some(2)),
+            "a 2/2 Ninja gets +2/+0 with two bosses deployed — the graft-time \
+             count (1) must not stick"
+        );
+
+        // Clear stage 2 → stage 3 deploys; Chrome Dome leaves with its stage
+        // and the bonus drops to nothing (no stale graft).
+        state
+            .players
+            .iter_mut()
+            .find(|p| p.id == horde)
+            .expect("horde seat")
+            .life = 0;
+        crate::game::sba::check_state_based_actions(&mut state, &mut Vec::new());
+        assert_eq!(state.boss_stage, 3, "the clear must advance to stage 3");
+        assert!(
+            !bosses_in_command_zone(&state).contains(&chrome),
+            "Chrome Dome leaves play with its cleared stage"
+        );
+        crate::game::layers::mark_layers_full(&mut state);
+        crate::game::layers::flush_layers(&mut state);
+        let ninja_obj = state.objects.get(&ninja).expect("ninja");
+        assert_eq!(
+            (ninja_obj.power, ninja_obj.toughness),
+            (Some(2), Some(2)),
+            "with Chrome Dome gone the Ninja falls back to base P/T"
         );
     }
 

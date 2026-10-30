@@ -486,6 +486,7 @@ export interface ChallengeDeckMetadata {
   short_label: string;
   description: string;
   default_ruleset: HordeRuleset;
+  resolved_config: FormatConfig;
   rules: RuleSummaryLine[];
 }
 

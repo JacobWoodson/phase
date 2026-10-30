@@ -11,13 +11,16 @@
 //! reverted. Negative assertions are paired with a positive reach-guard proving
 //! the input reached the seam under test.
 
-use engine::game::deck_loading::{load_deck_into_state, DeckEntry, DeckPayload, PlayerDeckPayload};
+use engine::game::deck_loading::{
+    load_and_hydrate_decks, load_deck_into_state, DeckEntry, DeckPayload, PlayerDeckPayload,
+};
 use engine::game::effects::life::apply_damage_life_loss;
-use engine::game::engine::start_game;
+use engine::game::engine::{apply, start_game};
 use engine::game::players::{team_life_total, teammates};
 use engine::game::sba::check_state_based_actions;
-use engine::game::turns::start_next_turn;
+use engine::game::turns::{advance_phase, start_next_turn};
 use engine::game::zones::create_object;
+use engine::types::actions::{GameAction, MulliganChoice};
 use engine::types::card::CardFace;
 use engine::types::card_type::{CoreType, Supertype};
 use engine::types::events::GameEvent;
@@ -558,5 +561,132 @@ fn commander_format_horde_wires_survivor_commanders() {
             .iter()
             .any(|id| state.objects[id].is_commander && state.objects[id].owner == HORDE),
         "the Horde seat has no commander"
+    );
+}
+
+/// Two-Horde wave dispatch: EVERY Horde commander's precombat main seeds a
+/// wave — not just the primary (archenemy) seat. Two Towers alternates Sauron
+/// (seat 0) and Saruman (seat 1) Horde turns (Reading B); the precombat
+/// dispatch must gate on the Horde-seat authority so the secondary commander
+/// reveals too. Driven through the real `start_game` / `advance_phase` seams
+/// (turns roll over inside `advance_phase`); the wave is observed (seeded
+/// budget) but never drained (no priority passes), so each observation is
+/// independent.
+///
+/// Order-agnostic by design: the exact turn order (starting seat, setup-skip
+/// consumption) is owned by the setup fixes, so this test observes Horde turns
+/// until BOTH commanders have acted and asserts a wave on each. Commander
+/// alternation itself is pinned by `begin_wave_rotates_the_active_horde_commander`.
+///
+/// Revert guard: gating the dispatch on `topology::archenemy` again leaves
+/// Saruman's precombats unseeded — the per-turn `> 0` assertion flips.
+#[test]
+fn both_horde_commanders_seed_a_wave_on_each_horde_turn() {
+    const SAURON: PlayerId = PlayerId(0);
+    const SARUMAN: PlayerId = PlayerId(1);
+    const SURVIVOR: PlayerId = PlayerId(2);
+
+    let mut state = GameState::new(
+        FormatConfig::horde(ChallengeDeck::LotrTwoTowersHorde.default_ruleset()),
+        3,
+        42,
+    );
+    // Reach-guard: both Horde seats designated (no silent drop).
+    assert_eq!(
+        state.horde_seats,
+        vec![SAURON, SARUMAN],
+        "Two Towers designates both Horde seats"
+    );
+
+    // Real libraries through the canonical init path: challenge libraries for
+    // both Horde seats, 60 basics for the survivor (it draws every turn).
+    let db = crate::support::shared_card_db().expect("fixture has Two Towers cards");
+    let payload = DeckPayload {
+        ai_decks: vec![PlayerDeckPayload {
+            main_deck: vec![DeckEntry {
+                card: plains_face(),
+                count: 60,
+            }],
+            ..PlayerDeckPayload::default()
+        }],
+        ..DeckPayload::default()
+    };
+    load_and_hydrate_decks(&mut state, &payload, Some(db));
+    for seat in [SAURON, SARUMAN] {
+        assert!(
+            !state.players[seat.0 as usize].library.is_empty(),
+            "reach-guard: {seat:?} has a loaded challenge library"
+        );
+    }
+    assert_eq!(
+        state.players[SURVIVOR.0 as usize].library.len(),
+        60,
+        "reach-guard: the survivor has a 60-card library to draw from"
+    );
+
+    start_game(&mut state);
+
+    // The survivor drew an opening hand, so the game opens on its mulligan
+    // prompt (the handless Horde seats are not pending). Keep through the
+    // public action path to reach a drivable turn 1.
+    assert!(
+        matches!(state.waiting_for, WaitingFor::MulliganDecision { .. }),
+        "start_game with a real survivor library must open the mulligan (got {:?})",
+        state.waiting_for
+    );
+    let _ = apply(
+        &mut state,
+        SURVIVOR,
+        GameAction::MulliganDecision {
+            choice: MulliganChoice::Keep,
+        },
+    );
+    assert!(
+        !matches!(state.waiting_for, WaitingFor::MulliganDecision { .. }),
+        "the survivor's KEEP must complete the mulligan (got {:?})",
+        state.waiting_for
+    );
+
+    // Drive whole turns purely through `advance_phase` (turns roll over
+    // internally at Cleanup). Each hop enters exactly one phase; a transition
+    // INTO precombat is a real dispatch firing. On every Horde precombat
+    // entry, assert the wave seeded. Stop once EACH commander has taken two
+    // waved turns — order-agnostic (no assumption about the starting seat or
+    // setup-skip consumption), but sustained across rotations.
+    let mut events = Vec::new();
+    let mut waves: Vec<(PlayerId, u32)> = Vec::new();
+    let mut prev_phase = state.phase;
+    for _ in 0..400 {
+        let sauron_waves = waves.iter().filter(|(s, _)| *s == SAURON).count();
+        let saruman_waves = waves.iter().filter(|(s, _)| *s == SARUMAN).count();
+        if sauron_waves >= 2 && saruman_waves >= 2 {
+            break;
+        }
+        advance_phase(&mut state, &mut events);
+        if state.phase == Phase::PreCombatMain
+            && prev_phase != Phase::PreCombatMain
+            && (state.active_player == SAURON || state.active_player == SARUMAN)
+        {
+            // Load-bearing per turn: this commander's precombat seeded a wave
+            // (UntilRarity seed = library size > 0).
+            assert!(
+                state.horde_wave_remaining > 0,
+                "{:?}'s precombat must seed a wave, got budget {}",
+                state.active_player,
+                state.horde_wave_remaining
+            );
+            waves.push((state.active_player, state.horde_wave_remaining));
+        }
+        prev_phase = state.phase;
+    }
+    let seats: Vec<PlayerId> = waves.iter().map(|(s, _)| *s).collect();
+    assert!(
+        seats.contains(&SAURON) && seats.contains(&SARUMAN),
+        "both commanders take waved turns, got {waves:?}"
+    );
+    assert!(
+        waves.iter().filter(|(s, _)| *s == SAURON).count() >= 2
+            && waves.iter().filter(|(s, _)| *s == SARUMAN).count() >= 2,
+        "sustained waved turns across rotations, got {waves:?}"
     );
 }

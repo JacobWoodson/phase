@@ -16412,6 +16412,27 @@ pub enum PendingHordeReveal {
         /// Banked Baxters taken before the move; they ride the dispatch.
         fired: Vec<ObjectId>,
     },
+    /// Revealed token: the CreateToken event paused on a replacement choice.
+    /// Reachable — an Esix/Jinnie-style "instead" substitute the Horde
+    /// controls applies to the reveal's token creation (CR 614.1a). Resume
+    /// runs the post-creation tail over whatever the answered choice
+    /// delivered (pinned-ability recovery, Ninja grafts, placeholder
+    /// removal), then continues the wave.
+    TokenCreation {
+        /// The revealed library placeholder, still in the library.
+        card: ObjectId,
+        /// Battlefield snapshot before the create, identifying this reveal's
+        /// products once the choice resolves.
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
+        before: HashSet<ObjectId>,
+        /// Pinned preset identity for ability recovery (`None` for
+        /// vanilla/keyword-only tokens: nothing to recover).
+        pinned: Option<crate::types::card::TokenImageRef>,
+        /// The revealed card's name: pinned-ability recovery applies only to
+        /// products still carrying it (an accepted substitute creates copies
+        /// of something else, which must not inherit the reveal's identity).
+        revealed_name: String,
+    },
 }
 
 /// A hero-choice batch parked mid-application by a nested replacement prompt,
@@ -32103,19 +32124,15 @@ impl GameState {
         // after it. Anchored on `archenemy` (NOT seat 0) because the transport layer
         // remaps the archenemy onto the AI seat (`server-core::session`); survivors
         // take every other seat. A single-Horde game is exactly `[archenemy]`.
-        let horde_seats_designated: Vec<PlayerId> = match (config.format, archenemy) {
-            (GameFormat::Horde, Some(primary)) => {
-                let seat_count = config
-                    .horde_ruleset
-                    .as_ref()
-                    .map_or(1, |r| r.horde_decks().len()) as u8;
-                (0..seat_count)
-                    .map(|offset| PlayerId(primary.0 + offset))
-                    .filter(|id| seat_order.contains(id))
-                    .collect()
-            }
-            _ => Vec::new(),
-        };
+        // Designation reads the shared `horde_designated_seats` authority so it
+        // cannot drift from `validate_for_player_count`; the filter is a
+        // defensive backstop for direct `GameState::new` callers (validated
+        // ingresses reject truncated rosters before a session exists).
+        let horde_seats_designated: Vec<PlayerId> = config
+            .horde_designated_seats()
+            .into_iter()
+            .filter(|id| seat_order.contains(id))
+            .collect();
         if config.format == GameFormat::Horde {
             let survivor_seats: Vec<PlayerId> = seat_order
                 .iter()

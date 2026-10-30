@@ -3092,13 +3092,28 @@ fn quick_brawl_check(
     )
 }
 
-/// The survivor deck format for the selected Horde challenge deck, or `None`
-/// when no challenge deck is specified. Horde survivors' deck constraints are a
-/// per-challenge-deck axis (EDH-designed hordes want 100-card Commander decks;
-/// constructed-block hordes want 60-card decks), carried on the deck's
-/// [`HordeRuleset`](crate::types::format::HordeRuleset). Validation reads it here
-/// so a `None` challenge deck falls back to the legacy unrestricted behavior.
+/// The survivor deck format governing a Horde validation request, or `None`
+/// when the request carries no Horde rules. Horde survivors' deck constraints
+/// are a per-challenge-deck axis (EDH-designed hordes want 100-card Commander
+/// decks; constructed-block hordes want 60-card decks), carried on the deck's
+/// [`HordeRuleset`](crate::types::format::HordeRuleset).
+///
+/// The resolved `FormatConfig` is authoritative: every production call arrives
+/// as `SelectedFormat::Resolved` with the picked deck's `horde_ruleset`
+/// already applied, while `selected_challenge_deck` is `None` there — reading
+/// only the deck field would skip the checks in production. An explicitly
+/// selected challenge deck (tag-selected and test flows) is the fallback.
+/// With neither, validation falls back to the legacy unrestricted behavior.
 fn horde_survivor_format(request: &DeckCompatibilityRequest) -> Option<SurvivorDeckFormat> {
+    if let Some(SelectedFormat::Resolved(config)) = request.selected_format.as_ref() {
+        if let Some(format) = config
+            .horde_ruleset
+            .as_ref()
+            .map(|ruleset| ruleset.survivor_deck_format)
+        {
+            return Some(format);
+        }
+    }
     request
         .selected_challenge_deck
         .map(|deck| deck.default_ruleset().survivor_deck_format)
@@ -6285,6 +6300,93 @@ mod tests {
             validate_deck_for_format(&db, &req),
             Ok(()),
             "a 100-card singleton EDH deck within color identity is a legal Horde survivor deck"
+        );
+    }
+
+    /// The production constructor path enforces the per-deck survivor shape:
+    /// `validate_name_deck_for_format_full` builds its request with
+    /// `selected_challenge_deck: None` and a resolved Sauron `FormatConfig`,
+    /// so the Commander checks must come from the resolved ruleset — a valid
+    /// 100-card EDH deck passes and a 60-card constructed deck is rejected.
+    ///
+    /// Revert guard: reading only `selected_challenge_deck` skips every
+    /// survivor check here and the 60-card deck passes — the rejection flips.
+    #[test]
+    fn horde_production_path_enforces_sauron_commander_shape() {
+        let db = horde_commander_test_db();
+        let config = FormatConfig::horde(ChallengeDeck::SauronHorde.default_ruleset());
+        let commander = vec!["White General".to_string()];
+        let empty: Vec<String> = Vec::new();
+        assert_eq!(
+            validate_name_deck_for_format_full(
+                &db,
+                &expand("Plains", 99),
+                &empty,
+                &commander,
+                &empty,
+                &empty,
+                &empty,
+                &empty,
+                &empty,
+                &config,
+                None,
+                3,
+            ),
+            Ok(()),
+            "a 100-card EDH deck passes Sauron through the production path"
+        );
+        let err = validate_name_deck_for_format_full(
+            &db,
+            &expand("Plains", 60),
+            &empty,
+            &commander,
+            &empty,
+            &empty,
+            &empty,
+            &empty,
+            &empty,
+            &config,
+            None,
+            3,
+        )
+        .unwrap_err();
+        assert!(
+            err.iter().any(|r| r.contains("exactly 100 cards")),
+            "a 60-card deck is rejected for Sauron survivors: {err:?}"
+        );
+        let mut duplicates = expand("Plains", 98);
+        duplicates.push("White Banned Bomb".to_string());
+        duplicates.push("White Banned Bomb".to_string());
+        let err = validate_name_deck_for_format_full(
+            &db,
+            &duplicates,
+            &empty,
+            &commander,
+            &empty,
+            &empty,
+            &empty,
+            &empty,
+            &empty,
+            &config,
+            None,
+            3,
+        )
+        .unwrap_err();
+        assert!(
+            err.iter().any(|r| r.contains("Singleton")),
+            "duplicate non-basics are rejected for Sauron survivors: {err:?}"
+        );
+        let mut off_color = expand("Plains", 98);
+        off_color.push("Blue Intruder".to_string());
+        let err = validate_name_deck_for_format_full(
+            &db, &off_color, &empty, &commander, &empty, &empty, &empty, &empty, &empty, &config,
+            None, 3,
+        )
+        .unwrap_err();
+        assert!(
+            err.iter()
+                .any(|r| r.contains("color identity") || r.contains("Blue Intruder")),
+            "an off-identity card is rejected for Sauron survivors: {err:?}"
         );
     }
 

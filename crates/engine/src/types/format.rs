@@ -746,6 +746,13 @@ pub struct ChallengeDeckMetadata {
     /// The deck's canonical ruleset, so a client can build the complete
     /// `FormatConfig` for a selected deck without a second call.
     pub default_ruleset: HordeRuleset,
+    /// The fully engine-resolved `FormatConfig` for this deck (built by
+    /// `FormatConfig::horde`): survivor deck-shape axes (`deck_size`,
+    /// `singleton`, commander fields) already derived from the ruleset's
+    /// `survivor_deck_format`. The deck picker applies this — never a
+    /// ruleset-only patch — so switching decks cannot leave the previous
+    /// deck's EDH/constructed shape attached.
+    pub resolved_config: FormatConfig,
     /// Human-readable, engine-authored breakdown of how this deck plays — one
     /// labeled line per rules axis (waves, survivor life, setup, Horde combat).
     /// Rendered by [`HordeRuleset::summary`] from the structured ruleset, so the
@@ -1318,12 +1325,14 @@ impl ChallengeDeck {
         };
         let default_ruleset = self.default_ruleset();
         let rules = default_ruleset.summary();
+        let resolved_config = FormatConfig::horde(default_ruleset.clone());
         ChallengeDeckMetadata {
             deck: self,
             label,
             short_label,
             description,
             default_ruleset,
+            resolved_config,
             rules,
         }
     }
@@ -3766,6 +3775,30 @@ impl FormatConfig {
         }
     }
 
+    /// The Horde seats a game designates under this config: the primary
+    /// (`archenemy_player`) plus one seat per co-Horde deck at consecutive
+    /// offsets. UNFILTERED — seats past the table edge are included, so
+    /// callers must validate every seat exists (see
+    /// `validate_for_player_count`); `GameState::new` filters defensively.
+    /// Empty for non-Horde formats or a missing primary, matching the
+    /// designation rule in `GameState::new`. Single authority for the
+    /// primary+offsets rule so validation and allocation cannot drift.
+    pub fn horde_designated_seats(&self) -> Vec<PlayerId> {
+        if self.format != GameFormat::Horde {
+            return Vec::new();
+        }
+        let Some(primary) = self.archenemy_player() else {
+            return Vec::new();
+        };
+        let deck_count = self
+            .horde_ruleset
+            .as_ref()
+            .map_or(1, |r| r.horde_decks().len());
+        (0..deck_count)
+            .map(|offset| PlayerId(primary.0.saturating_add(offset as u8)))
+            .collect()
+    }
+
     /// Bounds a runtime seat count against this format's registry range. Owns
     /// the seat-count bound and is the runtime pair of the `max_players`
     /// admission row in `built_in_axes_no_looser_than_rules`: that row bounds
@@ -3893,6 +3926,30 @@ impl FormatConfig {
                 ));
             }
         }
+        // Horde designates the primary plus one seat per co-Horde deck
+        // (`horde_designated_seats`); every designated seat must exist, and at
+        // least one seat must remain for the survivors. Without this, a
+        // two-player Two Towers game silently drops Saruman (seat 2 is past
+        // the table edge) and deals a single incoherent Horde, and a
+        // primary-0 two-player game leaves no survivors at all. Reject here —
+        // `GameState::new` filters defensively but must never silently drop
+        // in a validated session.
+        if self.format == GameFormat::Horde {
+            let designated = self.horde_designated_seats();
+            if let Some(&missing) = designated.iter().find(|seat| seat.0 >= player_count) {
+                return Err(format!(
+                    "horde seat {} (of {} designated) is past the table edge for {player_count} players",
+                    missing.0,
+                    designated.len(),
+                ));
+            }
+            if designated.len() >= player_count as usize {
+                return Err(format!(
+                    "horde designates {} of {player_count} seats, leaving no survivors",
+                    designated.len(),
+                ));
+            }
+        }
         if let Some(range) = &self.range_of_influence {
             let max_radius = player_count / 2;
             if range.default_range > max_radius {
@@ -3932,12 +3989,17 @@ impl FormatConfig {
     pub fn starting_player(&self) -> PlayerId {
         // Horde: the survivors set up their board first (the published rules
         // give them several turns before the Horde's first turn), so the first
-        // turn goes to a survivor, NOT the Horde. The Horde occupies the
-        // `archenemy_player` seat; the first survivor is the lowest seat index
-        // that isn't the Horde. `min_players` (2) guarantees such a seat exists.
+        // turn goes to a survivor, NOT the Horde: the lowest seat index
+        // outside the COMPLETE Horde roster (primary plus every co-Horde —
+        // a primary-only check would start a two-Horde game on the secondary
+        // commander). `validate_for_player_count` guarantees a survivor seat
+        // exists in every admitted session.
         if self.format == GameFormat::Horde {
-            let horde = self.archenemy_player().unwrap_or(PlayerId(0));
-            return PlayerId(if horde.0 == 0 { 1 } else { 0 });
+            let roster = self.horde_designated_seats();
+            return (0..=u8::MAX)
+                .map(PlayerId)
+                .find(|seat| !roster.contains(seat))
+                .unwrap_or(PlayerId(0));
         }
         // CR 904.6: The archenemy takes the first turn instead of a randomly
         // determined player. Non-Archenemy formats keep the legacy default.
@@ -5405,6 +5467,82 @@ mod tests {
         assert!(config.validate_for_player_count(4).is_ok());
         assert!(config.validate_for_player_count(2).is_err());
         assert!(config.validate_for_player_count(5).is_err());
+    }
+
+    /// A two-Horde deck whose co-commander seat is past the table edge must be
+    /// rejected, not silently truncated: Two Towers anchored at seat 1 (the
+    /// transport remap) with only 2 seats would otherwise drop Saruman (seat
+    /// 2) and deal a single incoherent Horde.
+    #[test]
+    fn validate_for_player_count_rejects_truncated_horde_roster() {
+        let mut config = FormatConfig::horde(ChallengeDeck::LotrTwoTowersHorde.default_ruleset());
+        config.archenemy_player = Some(PlayerId(1));
+        let err = config
+            .validate_for_player_count(2)
+            .expect_err("seat 2 is past a 2-player table edge");
+        assert!(
+            err.contains("past the table edge"),
+            "unexpected rejection: {err}"
+        );
+    }
+
+    /// A Horde game with no survivors is incoherent: Two Towers anchored at
+    /// seat 0 with 2 seats designates both seats as Horde and must be
+    /// rejected rather than starting survivor-less.
+    #[test]
+    fn validate_for_player_count_rejects_horde_roster_without_survivors() {
+        let config = FormatConfig::horde(ChallengeDeck::LotrTwoTowersHorde.default_ruleset());
+        assert_eq!(config.archenemy_player, Some(PlayerId(0)));
+        let err = config
+            .validate_for_player_count(2)
+            .expect_err("both seats are Horde, leaving no survivors");
+        assert!(err.contains("no survivors"), "unexpected rejection: {err}");
+    }
+
+    /// The same Two Towers config is admitted once the table fits the roster:
+    /// 3 seats with the seat-1 anchor hold both commanders plus a survivor,
+    /// and a single-Horde deck keeps its existing 2-seat admission.
+    #[test]
+    fn validate_for_player_count_admits_complete_horde_rosters() {
+        let mut two_towers =
+            FormatConfig::horde(ChallengeDeck::LotrTwoTowersHorde.default_ruleset());
+        two_towers.archenemy_player = Some(PlayerId(1));
+        assert!(two_towers.validate_for_player_count(3).is_ok());
+
+        let mut cyberman = FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset());
+        cyberman.archenemy_player = Some(PlayerId(1));
+        assert!(cyberman.validate_for_player_count(2).is_ok());
+        cyberman.archenemy_player = Some(PlayerId(0));
+        assert!(cyberman.validate_for_player_count(2).is_ok());
+    }
+
+    /// Horde survivors act first: for EVERY challenge deck, under both the
+    /// engine-default anchor (seat 0) and the transport remap (seat 1), the
+    /// starting seat is the lowest seat outside the COMPLETE Horde roster —
+    /// never a commander. A primary-only check starts Two Towers on Saruman.
+    #[test]
+    fn horde_starting_player_is_first_seat_outside_full_roster() {
+        for deck in ChallengeDeck::ALL {
+            for anchor in [PlayerId(0), PlayerId(1)] {
+                let mut config = FormatConfig::horde(deck.default_ruleset());
+                config.archenemy_player = Some(anchor);
+                let roster = config.horde_designated_seats();
+                let start = config.starting_player();
+                assert!(
+                    !roster.contains(&start),
+                    "{deck:?} anchored at {anchor:?} must not start on a Horde seat \
+                     (roster {roster:?}, start {start:?})"
+                );
+                let expected = (0..=u8::MAX)
+                    .map(PlayerId)
+                    .find(|seat| !roster.contains(seat))
+                    .unwrap();
+                assert_eq!(
+                    start, expected,
+                    "{deck:?} anchored at {anchor:?} must start on the lowest survivor seat"
+                );
+            }
+        }
     }
 
     /// The admission gate and the runtime seat-count validator are

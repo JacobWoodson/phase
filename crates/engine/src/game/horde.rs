@@ -41,9 +41,9 @@ use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     CardPlayMode, CastFromZoneDriver, Effect, ResolvedAbility, TargetFilter, TargetRef,
 };
-use crate::types::card::Rarity;
+use crate::types::card::{Rarity, TokenImageRef};
 use crate::types::events::GameEvent;
-use crate::types::format::{GameFormat, WaveTermination};
+use crate::types::format::{GameFormat, HordePostCombatActivation, WaveTermination};
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::phase::Phase;
@@ -94,6 +94,23 @@ pub(crate) fn is_horde_turn(state: &GameState) -> bool {
     is_horde_seat(state, state.active_player)
 }
 
+/// True when `id` is a Horde seat whose ruleset grants the advanced-rule
+/// infinite mana ("the Horde has infinite mana", for post-combat activation
+/// costs). This is the PERSISTENT authority for Horde mana: derived from the
+/// ruleset, so it can never expire. The step-end drain exempts these seats
+/// from both the CR 500.4 pool-empty and the loop-axis de-realization, and
+/// `mana_payment::refill_infinite_mana` keeps topping the pool after every
+/// action — unlike a one-shot loop mark, which the first step transition
+/// clears before the post-combat queue runs.
+pub(crate) fn has_horde_infinite_mana(state: &GameState, id: PlayerId) -> bool {
+    state
+        .format_config
+        .horde_ruleset
+        .as_ref()
+        .is_some_and(|r| r.post_combat_activation == HordePostCombatActivation::OncePerPermanent)
+        && is_horde_seat(state, id)
+}
+
 /// The Horde seat whose turn it currently is — the ACTIVE commander. For a
 /// two-Horde deck (LOTR "Two Towers") the commanders alternate turns (Reading B),
 /// so this is `active_player`, not the primary seat; the wave, post-combat
@@ -139,7 +156,7 @@ pub(crate) fn player_has_no_life_total(state: &GameState, id: PlayerId) -> bool 
 /// (its enters-the-battlefield triggers fire, CR 603.6) and then immediately
 /// phases out (CR 702.26). Milling the Horde's boss therefore DEPLOYS it rather
 /// than removing it, and it phases back in on the Horde's next untap
-/// (CR 702.26c). Basic decks ([`HordeLegendaryDeath::Normal`], every currently
+/// (CR 702.26a). Basic decks ([`HordeLegendaryDeath::Normal`], every currently
 /// shipped deck) mill straight to the graveyard.
 ///
 /// Called from `effects::life`'s no-life-total redirect. A per-card CR 616.1
@@ -224,8 +241,8 @@ pub(crate) fn mill_from_loss(
     // `active_trigger_definitions` drops every trigger of a phased-out permanent —
     // silently suppressing the legendary's own ETBs, which the rule requires to
     // fire. Phasing out (vs. staying) makes the boss recur on the Horde's next
-    // untap (CR 702.26c) and dodges the legend rule while out (CR 704.5j /
-    // CR 702.26e), so two milled copies of one boss don't annihilate.
+    // untap (CR 702.26a) and dodges the legend rule while out (CR 704.5j /
+    // CR 702.26b), so two milled copies of one boss don't annihilate.
     for id in legendaries {
         // A `Moved` replacement (Rest in Peace class) could still have diverted
         // the card, so only graft onto what actually entered.
@@ -489,9 +506,18 @@ pub(crate) fn maybe_reveal_next(
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
     // Gate: only advance the wave when the stack is clear (the previous card
-    // resolved) and budget remains. No turn/phase gate (see the doc comment):
-    // a positive budget IS the wave-active marker, in-window or residue.
-    if state.horde_wave_remaining == 0 || !state.stack.is_empty() {
+    // resolved) and budget remains — or a parked tail is waiting. No
+    // turn/phase gate (see the doc comment): a positive budget IS the
+    // wave-active marker, in-window or residue. Pending resume work runs
+    // independently of fresh budget: the reveal already consumed its budget
+    // before parking, so a pause on the wave's LAST card would otherwise
+    // strand its cast/dispatch after the replacement answer (the budget gate
+    // below would close before the drain inside `reveal_and_resolve_top_card`
+    // runs). The budget check inside the reveal path still stops cleanly
+    // once the tail settles, so no extra card is revealed.
+    if (state.horde_wave_remaining == 0 && state.pending_horde_reveal.is_none())
+        || !state.stack.is_empty()
+    {
         return None;
     }
     let horde = active_horde_seat(state)?;
@@ -499,16 +525,19 @@ pub(crate) fn maybe_reveal_next(
     // Reveal-and-resolve cards until either the wave pauses on a nontoken spell
     // (which is put on the stack and resolved through the normal priority loop
     // before the `engine::pass_priority_once` re-entry seam re-invokes this
-    // function), an Event parks a hero-choice prompt (same seam resumes it), or
-    // the wave budget / library is exhausted.
+    // function), an Event parks a hero-choice prompt, a token-creation
+    // replacement parks a choice prompt (same seam resumes both), or the wave
+    // budget / library is exhausted.
     //
     // Tokens must be handled in a LOOP here rather than one-per-beat: a token is
     // never cast (CR 111) and enters the battlefield synchronously, so it never
-    // goes on the stack and cannot pause the wave. The re-entry seam only fires
-    // after a Horde SPELL resolves and priority returns to the Horde with the
-    // stack becoming empty; a token that returned `None` (stack already empty,
-    // `waiting_for` unchanged) would strand every later card in the wave. So on
-    // a token we resolve its ETB and immediately `continue` to the next card.
+    // goes on the stack and cannot pause the wave on the stack. The re-entry
+    // seam only fires after a Horde SPELL resolves and priority returns to the
+    // Horde with the stack becoming empty; a token that returned `None` (stack
+    // already empty, `waiting_for` unchanged) would strand every later card in
+    // the wave. So on a token we resolve its ETB and immediately `continue` to
+    // the next card — unless its creation paused on a replacement choice, which
+    // returns `Pause` for the seam like any other prompt.
     loop {
         match reveal_and_resolve_top_card(state, horde, events) {
             RevealOutcome::Continue => {}
@@ -524,8 +553,9 @@ enum RevealOutcome {
     /// A token entered / amassed, or an Event resolved synchronously: the
     /// caller should reveal the next card.
     Continue,
-    /// A nontoken spell went on the stack, or an Event parked a hero-choice (or
-    /// nested replacement) prompt: the wave pauses until it resolves, then the
+    /// A nontoken spell went on the stack, an Event parked a hero-choice (or
+    /// nested replacement) prompt, or a token reveal parked a token-creation
+    /// replacement prompt: the wave pauses until it resolves, then the
     /// priority re-entry seam continues the remaining budget.
     /// Boxed: `WaitingFor` is ~1.7KB and the sibling variants carry nothing.
     Pause(Box<WaitingFor>),
@@ -626,9 +656,11 @@ fn reveal_and_resolve_top_card(
         } else {
             // CR 111 + CR 111.1: a token can never be cast, so a revealed library
             // token is put directly onto the battlefield under the Horde's
-            // control. Enters synchronously (no stack), so the caller
-            // continues the wave with the next card.
-            reveal_library_token(state, card_id, horde, events);
+            // control. Enters synchronously (no stack) — unless a
+            // token-creation replacement needs a choice (an Esix/Jinnie-style
+            // "instead"), which parks the reveal and pauses the wave for the
+            // priority re-entry seam.
+            return reveal_library_token(state, card_id, horde, events);
         }
         return RevealOutcome::Continue;
     }
@@ -762,6 +794,19 @@ fn resume_pending_horde_reveal(
                     RevealOutcome::Pause(Box::new(state.waiting_for.clone()))
                 }
             }
+        }
+        PendingHordeReveal::TokenCreation {
+            card,
+            before,
+            pinned,
+            revealed_name,
+        } => {
+            // The choice resolved; the shared CreateToken resume arm already
+            // delivered (or prevented) the creation. Run the post-creation
+            // tail over whatever it delivered — pinned-ability recovery,
+            // Ninja grafts, placeholder removal — then continue the wave.
+            complete_token_reveal(state, card, horde, &pinned, &before, &revealed_name);
+            RevealOutcome::Continue
         }
     }
 }
@@ -911,9 +956,9 @@ fn reveal_library_token(
     card_id: ObjectId,
     horde: PlayerId,
     events: &mut Vec<GameEvent>,
-) {
+) -> RevealOutcome {
     let Some(obj) = state.objects.get(&card_id) else {
-        return;
+        return RevealOutcome::Continue;
     };
     // Reconstruct the token body from the revealed library object (mirrors the
     // GameObject → TokenCharacteristics projection used by `token_copy`). The body
@@ -927,6 +972,7 @@ fn reveal_library_token(
     // keyword-only tokens (Cyberman, Zombie, Metallic Sliver) have `None` here and
     // are unchanged.
     let pinned_token_ref = obj.token_image_ref.clone();
+    let revealed_name = obj.name.clone();
     let characteristics = TokenCharacteristics {
         display_name: obj.name.clone(),
         power: obj.power,
@@ -972,12 +1018,61 @@ fn reveal_library_token(
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
             apply_create_token_after_replacement(state, event, events);
+            complete_token_reveal(
+                state,
+                card_id,
+                horde,
+                &pinned_token_ref,
+                &before,
+                &revealed_name,
+            );
+            RevealOutcome::Continue
         }
-        // The Horde's own token creation is not subject to a player's opt-in
-        // replacement choice; treat prevention / (unreachable) choice as no ETB.
-        ReplacementResult::Prevented | ReplacementResult::NeedsChoice(_) => {}
+        // CR 609.3: prevention consumes the reveal — no token enters, but the
+        // placeholder is still removed (the wave consumed the card).
+        ReplacementResult::Prevented => {
+            complete_token_reveal(
+                state,
+                card_id,
+                horde,
+                &pinned_token_ref,
+                &before,
+                &revealed_name,
+            );
+            RevealOutcome::Continue
+        }
+        // CR 614.1a: a token-creation replacement needs a choice — an
+        // Esix/Jinnie-style "instead" substitute the Horde controls applies to
+        // the reveal's token creation. Park the reveal (the placeholder stays
+        // until the choice resolves) and pause the wave; the priority
+        // re-entry seam resumes via `pending_horde_reveal`.
+        ReplacementResult::NeedsChoice(player) => {
+            state.pending_horde_reveal = Some(Box::new(
+                crate::types::game_state::PendingHordeReveal::TokenCreation {
+                    card: card_id,
+                    before,
+                    pinned: pinned_token_ref,
+                    revealed_name,
+                },
+            ));
+            state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
+            RevealOutcome::Pause(Box::new(state.waiting_for.clone()))
+        }
     }
+}
 
+/// Post-creation tail of a revealed token: pinned-ability recovery, Ninja
+/// grafts, the boss-deck flag, and placeholder removal. Shared by the
+/// synchronous path and the post-replacement resume — both reach here only
+/// after the CreateToken event settled (delivered or prevented).
+fn complete_token_reveal(
+    state: &mut GameState,
+    card_id: ObjectId,
+    horde: PlayerId,
+    pinned_token_ref: &Option<TokenImageRef>,
+    before: &HashSet<ObjectId>,
+    revealed_name: &str,
+) {
     // CR 111.3 + CR 111.4: recover the token's printed non-keyword abilities from
     // its pinned preset identity. The generic create path already ran
     // `inject_resolved_token_abilities`, but it matched identity by CHARACTERISTICS
@@ -989,6 +1084,11 @@ fn reveal_library_token(
     // the create path already resolved this exact preset (nothing to add — avoids
     // a double install) or when there is no pinned identity (vanilla/keyword
     // tokens: nothing to recover).
+    //
+    // Substitute guard: recovery re-stamps the REVEAL's identity, so it applies
+    // only to products still carrying the revealed name. An accepted Esix-style
+    // substitute creates copies of another creature, which must not inherit the
+    // reveal's preset (their copiable values came from the chosen source).
     if let Some(pinned) = pinned_token_ref {
         let created: Vec<ObjectId> = state
             .battlefield
@@ -997,6 +1097,13 @@ fn reveal_library_token(
             .filter(|id| !before.contains(id))
             .collect();
         for id in created {
+            if !state
+                .objects
+                .get(&id)
+                .is_some_and(|o| o.name.as_str() == revealed_name)
+            {
+                continue;
+            }
             let already_pinned = state
                 .objects
                 .get(&id)
@@ -1215,7 +1322,8 @@ pub(crate) fn maybe_activate_next_ability(
     // Hordemagic "infinite mana (for … activation costs)": top up the Horde's pool
     // so mana components are payable. Real non-mana costs (tap/sacrifice/pay-life)
     // are still paid by the activation path. No-op unless the Horde was flagged
-    // unbounded (see `deck_loading::grant_horde_emblem`).
+    // unbounded — the flag is applied by `deck_loading::grant_horde_emblem` and
+    // kept alive across step transitions by `has_horde_infinite_mana`.
     crate::game::mana_payment::refill_infinite_mana(state);
 
     let gates = crate::game::restrictions::ActivationRestrictionStaticGates::compute(state);
@@ -2617,6 +2725,94 @@ mod tests {
         assert_eq!(
             state.horde_wave_remaining, 1,
             "resume spends no fresh budget"
+        );
+    }
+
+    /// A replacement pause on the wave's LAST card resumes through public
+    /// actions to completion. Budget 1: the reveal consumes it, parks on the
+    /// Optional redirect, and — after the decline — the wave must still run
+    /// the parked cast even though no fresh budget remains. The cast then
+    /// resolves through priority passes: the bear enters, the stack empties,
+    /// and the wave ends with nothing stranded.
+    ///
+    /// Revert guard: without pending-through-gate, the post-answer
+    /// `maybe_reveal_next` returns `None` with the record still parked and
+    /// the card uncast in exile — the zone + pending assertions flip.
+    #[test]
+    fn wave_reveal_last_card_pause_resumes_to_completion() {
+        use crate::types::actions::GameAction;
+        let (mut state, horde) = wave_test_game(1);
+        let card = add_wave_creature(&mut state, horde, "Wave Bear");
+        state.players[horde.0 as usize].library = crate::im::vector![card];
+        redirect_source(
+            &mut state,
+            horde,
+            card,
+            Zone::Exile,
+            Zone::Graveyard,
+            true,
+            1,
+        );
+
+        let mut events = Vec::new();
+        let paused = maybe_reveal_next(&mut state, &mut events);
+        assert!(
+            matches!(paused, Some(WaitingFor::ReplacementChoice { .. })),
+            "the Optional redirect must pause the reveal, got {paused:?}"
+        );
+        assert_eq!(
+            state.horde_wave_remaining, 0,
+            "the lone reveal consumed the whole budget"
+        );
+        assert!(
+            state.pending_horde_reveal.is_some(),
+            "the last-card reveal parked its tail"
+        );
+
+        // Decline through the public action path.
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseReplacement { index: 1 },
+        )
+        .expect("decline the redirect");
+
+        // The re-entry seam resumes the parked tail despite zero budget.
+        let _resumed = maybe_reveal_next(&mut state, &mut events);
+        assert!(
+            state.pending_horde_reveal.is_none(),
+            "resume drains the record"
+        );
+        assert_eq!(
+            state.objects.get(&card).map(|o| o.zone),
+            Some(Zone::Stack),
+            "the declined redirect casts the card for free"
+        );
+
+        // Drive the cast to completion through priority passes.
+        let mut guard = 0;
+        while !state.stack.is_empty() && guard < 8 {
+            crate::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
+                .expect("pass priority");
+            guard += 1;
+        }
+        assert!(state.stack.is_empty(), "the free cast resolves");
+        assert_eq!(
+            state.objects.get(&card).map(|o| o.zone),
+            Some(Zone::Battlefield),
+            "the revealed bear enters the battlefield"
+        );
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "completion boundary is Priority, got {:?}",
+            state.waiting_for
+        );
+        assert_eq!(
+            state.horde_wave_remaining, 0,
+            "the wave ends with the budget spent — nothing revealed past it"
+        );
+        assert!(
+            state.players[horde.0 as usize].library.is_empty(),
+            "the one-card library is empty after its reveal"
         );
     }
 

@@ -949,9 +949,10 @@ pub(super) fn drain_pending_phase_transition_progress(
             let next_phase = progress.next_phase;
             // CR 500.5 + CR 106.4 + CR 104.4b: de-realize every LOOP-backed ∞-mana axis as this
             // step/phase ends. The per-player drain above already emptied these pools (keep-gate
-            // false for non-debug players); clearing the axis stops `refill_infinite_mana` from
-            // re-seeding it on the next action. Debug-toggle players (`debug_infinite_mana`) are
-            // EXCLUDED — their mana persists. Placed BEFORE the token-collapse check so that when a
+            // false for non-exempt players); clearing the axis stops `refill_infinite_mana` from
+            // re-seeding it on the next action. Debug-toggle players (`debug_infinite_mana`) and
+            // Horde advanced-rule mana seats (`horde::has_horde_infinite_mana`) are EXCLUDED —
+            // their mana persists. Placed BEFORE the token-collapse check so that when a
             // controller holds BOTH a mana axis and a token stash, the mana axis is cleared before
             // the token pause returns — otherwise the intervening `LoopCollapse`-submit `apply()`
             // would call `refill_infinite_mana` and re-seed the just-drained pool. Runs at true
@@ -962,6 +963,7 @@ pub(super) fn drain_pending_phase_transition_progress(
                 .iter()
                 .filter(|(pid, axes)| {
                     !state.debug_infinite_mana.contains(*pid)
+                        && !super::horde::has_horde_infinite_mana(state, **pid)
                         && axes.iter().any(|a| matches!(a, ResourceAxis::Mana(_)))
                 })
                 .map(|(pid, _)| *pid)
@@ -1090,13 +1092,16 @@ pub(super) fn drain_pending_phase_transition_progress(
         // decisions. The `enumerate` runs over the full pool so `pool_index`
         // stays aligned with the retained expiry units that remain in pool
         // order (`ManaPool::units`).
-        // CR 500.5: unspent mana empties as a step/phase ends. The ONLY exemption is the developer
-        // `DebugAction::SetInfiniteMana` toggle (a documented debug departure). A loop-backed ∞-mana
-        // axis is NOT exempt — it drains here and is de-realized in the queue-empty pass below. Gate
-        // the keep-override on the explicit debug marker, never on "has a Mana axis" (a real loop
+        // CR 500.5: unspent mana empties as a step/phase ends. There are TWO exemptions: the
+        // developer `DebugAction::SetInfiniteMana` toggle (a documented debug departure), and the
+        // Horde advanced-rule infinite mana (`horde::has_horde_infinite_mana`, a standing game
+        // rule derived from the ruleset). A loop-backed ∞-mana axis is NOT exempt — it drains
+        // here and is de-realized in the queue-empty pass below. Gate the keep-override on the
+        // explicit debug marker or the Horde authority, never on "has a Mana axis" (a real loop
         // sets one too — MEASURED identical footprint). This is the partner of
-        // `mana_payment::refill_infinite_mana`; together they keep a debug-flagged pool full.
-        let keep_for_infinite_mana = state.debug_infinite_mana.contains(&player_id);
+        // `mana_payment::refill_infinite_mana`; together they keep an exempt pool full.
+        let keep_for_infinite_mana = state.debug_infinite_mana.contains(&player_id)
+            || super::horde::has_horde_infinite_mana(state, player_id);
         let units: Vec<crate::types::mana::UnitDecision> = state
             .players
             .iter()
@@ -1348,18 +1353,23 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
     // player isn't the archenemy, or when the scheme deck is empty.
     //
     // Horde Magic reuses the OneVsMany topology with the Horde in the archenemy
-    // seat, so `topology::archenemy` also returns the Horde here — the two share
-    // this precombat-main entry point. Keep them mutually exclusive: a Horde game
-    // seeds its reveal-and-resolve wave counter (`horde::begin_wave`) instead of
-    // setting a scheme in motion. (`set_in_motion` would in any case no-op on the
-    // Horde's empty `scheme_deck`, but dispatching explicitly documents the
-    // overlap and keeps the two runtimes distinct.)
-    if next == Phase::PreCombatMain
-        && super::topology::archenemy(state) == Some(state.active_player)
-    {
+    // seat, so the two share this precombat-main entry point. Keep them mutually
+    // exclusive: a Horde game seeds its reveal-and-resolve wave counter
+    // (`horde::begin_wave`) instead of setting a scheme in motion.
+    // (`set_in_motion` would in any case no-op on the Horde's empty
+    // `scheme_deck`, but dispatching explicitly documents the overlap and keeps
+    // the two runtimes distinct.)
+    //
+    // The Horde dispatch gates on the Horde-seat authority
+    // (`horde::is_horde_turn`), NOT the one-vs-many archenemy (the primary Horde
+    // seat only): two-Horde decks alternate commanders (Reading B), and the
+    // secondary commander's precombat must seed its wave too.
+    if next == Phase::PreCombatMain {
         if state.format_config.format == GameFormat::Horde {
-            crate::game::horde::begin_wave(state, events);
-        } else {
+            if super::horde::is_horde_turn(state) {
+                crate::game::horde::begin_wave(state, events);
+            }
+        } else if super::topology::archenemy(state) == Some(state.active_player) {
             crate::game::archenemy::set_in_motion(state, events);
         }
     }
@@ -1367,10 +1377,11 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
     // Horde Magic (advanced rule): as the Horde's post-combat main begins, seed
     // its post-combat activation queue (sibling of `begin_wave` above). No-op for
     // basic decks; the beat itself is driven one activation per priority window by
-    // `horde::maybe_activate_next_ability`.
+    // `horde::maybe_activate_next_ability`. Gated on the Horde-seat authority for
+    // the same two-commander reason as the precombat wave above.
     if next == Phase::PostCombatMain
         && state.format_config.format == GameFormat::Horde
-        && super::topology::archenemy(state) == Some(state.active_player)
+        && super::horde::is_horde_turn(state)
     {
         crate::game::horde::begin_post_combat_activation(state, events);
     }
