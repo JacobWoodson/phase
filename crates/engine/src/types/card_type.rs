@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
 
@@ -262,6 +263,7 @@ pub const ARTIFACT_SUBTYPES: &[&str] = &[
     "Food",
     "Fortification",
     "Gold",
+    "Heartwood",
     "Incubator",
     "Infinity",
     "Junk",
@@ -273,6 +275,7 @@ pub const ARTIFACT_SUBTYPES: &[&str] = &[
     "Stone",
     "Treasure",
     "Vehicle",
+    "Vibranium",
 ];
 
 pub const ENCHANTMENT_SUBTYPES: &[&str] = &[
@@ -390,6 +393,50 @@ pub fn fixed_noncreature_subtypes() -> impl Iterator<Item = &'static str> {
         .copied()
 }
 
+/// CR 205.3: Lexical guard for subtype spellings. Rejects MTGJSON pollution and
+/// Oracle sentence fragments that are not valid subtype names.
+pub fn is_valid_subtype_spelling(candidate: &str) -> bool {
+    let candidate = candidate.trim();
+    if candidate.is_empty() || candidate.len() > 48 {
+        return false;
+    }
+    let mut chars = candidate.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_uppercase() {
+        return false;
+    }
+    for c in chars {
+        if !(c.is_ascii_alphabetic() || c == ' ' || c == '-' || c == '\'') {
+            return false;
+        }
+    }
+    // Bare English function words / known MTGJSON garbage tokens.
+    !matches!(
+        candidate,
+        "The" | "You" | "and" | "or" | "and/or" | "of" | "Baddest," | "Elemental?"
+    )
+}
+
+/// Full parser subtype vocabulary: canonical noncreature tables plus validated
+/// creature subtypes (from committed `oracle-subtypes.json`). Sorted longest-first
+/// for prefix-safe matching.
+pub fn build_parser_subtype_vocabulary(creature_subtypes: &[String]) -> Vec<String> {
+    let mut set: BTreeSet<String> = BTreeSet::new();
+    for subtype in fixed_noncreature_subtypes() {
+        set.insert(subtype.to_string());
+    }
+    for subtype in creature_subtypes {
+        if is_valid_subtype_spelling(subtype) {
+            set.insert(subtype.clone());
+        }
+    }
+    let mut list: Vec<String> = set.into_iter().collect();
+    list.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    list
+}
+
 /// CR 205.3i: Returns true if the given string is a land subtype.
 /// Used by `SetBasicLandType` to remove only land subtypes while preserving
 /// non-land subtypes (e.g., creature subtypes on Land Creatures like Dryad Arbor).
@@ -415,6 +462,21 @@ pub fn noncreature_subtype_set(s: &str) -> Option<SubtypeSet> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CR 205.3g + CR 111.10w/x: both standard token types belong to artifacts.
+    #[test]
+    fn artifact_subtypes_heartwood_vibranium_own_artifact_set() {
+        for subtype in ["Heartwood", "Vibranium", "Equipment"] {
+            assert_eq!(noncreature_subtype_set(subtype), Some(SubtypeSet::Artifact));
+            assert_eq!(
+                fixed_noncreature_subtypes()
+                    .filter(|s| *s == subtype)
+                    .count(),
+                1
+            );
+        }
+        assert_eq!(noncreature_subtype_set("Bear"), None);
+    }
 
     /// CR 702.16a: `protection_quality_str` returns the lowercase singular
     /// protection noun for each card type the engine can offer as a chosen

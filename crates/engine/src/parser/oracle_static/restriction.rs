@@ -1794,20 +1794,62 @@ pub(crate) fn parse_per_turn_draw_limit(tp: &str, text: &str) -> Option<StaticDe
 /// E.g., Omen Machine: "Players can't draw cards."
 /// E.g., Maralen of the Mornsong: "Players can't draw cards."
 pub(crate) fn parse_cant_draw_cards(tp: &str, text: &str) -> Option<StaticDefinition> {
+    let (who, _) = parse_cant_draw_cards_predicate(tp)?;
+    Some(StaticDefinition::new(StaticMode::CantDraw { who }).description(text.to_string()))
+}
+
+/// CR 101.2 / CR 121.3: "[Subject] can't draw (cards|a card)" — the subject and
+/// the draw prohibition shared by `parse_cant_draw_cards` and
+/// `parse_cant_draw_cards_or_gain_life`. Returns the subject's scope and the
+/// text after the draw object.
+fn parse_cant_draw_cards_predicate(tp: &str) -> Option<(ProhibitionScope, &str)> {
     type VE<'a> = OracleError<'a>;
 
     let (who, predicate) = strip_casting_prohibition_subject(tp)?;
     let rest = nom_tag_lower(predicate, predicate, "can't draw ")
         .or_else(|| nom_tag_lower(predicate, predicate, "can\u{2019}t draw "))?;
-
-    alt((
+    let (rest, _) = alt((
         value((), tag::<_, _, VE<'_>>("cards")),
         value((), tag::<_, _, VE<'_>>("a card")),
     ))
-    .parse(rest.trim_end_matches('.'))
+    .parse(rest)
     .ok()?;
+    Some((who, rest))
+}
 
-    Some(StaticDefinition::new(StaticMode::CantDraw { who }).description(text.to_string()))
+/// CR 101.2 + CR 121.3 + CR 119.7: "[Subject] can't draw cards or gain life."
+/// — two prohibitions sharing one subject (Mornsong Aria). The single-static
+/// `parse_cant_draw_cards` stops after "cards" and silently drops the life clause.
+pub(crate) fn parse_cant_draw_cards_or_gain_life(
+    tp: &str,
+    text: &str,
+) -> Option<Vec<StaticDefinition>> {
+    let (who, rest) = parse_cant_draw_cards_predicate(tp)?;
+    let rest = nom_tag_lower(rest, rest, " or gain life")?;
+    if !rest.trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
+
+    // Both prohibitions bind the one parsed subject, so the life clause's
+    // player scope is derived from `who` rather than re-scanned from the text.
+    let life_scope = match &who {
+        ProhibitionScope::AllPlayers => TargetFilter::Typed(TypedFilter::default()),
+        ProhibitionScope::Opponents => {
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+        }
+        ProhibitionScope::Controller => {
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You))
+        }
+        // CR 303.4e: "Enchanted player" — the player the Aura is attached to.
+        ProhibitionScope::EnchantedCreatureController => TargetFilter::AttachedTo,
+    };
+
+    Some(vec![
+        StaticDefinition::new(StaticMode::CantDraw { who }).description(text.to_string()),
+        StaticDefinition::new(StaticMode::CantGainLife)
+            .affected(life_scope)
+            .description(text.to_string()),
+    ])
 }
 
 /// CR 121.1 + CR 613.11: Parse a draw-source redirection static from Oracle
@@ -2033,6 +2075,9 @@ pub(crate) fn try_parse_graveyard_cast_permission(
                 enters_with_counter: None,
                 required_cast_keyword: None,
                 pool: GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
             })
             .affected(affected)
             .condition(StaticCondition::DuringYourTurn)
@@ -2306,6 +2351,9 @@ pub(crate) fn try_parse_graveyard_cast_permission(
         enters_with_counter,
         required_cast_keyword,
         pool: GraveyardPermissionPool::OwnGraveyard,
+        cast_limit: PermissionCastLimit::Unlimited,
+        mana_spend_permission: None,
+        enters_modifications: Default::default(),
     })
     .affected(affected)
     .description(text.to_string());
@@ -2868,6 +2916,9 @@ fn try_parse_disjunctive_graveyard_cast_permission(
         enters_with_counter: None,
         required_cast_keyword: None,
         pool: GraveyardPermissionPool::OwnGraveyard,
+        cast_limit: PermissionCastLimit::Unlimited,
+        mana_spend_permission: None,
+        enters_modifications: Default::default(),
     })
     .affected(affected)
     .description(text.to_string());
@@ -2915,6 +2966,9 @@ fn try_parse_unlimited_combined_graveyard_permission(
             enters_with_counter: None,
             required_cast_keyword: None,
             pool: GraveyardPermissionPool::OwnGraveyard,
+            cast_limit: PermissionCastLimit::Unlimited,
+            mana_spend_permission: None,
+            enters_modifications: Default::default(),
         })
         .affected(affected)
         .description(text.to_string()),
@@ -2980,6 +3034,9 @@ fn usable_disjunctive_permission_filter(filter: &TargetFilter) -> bool {
         | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        // CR 108.3 + CR 508.1d: per-member owner anchor — not a static
+        // restriction recipient this classifier looks for.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::OriginalSource
@@ -2989,6 +3046,7 @@ fn usable_disjunctive_permission_filter(filter: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }

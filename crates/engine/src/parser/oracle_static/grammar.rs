@@ -6,6 +6,7 @@ use super::oracle_trigger::NthEventTimingKind;
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
+use crate::parser::oracle_effect::parse_effect_chain_with_context_ability_root;
 use crate::parser::oracle_nom::defender_exception;
 use crate::parser::oracle_nom::defender_exception::DefenderExceptionSegment;
 use crate::types::ability::PlayerFilter;
@@ -1292,8 +1293,34 @@ fn next_nested_ability_quote_span(body: &str, search_from: usize) -> Option<(usi
     }
     let open_quote = next_open?;
     let content_start = open_quote + 1;
-    let rel_close = body[content_start..].find('\'')?;
-    let close_quote = content_start + rel_close;
+    // Digital-only Alchemy (no CR entry): the closer is the next `'` that is
+    // NOT a mid-word apostrophe. A naive first-quote close breaks on
+    // contractions inside the granted ability (Bloodrage Alpha's boon: "…
+    // you don't control.'" closed at "don", corrupting the granted trigger
+    // and stranding "t control.'"). A `'` with word characters on BOTH sides
+    // is always an apostrophe, never a delimiter; the genuine closer follows
+    // sentence punctuation (`.'`) or whitespace.
+    let bytes = body.as_bytes();
+    let mut rel_close = None;
+    for (i, ch) in body[content_start..].char_indices() {
+        if ch != '\'' {
+            continue;
+        }
+        let abs = content_start + i;
+        let prev_word = abs
+            .checked_sub(1)
+            .and_then(|p| bytes.get(p))
+            .is_some_and(|b| b.is_ascii_alphanumeric());
+        let next_word = bytes
+            .get(abs + 1)
+            .is_some_and(|b| b.is_ascii_alphanumeric());
+        if prev_word && next_word {
+            continue;
+        }
+        rel_close = Some(i);
+        break;
+    }
+    let close_quote = content_start + rel_close?;
     Some((open_quote, close_quote))
 }
 
@@ -1730,10 +1757,32 @@ pub(crate) fn parse_quoted_ability(text: &str) -> AbilityDefinition {
             in_granted_activated_ability: true,
             ..ParseContext::default()
         };
-        let mut def =
-            parse_effect_chain_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
+        // CR 602.1: the cost separator starts this granted ability's own effect body.
+        let mut def = parse_effect_chain_with_context_ability_root(
+            &effect_text,
+            AbilityKind::Activated,
+            &mut ctx,
+        );
         def.cost = Some(cost);
         def.activation_restrictions.extend(constraints.restrictions);
+        // CR 606.2 + CR 606.3: an activated ability with a loyalty symbol in
+        // its cost is a loyalty ability even when it is granted through quoted
+        // text (Way of the Pyromancer's "[+1]: Add {R}."), so it carries the
+        // same timing as a printed one: a player may activate it only "any time
+        // they have priority and the stack is empty during a main phase of
+        // their turn". Mirrors the printed path in
+        // `parser::oracle::apply_loyalty_restrictions`. Encoded as `AsSorcery`
+        // (via the single `sorcery_speed()` authority) so ActivateAsInstant
+        // permissions (The Wandering Emperor) still override it at runtime.
+        // The once-per-permanent clause is enforced by the planeswalker
+        // activation gate, never by the per-ability `OnlyOnceEachTurn`.
+        if def
+            .cost
+            .as_ref()
+            .is_some_and(crate::types::ability::is_loyalty_ability_cost)
+        {
+            def = def.sorcery_speed();
+        }
         // CR 601.2f: Fold a trailing self-referential "This ability costs {X}
         // less to activate, where X is ~'s power" node into `cost_reduction`
         // (the same AST-level extractor standalone activated abilities use). The
@@ -1743,11 +1792,14 @@ pub(crate) fn parse_quoted_ability(text: &str) -> AbilityDefinition {
         crate::parser::oracle::extract_cost_reduction_from_chain(&mut def);
         // CR 201.5a: the granter self-reference marker is rendered to the granting
         // object's printed name by `oracle_util::render_granting_self_reference`, at
-        // the two parse entry points (`parse_oracle_text`,
-        // `catalog_rules_text_abilities`) — NOT collapsed to the host token `~` here,
-        // which is what made a granted "Sacrifice <granter>" print as the equipped
-        // creature's name.
+        // the three parse entry points (`parse_oracle_text`,
+        // `catalog_rules_text_abilities`, `oracle_effect::token::push_parsed_statics`)
+        // — NOT collapsed to the host token `~` here, which is what made a granted
+        // "Sacrifice <granter>" print as the equipped creature's name.
         def.description = Some(text.to_string());
+        crate::parser::oracle_effect::refuse_linked_paid_cast_in_activated_mana_ability(
+            &mut def, text,
+        );
         def
     } else {
         // No cost separator — treat as spell-like ability text

@@ -85,7 +85,8 @@ fn gunzip_fixture(gz: &[u8]) -> String {
     flate2::read::GzDecoder::new(gz)
         .read_to_string(&mut json)
         .expect("fixture .json.gz must inflate to UTF-8 JSON");
-    json
+    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+    engine::types::game_state::record_captured_onsets_json(&json)
 }
 
 static OFFER_STATE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
@@ -1225,7 +1226,11 @@ fn real_4p_mana_and_token_boundary_drains_mana_and_still_collapses() {
 
     // Graft a token loop onto the real dump via the engine's single-authority writers — this is
     // the standard Part-2 accept footprint (a TokensCreated axis + a materialization stash).
-    state.mark_unbounded_loop(P0, &[ResourceAxis::TokensCreated]);
+    state.mark_unbounded_loop(
+        P0,
+        &[ResourceAxis::TokensCreated],
+        &[ResourceAxis::TokensCreated],
+    );
     let profile = Box::new(CopiableValues {
         name: "Saproling".to_string(),
         mana_cost: ManaCost::default(),
@@ -1989,6 +1994,10 @@ fn real_4p_boundary_collapse_batches_unobserved_counter_and_declines_observed_li
             ResourceAxis::Counter(CounterClass::Plus1Plus1, ObjectClass::Creature),
             ResourceAxis::Life(P0),
         ],
+        &[
+            ResourceAxis::Counter(CounterClass::Plus1Plus1, ObjectClass::Creature),
+            ResourceAxis::Life(P0),
+        ],
     );
     state.register_pending_materialization(
         P0,
@@ -2121,6 +2130,10 @@ fn real_4p_counter_observer_drift_in_window_declines_batched_counter_but_still_m
         .insert(CounterType::Plus1Plus1, base_counters);
     state.mark_unbounded_loop(
         P0,
+        &[ResourceAxis::Counter(
+            CounterClass::Plus1Plus1,
+            ObjectClass::Creature,
+        )],
         &[ResourceAxis::Counter(
             CounterClass::Plus1Plus1,
             ObjectClass::Creature,
@@ -3183,6 +3196,10 @@ fn med_mixed_counter_tokens_pause_commits_finite_counter_and_keeps_only_tokens_u
             CounterClass::Plus1Plus1,
             ObjectClass::Creature,
         )],
+        &[ResourceAxis::Counter(
+            CounterClass::Plus1Plus1,
+            ObjectClass::Creature,
+        )],
     );
     state.register_pending_materialization(
         P0,
@@ -3297,6 +3314,7 @@ fn low3_activate_and_settle(runner: &mut GameRunner, source: ObjectId, ability_i
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activation is legal");
     for _ in 0..60 {

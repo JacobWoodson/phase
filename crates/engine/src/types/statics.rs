@@ -9,7 +9,7 @@ use super::ability::{
     AbilityCost, AbilityTag, CardPlayMode, CastTimingPermission, CostCategory, PlayerFilter,
     QuantityExpr, QuantityRef, TargetFilter,
 };
-use super::events::ActivatedAbilityKind;
+use super::event_kinds::ActivatedAbilityKind;
 use super::identifiers::ObjectIncarnationRef;
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{ManaColor, ManaCost, SpecialAction, StepEndManaAction};
@@ -315,21 +315,34 @@ impl GraveyardPermissionPool {
     pub fn is_own_graveyard(&self) -> bool {
         matches!(self, GraveyardPermissionPool::OwnGraveyard)
     }
+}
 
-    /// Whether `card` is in this pool for `caster`: "your graveyard" is the
-    /// graveyard container the caster reads (CR 400.1 + CR 109.5).
-    pub fn admits(
-        self,
-        state: &crate::types::game_state::GameState,
-        card: &crate::game::game_object::GameObject,
-        caster: PlayerId,
-    ) -> bool {
-        match self {
-            GraveyardPermissionPool::OwnGraveyard => {
-                state.object_in_players_zone(card, Zone::Graveyard, caster)
-            }
-            GraveyardPermissionPool::AnyGraveyard => true,
-        }
+/// How many casts a resolution-created graveyard permission (CR 601.3: "a
+/// rule or effect allows that player to cast it") authorizes over its whole
+/// duration.
+///
+/// The Oracle wording decides it, not a rule; its article does: "you may cast Zombie SPELLS from your graveyard
+/// this turn" (Liliana, Untouched by Death) is `Unlimited`; "you may cast A
+/// creature SPELL from your graveyard this turn" (Chainer, Nightmare Adept; The
+/// Tomb of Aclazotz; Whispersteel Dagger) is `Single`. A `Single` grant ends
+/// with the cast it authorizes, so a second creature card in the same graveyard
+/// is no longer castable through it; each resolution grants its own cast.
+///
+/// An axis of its own rather than a [`CastFrequency`]: a frequency is a
+/// per-turn slot of the permission's SOURCE that resets each turn,
+/// while this is the lifetime of one GRANT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum PermissionCastLimit {
+    /// Any number of casts while the permission lasts.
+    #[default]
+    Unlimited,
+    /// One cast; the grant ends when the spell cast through it is cast.
+    Single,
+}
+
+impl PermissionCastLimit {
+    pub fn is_unlimited(&self) -> bool {
+        matches!(self, PermissionCastLimit::Unlimited)
     }
 }
 
@@ -856,6 +869,7 @@ fn special_action_registry_str(action: SpecialAction) -> &'static str {
         SpecialAction::TurnFaceUp => "TurnFaceUp",
         SpecialAction::RollPlanarDie => "RollPlanarDie",
         SpecialAction::EndContinuousEffect => "EndContinuousEffect",
+        SpecialAction::Foretell => "Foretell",
     }
 }
 
@@ -870,6 +884,8 @@ fn special_action_from_registry_str(s: &str) -> Option<SpecialAction> {
         // CR 116.2c: this arm is NOT compiler-forced (`_ => None` below) —
         // omitting it silently breaks the registry string round-trip.
         "EndContinuousEffect" => Some(SpecialAction::EndContinuousEffect),
+        // CR 116.2h: same non-compiler-forced registry round-trip obligation.
+        "Foretell" => Some(SpecialAction::Foretell),
         _ => None,
     }
 }
@@ -1415,6 +1431,12 @@ pub enum StaticMode {
     /// a keyword tag. E.g., "Creatures you control can boast twice during each of
     /// your turns rather than once" → overrides `OnlyOnceEachTurn` to `MaxTimesEachTurn(2)`
     /// for boast-tagged abilities on affected permanents.
+    ///
+    /// CR 606.3 loyalty reading: with `keyword: "loyalty"`, raises the
+    /// per-permanent loyalty-ability cap (Oath of Teferi class — "You may
+    /// activate the loyalty abilities of planeswalkers you control twice each
+    /// turn rather than only once"). Matched by the loyalty legality gate
+    /// against `is_loyalty_ability_cost`, not by `AbilityTag`.
     ModifyActivationLimit {
         /// The keyword tag whose activation limit is modified.
         keyword: String,
@@ -1602,6 +1624,30 @@ pub enum StaticMode {
             skip_serializing_if = "GraveyardPermissionPool::is_own_graveyard"
         )]
         pool: GraveyardPermissionPool,
+        /// How many casts the grant authorizes, as its Oracle wording says.
+        /// `Single` is built only for a resolution-created grant ("you may cast
+        /// a creature spell from your graveyard this turn"); casting through it
+        /// ends the granting effect (`casting_costs` at finalization). A printed
+        /// static never carries it, and one that did is refused by
+        /// `casting::graveyard_permission_sources` (it has no effect to end).
+        #[serde(default, skip_serializing_if = "PermissionCastLimit::is_unlimited")]
+        cast_limit: PermissionCastLimit,
+        /// CR 609.4b: "you may spend mana as though it were mana of any color to
+        /// cast that spell" riding on the grant (Whispersteel Dagger). Applies
+        /// only to a spell cast through this permission; latched at announcement
+        /// and read by `casting::player_mana_spend_permission_for_optional_spell`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mana_spend_permission: Option<crate::types::ability::ManaSpendPermission>,
+        /// CR 614.1c + CR 205.1b + CR 613.1d: "If you do, it … is a Vampire in
+        /// addition to its other types" (The Tomb of Aclazotz) — modifications
+        /// the spell cast through this permission keeps as a permanent.
+        /// Latched at announcement and applied at finalization beside
+        /// `enters_with_counter`, as the exile-cast grant's rider is.
+        #[serde(
+            default,
+            skip_serializing_if = "crate::types::ability::PendingEntersModifications::is_empty"
+        )]
+        enters_modifications: crate::types::ability::PendingEntersModifications,
     },
     /// CR 401.5 + CR 118.9 + CR 601.2a: Static ability granting permission to
     /// play/cast the top card of the controller's library when it matches
@@ -2754,7 +2800,7 @@ impl StaticMode {
     ///
     /// EVERY ARM ALTERNATIVE NAMES A `StaticMode` VARIANT EXPLICITLY. That is the
     /// durable property, and it is asserted structurally by
-    /// `defending_player_anchor_polarity_names_every_arm` in this file's tests: no
+    /// `defending_player_anchor_polarity_names_every_arm` in `tests/integration/types_statics.rs`: no
     /// `_`, and no bare-binding catch-all (`other => None`) either. Sub-patterns
     /// INSIDE a variant (`StaticMode::Other(_)`, `StaticMode::Foo { .. }`) are
     /// deliberately fine — they name the variant.
@@ -3012,9 +3058,12 @@ impl Hash for StaticMode {
                 extra_cost,
                 required_cast_keyword,
                 pool,
+                cast_limit,
+                mana_spend_permission,
                 // `CounterType` derives Hash but is collision-safe to skip: the
                 // enters-with rider never distinguishes two otherwise-equal
-                // permissions in the interned set (mirrors `extra_cost` below).
+                // permissions in the interned set (mirrors `extra_cost` below);
+                // the enters-modifications rider likewise.
                 ..
             } => {
                 frequency.hash(state);
@@ -3022,6 +3071,8 @@ impl Hash for StaticMode {
                 graveyard_destination_replacement.hash(state);
                 required_cast_keyword.hash(state);
                 pool.hash(state);
+                cast_limit.hash(state);
+                mana_spend_permission.hash(state);
                 // `AbilityCost` (inside `CastExtraCost`) lacks `Hash` — hash the
                 // mode marker only (mirrors the `alt_cost` treatment) so the
                 // alternative/additional shapes don't collide.
@@ -3411,14 +3462,28 @@ impl fmt::Display for StaticMode {
                 graveyard_destination_replacement,
                 extra_cost,
                 pool,
-                // CR 122.1: the enters-with counter payload rides on serde, not
-                // the Display round-trip (mirrors `extra_cost`); FromStr
-                // defaults it to None.
+                cast_limit,
+                mana_spend_permission,
+                // CR 122.1: the enters-with counter and enters-modifications
+                // payloads ride on serde, not the Display round-trip (mirrors
+                // `extra_cost`); FromStr defaults them to empty.
                 ..
             } => {
                 write!(f, "GraveyardCastPermission({play_mode},{frequency}")?;
                 if matches!(pool, GraveyardPermissionPool::AnyGraveyard) {
                     write!(f, ",pool=any_graveyard")?;
+                }
+                if matches!(cast_limit, PermissionCastLimit::Single) {
+                    write!(f, ",single")?;
+                }
+                match mana_spend_permission {
+                    Some(crate::types::ability::ManaSpendPermission::AnyColor) => {
+                        write!(f, ",anycolor")?;
+                    }
+                    Some(crate::types::ability::ManaSpendPermission::AnyTypeOrColor) => {
+                        write!(f, ",anymana")?;
+                    }
+                    None => {}
                 }
                 if matches!(graveyard_destination_replacement, Some(Zone::Exile)) {
                     write!(f, ",exile_on_graveyard")?;
@@ -3929,6 +3994,9 @@ impl FromStr for StaticMode {
                 enters_with_counter: None,
                 required_cast_keyword: None,
                 pool: GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
             },
             s if s.starts_with("GraveyardCastPermission(") => {
                 let inner = s
@@ -3954,6 +4022,19 @@ impl FromStr for StaticMode {
                         } else {
                             GraveyardPermissionPool::OwnGraveyard
                         },
+                        cast_limit: if rest.contains(&"single") {
+                            PermissionCastLimit::Single
+                        } else {
+                            PermissionCastLimit::Unlimited
+                        },
+                        mana_spend_permission: if rest.contains(&"anymana") {
+                            Some(crate::types::ability::ManaSpendPermission::AnyTypeOrColor)
+                        } else if rest.contains(&"anycolor") {
+                            Some(crate::types::ability::ManaSpendPermission::AnyColor)
+                        } else {
+                            None
+                        },
+                        enters_modifications: Default::default(),
                     }
                 } else {
                     StaticMode::GraveyardCastPermission {
@@ -3964,6 +4045,9 @@ impl FromStr for StaticMode {
                         enters_with_counter: None,
                         required_cast_keyword: None,
                         pool: GraveyardPermissionPool::OwnGraveyard,
+                        cast_limit: PermissionCastLimit::Unlimited,
+                        mana_spend_permission: None,
+                        enters_modifications: Default::default(),
                     }
                 }
             }
@@ -4608,181 +4692,6 @@ mod tests {
 
     // ===== ROW C — the polarity-typed deferral rule, STRUCTURAL half =====
 
-    /// Flatten `Pat::Or` recursively and unwrap `Pat::Paren`, yielding the
-    /// TOP-LEVEL alternatives of one arm pattern.
-    fn arm_alternatives(pat: &syn::Pat, out: &mut Vec<syn::Pat>) {
-        match pat {
-            syn::Pat::Or(or) => or.cases.iter().for_each(|c| arm_alternatives(c, out)),
-            syn::Pat::Paren(p) => arm_alternatives(&p.pat, out),
-            other => out.push(other.clone()),
-        }
-    }
-
-    /// Does this top-level alternative NAME a `StaticMode` variant explicitly?
-    /// A WHITELIST: it rejects `Pat::Wild` (`_`) and bare-binding `Pat::Ident`
-    /// (`other`) together, without enumerating irrefutable shapes, so it cannot
-    /// be defeated by a future irrefutable spelling nobody listed. Sub-patterns
-    /// INSIDE a `Pat::TupleStruct` / `Pat::Struct` are deliberately out of scope
-    /// — that is what lets `StaticMode::Other(_)` and
-    /// `StaticMode::Foo { .. }` through, which are correct Rust and correct
-    /// design.
-    fn names_a_static_mode_variant(alt: &syn::Pat) -> bool {
-        let path = match alt {
-            syn::Pat::Path(p) => &p.path,
-            syn::Pat::TupleStruct(p) => &p.path,
-            syn::Pat::Struct(p) => &p.path,
-            _ => return false,
-        };
-        path.segments
-            .first()
-            .is_some_and(|s| s.ident == "StaticMode")
-    }
-
-    /// Locate the single top-level `ExprMatch` in an `ImplItemFn` body.
-    fn sole_top_level_match(f: &syn::ImplItemFn) -> &syn::ExprMatch {
-        let matches: Vec<&syn::ExprMatch> = f
-            .block
-            .stmts
-            .iter()
-            .filter_map(|stmt| match stmt {
-                syn::Stmt::Expr(syn::Expr::Match(m), _) => Some(m),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            matches.len(),
-            1,
-            "`defending_player_anchor_polarity`'s body must contain EXACTLY ONE \
-             top-level `match` expression, or this row silently reads the wrong \
-             one (or none); found {}",
-            matches.len()
-        );
-        matches[0]
-    }
-
-    /// CR 508.1c + CR 702.3b, STRUCTURAL half: every arm alternative of
-    /// `StaticMode::defending_player_anchor_polarity` NAMES a `StaticMode`
-    /// variant explicitly, so a future `StaticMode` variant is a COMPILE ERROR
-    /// that must be classified deliberately rather than silently falling into
-    /// the `None` default.
-    ///
-    /// A behavioural row (row B) passes identically under `_ => None`; only a
-    /// source-level assertion can buy this. The predicate is a WHITELIST and is
-    /// measured green on `StaticMode::as_keyword`, the in-tree spelling
-    /// precedent this classification is copied from.
-    #[test]
-    fn defending_player_anchor_polarity_names_every_arm() {
-        // ROUTED through the repo's single comment-policy authority
-        // (`crate::source_census`), per `no_source_reading_file_carries_a_private_comment_policy`:
-        // every line's comment half is removed by the SHARED rule before the
-        // source is read, so a doc comment quoting an irrefutable arm cannot be
-        // read as one.
-        let stripped = crate::source_census::code_lines(include_str!("statics.rs"));
-        let file = syn::parse_file(&stripped)
-            .expect("this file must parse as Rust for the structural row to mean anything");
-
-        let mut found: Option<syn::ImplItemFn> = None;
-        for item in &file.items {
-            let syn::Item::Impl(imp) = item else { continue };
-            for sub in &imp.items {
-                let syn::ImplItem::Fn(f) = sub else { continue };
-                if f.sig.ident == "defending_player_anchor_polarity" {
-                    assert!(
-                        found.is_none(),
-                        "exactly one `defending_player_anchor_polarity` must exist"
-                    );
-                    found = Some(f.clone());
-                }
-            }
-        }
-        let f = found.expect(
-            "`StaticMode::defending_player_anchor_polarity` must exist — this row is \
-             reading the real function, not a renamed or deleted one",
-        );
-
-        // (a) exactly one top-level `ExprMatch`.
-        let m = sole_top_level_match(&f);
-
-        // PAIRED POSITIVE CONTROL: the row is reading the real classification.
-        assert!(
-            m.arms.len() >= 3,
-            "the classification must have at least three arms; got {}",
-            m.arms.len()
-        );
-        let rendered: Vec<String> = m.arms.iter().map(|a| quote_pat(&a.pat)).collect();
-        for expected in [
-            "StaticMode :: CanAttackWithDefender",
-            "StaticMode :: CantAttack",
-            "StaticMode :: CantAttackOrBlock",
-        ] {
-            assert!(
-                rendered.iter().any(|r| r.contains(expected)),
-                "the classification must still mention {expected}; arms were {rendered:?}"
-            );
-        }
-
-        // (b) every top-level alternative of every arm names a variant.
-        let mut total_alternatives = 0usize;
-        for arm in &m.arms {
-            let mut alts = Vec::new();
-            arm_alternatives(&arm.pat, &mut alts);
-            for alt in &alts {
-                total_alternatives += 1;
-                assert!(
-                    names_a_static_mode_variant(alt),
-                    "EVERY arm alternative must NAME a `StaticMode` variant \
-                     explicitly — no `_`, no bare-binding catch-all. Offending \
-                     alternative: {}",
-                    quote_pat(alt)
-                );
-            }
-        }
-        assert!(
-            total_alternatives >= 3,
-            "instrument control: the walk must have seen alternatives at all; got \
-             {total_alternatives}"
-        );
-
-        // (c) THE INSTRUMENT FIRES. Without this a predicate that accepted
-        // everything would satisfy (b) vacuously.
-        for irrefutable in [
-            "_ => None",
-            "other => None",
-            "StaticMode::CantAttack | _ => None",
-        ] {
-            let arm: syn::Arm = syn::parse_str(irrefutable)
-                .unwrap_or_else(|e| panic!("{irrefutable} must parse as an arm: {e}"));
-            let mut alts = Vec::new();
-            arm_alternatives(&arm.pat, &mut alts);
-            assert!(
-                !alts.iter().all(names_a_static_mode_variant),
-                "the predicate must REJECT the irrefutable arm `{irrefutable}`"
-            );
-        }
-        for accepted in [
-            "StaticMode::Other(_) => None",
-            "StaticMode::Continuous => None",
-            "StaticMode::IgnoreLandwalkForBlocking { .. } => None",
-            "StaticMode::CantAttack | StaticMode::CantBlock => None",
-        ] {
-            let arm: syn::Arm = syn::parse_str(accepted)
-                .unwrap_or_else(|e| panic!("{accepted} must parse as an arm: {e}"));
-            let mut alts = Vec::new();
-            arm_alternatives(&arm.pat, &mut alts);
-            assert!(
-                alts.iter().all(names_a_static_mode_variant),
-                "the predicate must ACCEPT the variant-naming arm `{accepted}` — \
-                 sub-patterns inside a variant are deliberately out of scope"
-            );
-        }
-    }
-
-    /// Render a `syn::Pat` for assertion messages without pulling in `quote`.
-    fn quote_pat(pat: &syn::Pat) -> String {
-        use syn::__private::ToTokens;
-        pat.to_token_stream().to_string()
-    }
-
     fn static_mode_hash(mode: &StaticMode) -> u64 {
         let mut hasher = DefaultHasher::new();
         mode.hash(&mut hasher);
@@ -5058,6 +4967,9 @@ mod tests {
                 enters_with_counter: None,
                 required_cast_keyword: None,
                 pool: GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
             },
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::Unlimited,
@@ -5067,6 +4979,9 @@ mod tests {
                 enters_with_counter: None,
                 required_cast_keyword: None,
                 pool: GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
             },
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::Unlimited,
@@ -5076,6 +4991,9 @@ mod tests {
                 enters_with_counter: None,
                 required_cast_keyword: None,
                 pool: GraveyardPermissionPool::AnyGraveyard,
+                cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
             },
             // CR 601.2f: Festival of Embers — graveyard cast with an additional
             // pay-life cost. NOTE: `extra_cost`-bearing variants are NOT in this
@@ -5270,6 +5188,9 @@ mod tests {
                 enters_with_counter: None,
                 required_cast_keyword: None,
                 pool: GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
             },
             StaticMode::ExileCastPermission {
                 frequency: CastFrequency::Unlimited,

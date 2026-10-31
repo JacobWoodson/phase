@@ -222,6 +222,8 @@ fn effect_offers_choice(e: &Effect) -> bool {
     match e {
         // Engine-set from the activation-payment snapshot, never a player prompt.
         Effect::NoteManaSpent | Effect::CompletePlayerAction { .. } => false,
+        // "note <number>" evaluates its operand silently — no player prompt.
+        Effect::NoteNumber { .. } => false,
         // ---- SCOPE FILTER. DESTRUCTURED WITHOUT `..` on every arm, exactly as
         //      HEAD's three allow arms are, so a new field on any of them forces
         //      a re-audit of whether the class is still in scope.
@@ -230,7 +232,7 @@ fn effect_offers_choice(e: &Effect) -> bool {
         //      — it is not a compile error to silence. rustc's own diagnostic
         //      prints a `help:` suggesting `..`, which silently disarms the
         //      guard. Classify the new field against the scope filter, then name
-        //      it `_`. The 14-field `Effect::Token` arm is the one that maximally
+        //      it `_`. The `Effect::Token` arm is the one that maximally
         //      invites the `..`.
         //
         //      CR 107.1c + CR 608.2d: THE `UpTo` GUARD IS ON *EVERY*
@@ -268,6 +270,7 @@ fn effect_offers_choice(e: &Effect) -> bool {
             owner: _,
             attach_to: _,
             enters_attacking: _,
+            attack_destination: _,
             supertypes: _,
             static_abilities: _,
             enter_with_counters: _,
@@ -357,6 +360,7 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::EndCombatPhase
         | Effect::Vote { .. }
         | Effect::SeparateIntoPiles { .. }
+        | Effect::ExileTopCardContest { .. }
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }
         | Effect::EpicCopy { .. }
@@ -426,6 +430,11 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::BecomeBlocked { .. }
         | Effect::SetClassLevel { .. }
         | Effect::CreateDelayedTrigger { .. }
+        // Digital-only Alchemy (no CR entry): installing the boon opens no
+        // prompt itself, but the granted body resolves later as its own
+        // ability and may prompt then (Valiant Batrider's "you may pay") —
+        // probe-worthy like a delayed body.
+        | Effect::CreateBoon { .. }
         | Effect::AddTargetReplacement { .. }
         | Effect::AddRestriction { .. }
         | Effect::ReduceNextSpellCost { .. }
@@ -443,15 +452,14 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::LoseTheGame { .. }
         | Effect::WinTheGame { .. }
         | Effect::RollDie { .. }
-        | Effect::FlipCoin { .. }
         | Effect::FlipCoins { .. }
-        | Effect::FlipCoinUntilLose { .. }
         | Effect::RingTemptsYou
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
+        | Effect::AbandonScheme
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
         | Effect::AssembleContraptions { .. }
@@ -476,6 +484,7 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::ExileFromTopUntil { .. }
         | Effect::RevealUntil { .. }
         | Effect::Discover { .. }
+        | Effect::PhysicalContest { .. }
         | Effect::Heist { .. }
         | Effect::HeistExile
         | Effect::Cascade
@@ -503,6 +512,7 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::SkipNextStep { .. }
         | Effect::AdditionalPhase { .. }
         | Effect::Double { .. }
+        | Effect::ModifyAnnouncedX { .. }
         | Effect::EachSourceDealsDamage { .. }
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
@@ -556,11 +566,31 @@ fn effect_offers_choice(e: &Effect) -> bool {
 /// choice-bearing). A FUTURE field fails to compile here until classified for the
 /// choice question.
 pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
+    // CR 608.2c: gate-check the whole chain — this node's modifiers and effect,
+    // plus the sub_ability / else_ability branches. Recursion is retained HERE,
+    // where it is a pure AST walk costing nothing, and dropped from the probe below.
+    node_modifiers_offer_choice(a)
+        || effect_offers_choice(&a.effect)
+        || a.sub_ability.as_deref().is_some_and(chain_offers_choice)
+        || a.else_ability.as_deref().is_some_and(chain_offers_choice)
+}
+
+/// CR 608.2d + CR 118.12: can this one node's executable modifiers (its
+/// optional / unless-pay / chooser / timing / modal / repeat fields) enter a
+/// resolution-time player choice, independent of what its effect does? The
+/// field-level half of [`chain_offers_choice`], shared with the scoped
+/// control-capture admission (`effects::fan_out_head_is_allowlisted`), so both
+/// read one exhaustive classification of every `ResolvedAbility` field.
+///
+/// The `ResolvedAbility` destructure is EXHAUSTIVE with no `..`: a FUTURE field
+/// fails to compile here until classified for the choice question.
+pub(crate) fn node_modifiers_offer_choice(a: &ResolvedAbility) -> bool {
     let ResolvedAbility {
+        // ---- structural: classified by chain_offers_choice ----
+        effect: _,
+        sub_ability: _,
+        else_ability: _,
         // ---- choice-bearing: folded into the verdict below ----
-        effect,
-        sub_ability,
-        else_ability,
         optional,
         optional_player: _, // selects the optional actor; `optional` already records the choice
         optional_for,
@@ -590,14 +620,16 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         source_id: _, // object id
         cast_occurrence: _, // finalized-cast provenance, no resolution-time choice
         source_incarnation: _, // self-transform epoch latch, no resolution-time choice
+        announced_source_incarnation: _, // announcement-time source epoch, no resolution-time choice
         noted_mana_payment: _, // concrete activation-payment snapshot, no resolution-time choice
-        trigger_source: _, // exact triggered-source authority, no choice
+        trigger_source: _,     // exact triggered-source authority, no choice
         trigger_definition_ref: _, // exact trigger occurrence, no choice
-        delayed_origin: _, // delayed-trigger identity, no choice
+        delayed_origin: _,     // delayed-trigger identity, no choice
         force_block_attacker: _, // exact force-block referent, no choice
         target_incarnations: _, // CR 400.7 referent pins, no choice
-        target_pins: _, // CR 400.7 selected-target pins, no choice
+        target_pins: _,        // CR 400.7 selected-target pins, no choice
         legacy_selected_target_incarnations: _,
+        chosen_target_slots: _,  // CR 115.1 announced-target record, no choice
         illegal_target_slots: _, // CR 608.2b resolution legality stamp, no choice
         unjudged_target_slots: _, // CR 608.2b resolution legality stamp, no choice
         illegal_local_target_slots: _, // CR 608.2b node-local legality stamp, no choice
@@ -633,10 +665,12 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         replacement_applied: _, // replacement provenance set, no prompt
         sub_link: _, // SubAbilityLink kind tag
         target_reads: _, // TargetReadOrigin tag (announce-time), no prompt
+        entry_onset: _, // ContinuousEffectOnset tag, no prompt
         sibling_condition: _, // SiblingCondition replication marker, no resolution-time choice
         parent_target_missing_reason: _, // seam flag
         activation_cost_reduction: _,
         activation_record: _,
+        control_change_instruction: _,
     } = a;
 
     // CR 603.5 + CR 608.2d: an optional effect / optional targeting /
@@ -689,12 +723,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         return true;
     }
 
-    // CR 608.2c: gate-check the whole chain — this node's effect, plus the
-    // sub_ability / else_ability branches. Recursion is retained HERE, where it is a
-    // pure AST walk costing nothing, and dropped from the probe below.
-    effect_offers_choice(effect)
-        || sub_ability.as_deref().is_some_and(chain_offers_choice)
-        || else_ability.as_deref().is_some_and(chain_offers_choice)
+    false
 }
 
 /// CR 608.2d + CR 732.2a: the resolution-choice verdict for a whole ability chain.
@@ -990,6 +1019,7 @@ mod tests {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -1475,6 +1505,7 @@ mod tests {
                 entry_ref: victim,
                 enter_tapped: Default::default(),
                 enter_with_counters: Vec::new(),
+                enter_with_choices: None,
                 applied: Default::default(),
             }
         ));

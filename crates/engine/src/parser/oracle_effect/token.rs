@@ -5,7 +5,7 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::anychar;
-use nom::combinator::{all_consuming, eof, opt, peek, recognize, rest, value, verify};
+use nom::combinator::{all_consuming, eof, opt, peek, recognize, rest, success, value, verify};
 use nom::multi::many_till;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -13,8 +13,12 @@ use nom::Parser;
 use crate::parser::oracle_ir::context::{ParseContext, TokenPtFollowup};
 use crate::parser::oracle_nom::error::OracleResult;
 use crate::types::ability::{
-    ContinuousModification, ControllerRef, Effect, FilterProp, ObjectScope, PtValue, QuantityExpr,
-    QuantityRef, StaticDefinition, TargetFilter, ThisWayCause, TypeFilter,
+    ContinuousModification, ControllerRef, Effect, FilterProp, NamedDefenderScope, ObjectScope,
+    PtValue, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter, ThisWayCause,
+    TokenAttackDestination, TypeFilter,
+};
+use crate::types::ability_visit::{
+    nested_definitions_name_granter, own_fields_name_granter, token_static_grants_to_itself,
 };
 use crate::types::card_type::Supertype;
 use crate::types::keywords::Keyword;
@@ -22,12 +26,14 @@ use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
 
 use super::super::oracle_nom::primitives as nom_primitives;
-use super::super::oracle_static::{parse_quoted_ability_modifications, parse_static_line_multi};
+use super::super::oracle_static::{
+    classify_quoted_inner, parse_static_line_multi, promote_nested_ability_quotes,
+};
 use super::super::oracle_target::parse_target_with_ctx;
 use super::super::oracle_util::{
-    comma_short_self_name, normalize_card_name_refs, parse_count_expr, parse_count_head,
-    parse_count_slot, parse_rounding_suffix_only, rewrite_quantity_expr_rounding,
-    strip_reminder_text, CountHead, TextPair,
+    comma_short_self_name, granting_self_reference_count, normalize_card_name_refs_reporting,
+    parse_count_expr, parse_count_head, parse_count_slot, parse_rounding_suffix_only,
+    rewrite_quantity_expr_rounding, strip_reminder_text, CountHead, TextPair,
 };
 use crate::parser::oracle_ir::ast::*;
 
@@ -47,7 +53,7 @@ pub(crate) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
     let lower = text.to_lowercase();
 
     // "create a token that's a copy of {target}"
-    if let Ok((_, (tapped, enters_attacking))) = parse_copy_token_entry_modifiers(&lower) {
+    if let Ok((_, (mut tapped, mut enters_attacking))) = parse_copy_token_entry_modifiers(&lower) {
         let tp = TextPair::new(&text, &lower);
         let after_copy_tp = tp
             .strip_after("copy of ")
@@ -76,7 +82,7 @@ pub(crate) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
         let (target_text, extra_keywords, additional_modifications) =
             split_token_except_clause(target_text, ctx);
         let target_lower = target_text.trim().to_lowercase();
-        let (mut target, _) = if parse_cost_paid_object_copy_target(&target_lower) {
+        let (mut target, target_remainder) = if parse_cost_paid_object_copy_target(&target_lower) {
             (TargetFilter::CostPaidObject, "")
         } else {
             parse_target_with_ctx(target_text, ctx)
@@ -110,7 +116,23 @@ pub(crate) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
         // instead of fabricating a count.
         let (_, after_create) =
             nom_on_lower(&text, &lower, |i| value((), tag("create ")).parse(i))?;
-        let count = parse_count_slot(after_create, ctx)?.count;
+        let count_slot = parse_count_slot(after_create, ctx)?;
+        let count = count_slot.count;
+        // CR 508.4: A creature put onto the battlefield attacking is attacking
+        // without having attacked. Some copy effects state this entry condition
+        // after the copy target (for example, Flamerush Rider's "...attacking
+        // creature and that's tapped and attacking"). Parse only the target
+        // parser's unconsumed remainder so the target's Attacking restriction
+        // never sets the token's entry flags.
+        if let Some((suffix_tapped, suffix_enters_attacking)) =
+            parse_copy_token_trailing_entry_modifiers(
+                &target_remainder.to_lowercase(),
+                count_slot.where_x.is_some(),
+            )
+        {
+            tapped |= suffix_tapped;
+            enters_attacking |= suffix_enters_attacking;
+        }
         return Some(Effect::CopyTokenOf {
             target,
             // CR 109.4: Default to the controller; a "target [player] creates"
@@ -118,6 +140,9 @@ pub(crate) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
             owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking,
+            // CR 508.4: the copy modifiers name no destination; a following
+            // "enters tapped and attacking …" sentence sets it.
+            attack_destination: TokenAttackDestination::ControllerChooses,
             tapped,
             count,
             extra_keywords,
@@ -155,6 +180,7 @@ pub(crate) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
         owner: TargetFilter::Controller,
         attach_to: token.attach_to,
         enters_attacking: token.enters_attacking,
+        attack_destination: token.attack_destination,
         // CR 205.4a: Carry parsed supertypes (e.g. "legendary" for Marit Lage)
         // onto the token so the legend rule (CR 704.5j) applies.
         supertypes: token.supertypes,
@@ -197,6 +223,52 @@ pub(super) fn parse_copy_token_entry_modifiers(input: &str) -> OracleResult<'_, 
     ))
     .parse(rest)?;
     Ok((rest, flags))
+}
+
+/// Parse an optional entry-state suffix after the copied-object target, such
+/// as `and that's tapped and attacking`. The caller supplies only the
+/// unconsumed target remainder, keeping target restrictions separate from
+/// token-entry instructions.
+fn parse_copy_token_trailing_entry_modifiers(
+    remainder: &str,
+    count_bound_by_where_x: bool,
+) -> Option<(bool, bool)> {
+    fn parse_suffix(input: &str, count_bound_by_where_x: bool) -> OracleResult<'_, (bool, bool)> {
+        let (rest, _) = tag("and ").parse(input)?;
+        let (rest, _) =
+            alt((tag("that's"), tag("that is"), tag("thats"), tag("that are"))).parse(rest)?;
+        let (rest, flags) = alt((
+            // The longer alternative must precede `tapped` so it is not
+            // consumed as a tapped-only suffix.
+            value((true, true), tag(" tapped and attacking")),
+            value((true, false), tag(" tapped")),
+            value((false, true), tag(" attacking")),
+        ))
+        .parse(rest)?;
+        let rest = if count_bound_by_where_x {
+            // CR 107.3c: A following where-X clause defines the token count.
+            // `parse_count_slot` already bound the count from this binder and
+            // parsed its quantity in full, so the clause is consumed whole here
+            // rather than re-validated by a second quantity grammar; without
+            // that binder, arbitrary text after the entry modifier is not an
+            // entry clause.
+            opt(preceded(
+                tag(", where x is "),
+                nom::combinator::rest::<_, OracleError<'_>>,
+            ))
+            .parse(rest)?
+            .0
+        } else {
+            rest
+        };
+        let (rest, _) = opt(alt((tag("."), tag(",")))).parse(rest)?;
+        let (rest, _) = nom::character::complete::multispace0.parse(rest)?;
+        let (rest, _) = eof.parse(rest)?;
+        Ok((rest, flags))
+    }
+    parse_suffix(remainder.trim_start(), count_bound_by_where_x)
+        .ok()
+        .map(|(_, flags)| flags)
 }
 
 fn parse_cost_paid_object_copy_target(lower: &str) -> bool {
@@ -566,12 +638,10 @@ fn parse_token_description_with_context(
     // Pakal, Thousandth Moon) — accept that as a valid terminator in addition
     // to EOF so the attacking flag is captured even when a variable-X binding
     // trails the clause.
-    // CR 508.4: trailing defender phrases ("that player or a planeswalker they
-    // control", "that opponent", etc. — Adeline, Resplendent Cathar / Myriad
-    // class) must not prevent the inline modifier from matching; accept a word
-    // boundary after "attacking" the same way `parse_battlefield_entry_qualifiers`
-    // does for put-onto-battlefield effects.
-    let attacking_clause = |i| -> OracleResult<'_, bool> {
+    // CR 508.4: a defender phrase after "attacking" names the destination
+    // (`parse_token_attack_destination`); any other following word still ends
+    // the clause at a word boundary.
+    let attacking_clause = |i| -> OracleResult<'_, (bool, TokenAttackDestination)> {
         let (i, _) = alt((
             tag(" that's"),
             tag(" that is"),
@@ -584,6 +654,7 @@ fn parse_token_description_with_context(
             value(false, tag(" attacking")),
         ))
         .parse(i)?;
+        let (i, destination) = opt(parse_token_attack_destination).parse(i)?;
         let (i, _) = alt((
             value((), nom::combinator::eof),
             value((), tag(", where ")),
@@ -592,7 +663,7 @@ fn parse_token_description_with_context(
             value((), tag(".")),
         ))
         .parse(i)?;
-        Ok((i, tapped))
+        Ok((i, (tapped, destination.unwrap_or_default())))
     };
     // Nom parses forward; scan byte positions (only those starting with the
     // leading space the clause requires) for the first place where the clause
@@ -602,7 +673,7 @@ fn parse_token_description_with_context(
             .then(|| {
                 attacking_clause(&lower_trimmed[pos..])
                     .ok()
-                    .map(|(_, tapped)| (pos, tapped))
+                    .map(|(_, (tapped, destination))| (pos, tapped, destination))
             })
             .flatten()
     });
@@ -610,12 +681,19 @@ fn parse_token_description_with_context(
     // trailing ", where X is …" that followed the clause is cut off from the
     // token body.  Extract and save it now (from the pre-truncation text) so
     // the X-binding step below can still bind an X/X token's P/T.
-    let saved_where_x_expr: Option<String> =
-        entry_clause.and_then(|(pos, _)| extract_token_where_x_expression(&text[pos..]));
-    let (text, mut enters_attacking, enters_tapped_attacking) = match entry_clause {
-        Some((len, tapped)) => (&text[..len], true, tapped),
-        None => (text, false, false),
-    };
+    let saved_where_x_expr: Option<String> = entry_clause
+        .as_ref()
+        .and_then(|(pos, _, _)| extract_token_where_x_expression(&text[*pos..]));
+    let (text, mut enters_attacking, enters_tapped_attacking, attack_destination) =
+        match entry_clause {
+            Some((len, tapped, destination)) => (&text[..len], true, tapped, destination),
+            None => (
+                text,
+                false,
+                false,
+                TokenAttackDestination::ControllerChooses,
+            ),
+        };
     let (mut count, leading_name, mut rest) = match slot_count {
         Some(count) => (count, None, text),
         None => {
@@ -740,7 +818,7 @@ fn parse_token_description_with_context(
     // take precedence and are never overwritten. The lookup keys on the bare
     // descriptor, so type-bearing descriptors ("Soldier creature") never match
     // a catalog `display_name` and are left untouched.
-    if let Some(body) = crate::game::token_presets::known_token_body_by_name_for_source(
+    if let Some(body) = crate::types::token_presets::known_token_body_by_name_for_source(
         descriptor,
         ctx.card_name.as_deref(),
     ) {
@@ -854,7 +932,9 @@ fn parse_token_description_with_context(
     }
 
     // Extract quoted static abilities: `and "This token can't block."` / `"~ can't block."`
-    let static_abilities = extract_token_static_abilities(suffix, &name);
+    // CR 201.5a: a token body whose granter references cannot bind to the object
+    // they name does not lower (as an unrepresentable P/T above).
+    let static_abilities = extract_token_static_abilities(suffix, &name)?;
 
     Some(TokenDescription {
         name,
@@ -869,7 +949,34 @@ fn parse_token_description_with_context(
         attach_to,
         static_abilities,
         enters_attacking,
+        attack_destination,
     })
+}
+
+/// CR 508.4: the defender a token instruction names after "attacking":
+/// "that player", "that opponent", optionally "or a planeswalker they
+/// control". Input starts at the space after "attacking"; the phrase must end
+/// the clause.
+pub(super) fn parse_token_attack_destination(
+    input: &str,
+) -> OracleResult<'_, TokenAttackDestination> {
+    let (rest, _) = (tag(" that "), alt((tag("player"), tag("opponent")))).parse(input)?;
+    let (rest, scope) = alt((
+        value(
+            NamedDefenderScope::PlayerOrPlaneswalker,
+            tag(" or a planeswalker they control"),
+        ),
+        success(NamedDefenderScope::Player),
+    ))
+    .parse(rest)?;
+    let (rest, ()) = nom_primitives::peek_clause_terminator(rest)?;
+    Ok((
+        rest,
+        TokenAttackDestination::Player {
+            player: ControllerRef::DefendingPlayer,
+            scope,
+        },
+    ))
 }
 
 /// CR 608.2c + CR 120.1 + CR 603.2c: split a trailing token-count rider off a
@@ -1242,7 +1349,11 @@ fn parse_token_name_clause(text: &str) -> (Option<String>, Cow<'_, str>) {
 /// `, `) and the closing `'` is the last `'` in the text. This pairing rule
 /// guarantees that any `'` inside the span (apostrophes from "can't" /
 /// possessives) is never mistaken for the close quote.
-fn extract_token_static_abilities(text: &str, token_name: &str) -> Vec<StaticDefinition> {
+///
+/// Returns `None` when a quoted body is refused by [`push_parsed_statics`]
+/// (CR 201.5a: a granter reference that cannot bind to the object it names),
+/// so the token clause does not lower.
+fn extract_token_static_abilities(text: &str, token_name: &str) -> Option<Vec<StaticDefinition>> {
     let mut statics = Vec::new();
 
     // Pass 1: double-quoted abilities — unambiguous delimiters.
@@ -1256,7 +1367,7 @@ fn extract_token_static_abilities(text: &str, token_name: &str) -> Vec<StaticDef
             break;
         };
         let quoted = &text[abs_start..abs_start + end];
-        push_parsed_statics(quoted.trim(), token_name, &mut statics);
+        push_parsed_statics(quoted.trim(), token_name, &mut statics)?;
         pos = abs_start + end + '"'.len_utf8();
     }
 
@@ -1265,7 +1376,7 @@ fn extract_token_static_abilities(text: &str, token_name: &str) -> Vec<StaticDef
     // Oracle text never mixes both delimiters at the same nesting level.
     if statics.is_empty() {
         if let Some(span) = find_anchored_single_quoted_span(text) {
-            push_parsed_statics(span.trim(), token_name, &mut statics);
+            push_parsed_statics(span.trim(), token_name, &mut statics)?;
         }
     }
 
@@ -1276,7 +1387,7 @@ fn extract_token_static_abilities(text: &str, token_name: &str) -> Vec<StaticDef
     // GenericEffect sibling instead; inline token descriptions need this pass.
     append_unquoted_equip_grants(text, &mut statics);
 
-    statics
+    Some(statics)
 }
 
 /// CR 702.6a: Scan the token "with …" suffix for standalone Equip activated
@@ -1342,29 +1453,83 @@ fn recognize_equip_clause(input: &str) -> OracleResult<'_, &str> {
     Ok((rest, clause))
 }
 
-fn push_parsed_statics(ability_text: &str, token_name: &str, out: &mut Vec<StaticDefinition>) {
-    let normalized;
-    let static_text = if token_name.is_empty() {
-        ability_text
+/// Parse one quoted token body into its statics — the third display/typed entry
+/// point into the CR 201.5a granter-reference machinery, after
+/// `parser::oracle::parse_oracle_text` and
+/// `game::effects::token::catalog_rules_text_abilities`.
+///
+/// CR 111.3 + CR 111.4: the creating effect defines the token's text and name.
+/// The body is un-nested one quote level (the emblem/boon convention), then the
+/// token's printed name is masked: inside a nested grant, the token's name names
+/// the token as that grant's source (CR 201.5a), so it lowers to
+/// `TargetFilter::GrantingObject` and is bound to the token at layer 6.
+///
+/// Returns `None` (the token clause does not lower) when a granter reference
+/// cannot bind to the object it names: the masker refused a token-name position
+/// (it would read the host); a creator-name reference reached a grant to another
+/// object (layer 6 would bind it to the token); or a token-name reference reached
+/// a token static's own fields or a grant made by the token's own text (the
+/// creation stamp would bind it to the creator).
+fn push_parsed_statics(
+    ability_text: &str,
+    token_name: &str,
+    out: &mut Vec<StaticDefinition>,
+) -> Option<()> {
+    // CR 111.3: un-nest the token's own text one quote level (emblem/boon convention).
+    let promoted = promote_nested_ability_quotes(ability_text);
+    // CR 201.5a: markers already present come from the card pass — the creator frame.
+    let creator_refs = granting_self_reference_count(&promoted);
+    let (static_text, token_refs) = if token_name.is_empty() {
+        (promoted, 0)
     } else {
-        normalized = normalize_card_name_refs(ability_text, token_name);
-        &normalized
+        let (normalized, refused) = normalize_card_name_refs_reporting(&promoted, token_name);
+        // CR 201.5a: a refused token-name position would read the host.
+        if !refused.is_empty() {
+            return None;
+        }
+        let token_refs = granting_self_reference_count(&normalized).saturating_sub(creator_refs);
+        (normalized, token_refs)
     };
-    let static_definitions = parse_static_line_multi(static_text);
-    if !static_definitions.is_empty() {
-        out.extend(static_definitions);
-        return;
+    let mut defs = parse_static_line_multi(&static_text);
+    if defs.is_empty() {
+        let modifications = classify_quoted_inner(&static_text);
+        if !modifications.is_empty() {
+            defs.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .modifications(modifications),
+            );
+        }
     }
-
-    let quoted = format!("\"{static_text}\"");
-    let modifications = parse_quoted_ability_modifications(&quoted);
-    if !modifications.is_empty() {
-        out.push(
-            StaticDefinition::continuous()
-                .affected(TargetFilter::SelfRef)
-                .modifications(modifications),
-        );
+    // CR 201.5a: a creator reference in a grant to another object would bind to the
+    // token at layer 6, not to the creator it names.
+    if creator_refs > 0
+        && defs
+            .iter()
+            .any(|d| !token_static_grants_to_itself(d) && nested_definitions_name_granter(d))
+    {
+        return None;
     }
+    // CR 111.3 + CR 201.5a: a token-name reference in a token static's own fields, or in a
+    // grant made by the token's own text, would be bound to the creator at creation, not
+    // to the token it names. An own field cannot tell a token marker from a creator one.
+    if token_refs > 0
+        && defs.iter().any(|d| {
+            own_fields_name_granter(d)
+                || (token_static_grants_to_itself(d) && nested_definitions_name_granter(d))
+        })
+    {
+        return None;
+    }
+    // CR 201.5a display: render token-frame references with the token's printed
+    // name before the card-level net renders any marker with the creator's name.
+    if token_refs > 0 {
+        for def in &mut defs {
+            crate::parser::oracle::render_static_descriptions(def, token_name);
+        }
+    }
+    out.extend(defs);
+    Some(())
 }
 
 /// Locate a single-quoted ability span in `text`, returning the content
@@ -1591,7 +1756,7 @@ fn known_registry_token_identity(
     source_name: Option<&str>,
 ) -> Option<(String, Vec<String>)> {
     let body =
-        crate::game::token_presets::known_token_body_by_name_for_source(descriptor, source_name)?;
+        crate::types::token_presets::known_token_body_by_name_for_source(descriptor, source_name)?;
     let mut types: Vec<String> = body
         .core_types
         .iter()
@@ -1740,6 +1905,7 @@ pub(super) fn push_unique_string(values: &mut Vec<String>, value: impl Into<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::oracle_target::parse_target;
     use crate::types::ability::{
         ObjectScope, PlayerFilter, QuantityExpr, QuantityRef, RoundingMode, TypeFilter,
     };
@@ -1809,6 +1975,7 @@ mod tests {
                     crate::types::ability::CardTypeSetSource::TrackedSet {
                         set: crate::types::ability::TrackedAnaphorSource::TriggeringBatch,
                         caused_by: None,
+                        filter: None,
                     },
                 )
                 .expect("statically valid property aggregate"),
@@ -2013,6 +2180,7 @@ mod tests {
                     crate::types::ability::CardTypeSetSource::TrackedSet {
                         set: crate::types::ability::TrackedAnaphorSource::ChainSet,
                         caused_by: None,
+                        filter: None,
                     },
                 )
                 .expect("statically valid property aggregate"),
@@ -2045,6 +2213,7 @@ mod tests {
                     source: crate::types::ability::CardTypeSetSource::TrackedSet {
                         set: crate::types::ability::TrackedAnaphorSource::ChainSet,
                         caused_by: Some(crate::types::ability::ThisWayCause::Discarded),
+                        filter: None,
                     },
                 },
             },
@@ -2200,6 +2369,182 @@ mod tests {
     }
 
     #[test]
+    fn flamerush_rider_copy_target_and_post_target_entry_clause_parse() {
+        // Flamerush Rider: the attacking property on the copied target is a
+        // target restriction; the later "and that's tapped and attacking"
+        // independently controls how the token enters.
+        let target_text = "target attacking creature and that's tapped and attacking.";
+        let (target, remainder) = parse_target(target_text);
+        let TargetFilter::Typed(typed_target) = target else {
+            panic!("expected typed target, got {target:?}");
+        };
+        assert!(typed_target.type_filters.contains(&TypeFilter::Creature));
+        assert!(typed_target
+            .properties
+            .contains(&FilterProp::Attacking { defender: None }));
+        assert_eq!(remainder, " and that's tapped and attacking.");
+
+        let oracle = "Create a token that's a copy of another target attacking creature and that's tapped and attacking.";
+        let effect = try_parse_token(&oracle.to_lowercase(), oracle, &mut ParseContext::default())
+            .expect("Flamerush Rider copy clause must parse");
+        let Effect::CopyTokenOf {
+            target,
+            tapped,
+            enters_attacking,
+            ..
+        } = effect
+        else {
+            panic!("expected CopyTokenOf, got {effect:?}");
+        };
+        let TargetFilter::Typed(typed_target) = target else {
+            panic!("expected typed copy target, got {target:?}");
+        };
+        assert!(typed_target.type_filters.contains(&TypeFilter::Creature));
+        assert!(typed_target
+            .properties
+            .contains(&FilterProp::Attacking { defender: None }));
+        assert!(typed_target.properties.contains(&FilterProp::Another));
+        assert!(tapped, "trailing tapped clause must set tapped=true");
+        assert!(
+            enters_attacking,
+            "trailing attacking clause must set enters_attacking=true"
+        );
+
+        let restricted_target = "Create a token that's a copy of target attacking creature.";
+        let effect = try_parse_token(
+            &restricted_target.to_lowercase(),
+            restricted_target,
+            &mut ParseContext::default(),
+        )
+        .expect("copy of an attacking target must parse");
+        let Effect::CopyTokenOf {
+            target,
+            tapped,
+            enters_attacking,
+            ..
+        } = effect
+        else {
+            panic!("expected CopyTokenOf, got {effect:?}");
+        };
+        assert!(matches!(
+            target,
+            TargetFilter::Typed(ref typed)
+                if typed.properties.contains(&FilterProp::Attacking { defender: None })
+        ));
+        assert!(
+            !tapped,
+            "target's Attacking restriction must not tap the token"
+        );
+        assert!(
+            !enters_attacking,
+            "target's Attacking restriction must not make the token enter attacking"
+        );
+
+        // Exercise the full printed Oracle through trigger parsing too. The
+        // delayed end-of-combat exile must remain linked after the target
+        // suffix is consumed.
+        let full_oracle = "Whenever this creature attacks, create a token that's a copy of another target attacking creature and that's tapped and attacking. Exile the token at end of combat.\nDash {2}{R}{R} (You may cast this spell for its dash cost. If you do, it gains haste, and it's returned from the battlefield to its owner's hand at the beginning of the next end step.)";
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            full_oracle,
+            "Flamerush Rider",
+            &["Dash".to_string()],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Warrior".to_string()],
+        );
+        let attack_trigger = parsed
+            .triggers
+            .iter()
+            .find(|trigger| trigger.mode == crate::types::triggers::TriggerMode::Attacks)
+            .expect("full Flamerush Rider Oracle must parse its attack trigger");
+        let execute = attack_trigger
+            .execute
+            .as_deref()
+            .expect("Flamerush Rider attack trigger execute");
+        let Effect::CopyTokenOf {
+            target: TargetFilter::Typed(target),
+            tapped,
+            enters_attacking,
+            ..
+        } = execute.effect.as_ref()
+        else {
+            panic!("expected full attack trigger to start with CopyTokenOf, got {execute:?}");
+        };
+        assert!(target.type_filters.contains(&TypeFilter::Creature));
+        assert!(target
+            .properties
+            .contains(&FilterProp::Attacking { defender: None }));
+        assert!(target.properties.contains(&FilterProp::Another));
+        assert!(*tapped && *enters_attacking);
+
+        fn find_delayed_exile(
+            definition: &crate::types::ability::AbilityDefinition,
+        ) -> Option<&crate::types::ability::AbilityDefinition> {
+            if matches!(
+                definition.effect.as_ref(),
+                Effect::CreateDelayedTrigger {
+                    condition: crate::types::ability::DelayedTriggerCondition::AtNextPhase {
+                        phase: crate::types::phase::Phase::EndCombat,
+                    },
+                    effect,
+                    ..
+                } if matches!(
+                    effect.effect.as_ref(),
+                    Effect::ChangeZone {
+                        destination: Zone::Exile,
+                        target: TargetFilter::LastCreated,
+                        ..
+                    }
+                )
+            ) {
+                return Some(definition);
+            }
+            definition
+                .sub_ability
+                .as_deref()
+                .and_then(find_delayed_exile)
+                .or_else(|| {
+                    definition
+                        .else_ability
+                        .as_deref()
+                        .and_then(find_delayed_exile)
+                })
+        }
+        assert!(
+            find_delayed_exile(execute).is_some(),
+            "the full attack trigger must retain its end-of-combat exile of the created token"
+        );
+    }
+
+    #[test]
+    fn copy_token_entry_suffix_and_leading_forms_remain_composable() {
+        for (suffix, expected) in [
+            (" and that's tapped and attacking.", (true, true)),
+            (" and that is tapped.", (true, false)),
+            (" and thats attacking,", (false, true)),
+        ] {
+            assert_eq!(
+                parse_copy_token_trailing_entry_modifiers(suffix, false),
+                Some(expected),
+                "copy-token trailing entry suffix: {suffix:?}"
+            );
+        }
+        assert_eq!(
+            parse_copy_token_trailing_entry_modifiers(
+                " and that are tapped and attacking, with flying.",
+                true,
+            ),
+            None,
+            "an unrelated trailing clause must not be accepted as an entry modifier"
+        );
+
+        let (_, (tapped, enters_attacking)) = parse_copy_token_entry_modifiers(
+            "create a tapped and attacking token that's a copy of target creature",
+        )
+        .expect("existing leading copy-token form must stay supported");
+        assert!(tapped && enters_attacking);
+    }
+
+    #[test]
     fn copy_x_tokens_binds_where_clause() {
         // CR 107.3: X bound to a trailing "where X is <quantity>" clause.
         let txt = "Create X tokens that are copies of target creature you control, where X is the number of Clues you control.";
@@ -2223,6 +2568,37 @@ mod tests {
                 .contains(&TypeFilter::Subtype("Clue".to_string())),
             "X must count controlled Clues, got {:?}",
             tf.type_filters
+        );
+    }
+
+    #[test]
+    fn nacatl_war_pride_copy_tokens_bind_count_and_entry_state() {
+        // Nacatl War-Pride's printed token sentence combines a copied-source
+        // anaphor, a trailing entry-state clause, and a where-X count binding.
+        let oracle = "create X tokens that are copies of it and that are tapped and attacking, where X is the number of creatures defending player controls.";
+        let effect = try_parse_token(&oracle.to_lowercase(), oracle, &mut ParseContext::default())
+            .expect("Nacatl War-Pride token sentence must parse");
+        let Effect::CopyTokenOf {
+            count,
+            tapped,
+            enters_attacking,
+            ..
+        } = effect
+        else {
+            panic!("expected CopyTokenOf, got {effect:?}");
+        };
+        assert!(tapped && enters_attacking);
+        assert!(
+            matches!(
+                &count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(filter),
+                    },
+                } if filter.controller == Some(ControllerRef::DefendingPlayer)
+                    && filter.type_filters.contains(&TypeFilter::Creature)
+            ),
+            "where-X must count creatures defending player controls, got {count:?}"
         );
     }
 
@@ -3095,7 +3471,8 @@ mod tests {
         use crate::types::statics::StaticMode;
 
         let statics =
-            extract_token_static_abilities(r#"with toxic 1 and "This token can't block.""#, "");
+            extract_token_static_abilities(r#"with toxic 1 and "This token can't block.""#, "")
+                .expect("the token body must lower");
         assert_eq!(statics.len(), 1);
         assert_eq!(statics[0].mode, StaticMode::CantBlock);
         assert_eq!(statics[0].affected, Some(TargetFilter::SelfRef));
@@ -3109,7 +3486,8 @@ mod tests {
         let statics = extract_token_static_abilities(
             r#"with flying, indestructible, and "The Void attacks each combat if able.""#,
             "The Void",
-        );
+        )
+        .expect("the token body must lower");
         assert_eq!(statics.len(), 1);
         assert_eq!(statics[0].mode, StaticMode::MustAttack);
         assert_eq!(statics[0].affected, Some(TargetFilter::SelfRef));
@@ -3117,7 +3495,8 @@ mod tests {
         let statics = extract_token_static_abilities(
             r#"with "Creatures you control attack each combat if able.""#,
             "Pirate",
-        );
+        )
+        .expect("the token body must lower");
         assert_eq!(statics.len(), 1);
         assert_eq!(statics[0].mode, StaticMode::MustAttack);
         assert_eq!(
@@ -3169,7 +3548,8 @@ mod tests {
         // Anchored single-quoted span: open `'` follows `and `, close `'`
         // is the last apostrophe. The internal apostrophe in "can't" is
         // treated as content, not a delimiter.
-        let statics = extract_token_static_abilities("and '~ can't block.'", "");
+        let statics = extract_token_static_abilities("and '~ can't block.'", "")
+            .expect("the token body must lower");
         assert_eq!(statics.len(), 1);
         assert_eq!(statics[0].mode, StaticMode::CantBlock);
         assert_eq!(statics[0].affected, Some(TargetFilter::SelfRef));
@@ -3184,7 +3564,8 @@ mod tests {
         let statics = extract_token_static_abilities(
             "with 'This token gets +1/+1 for each artifact you control.'",
             "Construct",
-        );
+        )
+        .expect("the token body must lower");
         assert_eq!(
             statics.len(),
             1,
@@ -3199,7 +3580,8 @@ mod tests {
         let statics = extract_token_static_abilities(
             r#"with "Equipped creature gets +1/+2" and equip {2}"#,
             "Sturdy Shield",
-        );
+        )
+        .expect("the token body must lower");
         assert!(
             statics.iter().any(|static_def| {
                 static_def.modifications.iter().any(|modification| {
@@ -3222,8 +3604,83 @@ mod tests {
 
     #[test]
     fn extract_static_empty_when_no_quoted_ability() {
-        let statics = extract_token_static_abilities("with flying and haste", "");
+        let statics = extract_token_static_abilities("with flying and haste", "")
+            .expect("the token body must lower");
         assert!(statics.is_empty());
+    }
+
+    /// SHAPE — CR 201.5a + CR 111.4: Toggo, Goblin Weaponsmith's Rock body
+    /// (verbatim). Inside the nested grant, "Sacrifice Rock" names the token as
+    /// that grant's source, so it lowers to an unbound `GrantingObject` (bound to
+    /// the Rock at layer 6), and the grant's description renders the token's
+    /// printed name while the host reference stays `~` (CR 201.5b).
+    #[test]
+    fn toggo_rock_nested_grant_names_the_rock() {
+        use crate::types::ability::{AbilityCost, FilterProp, TypedFilter};
+        use crate::types::statics::StaticMode;
+
+        fn sacrifice_target(cost: &AbilityCost) -> Option<&TargetFilter> {
+            match cost {
+                AbilityCost::Sacrifice(sac) => Some(&sac.target),
+                AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+                    costs.iter().find_map(sacrifice_target)
+                }
+                _ => None,
+            }
+        }
+
+        let statics = extract_token_static_abilities(
+            "with \"Equipped creature has '{1}, {T}, Sacrifice Rock: This creature deals 2 damage to any target'\" and equip {1}",
+            "Rock",
+        )
+        .expect("Toggo's Rock body must lower");
+        // Reach-guard: the equipped-creature grant and the equip grant.
+        assert_eq!(statics.len(), 2, "{statics:#?}");
+        let grant = statics
+            .iter()
+            .find(|def| {
+                def.affected
+                    == Some(TargetFilter::Typed(
+                        TypedFilter::creature().properties(vec![FilterProp::EquippedBy]),
+                    ))
+            })
+            .expect("CR 301.5a: the equipped-creature grant static");
+        assert_eq!(grant.mode, StaticMode::Continuous);
+        let [ContinuousModification::GrantAbility { definition }] = grant.modifications.as_slice()
+        else {
+            panic!("expected one GrantAbility, got {:#?}", grant.modifications);
+        };
+        assert_eq!(
+            definition.cost.as_ref().and_then(sacrifice_target),
+            Some(&TargetFilter::GrantingObject { bound: None }),
+            "CR 201.5a: Sacrifice Rock names the granting Rock, not the host"
+        );
+        assert_eq!(
+            definition.description.as_deref(),
+            Some("{1}, {T}, Sacrifice Rock: ~ deals 2 damage to any target"),
+            "CR 201.5a + CR 201.5b: the cost names Rock, the effect source stays the host"
+        );
+        assert!(
+            statics.iter().any(|def| {
+                def.affected == Some(TargetFilter::SelfRef)
+                    && def.modifications.iter().any(|m| {
+                        matches!(
+                            m,
+                            ContinuousModification::GrantAbility { definition }
+                                if matches!(
+                                    *definition.effect,
+                                    Effect::Attach { attachment: TargetFilter::SelfRef, .. }
+                                )
+                        )
+                    })
+            }),
+            "CR 702.6a: the equip grant must be present"
+        );
+        let json = serde_json::to_string(&statics).expect("statics serialize");
+        assert!(
+            !json.contains(crate::parser::oracle_util::GRANTING_SELF_PLACEHOLDER),
+            "the granter marker must not leak into the token's statics"
+        );
     }
 
     #[test]
@@ -3682,6 +4139,7 @@ mod tests {
         let Effect::Token {
             tapped,
             enters_attacking,
+            attack_destination,
             ..
         } = effect
         else {
@@ -3691,6 +4149,74 @@ mod tests {
         assert!(
             enters_attacking,
             "Human token must enter attacking despite trailing defender phrase"
+        );
+        assert_eq!(
+            attack_destination,
+            TokenAttackDestination::Player {
+                player: ControllerRef::DefendingPlayer,
+                scope: NamedDefenderScope::PlayerOrPlaneswalker,
+            },
+            "the trailing defender phrase names the destination"
+        );
+    }
+
+    /// CR 508.4: the destination phrase after "attacking" names the defending
+    /// player (optionally "or a planeswalker they control") and must end the
+    /// clause; any other continuation is not a destination.
+    #[test]
+    fn token_attack_destination_phrase_ends_the_clause() {
+        let player = |scope| TokenAttackDestination::Player {
+            player: ControllerRef::DefendingPlayer,
+            scope,
+        };
+        for (input, scope) in [
+            (" that player", NamedDefenderScope::Player),
+            (" that opponent", NamedDefenderScope::Player),
+            (" that player.", NamedDefenderScope::Player),
+            (
+                " that player or a planeswalker they control",
+                NamedDefenderScope::PlayerOrPlaneswalker,
+            ),
+            (" that player, where X is 2", NamedDefenderScope::Player),
+        ] {
+            let (_, destination) = parse_token_attack_destination(input)
+                .unwrap_or_else(|error| panic!("{input:?} must parse: {error:?}"));
+            assert_eq!(destination, player(scope), "{input:?}");
+        }
+        for input in [
+            " that player's planeswalker",
+            " that player and",
+            " that creature",
+            " attacking",
+        ] {
+            assert!(
+                parse_token_attack_destination(input).is_err(),
+                "{input:?} is not a destination"
+            );
+        }
+    }
+
+    /// CR 508.4: the leading "tapped and attacking" modifier names no defender.
+    #[test]
+    fn leading_tapped_and_attacking_modifier_names_no_destination() {
+        let text = "Create a tapped and attacking X/X green Dinosaur creature token with trample, where X is the greatest power among other attacking creatures.";
+        let effect = try_parse_token(&text.to_lowercase(), text, &mut ParseContext::default())
+            .expect("expected Token effect");
+        let Effect::Token {
+            enters_attacking,
+            attack_destination,
+            ..
+        } = effect
+        else {
+            panic!("expected Token effect");
+        };
+        assert!(
+            enters_attacking,
+            "reach guard: the leading modifier applied"
+        );
+        assert_eq!(
+            attack_destination,
+            TokenAttackDestination::ControllerChooses
         );
     }
 
@@ -3835,7 +4361,7 @@ mod tests {
         use crate::types::mana::ManaColor;
 
         assert!(
-            crate::game::token_presets::known_token_body_by_name("Bear").is_none(),
+            crate::types::token_presets::known_token_body_by_name("Bear").is_none(),
             "Bear has multiple catalog bodies and must not pick the first one"
         );
 
@@ -4018,7 +4544,7 @@ mod granted_activated_pump_tests {
     ///
     /// Asserted as a SHAPE, never byte equality: Brood Keeper's wrapper is built by
     /// the `It has "…"` path and carries a `description`, while Dragon Egg's is built
-    /// by `push_parsed_statics`' fallback (`token.rs:1359-1367`) and carries none.
+    /// by `push_parsed_statics`' `classify_quoted_inner` fallback and carries none.
     fn assert_granted_red_pump(statics: &[StaticDefinition], token: &str) {
         assert_eq!(
             statics.len(),
