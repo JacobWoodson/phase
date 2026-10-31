@@ -8003,9 +8003,9 @@ pub enum PendingCounterPostAction {
     EmitCommittedCopyTokenEntry {
         object_id: ObjectId,
     },
-    /// CR 614.12 + CR 616.1: finish an ordinary interactive enter-as-copy
-    /// entry after its merged counter placement settles. Never minted by Meld
-    /// or liminal entry. The incarnation pin prevents work on a later object.
+    /// CR 614.12 + CR 616.1: finish an ordinary or liminal-token interactive
+    /// enter-as-copy entry after its merged counter placement settles. Never
+    /// minted by Meld. The incarnation pin prevents work on a later object.
     ///
     /// The fallible engine consumer pops this action before running the entry
     /// tail; a nested pause parks only the remaining post-actions. It runs in
@@ -34755,6 +34755,7 @@ impl GameState {
                 | GameEvent::DamageCleared { .. }
                 | GameEvent::GameOver { .. }
                 | GameEvent::ResolutionHalted { .. }
+                | GameEvent::ShortcutRepetition { .. }
                 | GameEvent::DamageDealt { .. }
                 | GameEvent::DamagePrevented { .. }
                 | GameEvent::SpellCountered { .. }
