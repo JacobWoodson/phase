@@ -803,22 +803,24 @@ pub(crate) fn apply_damage_after_replacement(
                     // replacements, or the Horde damage→mill redirect parking a
                     // mill/batch choice. The loss, the damage event, and any
                     // lifelink for this target are deferred until the resume.
-                    // Combat drops deferred portions (combat_damage.rs Phase
-                    // C); non-combat damage stashes its post-loss work so the
-                    // resume drain runs it exactly once after the loss settles.
-                    if !is_combat {
-                        state.pending_damage_post_loss =
-                            Some(Box::new(crate::types::game_state::PendingDamagePostLoss {
-                                source_id: ctx.source_id,
-                                source_incarnation: ctx.source_incarnation,
-                                controller: ctx.controller,
-                                target: *player_id,
-                                actual_amount,
-                                has_lifelink: ctx.has_lifelink,
-                                lifelink_bonus: ctx.lifelink_bonus,
-                                stage: crate::types::game_state::DamagePostLossStage::EmitAndRecord,
-                            }));
-                    }
+                    // Both combat and non-combat legs stash their post-loss work
+                    // (combat-flagged for the batch remnant, which the combat
+                    // resume consumes; the shared drain skips combat stashes).
+                    // Counter-addition pauses (infect/toxic) return NeedsChoice
+                    // WITHOUT stashing, so the stash's presence after this call
+                    // identifies a loss pause.
+                    state.pending_damage_post_loss =
+                        Some(Box::new(crate::types::game_state::PendingDamagePostLoss {
+                            source_id: ctx.source_id,
+                            source_incarnation: ctx.source_incarnation,
+                            controller: ctx.controller,
+                            target: *player_id,
+                            actual_amount,
+                            has_lifelink: ctx.has_lifelink,
+                            lifelink_bonus: ctx.lifelink_bonus,
+                            stage: crate::types::game_state::DamagePostLossStage::EmitAndRecord,
+                            is_combat,
+                        }));
                     return DamageResult::NeedsChoice;
                 }
             }
@@ -1042,10 +1044,11 @@ pub(crate) fn apply_damage_after_replacement(
 /// dealt damage by" condition queries. `dealt_amount` gates recording (a
 /// nonzero amount actually dealt per CR 120.3/120.6); `record_amount` /
 /// `record_excess` are the lethal-split figures the record carries. Shared by
-/// the synchronous path and the post-loss resume drain so a paused-then-resumed
-/// leg emits and records exactly what the never-paused leg would.
+/// the synchronous path, the post-loss resume drain, and the combat batch
+/// remnant resume so a paused-then-resumed leg emits and records exactly what
+/// the never-paused leg would.
 #[allow(clippy::too_many_arguments)]
-fn emit_damage_dealt_and_record(
+pub(crate) fn emit_damage_dealt_and_record(
     state: &mut GameState,
     source_id: ObjectId,
     source_incarnation: Option<u64>,
@@ -1186,24 +1189,27 @@ fn gain_lifelink_for_damage_leg(
 pub(crate) enum DamagePostLossDrainOutcome {
     /// The stashed work fully settled (or nothing was stashed).
     Settled,
-    /// The lifelink gain re-parked on a life-gain replacement choice; the
-    /// stash keeps the `LifelinkGain` stage for the next answer.
+    /// The lifelink gain parked on a life-gain replacement choice. Nothing is
+    /// re-stashed: the gain is owned by `state.pending_replacement` and the
+    /// LifeGain arm settles it — re-stashing would re-propose a second gain on
+    /// the next answer.
     PausedForReplacement,
 }
 
 /// CR 120.3f + CR 120.1 + CR 616.1: run a non-combat player-damage leg's
 /// stashed post-loss work (the `DamageDealt` event, the CR 120.1 record, the
 /// lifelink gain) once its life loss fully settles. Called from the
-/// post-replacement funnel after the batch drain retires with no re-park. Each
-/// stage runs exactly once: `EmitAndRecord` is infallible, while a lifelink
-/// gain that re-parks keeps the `LifelinkGain` stage so the next answer
-/// resumes the gain without re-emitting.
+/// post-replacement funnel after the batch drain retires with no re-park.
+/// `EmitAndRecord` is infallible; a lifelink gain that parks hands ownership
+/// to the pending replacement (matching `PendingCombatLifelink`, whose paused
+/// source is deliberately absent from `remaining`) instead of re-stashing, so
+/// the answering drain never proposes the gain twice.
 pub(crate) fn drain_pending_damage_post_loss(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> DamagePostLossDrainOutcome {
     use crate::types::game_state::DamagePostLossStage;
-    let Some(mut stashed) = state.pending_damage_post_loss.take() else {
+    let Some(stashed) = state.pending_damage_post_loss.take() else {
         return DamagePostLossDrainOutcome::Settled;
     };
     if matches!(stashed.stage, DamagePostLossStage::EmitAndRecord) {
@@ -1222,7 +1228,6 @@ pub(crate) fn drain_pending_damage_post_loss(
             false,
             events,
         );
-        stashed.stage = DamagePostLossStage::LifelinkGain;
     }
     if gain_lifelink_for_damage_leg(
         state,
@@ -1231,8 +1236,11 @@ pub(crate) fn drain_pending_damage_post_loss(
         stashed.controller,
         events,
     ) {
-        stashed.stage = DamagePostLossStage::LifelinkGain;
-        state.pending_damage_post_loss = Some(stashed);
+        // CR 616.1: the gaining player must choose which replacement applies
+        // first. Nothing was applied for this leg. `state.pending_replacement`
+        // is left populated ON PURPOSE — it is the resume's authority, and
+        // this leg is deliberately NOT re-stashed (that would gain the life
+        // twice) — mirroring `drain_combat_lifelink`'s handoff.
         return DamagePostLossDrainOutcome::PausedForReplacement;
     }
     DamagePostLossDrainOutcome::Settled

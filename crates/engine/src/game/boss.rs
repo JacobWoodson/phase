@@ -31,6 +31,7 @@ use crate::types::game_state::{
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
+use rand::seq::SliceRandom;
 
 /// True when the object is a Boss card.
 pub fn is_boss(obj: &GameObject) -> bool {
@@ -121,15 +122,31 @@ pub(crate) fn load_boss_deck(state: &mut GameState, owner: PlayerId) {
     else {
         return;
     };
+    // CR 400.2: expand the entries and shuffle BEFORE object allocation (a
+    // Placement draw, like `shuffled_entry_faces` for hidden-order decks).
+    // Sequential `ObjectId`s plus the viewer-visible pile order would
+    // otherwise let an observer sort by ID and recover the assembly order.
+    let mut assembled: Vec<(
+        &'static crate::types::proposed_event::TokenCharacteristics,
+        Option<crate::types::card::TokenImageRef>,
+    )> = Vec::new();
     for (count, selector) in boss_deck_list(deck) {
         let preset = known_token_preset_by_id(selector).unwrap_or_else(|| {
             panic!("boss-deck selector '{selector}' must resolve to a token preset")
         });
         for _ in 0..*count {
             let image_ref = crate::game::deck_loading::horde_token_image_ref(preset);
-            let id = create_boss_deck_card(state, &preset.body, Some(image_ref), owner);
-            state.boss_deck.push_back(id);
+            assembled.push((&preset.body, Some(image_ref)));
         }
+    }
+    assembled.shuffle(
+        state
+            .rng
+            .draw(crate::types::game_state::RandomDraw::Placement),
+    );
+    for (body, image_ref) in assembled {
+        let id = create_boss_deck_card(state, body, image_ref, owner);
+        state.boss_deck.push_back(id);
     }
     // Shuffle the assembled pile (a hidden pile — Placement draw) via the
     // game rng, so the Boss order is random yet reproducible — the same helper
@@ -1944,6 +1961,307 @@ mod tests {
         assert!(
             !crate::game::horde::player_has_no_life_total(&state, horde),
             "a boss-deck game keeps a real Boss life total"
+        );
+    }
+
+    /// Challenge-deck library loaded raw — no setup hook, no deploy — so the
+    /// pile holds the full deck and the id→card mapping is comparable across
+    /// seeds.
+    fn horde_library_state_for_deck(
+        deck: ChallengeDeck,
+        seed: u64,
+    ) -> (GameState, PlayerId, PlayerId) {
+        let mut state = GameState::new(FormatConfig::horde(deck.default_ruleset()), 3, seed);
+        let horde = state.format_config.archenemy_player().expect("Horde seat");
+        load_horde_library(
+            &mut state,
+            crate::test_support::shared_card_db(),
+            horde,
+            deck,
+        );
+        let hero = hero_seat(&state, horde);
+        (state, horde, hero)
+    }
+
+    /// Cyberman library (100 nontokens + 200 tokens) loaded raw.
+    fn cyberman_library_state(seed: u64) -> (GameState, PlayerId, PlayerId) {
+        horde_library_state_for_deck(ChallengeDeck::CybermanHorde, seed)
+    }
+
+    /// Turtle Boss pile (11 Bosses) loaded raw — no deploy — for the same
+    /// cross-seed comparison. Token-layout: no card DB needed.
+    fn turtle_boss_pile_state(seed: u64) -> (GameState, PlayerId, PlayerId) {
+        let mut state = GameState::new(
+            FormatConfig::horde(ChallengeDeck::TurtleTeamUpHorde.default_ruleset()),
+            3,
+            seed,
+        );
+        let horde = state.format_config.archenemy_player().expect("Horde seat");
+        load_boss_deck(&mut state, horde);
+        let hero = hero_seat(&state, horde);
+        (state, horde, hero)
+    }
+
+    /// The pile's id→card mapping in ID order: the allocation order made
+    /// observable. Pre-fix this is the deck-list order under every seed.
+    fn pile_id_name_map(state: &GameState, pile: &[ObjectId]) -> Vec<(ObjectId, String)> {
+        let mut entries: Vec<(ObjectId, String)> = pile
+            .iter()
+            .map(|id| {
+                (
+                    *id,
+                    state
+                        .objects
+                        .get(id)
+                        .map(|o| o.name.clone())
+                        .unwrap_or_default(),
+                )
+            })
+            .collect();
+        entries.sort();
+        entries
+    }
+
+    /// R6-#5 — Horde library IDs must not encode deck-list order: the same
+    /// 300-card Cyberman deck under two seeds must map IDs to different
+    /// cards. Pre-fix, allocation ran in list order (100 nontokens then 200
+    /// tokens) under every seed, and the viewer's pile-order projection
+    /// exposes pile order — sorting by ID recovered the assembly order.
+    #[test]
+    fn horde_library_allocation_order_is_seed_dependent() {
+        let (state_a, horde_a, hero_a) = cyberman_library_state(42);
+        let (state_b, horde_b, _) = cyberman_library_state(43);
+        let pile_a: Vec<ObjectId> = state_a
+            .players
+            .iter()
+            .find(|p| p.id == horde_a)
+            .expect("horde")
+            .library
+            .iter()
+            .copied()
+            .collect();
+        let pile_b: Vec<ObjectId> = state_b
+            .players
+            .iter()
+            .find(|p| p.id == horde_b)
+            .expect("horde")
+            .library
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(pile_a.len(), 300, "Cyberman library holds 100 + 200");
+        assert_eq!(pile_b.len(), 300, "Cyberman library holds 100 + 200");
+        let map_a = pile_id_name_map(&state_a, &pile_a);
+        let (state_a2, horde_a2, _) = cyberman_library_state(42);
+        let pile_a2: Vec<ObjectId> = state_a2
+            .players
+            .iter()
+            .find(|p| p.id == horde_a2)
+            .expect("horde")
+            .library
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(
+            pile_id_name_map(&state_a2, &pile_a2),
+            map_a,
+            "the same seed reproduces the same allocation (reproducibility)"
+        );
+        assert_ne!(
+            map_a,
+            pile_id_name_map(&state_b, &pile_b),
+            "allocation order must depend on the seed, not the deck list"
+        );
+        // The combined shuffle interleaves nontokens and tokens in ID order
+        // (pre-fix: the first 100 IDs are all nontokens).
+        let token_flags: Vec<bool> = map_a
+            .iter()
+            .map(|(id, _)| state_a.objects.get(id).is_some_and(|o| o.is_token))
+            .collect();
+        assert!(
+            token_flags[..100].iter().any(|t| *t) && token_flags[100..].iter().any(|t| !t),
+            "ID order must mix nontokens and tokens, not list them group by group"
+        );
+        // Viewer reach-guard: the hero's snapshot really does project the
+        // pile ID order (the surface the fixed mapping would have exploited).
+        let viewer = crate::game::visibility::filter_state_for_viewer(&state_a, hero_a);
+        let seen: Vec<ObjectId> = viewer
+            .players
+            .iter()
+            .find(|p| p.id == horde_a)
+            .expect("horde in view")
+            .library
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(seen, pile_a, "the viewer sees the pile ID order");
+        assert!(
+            seen.iter().all(|id| viewer
+                .objects
+                .get(id)
+                .is_some_and(|o| o.name == "Hidden Card")),
+            "pile identities stay redacted in the view"
+        );
+    }
+
+    /// R6-#6 — a hidden Horde library card must not leak token metadata in
+    /// viewer states: `is_token` and `is_horde_deck_token` both redact.
+    /// Exercised on the token-bearing Cyberman deck (100 cards + 200
+    /// tokens), asserting both the projected structs and their serialized
+    /// form (all three marker keys skip-serialize when cleared).
+    #[test]
+    fn hidden_horde_library_redacts_token_metadata() {
+        let (state, horde, hero) = horde_library_state_for_deck(ChallengeDeck::CybermanHorde, 42);
+        let pile: Vec<ObjectId> = state
+            .players
+            .iter()
+            .find(|p| p.id == horde)
+            .expect("horde")
+            .library
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(pile.len(), 300, "Cyberman library holds 100 + 200");
+        // Reach guards: authoritatively, the pile really does mix tokens in.
+        let token_count = pile
+            .iter()
+            .filter(|id| state.objects.get(id).is_some_and(|o| o.is_token))
+            .count();
+        assert_eq!(
+            token_count, 200,
+            "200 pile cards are tokens authoritatively"
+        );
+        assert!(
+            pile.iter().all(|id| {
+                let obj = state.objects.get(id).expect("pile object");
+                obj.is_horde_deck_token == obj.is_token
+            }),
+            "authoritatively, exactly the tokens carry the horde-deck flag"
+        );
+
+        let viewer = crate::game::visibility::filter_state_for_viewer(&state, hero);
+        for id in &pile {
+            let obj = viewer.objects.get(id).expect("pile object projected");
+            assert!(
+                !obj.is_token,
+                "hidden pile card {id:?} must not show token-ness"
+            );
+            assert!(
+                !obj.is_horde_deck_token,
+                "hidden pile card {id:?} must not show the horde-deck flag"
+            );
+            assert!(
+                obj.horde_library_rarity.is_none(),
+                "Cyberman pins no rarity; the view must not invent one"
+            );
+            let json = serde_json::to_string(obj).expect("pile object serializes");
+            for key in [
+                "\"is_token\":",
+                "\"is_horde_deck_token\":",
+                "\"horde_library_rarity\":",
+            ] {
+                assert!(
+                    !json.contains(key),
+                    "serialized hidden pile card {id:?} must omit {key}"
+                );
+            }
+        }
+    }
+
+    /// R6-#6 — the rarity-terminated D&D deck gets the same guarantee plus
+    /// its pinned per-card rarities: all 62 nontokens pin a rarity
+    /// authoritatively (the wave rule reads it), and the view redacts every
+    /// one alongside the token flags on the 38 Ooze tokens.
+    #[test]
+    fn hidden_horde_library_redacts_pinned_rarity() {
+        let (state, horde, hero) = horde_library_state_for_deck(ChallengeDeck::DndHorde, 42);
+        let pile: Vec<ObjectId> = state
+            .players
+            .iter()
+            .find(|p| p.id == horde)
+            .expect("horde")
+            .library
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(pile.len(), 100, "D&D library holds 62 + 38");
+        let pinned = pile
+            .iter()
+            .filter(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|o| o.horde_library_rarity.is_some())
+            })
+            .count();
+        assert_eq!(pinned, 62, "all 62 nontokens pin a rarity authoritatively");
+        let token_count = pile
+            .iter()
+            .filter(|id| state.objects.get(id).is_some_and(|o| o.is_token))
+            .count();
+        assert_eq!(token_count, 38, "38 pile cards are tokens authoritatively");
+
+        let viewer = crate::game::visibility::filter_state_for_viewer(&state, hero);
+        for id in &pile {
+            let obj = viewer.objects.get(id).expect("pile object projected");
+            assert!(
+                !obj.is_token,
+                "hidden pile card {id:?} must not show token-ness"
+            );
+            assert!(
+                !obj.is_horde_deck_token,
+                "hidden pile card {id:?} must not show the horde-deck flag"
+            );
+            assert!(
+                obj.horde_library_rarity.is_none(),
+                "hidden pile card {id:?} must not show its pinned rarity"
+            );
+            let json = serde_json::to_string(obj).expect("pile object serializes");
+            for key in [
+                "\"is_token\":",
+                "\"is_horde_deck_token\":",
+                "\"horde_library_rarity\":",
+            ] {
+                assert!(
+                    !json.contains(key),
+                    "serialized hidden pile card {id:?} must omit {key}"
+                );
+            }
+        }
+    }
+
+    /// R6-#5 — the Boss pile gets the same guarantee: the 11-Boss Turtle
+    /// pile under two seeds must map IDs to different Bosses.
+    #[test]
+    fn boss_pile_allocation_order_is_seed_dependent() {
+        let (state_a, _, hero_a) = turtle_boss_pile_state(42);
+        let (state_b, _, _) = turtle_boss_pile_state(43);
+        let pile_a: Vec<ObjectId> = state_a.boss_deck.iter().copied().collect();
+        let pile_b: Vec<ObjectId> = state_b.boss_deck.iter().copied().collect();
+        assert_eq!(pile_a.len(), 11, "the Boss pile holds 11 Bosses");
+        assert_eq!(pile_b.len(), 11, "the Boss pile holds 11 Bosses");
+        let map_a = pile_id_name_map(&state_a, &pile_a);
+        let (state_a2, _, _) = turtle_boss_pile_state(42);
+        let pile_a2: Vec<ObjectId> = state_a2.boss_deck.iter().copied().collect();
+        assert_eq!(
+            pile_id_name_map(&state_a2, &pile_a2),
+            map_a,
+            "the same seed reproduces the same allocation (reproducibility)"
+        );
+        assert_ne!(
+            map_a,
+            pile_id_name_map(&state_b, &pile_b),
+            "allocation order must depend on the seed, not the deck list"
+        );
+        let viewer = crate::game::visibility::filter_state_for_viewer(&state_a, hero_a);
+        let seen: Vec<ObjectId> = viewer.boss_deck.iter().copied().collect();
+        assert_eq!(seen, pile_a, "the viewer sees the pile ID order");
+        assert!(
+            seen.iter().all(|id| viewer
+                .objects
+                .get(id)
+                .is_some_and(|o| o.name == "Hidden Card")),
+            "pile identities stay redacted in the view"
         );
     }
 

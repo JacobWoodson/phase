@@ -276,6 +276,65 @@ fn chrome_overload_skips_phased_out_hero_creature() {
     assert!(obj.is_phased_out(), "the bear is still phased out");
 }
 
+/// R6-#2 — the Smackdown half of the phased-out exclusion: a phased-out
+/// 5-power creature must not set the greatest-power selection or the bosses'
+/// life loss. The two phased-in 2/2s tie, so the captain picks from those two
+/// only; the bosses lose exactly 2 and the phased-out creature survives.
+///
+/// Revert guard: without the filter the lone phased-out 5 is the max and
+/// auto-picks with no prompt — the planned answer never fires.
+#[test]
+fn smackdown_ignores_phased_out_greatest_power() {
+    use engine::game::game_object::PhaseOutCause;
+    use engine::game::phasing::phase_out_object;
+
+    let mut state = hero_event_game();
+    let big = add_hero_creature(&mut state, HERO1, "Phased Brute", 5);
+    let cub1 = add_hero_creature(&mut state, HERO1, "Hero Cub One", 2);
+    let cub2 = add_hero_creature(&mut state, HERO2, "Hero Cub Two", 2);
+    add_library_event(&mut state, "Event: Leatherhead's Smackdown");
+
+    let mut phase_events = Vec::new();
+    let phased = phase_out_object(&mut state, big, PhaseOutCause::Directly, &mut phase_events);
+    assert!(phased.contains(&big), "reach-guard: the brute phased out");
+
+    let mut runner = GameRunner::from_state(state);
+    begin_wave_with_budget(&mut runner, 1);
+    // Snapshot after the advance: the deployed Krang's upkeep trigger ("the
+    // bosses lose 2 life") fires during it, before the prompt is answered.
+    let boss_life = seat_life(runner.state(), HORDE);
+    let mut answers = vec![vec![cub1]];
+    drive_wave_with_answers(&mut runner, &mut answers, |runner| {
+        let WaitingFor::HeroEventChoice { cards, count, .. } = &runner.state().waiting_for else {
+            panic!(
+                "Smackdown must prompt, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(*count, 1);
+        assert_eq!(
+            *cards,
+            vec![cub1, cub2],
+            "only the tied phased-in 2/2s are offered, not the phased-out 5"
+        );
+    });
+    assert_wave_settled(&runner);
+
+    let st = runner.state();
+    assert!(
+        in_pile(st, HERO1, cub1, Zone::Graveyard),
+        "the picked 2/2 is destroyed"
+    );
+    assert_eq!(
+        seat_life(st, HORDE),
+        boss_life - 2,
+        "the bosses lose the picked creature's power, not the phased-out 5"
+    );
+    let obj = st.objects.get(&big).expect("brute survives");
+    assert_eq!(obj.zone, Zone::Battlefield);
+    assert!(obj.is_phased_out(), "the brute is still phased out");
+}
+
 #[test]
 fn krang_team_discard_rejects_overcount_then_completes() {
     let mut state = hero_event_game();

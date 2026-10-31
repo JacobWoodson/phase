@@ -1011,6 +1011,23 @@ pub fn load_horde_library(
         player.library.clear();
     }
 
+    // CR 400.2 + CR 103.3: expand BOTH groups into one combined entry list
+    // and shuffle it BEFORE object allocation (a Placement draw, like
+    // `shuffled_entry_faces` for hidden-order decks). Sequential `ObjectId`s
+    // plus the viewer-visible pile order would otherwise let an observer sort
+    // by ID and recover the pre-shuffle assembly order.
+    enum HordeLibraryEntry {
+        Card {
+            // Boxed: `CardFace` dwarfs the token variant (`clippy::large_enum_variant`).
+            face: Box<CardFace>,
+            pinned: Option<Rarity>,
+        },
+        Token {
+            body: &'static crate::types::proposed_event::TokenCharacteristics,
+            image_ref: Option<TokenImageRef>,
+        },
+    }
+    let mut assembled: Vec<HordeLibraryEntry> = Vec::new();
     for (count, name) in nontokens {
         let face = db
             .get_face_by_name(name)
@@ -1020,7 +1037,10 @@ pub fn load_horde_library(
             .clone();
         let pinned = card_rarity(name);
         for _ in 0..*count {
-            create_horde_library_card(state, &face, pinned, horde_seat);
+            assembled.push(HordeLibraryEntry::Card {
+                face: Box::new(face.clone()),
+                pinned,
+            });
         }
     }
 
@@ -1038,7 +1058,7 @@ pub fn load_horde_library(
         // self-replicating Ooze's dies trigger). Name-resolved tokens are uniquely
         // named vanilla/keyword bodies with no catalog abilities and pass `None`.
         let (body, token_image_ref): (
-            &crate::types::proposed_event::TokenCharacteristics,
+            &'static crate::types::proposed_event::TokenCharacteristics,
             Option<TokenImageRef>,
         ) = if let Some(preset) = crate::game::token_presets::known_token_preset_by_id(selector) {
             (&preset.body, Some(horde_token_image_ref(preset)))
@@ -1051,7 +1071,26 @@ pub fn load_horde_library(
             )
         };
         for _ in 0..*count {
-            create_horde_library_token(state, body, token_image_ref.clone(), horde_seat);
+            assembled.push(HordeLibraryEntry::Token {
+                body,
+                image_ref: token_image_ref.clone(),
+            });
+        }
+    }
+
+    assembled.shuffle(
+        state
+            .rng
+            .draw(crate::types::game_state::RandomDraw::Placement),
+    );
+    for entry in assembled {
+        match entry {
+            HordeLibraryEntry::Card { face, pinned } => {
+                create_horde_library_card(state, &face, pinned, horde_seat);
+            }
+            HordeLibraryEntry::Token { body, image_ref } => {
+                create_horde_library_token(state, body, image_ref, horde_seat);
+            }
         }
     }
 

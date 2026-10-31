@@ -14,6 +14,7 @@
 //! 3. The advanced delivery must publish `Milled` events exactly like ordinary
 //!    mill, so milled triggers (Zellix) fire.
 
+use engine::game::combat::AttackTarget;
 use engine::game::game_object::PhaseStatus;
 use engine::game::layers::flush_layers;
 use engine::game::scenario::{GameRunner, GameScenario};
@@ -563,6 +564,278 @@ fn paused_damage_to_mill_preserves_lifelink_and_recording() {
         records.len(),
         1,
         "Tim's damage must be recorded exactly once, got {:?}",
+        runner.state().damage_dealt_this_turn
+    );
+    assert_eq!(
+        records[0].target,
+        TargetRef::Player(HORDE),
+        "the record must name the Horde as the damage recipient"
+    );
+    assert_eq!(
+        records[0].amount, 1,
+        "the record must carry the 1 damage dealt"
+    );
+}
+
+/// R6-#3 — the SECOND pause must not re-propose the lifelink gain: the R4-#3
+/// board plus Boon Reflection and Rhox Faithmender on the survivor's side.
+/// Tim's ping pauses twice — once for the mill ordering (RiP vs Leyline),
+/// once for the gain ordering (Boon vs Rhox). Answering the gain prompt
+/// settles the ONE gain (with the chosen replacement folded once); no third
+/// prompt may appear and the survivor's life is the exact total.
+///
+/// Gain-source note: the review names Angel of Vitality, but the curated
+/// integration fixture has no Angel entry — only Boon, Rhox, and
+/// Alhammarret's Archive carry parsed GainLife replacements there. Boon +
+/// Rhox are the same competing-replacement class (two mandatory doublers),
+/// so the pause is identical; 1 gains exactly 1*2*2 = 4 either order.
+///
+/// Revert guard: without the stage handoff, the post-answer funnel drain
+/// re-proposes the gain after every answer — a third ordering prompt parks
+/// and each further answer gains again.
+#[test]
+fn paused_damage_second_pause_gains_lifelink_once() {
+    let Some(db) = load_db() else {
+        return;
+    };
+
+    let mut scenario = advanced_horde_scenario();
+    scenario.with_life(SURVIVOR, 20);
+    scenario.add_real_card(SURVIVOR, "Rest in Peace", Zone::Battlefield, db);
+    scenario.add_real_card(SURVIVOR, "Leyline of the Void", Zone::Battlefield, db);
+    scenario.add_real_card(SURVIVOR, "Boon Reflection", Zone::Battlefield, db);
+    scenario.add_real_card(SURVIVOR, "Rhox Faithmender", Zone::Battlefield, db);
+    let tim = scenario.add_real_card(SURVIVOR, "Prodigal Sorcerer", Zone::Battlefield, db);
+    let courage = scenario.add_real_card(SURVIVOR, "Unflinching Courage", Zone::Hand, db);
+    let milled = scenario.add_real_card(HORDE, "Lightning Bolt", Zone::Library, db);
+    for _ in 0..9 {
+        scenario.add_real_card(HORDE, "Lightning Bolt", Zone::Library, db);
+    }
+
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    {
+        let dummy = ObjectId(0);
+        let pool = &mut runner
+            .state_mut()
+            .players
+            .iter_mut()
+            .find(|p| p.id == SURVIVOR)
+            .unwrap()
+            .mana_pool;
+        for mana in [ManaType::Green, ManaType::White, ManaType::Colorless] {
+            pool.add(ManaUnit::new(mana, dummy, false, vec![]));
+        }
+    }
+    park_survivor_priority(&mut runner);
+
+    runner.cast(courage).target_objects(&[tim]).resolve();
+    runner.advance_until_stack_empty();
+
+    flush_layers(runner.state_mut());
+    assert!(
+        runner
+            .state()
+            .objects
+            .get(&tim)
+            .expect("Tim still on the battlefield")
+            .keywords
+            .contains(&Keyword::Lifelink),
+        "Courage must grant Tim lifelink, or the life assertion is vacuous"
+    );
+
+    // PAUSE 1: the redirected mill parks on the RiP/Leyline ordering.
+    let result = activate_tim_stop_at_prompt(&mut runner, tim);
+    assert!(
+        matches!(result.waiting_for, WaitingFor::ReplacementChoice { .. }),
+        "the ordering choice must park mid-mill, got {:?}",
+        result.waiting_for
+    );
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("answer the mill ordering prompt");
+
+    // PAUSE 2: the lifelink gain parks on the Boon/Rhox ordering.
+    let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for else {
+        panic!(
+            "the lifelink gain must park on its ordering prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        candidates.len(),
+        2,
+        "Boon and Rhox must both contest the gain"
+    );
+    let names: Vec<&str> = candidates.iter().map(|c| c.source_name.as_str()).collect();
+    assert!(
+        names.contains(&"Boon Reflection") && names.contains(&"Rhox Faithmender"),
+        "the gain prompt must name both replacements, got {names:?}"
+    );
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("answer the gain ordering prompt");
+
+    // NO PAUSE 3: the answered gain is settled, not re-proposed.
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the answered gain must settle with no further prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner
+            .state()
+            .objects
+            .get(&milled)
+            .expect("milled Bolt still exists")
+            .zone,
+        Zone::Exile,
+        "the milled Bolt must be exiled by the answered redirect"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .players
+            .iter()
+            .find(|p| p.id == SURVIVOR)
+            .unwrap()
+            .life,
+        24,
+        "Tim's 1 lifelink damage must gain exactly 1*2*2 = 4 through both pauses"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .damage_dealt_this_turn
+            .iter()
+            .filter(|r| r.source_id == tim)
+            .count(),
+        1,
+        "Tim's damage must be recorded exactly once"
+    );
+}
+
+/// R6-#4 — combat damage across a mill pause: an unblocked Rhox Faithmender
+/// (1/5) hits the Horde while Rest in Peace + Leyline of the Void pause the
+/// redirected mill-1. After the prompt is answered the combat leg completes:
+/// the milled card exiles, Rhox's controller gains the doubled lifelink
+/// (1 damage, doubled once by Rhox itself to 2 — a lone replacement, so the
+/// gain never pauses), and the combat damage is recorded — each exactly once.
+///
+/// Revert guard: without the batch remnant, Phase C turns the paused leg's
+/// `NeedsChoice` into 0 — no lifelink gain, no damage record.
+#[test]
+fn combat_damage_to_mill_preserves_lifelink_and_recording() {
+    let Some(db) = load_db() else {
+        return;
+    };
+
+    let mut scenario = advanced_horde_scenario();
+    scenario.with_life(SURVIVOR, 20);
+    scenario.add_real_card(SURVIVOR, "Rest in Peace", Zone::Battlefield, db);
+    scenario.add_real_card(SURVIVOR, "Leyline of the Void", Zone::Battlefield, db);
+    let rhox = scenario.add_real_card(SURVIVOR, "Rhox Faithmender", Zone::Battlefield, db);
+    let milled = scenario.add_real_card(HORDE, "Lightning Bolt", Zone::Library, db);
+    for _ in 0..9 {
+        scenario.add_real_card(HORDE, "Lightning Bolt", Zone::Library, db);
+    }
+
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    park_survivor_priority(&mut runner);
+
+    // PREMISES: Rhox swings for exactly 1 with lifelink — or the life and
+    // record assertions below fail for fixture reasons, not the pause defect.
+    flush_layers(runner.state_mut());
+    let rhox_obj = runner
+        .state()
+        .objects
+        .get(&rhox)
+        .expect("Rhox still on the battlefield");
+    assert_eq!(rhox_obj.power, Some(1), "Rhox must hit for exactly 1");
+    assert!(
+        rhox_obj.keywords.contains(&Keyword::Lifelink),
+        "Rhox must have lifelink"
+    );
+
+    // Walk the survivor's turn into combat and send Rhox at the Horde.
+    runner.pass_both_players();
+    runner
+        .declare_attackers(&[(rhox, AttackTarget::Player(HORDE))])
+        .expect("Rhox must be able to attack the Horde");
+    // Drive through combat damage to post-combat, leaving Rhox unblocked and
+    // answering each mill-ordering prompt (both redirects exile either way).
+    let mut mill_prompts = 0;
+    for _ in 0..40 {
+        if runner.state().phase == Phase::PostCombatMain {
+            break;
+        }
+        match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } => runner.pass_both_players(),
+            WaitingFor::DeclareBlockers { .. } => {
+                runner
+                    .declare_blockers(&[])
+                    .expect("declaring no blockers should succeed");
+            }
+            WaitingFor::ReplacementChoice { .. } => {
+                mill_prompts += 1;
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("answer the CR 616.1 ordering prompt");
+            }
+            other => panic!("unexpected window during combat: {other:?}"),
+        }
+    }
+    assert_eq!(
+        runner.state().phase,
+        Phase::PostCombatMain,
+        "combat must complete, stuck at {:?} with {:?}",
+        runner.state().phase,
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        mill_prompts, 1,
+        "the redirected mill-1 must pause on its ordering — zero means the \
+         board stopped pausing and the test is vacuous"
+    );
+
+    // DISCRIMINATORS: the mill landed (the Bolt exiled) AND the combat
+    // leg's post-loss work survived the pause — the doubled lifelink and the
+    // CR 120.1 record, each exactly once.
+    assert_eq!(
+        runner
+            .state()
+            .objects
+            .get(&milled)
+            .expect("milled Bolt still exists")
+            .zone,
+        Zone::Exile,
+        "the milled Bolt must be exiled by the answered redirect"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .players
+            .iter()
+            .find(|p| p.id == SURVIVOR)
+            .unwrap()
+            .life,
+        22,
+        "Rhox's 1 combat damage must gain exactly 1*2 = 2 even though the \
+         redirected mill paused"
+    );
+    let records: Vec<_> = runner
+        .state()
+        .damage_dealt_this_turn
+        .iter()
+        .filter(|r| r.source_id == rhox)
+        .collect();
+    assert_eq!(
+        records.len(),
+        1,
+        "Rhox's damage must be recorded exactly once, got {:?}",
         runner.state().damage_dealt_this_turn
     );
     assert_eq!(

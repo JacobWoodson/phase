@@ -3877,6 +3877,15 @@ fn redact_printed_identity(obj: &mut crate::game::game_object::GameObject) {
     obj.spellbook.clear();
     obj.parse_warnings.clear();
     obj.back_face = None;
+    // CR 400.2: a hidden card's token-ness identifies its pile position
+    // (Horde libraries mix tokens and cards), so it redacts like every other
+    // printed characteristic — mirroring `redact_zone_change_record`'s
+    // `record.is_token = false`. The Horde-deck flag and the pinned library
+    // rarity go with it: both are loader-seeded per-card metadata with no
+    // public face while hidden.
+    obj.is_token = false;
+    obj.is_horde_deck_token = false;
+    obj.horde_library_rarity = None;
     obj.specialize_faces = None;
     obj.cleave_variant = None;
     obj.modal = None;
@@ -12468,6 +12477,7 @@ mod tests {
                 prevention_tally: Vec::new(),
                 lives_before: vec![20, 20],
                 sub_step: crate::types::game_state::CombatDamageSubStep::Regular,
+                phase_c_remnant: None,
             }));
 
         let authoritative = serde_json::to_string(&state.pending_combat_lifelink)

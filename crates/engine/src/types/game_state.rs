@@ -24,14 +24,15 @@ use super::ability::{
     CastTimingPermission, CastVariantPaid, CastingPermission, CategoryChooserScope, ChoiceType,
     ChoiceValue, ChooseFromZoneConstraint, ChosenAttribute, CoinFlipResult, ContinuousModification,
     ControlWindow, CopiableValues, CopyChooseScope, CopyScale, CopyTargetPurpose,
-    CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition, DelayedTriggerKind,
-    DigRestOrder, DigRestSplitScope, Duration, EffectKind, EntryAttackDestination, FaceDownProfile,
-    GameRestriction, KeywordAction, KickerVariant, LibraryPosition, ModalChoice,
-    PermanentEntryMode, PileSource, QuantityExpr, ReplacementDefinition, ResolvedAbility,
-    ReturnResultId, SearchDestinationSplit, SearchOrderingHint, SearchSelectionConstraint,
-    StackAbilityKind, StaticCondition, TapCreaturesSelectionMode, TargetFilter, TargetRef,
-    ThisWayCause, TriggerBaseSetInstanceRef, TriggerCondition, TriggerDefinition,
-    TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry,
+    CostPaidObjectSnapshot, CounterCostSelection, DamageContextSnapshot, DelayedTriggerCondition,
+    DelayedTriggerKind, DigRestOrder, DigRestSplitScope, Duration, EffectKind,
+    EntryAttackDestination, FaceDownProfile, GameRestriction, KeywordAction, KickerVariant,
+    LibraryPosition, ModalChoice, PermanentEntryMode, PileSource, QuantityExpr,
+    ReplacementDefinition, ResolvedAbility, ReturnResultId, SearchDestinationSplit,
+    SearchOrderingHint, SearchSelectionConstraint, StackAbilityKind, StaticCondition,
+    TapCreaturesSelectionMode, TargetFilter, TargetRef, ThisWayCause, TriggerBaseSetInstanceRef,
+    TriggerCondition, TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef,
+    TriggerEntry,
 };
 use super::actions::{DebugCardCreationKind, GameAction, ResolveAllScope};
 use super::attribution::ObjectAttribution;
@@ -2719,19 +2720,22 @@ pub struct ExploitRecord {
     pub sacrificed_incarnation: Option<u64>,
 }
 
-/// CR 120.3f + CR 120.1 + CR 616.1: post-loss work a non-combat
-/// player-damage leg still owes after its life loss paused (the Horde
-/// damage→mill redirect parking a mill/batch choice, or co-applicable
-/// life-loss replacements). Stashed by `apply_damage_after_replacement` on
-/// the deferral; drained by `drain_pending_damage_post_loss` once the loss
-/// fully settles. Combat damage never stashes (combat drops deferred
-/// portions), and creature damage cannot pause here (only the player life-loss
-/// call defers), so the target is always a player and toxic never applies.
+/// CR 120.3f + CR 120.1 + CR 616.1: post-loss work a player-damage leg
+/// still owes after its life loss paused (the Horde damage→mill redirect
+/// parking a mill/batch choice, or co-applicable life-loss replacements).
+/// Stashed by `apply_damage_after_replacement` on the deferral. A non-combat
+/// leg drains through `drain_pending_damage_post_loss` once the loss fully
+/// settles; a combat leg (`is_combat`) instead rides the combat batch's
+/// Phase C remnant — the combat resume consumes it, so the post-replacement
+/// funnel never drains it directly. Creature damage cannot pause here (only
+/// the player life-loss call defers), so the target is always a player and
+/// toxic never applies.
 ///
 /// The staged cursor runs each step exactly once: `EmitAndRecord` is
-/// infallible (event push + record push), while `LifelinkGain` can re-park
-/// on co-applicable life-gain replacements — the drain keeps the current
-/// stage then, so the next answer resumes the gain without re-emitting.
+/// infallible (event push + record push), while a `LifelinkGain` drain that
+/// parks hands the gain to `pending_replacement` and consumes the stash —
+/// the LifeGain arm settles it, so the next answer never re-proposes it
+/// (mirroring `PendingCombatLifelink`'s deliberately-absent paused source).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingDamagePostLoss {
     pub source_id: ObjectId,
@@ -2750,6 +2754,10 @@ pub struct PendingDamagePostLoss {
     #[serde(default)]
     pub lifelink_bonus: u32,
     pub stage: DamagePostLossStage,
+    /// CR 510.2: a combat leg's post-loss work, owned by the batch remnant
+    /// rather than the shared drain (see the struct docs).
+    #[serde(default)]
+    pub is_combat: bool,
 }
 
 /// Cursor for [`PendingDamagePostLoss`]: which post-loss step still owes work.
@@ -2757,7 +2765,9 @@ pub struct PendingDamagePostLoss {
 pub enum DamagePostLossStage {
     /// Push the `DamageDealt` event and the CR 120.1 record, then advance.
     EmitAndRecord,
-    /// Apply the lifelink gain (may re-park on gain replacements).
+    /// Apply the lifelink gain. A park here consumes the stash (the pending
+    /// replacement owns the gain); the value survives only for in-flight
+    /// records, never for a re-stash.
     LifelinkGain,
 }
 
@@ -19498,7 +19508,58 @@ pub struct PendingLifelinkGain {
 /// `CombatDamageDealtToPlayer` aggregate, then Phase D's prevention riders. Deferring Phase D
 /// rather than hoisting it makes it impossible for a rider's own continuation (CR 615.5) to run
 /// while the CR 616.1 prompt is open.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// CR 510.2 + CR 616.1: one combat-damage assignment still owed after a
+/// Phase C pause, with its post-Phase-B survivor. Owned (unlike the borrowed
+/// `BatchEntry`) so the batch remnant round-trips through saves and AI
+/// clones; the survivor is re-applied on resume WITHOUT re-running damage
+/// replacement/prevention selection. `Eq` is absent because `ProposedEvent`
+/// is only `PartialEq` (like `PendingReplacement`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingCombatLeg {
+    /// Source characteristics snapshotted at collect time (CR 400.7: the
+    /// incarnation stays authoritative if the source changes zones).
+    pub ctx: DamageContextSnapshot,
+    pub source_is_commander: bool,
+    pub target: TargetRef,
+    /// CR 119.3 + CR 702.15b: the controller this source gains lifelink for
+    /// (`None` when the source has no lifelink).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifelink_controller: Option<PlayerId>,
+    /// Post-Phase-B survivor (`None` = fully prevented: applies as 0 with
+    /// bookkeeping, exactly as the never-paused path would).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub survivor: Option<ProposedEvent>,
+}
+
+/// CR 510.2: per-player, per-source combat damage for one step —
+/// `(player, [(source_id, amount)], step_total)`.
+pub type PerPlayerCombatDamage = (PlayerId, Vec<(ObjectId, u32)>, u32);
+
+/// CR 510.2 + CR 616.1: the unfinished Phase C tail of a combat-damage batch
+/// whose leg paused on a life-loss replacement choice (the Horde damage→mill
+/// redirect parking a mill/batch choice, or co-applicable loss replacements).
+/// The paused leg itself rides `pending_damage_post_loss` (combat-flagged);
+/// its lifelink share and combat bookkeeping were folded into the accumulators
+/// below at park time (amounts are post-replacement and order-free), so the
+/// resume only owes its `DamageDealt` event + CR 120.1 record (sync order:
+/// after the loss settles), then the remaining legs, then the aggregate and
+/// the lifelink drain. `Eq` is absent (see `PendingCombatLeg`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingCombatPhaseCRemnant {
+    /// Legs never applied, in batch order.
+    pub remaining: Vec<PendingCombatLeg>,
+    /// CR 119.3 + CR 702.15b: per-source lifelink sums so far, in
+    /// first-appearance order — `(source_id, controller, total_dealt)`.
+    pub lifelink_by_source: Vec<(ObjectId, PlayerId, u32)>,
+    /// CR 510.2: per-player, per-source damage so far.
+    pub combat_damage_to_players: Vec<PerPlayerCombatDamage>,
+    /// CR 400.7: each applied source's incarnation.
+    pub source_incarnations: Vec<ObjectIncarnationRef>,
+}
+
+/// `Eq` is absent because the Phase C remnant holds `ProposedEvent`
+/// survivors (see `PendingCombatLeg`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingCombatLifelink {
     /// CR 702.15e: per-source gains still owed, in batch order — separate life
     /// gain events, never merged.
@@ -19540,6 +19601,11 @@ pub struct PendingCombatLifelink {
     /// CR 510.4: which sub-step owns this batch. Snapshotted because
     /// `combat.first_strike_done` mutates during the resume.
     pub sub_step: CombatDamageSubStep,
+    /// CR 510.2 + CR 616.1: the unfinished Phase C tail, present only when
+    /// the batch parked on a LEG's life-loss pause (rather than a lifelink
+    /// gain's). The resume completes it before draining `remaining`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase_c_remnant: Option<PendingCombatPhaseCRemnant>,
 }
 
 /// CR 510.1c: A blocker with its lethal damage threshold for UI display.
@@ -41418,6 +41484,7 @@ mod tests {
             )],
             lives_before: vec![20, 20],
             sub_step: CombatDamageSubStep::Regular,
+            phase_c_remnant: None,
         })
     }
 

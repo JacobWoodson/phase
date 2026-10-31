@@ -1365,10 +1365,15 @@ fn handle_replacement_choice_inner(
             // batch drain above retires with no re-park, so drain the stashed
             // stages here — before outer continuations, matching sync order
             // (each damage target completes before later instructions resume).
-            // A lifelink gain that re-parks keeps the `LifelinkGain` stage for
-            // the next answer; propagate its prompt.
+            // A lifelink gain that parks is owned by the pending replacement
+            // (the drain consumes the stash); propagate its prompt. A
+            // combat-flagged stash is skipped: the combat batch remnant owns
+            // it, and the outer wrapper resumes that remnant below.
             if matches!(waiting_for, WaitingFor::Priority { .. })
-                && state.pending_damage_post_loss.is_some()
+                && state
+                    .pending_damage_post_loss
+                    .as_ref()
+                    .is_some_and(|stashed| !stashed.is_combat)
                 && state.active_batch_delivery().is_none()
             {
                 let outcome = crate::game::effects::deal_damage::drain_pending_damage_post_loss(

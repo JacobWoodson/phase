@@ -597,6 +597,18 @@ fn enter_phase(
     //     `resume_pending_combat_lifelink` BEFORE the skip. A `Some` observed at
     //     the line below can therefore no longer have come from that door.
     state.pending_combat_lifelink = None;
+    // CR 510.2 + CR 724.1a: abandoning the batch abandons its Phase C remnant
+    // too — drop a combat-flagged post-loss stash with it (a non-combat stash
+    // belongs to an unrelated resolution and survives). Unreachable with a
+    // live prompt (prompts block phase movement), but stranding the stash
+    // would pin `pending_damage_post_loss` forever.
+    if state
+        .pending_damage_post_loss
+        .as_ref()
+        .is_some_and(|stashed| stashed.is_combat)
+    {
+        state.pending_damage_post_loss = None;
+    }
 
     // CR 500.1: captured BEFORE the assignment below, which is the only place
     // the outgoing phase still exists. A phase-group crossing is a property of
