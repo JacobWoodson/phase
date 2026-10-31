@@ -34,7 +34,9 @@ use crate::types::mana::{ManaCost, ManaSpellGrant};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::replacements::ReplacementEvent;
-use crate::types::statics::{CastFrequency, GraveyardPermissionPool, StaticMode};
+use crate::types::statics::{
+    CastFrequency, GraveyardPermissionPool, PermissionCastLimit, StaticMode,
+};
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
@@ -77,7 +79,8 @@ use super::oracle_effect::sequence::try_parse_same_is_true_continuation;
 use super::oracle_effect::{
     ability_chain_grants_chosen_color_keyword, lower_ability_ir, parse_ability_ir_standalone,
     parse_ability_ir_with_context, parse_additional_cost_instead_condition_fragment,
-    parse_effect_chain, parse_effect_chain_with_context, parse_phase_name_set,
+    parse_effect_chain, parse_effect_chain_with_context,
+    parse_effect_chain_with_context_ability_root, parse_phase_name_set,
     parse_windowed_replacement_install_ir, rewrite_condition_keyword, target_filter_controller_ref,
     try_parse_temporal_delayed_trigger_ability,
 };
@@ -1992,6 +1995,8 @@ fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) 
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber
@@ -2079,7 +2084,7 @@ fn player_filter_uses_filter_prop(
         PlayerFilter::TrackedSetPossessor { filter, .. } => {
             target_filter_uses_filter_prop(filter, pred)
         }
-        PlayerFilter::AllExcept { exclude } => player_filter_uses_filter_prop(exclude, pred),
+        PlayerFilter::AllExcept { exclude, .. } => player_filter_uses_filter_prop(exclude, pred),
         PlayerFilter::AnyOf { filters } => filters
             .iter()
             .any(|f| player_filter_uses_filter_prop(f, pred)),
@@ -2737,7 +2742,10 @@ fn plain_own_graveyard_cast_grant_filter(effect: &Effect) -> Option<&TargetFilte
             enters_with_counter: None,
             required_cast_keyword: None,
             pool: GraveyardPermissionPool::OwnGraveyard,
-        } => definition.affected.as_ref(),
+            cast_limit: PermissionCastLimit::Unlimited,
+            mana_spend_permission: None,
+            enters_modifications,
+        } if enters_modifications.is_empty() => definition.affected.as_ref(),
         _ => None,
     }
 }
@@ -2800,6 +2808,9 @@ fn coordinated_graveyard_permission(cast_target: &TargetFilter) -> Option<Static
             enters_with_counter: None,
             required_cast_keyword: None,
             pool: GraveyardPermissionPool::OwnGraveyard,
+            cast_limit: PermissionCastLimit::Unlimited,
+            mana_spend_permission: None,
+            enters_modifications: Default::default(),
         })
         // CR 611.2c: class-wide and re-evaluated live, so cards that reach the
         // graveyard later this turn are covered.
@@ -3835,6 +3846,8 @@ fn is_spell_resolution_instruction_line(
         return false;
     }
 
+    // A classification probe, not an ability-body producer. Keep the nested
+    // default: the line may continue a spell with earlier target declarations.
     let snapshot = ctx.diagnostics.len();
     let parsed = parse_effect_chain_with_context(&prepared.effect_text, AbilityKind::Spell, ctx);
     ctx.diagnostics.truncate(snapshot);
@@ -5725,12 +5738,14 @@ fn parse_normalized_oracle_ir(
             // are parsed as IR and each is lowered purely to *ask* the question,
             // while whichever IR won is what gets emitted.
             //
-            // Three properties make this the same computation as the original:
+            // The root and nested entries share lowering machinery, with one
+            // intentional damage-target permission difference:
             //
-            // 1. `parse_effect_chain_with_context(t,k,cx)` IS
-            //    `lower_ability_ir(&parse_ability_ir_with_context(t,k,cx))`, so
-            //    each `has_unimplemented` argument is bit-for-bit the definition
-            //    the original tested.
+            // 1. `parse_effect_chain_with_context` withholds parent-target
+            //    population permission, while `parse_ability_ir_with_context`
+            //    enters an ability root that can authorize it. Converting a
+            //    caller can change that binding; the entries otherwise share
+            //    the WithContext recognizers and `lower_ability_ir` pipeline.
             // 2. The `ctx` sequencing is preserved exactly. The retry's parse
             //    receives the SAME, already-mutated `ctx` as the first parse —
             //    not a fresh one — and interposing the lowering between the two
@@ -6674,10 +6689,10 @@ fn parse_normalized_oracle_ir(
             continue;
         }
 
-        // Priority 5-pre: trigger-framed "… enters with [counters] on it" lines
-        // are CR 614.1c replacement effects, not triggered abilities — despite
-        // the "whenever"/"when" framing. Intercept before the generic trigger
-        // dispatch routes them through the SpellCast / ChangesZone matcher.
+        // Priority 5-pre: claim typed/counted "… enters with" frames before
+        // generic trigger dispatch. Cast-framed forms are CR 603.1 triggers
+        // whose resolution installs a CR 614.1c entry replacement; they must
+        // never be lowered as object-hosted static replacements.
         //
         // CR 603.2 exclusion: an ETB-with-counter TRIGGER ("… enters with a
         // counter on it, <consequence>") watches for ANY (untyped) counter and
@@ -6711,8 +6726,8 @@ fn parse_normalized_oracle_ir(
             // CR 603.1 + CR 603.3 + CR 614.1c/614.12: "Whenever you cast [spell],
             // that [subject] enters with … counter(s) on it[, where X is …]"
             // (Wildgrowth Archaic and cousin cards — Runadi, Communal Brewing, Torgal;
-            // Boreal Outrider is NOT recognized here; the self-exile form, Dark
-            // Intimations, is recognized only to fail closed below) is a TRIGGERED
+            // Boreal Outrider is NOT recognized here; Dark Intimations composes a
+            // mandatory self-exile before the installer) is a TRIGGERED
             // ability (CR 603.1),
             // not an object-hosted static replacement — the entering-with-counters
             // effect must survive the source leaving the battlefield after the
@@ -6732,10 +6747,8 @@ fn parse_normalized_oracle_ir(
                 // object-hosted replacement — publishing a partial ability AND
                 // giving it the wrong lifetime, since the effect must outlive the
                 // source leaving the battlefield. Fail the line closed instead,
-                // so the unsupported clause is reported honestly. The self-exile
-                // form ("…, exile this card from your graveyard. That … enters
-                // with …") always lands here, as one unsupported line: neither the
-                // exile nor the rider is published without the other.
+                // so the unsupported clause is reported honestly. A self-exile
+                // prelude and its rider are published together or not at all.
                 CastEntersWithOutcome::ShapeUnsupported => {
                     emitter.unsupported_at(item_line, line.clone());
                     i += 1;
@@ -6893,7 +6906,9 @@ fn parse_normalized_oracle_ir(
             }) {
                 ctx.subject = None;
                 ctx.actor = None;
-                trigger = trigger.execute(parse_effect_chain_with_context(
+                // CR 701.43d + CR 607.2h: the linked exert-payoff trigger has its own
+                // ability body, separate from the optional attack cost.
+                trigger = trigger.execute(parse_effect_chain_with_context_ability_root(
                     effect_rest.trim(),
                     AbilityKind::Spell,
                     &mut ctx,
@@ -7517,6 +7532,7 @@ fn parse_normalized_oracle_ir(
             let def = AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Choose {
+                    chooser: crate::types::ability::ControllerRef::You,
                     choice_type: ChoiceType::color(),
                     persist: true,
                     selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -7568,8 +7584,11 @@ fn parse_normalized_oracle_ir(
             ctx.subject = None;
             ctx.actor = None;
             // Routed through `parse_ability_ir_with_context` + `ability_ir_at`,
-            // i.e. `lower_ability_ir`, which is what `parse_effect_chain_with_context`
-            // has always been. #6123 converted this site to the raw pair
+            // hence `lower_ability_ir`. The nested `parse_effect_chain_with_context`
+            // entry shares this lowering and recognizer set, but withholds the
+            // damage-target population permission that an ability root may grant.
+            // Converting between the entries changes that permission default.
+            // #6123 converted this site to the raw pair
             // `parse_effect_chain_ir` + `lower_effect_chain_ir` while hoisting the
             // Class-H replacement producers, which silently dropped three things the
             // entry point had been supplying: `finalize_effect_chain`, the
@@ -9395,7 +9414,7 @@ fn resolve_guards_in_effect(effect: &mut Effect) {
         }
         // CR 611.2: the seventh carrier is one level down — the granted permission's own
         // `enters_with_modifications`, the type-grant rider on a cast-this-way creature
-        // (The Tomb of Aclazotz class; see that field's own doc).
+        // (see that field's own doc).
         Effect::GrantCastingPermission { permission, .. } => {
             resolve_guards_in_casting_permission(permission)
         }
@@ -9527,6 +9546,7 @@ fn resolve_guards_in_effect(effect: &mut Effect) {
         | Effect::TakeTheInitiative
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
+        | Effect::AbandonScheme
         | Effect::ChaosEnsues
         | Effect::ReverseTurnOrder
         | Effect::RedistributeLifeTotals
@@ -9647,7 +9667,7 @@ fn resolve_guards_in_replacement(replacement: &mut ReplacementDefinition) {
 /// `CastingPermission` variant must force a descend-or-leaf decision here.
 ///
 /// CR 611.2: only `ExileWithAltCost` carries modifications — the type-grant rider on a
-/// cast-this-way permission (The Tomb of Aclazotz class). The remaining seven variants
+/// cast-this-way permission. The remaining seven variants
 /// carry costs, zones and turn stamps, none of which is a definition carrier.
 fn resolve_guards_in_casting_permission(permission: &mut CastingPermission) {
     match permission {
@@ -9669,7 +9689,10 @@ fn resolve_guards_in_casting_permission(permission: &mut CastingPermission) {
     }
 }
 
-/// CR 611.2: a static's modifications are the only definition carriers it has.
+/// CR 611.2: a static's modifications are the only definition carriers it has
+/// (a granted graveyard cast permission's `enters_modifications` holds only a
+/// cast-this-way rider's modifications — today the Tomb's type change, which
+/// carries no definition).
 fn resolve_guards_in_static(static_def: &mut StaticDefinition) {
     for modification in &mut static_def.modifications {
         resolve_guards_in_continuous_mod(modification);
@@ -10611,6 +10634,7 @@ fn demote_lifetimes_in_effect(effect: &mut Effect) {
         | Effect::TakeTheInitiative
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
+        | Effect::AbandonScheme
         | Effect::ChaosEnsues
         | Effect::ReverseTurnOrder
         | Effect::RedistributeLifeTotals
@@ -13290,6 +13314,10 @@ pub mod test_helpers {
 #[cfg(test)]
 #[path = "oracle_pipeline_snapshot_tests.rs"]
 mod pipeline_snapshot_tests;
+
+#[cfg(test)]
+#[path = "scheme_tests.rs"]
+mod scheme_tests;
 
 /// Row 1.J — the continuation gate's failure-recursion helper must see a parse
 /// failure nested inside a WRAPPER EFFECT, not only inside a `sub_ability` chain.

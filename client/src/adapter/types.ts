@@ -163,8 +163,11 @@ export type BuiltInGameFormat =
   | "HistoricBrawl"
   | "FreeForAll"
   | "TwoHeadedGiant"
+  | "TwoHeadedGiantCommander"
   | "Archenemy"
+  | "ArchenemyCommander"
   | "Planechase"
+  | "PlanechaseCommander"
   | "Limited"
   | "Momir"
   | "CommanderDraft"
@@ -809,7 +812,10 @@ export type TapCreaturesSelectionMode =
 // to the chosen objects. Internally tagged (`#[serde(tag = "type")]`).
 export type PayCostKind =
   | { type: "Discard" }
-  | { type: "Reveal" }
+  // CR 701.20a: `shared_quality` is the engine-side constraint the revealed
+  // cards must satisfy ("two cards that share a color"); the engine validates
+  // the selection, so it is opaque pass-through here.
+  | { type: "Reveal"; shared_quality?: unknown }
   | { type: "Sacrifice" }
   | { type: "ReturnToHand" }
   | { type: "ExileFromZone"; zone: ExileCostSourceZone }
@@ -845,6 +851,18 @@ export type CostResume =
       object_id?: number;
       cost_source: "Morph" | "Megamorph" | "Disguise" | "ManifestManaCost";
       remaining_cost?: unknown;
+    }
+  // CR 805.6: one hero's step of a collective tap-creatures payment. The
+  // client renders it as an ordinary any-subset prompt; the engine owns the
+  // session (per-hero prompts, combined threshold).
+  | {
+      type: "TeamTapPayment";
+      aggregate: TapCreaturesAggregate;
+      eligible: ObjectId[];
+      selected: ObjectId[];
+      remaining: PlayerId[];
+      filter: unknown;
+      ability: unknown;
     };
 
 export type ManaColor = "White" | "Blue" | "Black" | "Red" | "Green";
@@ -1403,6 +1421,8 @@ export interface ResolutionCastFacePolicy {
   controller: PlayerId;
   /** Fixed cast-time constraint; null is the explicit no-extra-constraint form. */
   constraint: Record<string, unknown> | null;
+  /** Instruction authority; absent means "Cast". "Play" also admits a land face. */
+  play_mode?: "Cast" | "Play";
 }
 
 /** Opaque identity for a delayed trigger installed by a resolution cast offer. */
@@ -3894,8 +3914,8 @@ export interface UnboundedFamilyView {
   state: FamilyCollapseState;
 }
 
-/** Mirrors `engine::game::derived_views::CounterMagnitude`. Absent on the wire ⇒ `"Finite"`. */
-export type CounterMagnitude = "Finite" | "Unbounded";
+/** Mirrors `engine::game::derived_views::DisplayMagnitude`. Absent on the wire ⇒ `"Finite"`. */
+export type DisplayMagnitude = "Finite" | "Unbounded";
 
 /**
  * One renderable counter row on one object. Mirrors
@@ -3911,7 +3931,7 @@ export type CounterMagnitude = "Finite" | "Unbounded";
 export interface CounterRowView {
   counter: CounterType;
   count: number;
-  magnitude?: CounterMagnitude;
+  magnitude?: DisplayMagnitude;
 }
 
 /**
@@ -4373,6 +4393,11 @@ export interface DerivedViews {
    * `engine::game::derived_views::DerivedViews::counter_display`.
    */
   counter_display?: Record<string, ObjectCounterDisplay>;
+  /**
+   * Per-player life-readout magnitude, keyed by player id; an absent seat is `"Finite"`. Read
+   * it through `lifeReadout`. Mirrors `engine::game::derived_views::DerivedViews::life_magnitude`.
+   */
+  life_magnitude?: Record<string, DisplayMagnitude>;
 }
 
 /** Mirrors `engine::types::game_state::NextSpellModifier` (serde tag="type"). */

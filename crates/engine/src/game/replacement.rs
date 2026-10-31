@@ -8220,7 +8220,13 @@ fn object_replacement_candidate_applies(
     if is_damage_prevention_replacement(state, &rid, &repl_def.event)
         && is_prevention_disabled(state, event)
     {
-        // CR 615.12: effects that disable prevention suppress prevention replacements.
+        // CR 615.12: unpreventable damage is still subject to applicable prevention
+        // effects — they prevent nothing, but "any additional effects they have will
+        // take place". strict-failure: skipping the shield here also drops its rider
+        // (Ironscale Hydra / Nine Lives / Gloom Surgeon / Polukranos rulings); the
+        // rules-correct path needs a typed "that many" vs "prevented this way" rider
+        // amount and is tracked as Command Zone #86. Shield counters already follow
+        // CR 615.12 (`apply_shield_counter_replacement`).
         return false;
     }
     if let Some(ref scope) = repl_def.token_owner_scope {
@@ -9522,6 +9528,14 @@ pub fn find_applicable_replacements(
                     if is_damage_prevention_replacement(state, &rid, &repl_def.event)
                         && is_prevention_disabled(state, event)
                     {
+                        // CR 615.12: unpreventable damage is still subject to applicable
+                        // prevention effects — they prevent nothing, but "any additional
+                        // effects they have will take place". strict-failure: skipping the
+                        // shield here also drops its rider (Ironscale Hydra / Nine Lives /
+                        // Gloom Surgeon / Polukranos rulings); the rules-correct path needs a
+                        // typed "that many" vs "prevented this way" rider amount and is
+                        // tracked as Command Zone #86. Shield counters already follow
+                        // CR 615.12 (`apply_shield_counter_replacement`).
                         continue;
                     }
                     if let Some(ref cond) = repl_def.condition {
@@ -12391,6 +12405,7 @@ pub(crate) fn as_enters_choice_type(def: &ReplacementDefinition) -> Option<&Choi
     }
     match &*execute.effect {
         Effect::Choose {
+            chooser: _,
             choice_type,
             persist: true,
             selection,
@@ -14960,6 +14975,7 @@ mod tests {
         let choose = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type: crate::types::ability::ChoiceType::creature_type(),
                 persist: true,
                 selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -17213,6 +17229,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Choose {
+                    chooser: crate::types::ability::ControllerRef::You,
                     choice_type: crate::types::ability::ChoiceType::color_excluding(vec![
                         crate::types::mana::ManaColor::Green,
                     ]),

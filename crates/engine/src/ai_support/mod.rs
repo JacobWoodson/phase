@@ -266,14 +266,19 @@ pub(crate) fn structurally_valid_tap_for_convoke_payment(
 
 /// CR 608.2d + CR 614.12a: A named choice made while an effect applies, or as a
 /// permanent enters, is announced from the prompt's enumerated domain, and the
-/// reducer accepts any member of it (`engine_resolution_choices.rs`, the
-/// `NamedChoice` arm) — so `SimulationFilter` can skip its clone-and-apply
-/// probe. Mirrors [`structurally_valid_search_selection`].
+/// reducer's submission guard admits any member of it
+/// (`engine_resolution_choices.rs`, the `NamedChoice` arm) — so
+/// `SimulationFilter` skips its clone-and-apply probe on this verdict. Mirrors
+/// [`structurally_valid_search_selection`].
+///
+/// The verdict is the submission guard's, not the apply's: an admitted answer
+/// can still fail later in the action, as a life gain the engine cannot
+/// represent does (`EngineError::LifeChangeUnrepresentable`).
 ///
 /// This is load-bearing for creature-type prompts: each of the several hundred
 /// enumerated answers (one per known creature type) paid a full `GameState`
-/// clone, which is costly on a large board, to re-derive a verdict that
-/// membership alone decides.
+/// clone, which is costly on a large board, to re-derive the guard's verdict,
+/// which membership alone decides.
 ///
 /// CR 601.2f + CR 601.2h + CR 602.2b: while a cast or activation is in progress
 /// (`GameState::withholds_priority`), an answer precedes determining and paying
@@ -331,6 +336,34 @@ pub(crate) fn structurally_valid_named_choice_answer(
             | NamedChoiceSourceBinding::ExactObjectAndResolution => true,
         },
     }
+}
+
+/// CR 608.2d + CR 614.12a + CR 701.23a: Whether the pending prompt's submission
+/// guard admits `action`, decided without mutating the game, for a library search
+/// selection ([`structurally_valid_search_selection`]) or a named choice from the
+/// prompt's enumerated domain ([`structurally_valid_named_choice_answer`]).
+/// `true` means the guard admits the answer; `false` means it rejects it or the
+/// shape is not modeled here.
+///
+/// This is the one authority for those shapes. `SimulationFilter` consults it
+/// before its clone-and-apply probe, and phase-ai's planner legality gate
+/// consults it outside the filter pipeline, so the verdict reads only the
+/// state and the action — never a candidate's actor or semantic owner, nor a
+/// cast probe. CR 723.5: under player control, or a latched search control,
+/// the controller submits the controlled player's answer; who submits it does
+/// not change whether the guard admits it.
+///
+/// Only prompt-answer shapes with that property belong here. The other
+/// `SimulationFilter` hatches (pass, convoke payment, priority activation and
+/// cast) are scoped to that filter's own probe. The planner legality gate in
+/// phase-ai does not consult them: it admits a pass during
+/// `WaitingFor::Priority` by its own arm, without simulating it, and simulates
+/// the convoke payment, activation and cast candidates it validates.
+///
+/// Conservative by design: `false` only costs a simulation.
+pub fn structurally_valid_prompt_answer(state: &GameState, action: &GameAction) -> bool {
+    structurally_valid_search_selection(state, action)
+        || structurally_valid_named_choice_answer(state, action)
 }
 
 fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
@@ -842,13 +875,14 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 || chosen.len() < *min_count
                 || chosen.len() > *count
         }
-        // CR 601.2f + CR 208.1: the aggregate Crew/Saddle/Teamwork tap cost
-        // accepts ANY creature subset (drawn from `choices`, no duplicates)
-        // whose summed CURRENT positive power satisfies the advertised comparator
-        // — not a fixed cardinality. Evaluates through the same `satisfied_by`
-        // the payment validator (`handle_tap_creatures_for_spell_cost`) uses, so
-        // both seams agree on which subsets are legal. The `Fixed`/`VariableX`
-        // forms are handled by the range arm immediately below.
+        // CR 601.2f + CR 107.1b + CR 208.1: the aggregate Crew/Saddle/Teamwork
+        // tap cost accepts ANY creature subset (drawn from `choices`, no
+        // duplicates) whose summed CURRENT SIGNED power satisfies the
+        // advertised comparator — not a fixed cardinality. Evaluates through
+        // the same signed total + `satisfied_by` the payment validator
+        // (`handle_tap_creatures_for_spell_cost`) uses, so both seams agree
+        // on which subsets are legal. The `Fixed`/`VariableX` forms are
+        // handled by the range arm immediately below.
         (
             WaitingFor::PayCost {
                 kind:
@@ -860,7 +894,8 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
-            let total = crate::game::casting_costs::tap_creatures_total_power(state, chosen);
+            let total =
+                crate::game::casting_costs::tap_creatures_signed_total_power(state, chosen);
             selection_mismatch(chosen, choices, None) || !aggregate.satisfied_by(total)
         }
         // CR 107.3a + CR 118.3: the Fixed/VariableX tap-creatures forms honor the

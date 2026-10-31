@@ -265,6 +265,15 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         game_state,
         "GameState",
         None,
+        "trigger_indicated_actions_this_turn",
+        "Box<HashSet>",
+        Classification::Canonical(HASH_SET),
+    );
+    add_spec(
+        &mut specs,
+        game_state,
+        "GameState",
+        None,
         "post_replacement_token_choice_applied",
         "Option<HashSet>",
         Classification::Canonical(OPTION_HASH_SET),
@@ -316,7 +325,6 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "last_effect_counts_by_player",
         "stack_trigger_event_batches",
         "stack_trigger_firings",
-        "lki_copiable_values",
         "linked_exile_lki",
         "ring_level",
         "ring_bearer",
@@ -405,6 +413,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
     for field in [
         "attribution",
         "lki_cache",
+        "lki_copiable_values",
         "tracked_object_sets",
         "departed_activated_abilities",
     ] {
@@ -462,7 +471,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         ),
         (
             "activated_abilities_this_game",
-            "HashMap",
+            "im::HashMap",
             "with=\"tuple_key_map\"",
         ),
         (
@@ -2049,7 +2058,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
             }]),
         ),
     ]));
-    state.lki_copiable_values = HashMap::from([
+    state.lki_copiable_values = im::HashMap::from_iter([
         (ObjectId(1), intrinsic_copiable_values(&first)),
         (ObjectId(2), intrinsic_copiable_values(&second)),
     ]);

@@ -576,6 +576,7 @@ mod tests {
             None,
             TransientContinuousEffectBindings::default(),
             Some(PlayerId(0)),
+            None,
         );
         assert!(
             installed.is_some(),

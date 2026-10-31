@@ -978,6 +978,7 @@ where
         | Effect::TakeTheInitiative
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
+        | Effect::AbandonScheme
         | Effect::ChaosEnsues
         | Effect::RedistributeLifeTotals
         | Effect::ReverseTurnOrder
