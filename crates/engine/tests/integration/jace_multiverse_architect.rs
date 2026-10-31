@@ -1369,3 +1369,47 @@ fn jace_subtype_defended_tax_shape_and_runtime() {
 // when the predicate consumed no defended scope yet trailing text precedes
 // the `unless` — a NEW decline behavior, outside this round's stamp-only
 // scope, returned for a design decision.
+
+/// Row 10 — event delivery through a REAL phase transition: from P1's
+/// pre-combat main with priority, advance into beginning of combat via the
+/// runner (production `turns::auto_advance` + priority passes — no injected
+/// `PhaseChanged`, no teleported phase) and prove Jace's trigger fires: the
+/// {2} choice reaches P1, declining installs the ban, and P1's Bear cannot
+/// attack the Jace. Guards the registration + delivery path the
+/// injected-event rows bypass (review R3 note).
+#[test]
+fn jace_trigger_fires_through_real_begin_combat_transition() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let jace = scenario
+        .add_planeswalker_from_oracle(P0, "Jace, Multiverse Architect", "Jace", 4, JACE_ORACLE)
+        .id();
+    let attacker = scenario.add_creature(P1, "P1 Bear", 2, 2).id();
+    let mut runner = scenario.build();
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+    // NOTE: phase stays PreCombatMain — the advance below is the real thing.
+
+    runner.advance_to_phase(Phase::BeginCombat);
+    assert_eq!(
+        runner.state().phase,
+        Phase::BeginCombat,
+        "reach-guard: the runner must reach beginning of combat, else the \
+         trigger below never fires"
+    );
+
+    drive_to_optional_prompt(&mut runner);
+    answer_optional(&mut runner, P1, false);
+
+    assert!(
+        has_attack_ban(&runner),
+        "declining installs the attack prohibition"
+    );
+    // REVERT-FAIL: without event delivery the trigger never fires, no ban
+    // exists, and this attack stays legal.
+    assert!(
+        !attack_is_legal(&runner, P1, attacker, AttackTarget::Planeswalker(jace)),
+        "CR 508.1c: P1 can't attack a Jace P0 controls"
+    );
+}
