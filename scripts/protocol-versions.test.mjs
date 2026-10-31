@@ -302,26 +302,27 @@ function ownershipFixture(path) {
     mkdirSync(dirname(join(path, file)), { recursive: true });
     copyFileSync(join(root, file), join(path, file));
   }
-  // The live checker enforces frozen floors against the fixture registry, so a
-  // floor pinned above the fixture's lobby (a live lobby bump the fixture does
-  // not carry) would fail every ownership test. Top the lobby up to the highest
-  // frozen floor with synthetic lobby-only records; full/wire/draft/directory
-  // counts (asserted by the migration tests) stay untouched.
-  // Fixed filenames with byte-identical content: every ownership fixture must
-  // produce the same protocol/changes tree, because the absent-base test diffs
-  // two independently built fixtures and the history checker requires prior
-  // files to remain byte-identical regular files.
-  const script = readFileSync(join(path, "scripts/check-protocol-version.mjs"), "utf8");
-  const floors = [...script.matchAll(/MIN_LOBBY_PROTOCOL_FOR_\w+:\s*(\d+)/g)].map((m) => Number(m[1]));
-  const topUp = Math.max(0, ...floors.map((floor) => floor - loadProtocolVersions(path).lobby));
-  for (let i = 0; i < topUp; i++) {
-    // Deterministic UUIDv4 names (not randomUUID): every ownership fixture must
-    // produce the same protocol/changes tree, because the absent-base test
-    // diffs two independently built fixtures and the history checker requires
-    // prior files to remain byte-identical regular files.
-    const name = `aaaaaaaa-aaaa-4aaa-8aaa-${i.toString(16).padStart(12, "0")}.json`;
+  // Frozen capability floors are validated against computed versions, but the
+  // staged registry is deliberately empty (migration tests assert exact
+  // increments on top of it), so a floor above the baseline would strand the
+  // fixture. Backfill synthetic LOBBY-only records up to the highest frozen
+  // floor parsed out of the staged checker: lobby-only because no assertion
+  // below does exact arithmetic on lobby, while full/wire/draft/directory
+  // must stay exactly baseline plus the test's own records. Synthetic (not
+  // copies of the real records) so the fixture never depends on repo state.
+  const stagedChecker = readFileSync(join(path, "scripts/check-protocol-version.mjs"), "utf8");
+  const frozen = [...stagedChecker.matchAll(/MIN_LOBBY_PROTOCOL_FOR_\w+:\s*(\d+)/g)]
+    .map((match) => Number(match[1]));
+  const stagedBaseline = JSON.parse(readFileSync(join(path, "protocol/baseline.json"), "utf8"));
+  const backfill = Math.max(0, Math.max(stagedBaseline.lobby, ...frozen) - stagedBaseline.lobby);
+  // Deterministic names+bytes (not randomUUID): history tests compare two
+  // separately staged fixtures against each other, so every fixture must
+  // backfill identical records. Counter in the trailing group keeps valid
+  // UUIDv4 shape for any floor count.
+  for (let i = 0; i < backfill; i++) {
+    const name = `00000000-0000-4000-8000-${String(i).padStart(12, "0")}.json`;
     writeFileSync(join(path, "protocol/changes", name),
-      JSON.stringify({ surfaces: ["lobby"], reason: "ownership fixture tops lobby to the frozen floors" }));
+      JSON.stringify({ surfaces: ["lobby"], reason: "fixture backfill for frozen capability floors" }));
   }
   generateProtocolVersions(path);
   checker(path);

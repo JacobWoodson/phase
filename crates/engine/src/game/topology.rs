@@ -15,7 +15,7 @@ pub(crate) struct TeamId(pub u8);
 /// individual turn (alternating, LOTR Two Towers), and Emperor's teams take
 /// individual turns (CR 809.4). The other per-side axis — whether a side pools
 /// life/poison (2HG's shared team vs Emperor's independent teammates, CR 809.7) —
-/// is [`side_shares_life`], kept as a direct O(1) predicate (like [`team_id`])
+/// is [`has_shared_life`], kept as a direct O(1) predicate (like [`team_id`])
 /// rather than a field so it stays allocation-free in the hot SBA path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Side {
@@ -64,7 +64,7 @@ pub(crate) fn sides(state: &GameState) -> Vec<Side> {
             .copied()
             .filter(|id| hordes.contains(id))
             .collect();
-        // Life-sharing is a per-side axis carried by [`side_shares_life`]: the
+        // Life-sharing is a per-side axis carried by [`has_shared_life`]: the
         // survivor side pools life (like 2HG), while the two allied Horde seats do
         // NOT pool with each other — each has no life total anyway.
         return vec![
@@ -259,47 +259,81 @@ pub(crate) fn archenemy(state: &GameState) -> Option<PlayerId> {
 
 /// CR 810.4 / CR 810.8 / CR 810.9 / CR 810.10: Two-Headed Giant shares life,
 /// poison, and team loss. Default Archenemy uses shared turns (CR 805) but not
-/// these shared-resource rules.
+/// these shared-resource rules. Only the 2HG game-over branch still reads the
+/// whole bundle at once — life, poison, and loss each have their own
+/// per-player predicate below, because Archenemy Commander shares life
+/// (CR 904.13b) while keeping poison individual (CR 904.13c).
 pub(crate) fn has_two_headed_giant_shared_resources(state: &GameState) -> bool {
-    matches!(state.format_config.format, GameFormat::TwoHeadedGiant)
+    state.format_config.format.is_two_headed_giant_family()
 }
 
-/// CR 810.4 / CR 810.8 / CR 810.9 / CR 810.10: Whether `player`'s SIDE pools life,
-/// poison, and life-lock statics as a team — the per-side life axis. This is the
-/// single authority every per-player resource aggregation goes through
-/// ([`shared_resource_members`]/[`shared_resource_dedup_key`], and the life-loss /
-/// poison-loss / can't-gain-or-lose-life checks in `elimination`/`sba`/
-/// `static_abilities`).
+/// CR 810.4 / CR 810.8 / CR 810.9: Whether `player`'s SIDE pools life as a
+/// team — the per-side life axis. This is the single authority every
+/// per-player life aggregation goes through ([`shared_life_members`]/
+/// [`shared_life_dedup_key`], and the life-loss / can't-gain-or-lose-life
+/// checks in `elimination`/`sba`/`static_abilities`). Team loss rides with
+/// shared life — CR 810.8a in 2HG, CR 810.8a-via-904.13b for the heroes —
+/// so the elimination cascade and the can't-lose teammate folds gate on
+/// this predicate too.
 ///
 /// Computed directly (like [`team_id`]) rather than off [`sides`], so it stays an
 /// O(1), allocation-free check in the hot SBA path:
-/// - Two-Horde MIXED shape: the survivor side pools; each Horde seat does NOT (it
-///   has no life total, and the two Horde seats are not a shared-life team). This
-///   is the case a whole-game predicate gets wrong.
-/// - Two-Headed Giant (`FixedTeams`): the team pools. A future individual-turn
-///   `FixedTeams` (Emperor) does NOT (CR 809.7) — distinguished by format.
-/// - Archenemy / single-Horde (`OneVsMany`): the "many" survivor side pools only
-///   in Horde (CR 904.5 keeps Archenemy heroes independent); the archenemy/Horde
-///   seat never pools.
+/// - The 2HG family (`FixedTeams`, 2HG and 2HG Commander): the team pools. A
+///   future individual-turn `FixedTeams` (Emperor) does NOT (CR 809.7) —
+///   distinguished by format, not topology.
+/// - Archenemy Commander (`OneVsMany`): the heroes pool (CR 904.13b applies
+///   CR 810.8/CR 810.9 to the opposing team); the archenemy reads their own
+///   60 (CR 904.13b).
+/// - Single-Horde (`OneVsMany`): the "many" survivor side pools; the Horde
+///   seat (no life total) never does. Default Archenemy heroes stay
+///   independent (CR 904.5).
+/// - Two-Horde MIXED shape: the survivor side pools; each Horde seat does NOT
+///   (it has no life total, and the two Horde seats are not a shared-life
+///   team). This is the case a whole-game predicate gets wrong.
 /// - Free-for-all: never.
-pub(crate) fn side_shares_life(state: &GameState, player: PlayerId) -> bool {
+pub(crate) fn has_shared_life(state: &GameState, player: PlayerId) -> bool {
+    if state.format_config.format.is_two_headed_giant_family() {
+        return true;
+    }
+    if state.format_config.format == GameFormat::ArchenemyCommander {
+        return Some(player) != archenemy(state);
+    }
     if let Some(hordes) = two_horde_seats(state) {
         // Survivors pool; the allied (life-total-less) Horde seats do not.
         return !hordes.contains(&player);
     }
     match state.format_config.topology() {
-        FormatTopology::IndividualSeats => false,
-        FormatTopology::FixedTeams { .. } => {
-            state.format_config.format == GameFormat::TwoHeadedGiant
-        }
         FormatTopology::OneVsMany { archenemy, .. } => {
             player != archenemy && state.format_config.format == GameFormat::Horde
         }
+        FormatTopology::IndividualSeats | FormatTopology::FixedTeams { .. } => false,
     }
 }
 
-pub(crate) fn shared_resource_members(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
-    if side_shares_life(state, player) {
+/// CR 810.10: Whether `player`'s poison total is shared with their team: the
+/// 2HG family plus the Horde survivor sides (whose shared poison rides with
+/// their shared life). Archenemy Commander explicitly keeps poison
+/// individual — the archenemy loses at 10+ and each hero loses at 10+
+/// (CR 904.13c) — so it answers false here while answering true for
+/// life above.
+pub(crate) fn has_shared_poison(state: &GameState, player: PlayerId) -> bool {
+    if state.format_config.format.is_two_headed_giant_family() {
+        return true;
+    }
+    if let Some(hordes) = two_horde_seats(state) {
+        // Survivors pool; the allied Horde seats do not.
+        return !hordes.contains(&player);
+    }
+    match state.format_config.topology() {
+        FormatTopology::OneVsMany { archenemy, .. } => {
+            player != archenemy && state.format_config.format == GameFormat::Horde
+        }
+        FormatTopology::IndividualSeats | FormatTopology::FixedTeams { .. } => false,
+    }
+}
+
+pub(crate) fn shared_life_members(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
+    if has_shared_life(state, player) {
         team_members(state, player)
     } else if super::players::is_alive(state, player) {
         vec![player]
@@ -308,25 +342,37 @@ pub(crate) fn shared_resource_members(state: &GameState, player: PlayerId) -> Ve
     }
 }
 
-/// Dedup key for shared-resource aggregation ([`aggregate_over_teams`]). A side
+pub(crate) fn shared_poison_members(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
+    if has_shared_poison(state, player) {
+        team_members(state, player)
+    } else if super::players::is_alive(state, player) {
+        vec![player]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Dedup key for shared-life aggregation ([`aggregate_over_teams`]). A side
 /// that shares life pools under its team; an individual seat pools under
 /// itself. The two namespaces are deliberately distinct variants rather than
 /// one shared `TeamId` space: under one-vs-many the survivor side IS
 /// `TeamId(1)` while a Horde seat anchored at seat 1 would also key as
 /// `TeamId(1)`, collapsing the Horde's pool into the survivors' (Repay in
 /// Kind would read the survivors' 40 as the minimum and raise the bosses
-/// instead of setting everyone to 5).
+/// instead of setting everyone to 5). The same structural separation keeps
+/// the Archenemy Commander archenemy (CR 904.13b, an individual seat) out of
+/// the heroes' shared-side pool with no topology-specific carve-out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum SharedResourceKey {
+pub(crate) enum SharedLifeKey {
     SharedSide(TeamId),
     IndividualSeat(PlayerId),
 }
 
-pub(crate) fn shared_resource_dedup_key(state: &GameState, player: PlayerId) -> SharedResourceKey {
-    if side_shares_life(state, player) {
-        SharedResourceKey::SharedSide(team_id(state, player))
+pub(crate) fn shared_life_dedup_key(state: &GameState, player: PlayerId) -> SharedLifeKey {
+    if has_shared_life(state, player) {
+        SharedLifeKey::SharedSide(team_id(state, player))
     } else {
-        SharedResourceKey::IndividualSeat(player)
+        SharedLifeKey::IndividualSeat(player)
     }
 }
 
@@ -612,6 +658,67 @@ mod tests {
     }
 
     #[test]
+    fn two_hg_commander_shares_resources_and_seats_two_teams_of_two() {
+        let state = GameState::new(FormatConfig::two_headed_giant_commander(), 4, 42);
+
+        // CR 810.4 / CR 810.8 / CR 810.9 / CR 810.10 via the 2HG family.
+        assert!(has_two_headed_giant_shared_resources(&state));
+        assert_eq!(
+            team_members(&state, PlayerId(0)),
+            vec![PlayerId(0), PlayerId(1)]
+        );
+        assert_eq!(
+            team_members(&state, PlayerId(2)),
+            vec![PlayerId(2), PlayerId(3)]
+        );
+        assert_eq!(teammates(&state, PlayerId(0)), vec![PlayerId(1)]);
+        assert_eq!(teammates(&state, PlayerId(3)), vec![PlayerId(2)]);
+        // 60 shared per team, 30 per seat.
+        assert_eq!(state.players[0].life, 30);
+        assert_eq!(
+            crate::game::players::team_life_total(&state, PlayerId(0)),
+            60
+        );
+        assert_eq!(
+            crate::game::players::team_life_total(&state, PlayerId(3)),
+            60
+        );
+    }
+
+    #[test]
+    fn archenemy_commander_shares_life_but_not_poison() {
+        let state = GameState::new(FormatConfig::archenemy_commander(), 4, 42);
+
+        // CR 904.13b: heroes share life; the archenemy does not.
+        assert!(!has_shared_life(&state, PlayerId(0)));
+        assert!(has_shared_life(&state, PlayerId(1)));
+        assert!(has_shared_life(&state, PlayerId(3)));
+        // CR 904.13c: nobody shares poison.
+        for seat in 0..4 {
+            assert!(!has_shared_poison(&state, PlayerId(seat)));
+        }
+        assert_eq!(
+            shared_life_members(&state, PlayerId(1)),
+            vec![PlayerId(1), PlayerId(2), PlayerId(3)]
+        );
+        assert_eq!(
+            shared_poison_members(&state, PlayerId(1)),
+            vec![PlayerId(1)]
+        );
+        // 60 for the archenemy, 20 per hero seat at 4 seats, team 60.
+        assert_eq!(state.players[0].life, 60);
+        assert_eq!(state.players[1].life, 20);
+        assert_eq!(
+            crate::game::players::team_life_total(&state, PlayerId(1)),
+            60
+        );
+        assert_eq!(
+            crate::game::players::team_life_total(&state, PlayerId(0)),
+            60
+        );
+    }
+
+    #[test]
     fn archenemy_team_members_by_side_for_supported_player_counts() {
         for player_count in [2, 4, 6] {
             let state = GameState::new(FormatConfig::archenemy(), player_count, 42);
@@ -886,48 +993,52 @@ mod tests {
         );
     }
 
-    /// `side_shares_life` is per-side: the survivor side pools (2HG-style) while
-    /// each Horde seat does not — the two allied Horde seats must NOT share a life
-    /// pool with each other (the vestigial-pool bug a whole-game predicate had).
+    /// `has_shared_life` / `has_shared_poison` are per-side: the survivor side
+    /// pools (2HG-style) while each Horde seat does not — the two allied Horde
+    /// seats must NOT share a life pool with each other (the vestigial-pool bug
+    /// a whole-game predicate had).
     #[test]
     fn two_horde_survivors_pool_life_hordes_do_not() {
         let state = two_horde_state();
-        assert!(side_shares_life(&state, PlayerId(2)), "survivor pools");
-        assert!(side_shares_life(&state, PlayerId(3)), "survivor pools");
+        assert!(has_shared_life(&state, PlayerId(2)), "survivor pools");
+        assert!(has_shared_life(&state, PlayerId(3)), "survivor pools");
+        assert!(!has_shared_life(&state, PlayerId(0)), "Horde seat does not");
+        assert!(!has_shared_life(&state, PlayerId(1)), "Horde seat does not");
+        // Poison rides with the survivors' shared life; the Horde seats stay
+        // out of the poison pool too.
+        assert!(has_shared_poison(&state, PlayerId(2)), "survivor pools");
+        assert!(has_shared_poison(&state, PlayerId(3)), "survivor pools");
         assert!(
-            !side_shares_life(&state, PlayerId(0)),
+            !has_shared_poison(&state, PlayerId(0)),
             "Horde seat does not"
         );
         assert!(
-            !side_shares_life(&state, PlayerId(1)),
+            !has_shared_poison(&state, PlayerId(1)),
             "Horde seat does not"
         );
 
         // The resource-aggregation members follow suit: a Horde seat aggregates
         // over itself alone (not both Hordes), a survivor over the survivor team.
-        assert_eq!(
-            shared_resource_members(&state, PlayerId(0)),
-            vec![PlayerId(0)]
-        );
-        let mut survivor_pool = shared_resource_members(&state, PlayerId(2));
+        assert_eq!(shared_life_members(&state, PlayerId(0)), vec![PlayerId(0)]);
+        let mut survivor_pool = shared_life_members(&state, PlayerId(2));
         survivor_pool.sort_by_key(|id| id.0);
         assert_eq!(survivor_pool, vec![PlayerId(2), PlayerId(3)]);
     }
 
-    /// `side_shares_life` across the uniform formats: 2HG pools, Archenemy heroes
+    /// `has_shared_life` across the uniform formats: 2HG pools, Archenemy heroes
     /// stay independent (CR 904.5), free-for-all never pools.
     #[test]
-    fn side_shares_life_matches_each_uniform_format() {
+    fn has_shared_life_matches_each_uniform_format() {
         let thg = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
-        assert!(thg.players.iter().all(|p| side_shares_life(&thg, p.id)));
+        assert!(thg.players.iter().all(|p| has_shared_life(&thg, p.id)));
 
         let arch = GameState::new(FormatConfig::archenemy(), 4, 42);
         assert!(
-            arch.players.iter().all(|p| !side_shares_life(&arch, p.id)),
+            arch.players.iter().all(|p| !has_shared_life(&arch, p.id)),
             "Archenemy heroes each keep their own 20 (CR 904.5)"
         );
 
         let ffa = GameState::new(FormatConfig::free_for_all(), 4, 42);
-        assert!(ffa.players.iter().all(|p| !side_shares_life(&ffa, p.id)));
+        assert!(ffa.players.iter().all(|p| !has_shared_life(&ffa, p.id)));
     }
 }

@@ -12378,6 +12378,41 @@ pub enum CostResume {
     /// CR 118.12: Resume a resolution-time `Effect::PayCost` after the payer
     /// selects objects for an interactive cost such as tapping creatures.
     Resolution,
+    /// CR 805.6 + CR 118.12: Resume a COLLECTIVE resolution-time
+    /// `TapCreatures` aggregate cost (Bow to My Command) after one hero
+    /// selects their contribution. Each teammate is prompted in seat order
+    /// for any subset (possibly empty) of their own untapped creatures; the
+    /// selections accumulate untapped and tap simultaneously only once the
+    /// combined signed power satisfies `aggregate` — mirroring the
+    /// single-payer path's validate-before-execute atomicity, so a shortfall
+    /// taps nothing. `remaining` holds the heroes still to prompt AFTER the
+    /// current prompt's player; creatureless heroes are skipped, never
+    /// prompted. Like `Resolution`, the resolving chain owns this payment's
+    /// rider (no `PendingCast`/`PendingManaAbility` rides along).
+    TeamTapPayment {
+        aggregate: crate::types::ability::TapCreaturesAggregate,
+        /// Team-wide gate-time eligible set (each member matched under
+        /// their own controller binding). Per-hero prompts slice this by
+        /// controller; the set is static across the session because no
+        /// resolution interleaves between prompts.
+        eligible: Vec<crate::types::identifiers::ObjectId>,
+        /// Accumulated selections from heroes who already answered, still
+        /// untapped until the combined check passes.
+        selected: Vec<crate::types::identifiers::ObjectId>,
+        /// Living teammates still to prompt after the current player, in
+        /// seat order.
+        remaining: Vec<crate::types::player::PlayerId>,
+        /// Gate-time cost filter and payer-adjusted resolving ability,
+        /// carried so departure reconciliation re-runs the SAME eligibility
+        /// authority as the gate
+        /// (`costs::find_eligible_team_tap_creatures_targets`) instead of a
+        /// hand-written liveness predicate that can drift from it (e.g.
+        /// missing the filter's creature-ness once an animation ends). Boxed:
+        /// `ResolvedAbility` is 5,264 B inline and this resume rides every
+        /// `WaitingFor::PayCost` (see `types/game_state_size.rs`).
+        filter: Box<crate::types::ability::TargetFilter>,
+        ability: Box<crate::types::ability::ResolvedAbility>,
+    },
     /// CR 702.37e + CR 116.2b + CR 118.1 + CR 118.3: Resumption context after paying a non-mana cost
     /// (e.g. ReturnToHand, Discard, PayLife, Reveal, Sacrifice) to turn a face-down permanent face up.
     TurnFaceUp {
@@ -20316,6 +20351,7 @@ impl WaitingFor {
                 } => Some(pending_cast),
                 CostResume::ManaAbility { .. }
                 | CostResume::Resolution
+                | CostResume::TeamTapPayment { .. }
                 | CostResume::TurnFaceUp { .. } => None,
             },
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_ref() {
@@ -20354,6 +20390,7 @@ impl WaitingFor {
                 } => Some(pending_cast),
                 CostResume::ManaAbility { .. }
                 | CostResume::Resolution
+                | CostResume::TeamTapPayment { .. }
                 | CostResume::TurnFaceUp { .. } => None,
             },
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_mut() {
@@ -20610,6 +20647,7 @@ impl WaitingFor {
                 CostResume::Spell { .. }
                 | CostResume::SpellCost { .. }
                 | CostResume::Resolution
+                | CostResume::TeamTapPayment { .. }
                 | CostResume::TurnFaceUp { .. } => None,
             },
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_ref() {
@@ -24046,10 +24084,10 @@ declare_game_state! {
     pub activated_abilities_this_turn: im::HashMap<(ObjectId, usize), u32>,
     #[serde(
         default,
-        skip_serializing_if = "HashMap::is_empty",
+        skip_serializing_if = "im::HashMap::is_empty",
         with = "tuple_key_map"
     )]
-    pub activated_abilities_this_game: HashMap<(ObjectId, usize), u32>,
+    pub activated_abilities_this_game: im::HashMap<(ObjectId, usize), u32>,
     /// CR 602.5b + CR 702.122: Vehicles whose crew ability has been activated this
     /// turn. Populated on a successful crew announcement; read to enforce an
     /// "Activate only once each turn" crew restriction. Crew is not an
@@ -24826,6 +24864,19 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub named_color_this_resolution: Option<crate::types::mana::ManaColor>,
 
+    /// CR 607.2d + CR 608.2c: the label the current resolution's most recent
+    /// labeled choice named, persisting or not ("target opponent chooses self
+    /// or others. If that player chooses self, …"). The named-choice
+    /// continuation for `AbilityCondition::ChosenLabelIs`: unlike the source's
+    /// `ChosenAttribute::Label` history (which CR 607.2d readers own and which
+    /// accumulates across resolutions, so a recycled scheme's first answer
+    /// would shadow every later one), this slot answers "what did the choice
+    /// earlier in THESE instructions name". Cleared at every top-level
+    /// resolution; a gate whose own resolution named no label reads `None`
+    /// and fails closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub named_label_this_resolution: Option<String>,
+
     /// CR 608.2c + CR 123.1: the sticker the current resolution's most recent
     /// PutSticker instruction placed ("that sticker"). Cleared at every
     /// top-level resolution and at the start of every PutSticker instruction,
@@ -25403,9 +25454,9 @@ declare_game_state! {
     /// public zone. Ordinary `LKISnapshot` is intentionally filter-shaped and
     /// does not carry ability definitions; copy effects need the complete
     /// copiable surface when the copy source later ceases to exist.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
-    pub lki_copiable_values: HashMap<ObjectId, CopiableValues>,
+    #[serde(default, skip_serializing_if = "im::HashMap::is_empty")]
+    #[serde(serialize_with = "crate::types::deterministic_serde::im_hash_map")]
+    pub lki_copiable_values: im::HashMap<ObjectId, CopiableValues>,
 
     /// CR 400.7 + CR 608.2h: LKI keyed by exact object incarnation. The legacy
     /// `lki_cache` remains the broad ObjectId-only authority for existing callers;
@@ -25764,6 +25815,12 @@ fn history_map_entries_unshared(original: &GameState, copy: &GameState) -> u64 {
         + original
             .activated_abilities_this_turn
             .unshared(&copy.activated_abilities_this_turn)
+        + original
+            .activated_abilities_this_game
+            .unshared(&copy.activated_abilities_this_game)
+        + original
+            .lki_copiable_values
+            .unshared(&copy.lki_copiable_values)
         + original
             .batched_zone_change_trigger_fired
             .unshared(&copy.batched_zone_change_trigger_fired)
@@ -26514,7 +26571,9 @@ fn visit_cost_resume_chains<'a>(
             visit_pending_mana_ability_chains(mana_ability, f)
         }
         // The resolving chain itself owns this payment's rider.
-        CostResume::Resolution | CostResume::TurnFaceUp { .. } => Ok(()),
+        CostResume::Resolution
+        | CostResume::TeamTapPayment { .. }
+        | CostResume::TurnFaceUp { .. } => Ok(()),
     }
 }
 
@@ -32503,7 +32562,7 @@ impl GameState {
         let mut players: Vec<Player> = (0..player_count)
             .map(|i| Player {
                 id: PlayerId(i),
-                life: config.starting_life_for_player(PlayerId(i)),
+                life: config.starting_life_for_player(PlayerId(i), usize::from(player_count)),
                 ..Player::default()
             })
             .collect();
@@ -32511,7 +32570,7 @@ impl GameState {
         let starting_player = config.starting_player();
         let archenemy = config.archenemy_player();
         // Horde Magic (casual variant): the survivors share ONE combined life
-        // total (CR 810.8/810.9a, pooled via `topology::side_shares_life`).
+        // total (CR 810.8/810.9a, pooled via `topology::has_shared_life`).
         // `starting_life_for_player` seeded every seat — Horde included — with the
         // full combined total (it can't split until the seat count is known here),
         // so N survivors would sum to N × combined. Distribute the combined total
@@ -32768,7 +32827,7 @@ impl GameState {
             triggers_fired_this_game: HashSet::new(),
             triggered_abilities_added_mana_this_turn: HashSet::new(),
             activated_abilities_this_turn: im::HashMap::new(),
-            activated_abilities_this_game: HashMap::new(),
+            activated_abilities_this_game: im::HashMap::new(),
             crew_activated_this_turn: HashSet::new(),
             crew_resolved_this_turn: HashSet::new(),
             crew_history_this_turn: HashSet::new(),
@@ -32872,6 +32931,7 @@ impl GameState {
             chosen_counter_kind_this_resolution: None,
             chosen_color_this_resolution: None,
             named_color_this_resolution: None,
+            named_label_this_resolution: None,
             placed_sticker_this_resolution: None,
             noted_numbers_this_resolution: Vec::new(),
             last_chosen_damage_source: None,
@@ -32930,7 +32990,7 @@ impl GameState {
             stack_trigger_event_batches: HashMap::new(),
             stack_trigger_firings: HashMap::new(),
             lki_cache: im::HashMap::new(),
-            lki_copiable_values: HashMap::new(),
+            lki_copiable_values: im::HashMap::new(),
             lki_by_incarnation: im::HashMap::new(),
             lki_copiable_values_by_incarnation: im::HashMap::new(),
             departed_stack_spells: im::HashMap::new(),
@@ -34041,6 +34101,7 @@ impl GameState {
         self.chosen_counter_kind_this_resolution.hash(&mut h);
         self.chosen_color_this_resolution.hash(&mut h);
         self.named_color_this_resolution.hash(&mut h);
+        self.named_label_this_resolution.hash(&mut h);
         // CR 608.2c: "that sticker" can change what a following instruction
         // reads (phase-2 quantity), so distinct live values must not share a
         // loop pre-filter fingerprint.
@@ -36218,6 +36279,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         chosen_counter_kind_this_resolution: _,
         chosen_color_this_resolution: _,
         named_color_this_resolution: _,
+        named_label_this_resolution: _,
         placed_sticker_this_resolution: _,
         noted_numbers_this_resolution: _,
         last_chosen_damage_source: _,
@@ -36646,6 +36708,7 @@ impl PartialEq for GameState {
                 == other.chosen_counter_kind_this_resolution
             && self.chosen_color_this_resolution == other.chosen_color_this_resolution
             && self.named_color_this_resolution == other.named_color_this_resolution
+            && self.named_label_this_resolution == other.named_label_this_resolution
             && self.placed_sticker_this_resolution == other.placed_sticker_this_resolution
             && self.noted_numbers_this_resolution == other.noted_numbers_this_resolution
             && self.last_revealed_ids == other.last_revealed_ids

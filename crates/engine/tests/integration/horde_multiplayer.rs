@@ -185,7 +185,7 @@ fn three_survivors_share_one_combined_life_total() {
 /// individually per the redirect rules, but every read folds through the team).
 ///
 /// Revert guard: without the shared-life predicate broadening,
-/// `shared_resource_members` would return just the damaged survivor, so
+/// `shared_life_members` would return just the damaged survivor, so
 /// `team_life_total` for the OTHER survivor would be unaffected — the final
 /// assertion (both drop) flips.
 #[test]

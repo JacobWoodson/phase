@@ -1177,6 +1177,12 @@ pub fn is_card_commander_eligible_for_format(name: &str, format: JsValue) -> boo
         // re-arms that for the next format, so every arm is named.
         match format {
             GameFormat::Commander | GameFormat::DuelCommander => is_commander_eligible(face),
+            // CR 903.3, unchanged by CR 810 seating: 2HG Commander decks
+            // designate commanders under Commander's own predicate.
+            GameFormat::TwoHeadedGiantCommander => is_commander_eligible(face),
+            // CR 904.13a + CR 903.3: Archenemy Commander decks designate
+            // commanders under Commander's own predicate.
+            GameFormat::ArchenemyCommander => is_commander_eligible(face),
             GameFormat::PauperCommander => is_commander_eligible(face),
             // CR 903.3, unchanged by CR 903.13f: the CR 903.13f(3) grant
             // affects PAIRING, not eligibility, so Commander Draft uses
@@ -1193,6 +1199,9 @@ pub fn is_card_commander_eligible_for_format(name: &str, format: JsValue) -> boo
             // horde's deck builder, and `false` here would silently tell it
             // no card can be its commander.
             GameFormat::Horde => is_commander_eligible(face),
+            // CR 903.3's commander eligibility test applies unchanged —
+            // planar doesn't change eligibility.
+            GameFormat::PlanechaseCommander => is_commander_eligible(face),
             // Formats with no command zone: nothing can be designated.
             GameFormat::Standard
             | GameFormat::Pioneer
