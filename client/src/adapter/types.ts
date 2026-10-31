@@ -163,8 +163,11 @@ export type BuiltInGameFormat =
   | "HistoricBrawl"
   | "FreeForAll"
   | "TwoHeadedGiant"
+  | "TwoHeadedGiantCommander"
   | "Archenemy"
+  | "ArchenemyCommander"
   | "Planechase"
+  | "PlanechaseCommander"
   | "Limited"
   | "Momir"
   | "CommanderDraft"
@@ -809,7 +812,10 @@ export type TapCreaturesSelectionMode =
 // to the chosen objects. Internally tagged (`#[serde(tag = "type")]`).
 export type PayCostKind =
   | { type: "Discard" }
-  | { type: "Reveal" }
+  // CR 701.20a: `shared_quality` is the engine-side constraint the revealed
+  // cards must satisfy ("two cards that share a color"); the engine validates
+  // the selection, so it is opaque pass-through here.
+  | { type: "Reveal"; shared_quality?: unknown }
   | { type: "Sacrifice" }
   | { type: "ReturnToHand" }
   | { type: "ExileFromZone"; zone: ExileCostSourceZone }
@@ -845,6 +851,18 @@ export type CostResume =
       object_id?: number;
       cost_source: "Morph" | "Megamorph" | "Disguise" | "ManifestManaCost";
       remaining_cost?: unknown;
+    }
+  // CR 805.6: one hero's step of a collective tap-creatures payment. The
+  // client renders it as an ordinary any-subset prompt; the engine owns the
+  // session (per-hero prompts, combined threshold).
+  | {
+      type: "TeamTapPayment";
+      aggregate: TapCreaturesAggregate;
+      eligible: ObjectId[];
+      selected: ObjectId[];
+      remaining: PlayerId[];
+      filter: unknown;
+      ability: unknown;
     };
 
 export type ManaColor = "White" | "Blue" | "Black" | "Red" | "Green";
@@ -1403,6 +1421,8 @@ export interface ResolutionCastFacePolicy {
   controller: PlayerId;
   /** Fixed cast-time constraint; null is the explicit no-extra-constraint form. */
   constraint: Record<string, unknown> | null;
+  /** Instruction authority; absent means "Cast". "Play" also admits a land face. */
+  play_mode?: "Cast" | "Play";
 }
 
 /** Opaque identity for a delayed trigger installed by a resolution cast offer. */
@@ -3589,6 +3609,8 @@ export type GameEvent =
   | { type: "EnduringStoryGained"; data: { player_id: PlayerId } }
   | { type: "DamageCleared"; data: { object_id: ObjectId } }
   | { type: "GameOver"; data: { winner: PlayerId | null } }
+  | { type: "ResolutionHalted"; data: { involved: ObjectId[] } }
+  | { type: "ShortcutRepetition"; data: { controller: PlayerId; repetition: number } }
   | { type: "DamageDealt"; data: { source_id: ObjectId; target: TargetRef; amount: number; is_combat: boolean; excess?: number } }
   | { type: "DamagePrevented"; data: { source_id: ObjectId; target: TargetRef; amount: number } }
   | { type: "SpellCountered"; data: { object_id: ObjectId; countered_by: ObjectId } }
@@ -4943,7 +4965,20 @@ export const AdapterErrorCode = {
   /** The Action frame was definitely not handed to the WebSocket. */
   ACTION_NOT_SENT: "ACTION_NOT_SENT",
   STALE_ACTION: "STALE_ACTION",
+  /** The server refused one request; the connection stays open. */
+  REQUEST_FAILED: "REQUEST_FAILED",
 } as const;
+
+/** Which frame a `StateWithheld` replaced; a withheld `GameStarted` carries the recipient's seat. */
+export type WithheldFrame =
+  | { type: "GameStarted"; data: { your_player: PlayerId } }
+  | { type: "StateUpdate" };
+
+/** The server applied a state it could not send (`StateWithheld`). */
+export interface StateWithheldNotice {
+  revision: number;
+  reason: string;
+}
 
 /**
  * Detect the Rust-side sentinel used by `with_state`/`with_state_mut` in

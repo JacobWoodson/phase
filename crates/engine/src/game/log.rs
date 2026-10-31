@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::game::combat::AttackTarget;
 use crate::game::planechase::PlanarDieFace;
@@ -14,7 +14,7 @@ use crate::types::log::{
 use crate::types::mana::{ManaColor, ManaType};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
-use crate::types::resolved_commands::{ResolvedRulesCommand, RulesExecutionNodeRef};
+use crate::types::resolved_commands::{PlayerLeaveMove, ResolvedRulesJournal};
 use crate::types::stickers::StickerKind;
 use crate::types::zones::Zone;
 
@@ -170,35 +170,16 @@ struct BatchIndex<'a> {
     moves: HashMap<ObjectId, Vec<BatchMove<'a>>>,
     turn_starts: Vec<usize>,
     eliminations: Vec<(usize, PlayerId)>,
-    /// The event carries no incarnation, so the turn zone-change index tells repeated
-    /// identical moves apart.
-    player_leave_moves: HashSet<(ObjectId, Zone, Zone, usize)>,
+    journal: &'a ResolvedRulesJournal,
 }
 
 impl<'a> BatchIndex<'a> {
-    fn new(events: &'a [GameEvent], state: &GameState) -> Self {
+    fn new(events: &'a [GameEvent], state: &'a GameState) -> Self {
         let mut batch = Self {
             moves: HashMap::new(),
             turn_starts: Vec::new(),
             eliminations: Vec::new(),
-            player_leave_moves: state
-                .resolved_rules_journal
-                .entries()
-                .iter()
-                .filter_map(|entry| match entry.command.as_ref() {
-                    Some(ResolvedRulesCommand::ZoneChange(command))
-                        if matches!(command.cause, RulesExecutionNodeRef::PlayerLeave(_)) =>
-                    {
-                        Some((
-                            command.object.object_id,
-                            command.from,
-                            command.to,
-                            command.turn_zone_change_index,
-                        ))
-                    }
-                    _ => None,
-                })
-                .collect(),
+            journal: &state.resolved_rules_journal,
         };
         for (position, event) in events.iter().enumerate() {
             match event {
@@ -309,12 +290,12 @@ fn is_player_leave_move(events: &[GameEvent], index: usize, batch: &BatchIndex) 
                     player_id == record.owner && (index..turn_start).contains(&position)
                 })
         }
-        None => batch.player_leave_moves.contains(&(
-            *object_id,
-            *from,
-            *to,
-            record.turn_zone_change_index,
-        )),
+        None => batch.journal.records_player_leave_move(&PlayerLeaveMove {
+            object_id: *object_id,
+            from: *from,
+            to: *to,
+            turn_zone_change_index: record.turn_zone_change_index,
+        }),
     }
 }
 
@@ -420,7 +401,8 @@ fn importance(event: &GameEvent) -> LogImportance {
         // dungeon), so the timeline is the only place a player learns which room
         // they landed in and what it does.
         | GameEvent::RoomEntered { .. }
-        | GameEvent::ArmyAmassed { .. } => LogImportance::Context,
+        | GameEvent::ArmyAmassed { .. }
+        | GameEvent::ShortcutRepetition { .. } => LogImportance::Context,
         // A countered spell or prevented damage is the decisive outcome of an
         // otherwise-visible action, so Timeline must not make that outcome
         // disappear behind the Details view.
@@ -628,6 +610,7 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::DamageCleared { .. }
         | GameEvent::GameOver { .. }
         | GameEvent::ResolutionHalted { .. }
+        | GameEvent::ShortcutRepetition { .. }
         | GameEvent::CounterAdded { .. }
         | GameEvent::ObjectIntensified { .. }
         | GameEvent::Evolved { .. }
@@ -915,6 +898,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         // CR 732.2: a halted runaway resolution is game-flow control, grouped
         // with GameOver under `Game` rather than object-state `State`.
         | GameEvent::ResolutionHalted { .. }
+        | GameEvent::ShortcutRepetition { .. }
         | GameEvent::PlayerLost { .. }
         | GameEvent::PlayerEliminated { .. }
         // CR 103.1: grouped with the setup event MulliganStarted under `Game`
@@ -1838,6 +1822,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             object_id,
             old_controller,
             new_controller,
+            evidence: _,
         } => vec![
             card_seg(state, *object_id),
             text(" changed controller from "),
@@ -1907,6 +1892,16 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::ResolutionHalted { .. } => {
             vec![text("Resolution halted — possible mandatory loop")]
         }
+
+        // CR 732.2a: engine-authored raw text, like `ResolutionHalted` above.
+        GameEvent::ShortcutRepetition {
+            controller,
+            repetition,
+        } => vec![
+            player_seg(state, *controller),
+            text(" repeats the loop — repetition "),
+            num(crate::game::arithmetic::u32_to_i32_saturating(*repetition)),
+        ],
 
         GameEvent::MonarchChanged { player_id } => {
             vec![player_seg(state, *player_id), text(" becomes the monarch")]
@@ -2372,6 +2367,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::game_state::StackEntryKind;
     use crate::types::identifiers::CardId;
+    use crate::types::resolved_commands::RulesExecutionNodeRef;
 
     /// CR 701.17a + CR 701.17c: the paired `ZoneChanged` names the milled card, so the
     /// trigger-facing mill event is dropped rather than narrated twice.
