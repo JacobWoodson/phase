@@ -632,3 +632,140 @@ fn the_best_of_both_worlds_releases_every_borg_a_copied_chapter_one_assimilated(
         );
     }
 }
+
+const FLICKER_OF_FATE: &str = "Exile target creature or enchantment, then return it to the \
+     battlefield under its owner's control.";
+
+/// CR 113.7a + CR 400.7: chapter I is on the stack when Flicker of Fate blinks
+/// the Saga. The returned Saga is a new object; its own chapter I assimilates a
+/// second creature. The old chapter I still resolves and assimilates its target
+/// (CR 113.7a), but it must not write onto the returned Saga's linked record
+/// (CR 400.7), so the returned Saga's chapter III releases only its own Borg
+/// (CR 607.1).
+#[test]
+fn the_best_of_both_worlds_old_chapter_one_after_a_blink_leaves_the_new_record_alone() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let soldier = scenario
+        .add_creature(P1, "Opposing Soldier", 2, 2)
+        .with_subtypes(vec!["Human", "Soldier"])
+        .id();
+    let elf = scenario
+        .add_creature(P1, "Opposing Elf", 1, 1)
+        .with_subtypes(vec!["Elf"])
+        .id();
+    for i in 0..5 {
+        scenario.add_card_to_library_top(P0, &format!("P0 Library {i}"));
+    }
+    let flicker = scenario
+        .add_spell_to_hand_from_oracle(P0, "Flicker of Fate", true, FLICKER_OF_FATE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let saga = scenario
+        .add_creature(P0, "The Best of Both Worlds", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Saga"])
+        .from_oracle_text(THE_BEST_OF_BOTH_WORLDS)
+        .id();
+    let mut runner = scenario.build();
+    seed_creature_types(&mut runner);
+
+    // The original Saga's chapter I triggers and targets the Soldier.
+    start_next_chapter(&mut runner, saga);
+    loop {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(soldier)),
+                    })
+                    .expect("the old chapter I targets the Soldier");
+            }
+            WaitingFor::OrderTriggers { .. } => {
+                drain_order_triggers_with_identity(runner.state_mut());
+            }
+            WaitingFor::Priority { .. } => break,
+            other => panic!("unexpected chapter I prompt: {other:?}"),
+        }
+    }
+    assert!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == saga
+                && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })),
+        "reach guard: the old chapter I is on the stack"
+    );
+    let old_incarnation = runner.state().objects[&saga].incarnation;
+
+    // In response, Flicker of Fate blinks the Saga. The returned Saga's
+    // chapter I (CR 714.3a) targets the Elf and resolves first.
+    runner.cast(flicker).target_objects(&[saga]).commit();
+    let mut new_chapter_targeted = false;
+    for _ in 0..64 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(elf)),
+                    })
+                    .expect("the returned Saga's chapter I targets the Elf");
+                new_chapter_targeted = true;
+            }
+            WaitingFor::OrderTriggers { .. } => {
+                drain_order_triggers_with_identity(runner.state_mut());
+            }
+            WaitingFor::Priority { .. } => {
+                if runner.state().stack.is_empty() {
+                    break;
+                }
+                runner.pass_holding_team().expect("pass priority");
+            }
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    assert!(runner.state().stack.is_empty(), "the stack resolved");
+    assert!(
+        new_chapter_targeted,
+        "reach guard: the returned Saga's chapter I triggered"
+    );
+    assert_eq!(runner.state().objects[&saga].zone, Zone::Battlefield);
+    assert_ne!(
+        runner.state().objects[&saga].incarnation,
+        old_incarnation,
+        "reach guard: the Saga is a new object (CR 400.7)"
+    );
+
+    // CR 113.7a: both chapter I resolutions assimilated their creature.
+    assert_assimilated(&mut runner, elf, &["Elf"]);
+    assert_assimilated(&mut runner, soldier, &["Human", "Soldier"]);
+
+    fire_next_chapter(&mut runner, saga); // II
+    fire_next_chapter(&mut runner, saga); // III
+
+    // CR 607.1 + CR 400.7: chapter III released only the returned Saga's Borg.
+    relayer(&mut runner);
+    let returned_elf = runner
+        .state()
+        .battlefield
+        .iter()
+        .copied()
+        .find(|id| runner.state().objects[id].name == "Opposing Elf")
+        .expect("the Elf is on the battlefield");
+    assert_eq!(
+        runner.state().objects[&returned_elf].controller,
+        P1,
+        "the Elf returned under its owner's control"
+    );
+    assert!(
+        !has_subtype(&runner, returned_elf, "Borg"),
+        "the Elf's retype ended with the old object"
+    );
+    assert_eq!(
+        runner.state().objects[&soldier].zone,
+        Zone::Battlefield,
+        "the old chapter I's Borg was never exiled"
+    );
+    assert_assimilated(&mut runner, soldier, &["Human", "Soldier"]);
+}
